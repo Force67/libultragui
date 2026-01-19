@@ -44,12 +44,46 @@ pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
 # GLFW (for examples/platform)
 find_package(glfw3 3.3 REQUIRED)
 
+# --- Shader compilation ---
+find_program(GLSLC glslc REQUIRED)
+set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+set(SHADER_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
+
+set(SHADER_SOURCES
+    ${SHADER_DIR}/quad.vert
+    ${SHADER_DIR}/quad.frag
+)
+
+set(SHADER_OUTPUTS)
+foreach(SHADER ${SHADER_SOURCES})
+    get_filename_component(SHADER_NAME ${SHADER} NAME)
+    set(SPV_OUTPUT ${SHADER_OUT_DIR}/${SHADER_NAME}.spv)
+    add_custom_command(
+        OUTPUT ${SPV_OUTPUT}
+        COMMAND ${GLSLC} ${SHADER} -o ${SPV_OUTPUT}
+        DEPENDS ${SHADER}
+        COMMENT "Compiling shader ${SHADER_NAME}"
+    )
+    list(APPEND SHADER_OUTPUTS ${SPV_OUTPUT})
+endforeach()
+
+add_custom_target(ultragui_shaders DEPENDS ${SHADER_OUTPUTS})
+
 # --- Core library ---
-add_library(ultragui STATIC
+set(ULTRAGUI_SOURCES
     src/core/arena.cpp
     src/core/string_utils.cpp
     src/platform/platform_glfw.cpp
+    src/render/renderer2d.cpp
 )
+
+if(ULTRAGUI_BACKEND_VULKAN)
+    list(APPEND ULTRAGUI_SOURCES src/rhi/vulkan/vulkan_rhi.cpp)
+endif()
+
+add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
+add_dependencies(ultragui ultragui_shaders)
 
 target_include_directories(ultragui
     PUBLIC
@@ -57,6 +91,10 @@ target_include_directories(ultragui
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(ultragui PRIVATE
+    ULTRAGUI_SHADER_DIR="${SHADER_OUT_DIR}"
 )
 
 target_link_libraries(ultragui

@@ -12,3 +12,5 @@
 #include <ultragui/core/string_view.h>
 #include <ultragui/core/types.h>
 #include <ultragui/platform/platform.h>
+#include <ultragui/render/renderer2d.h>
+#include <ultragui/rhi/rhi.h>
