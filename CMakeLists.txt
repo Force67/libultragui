@@ -89,6 +89,9 @@ set(ULTRAGUI_SOURCES
     src/widgets/button.cpp
     src/widgets/image.cpp
     src/widgets/scroll_view.cpp
+    src/idl/parser.cpp
+    src/idl/builder.cpp
+    src/input/input.cpp
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)
