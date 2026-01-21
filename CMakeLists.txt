@@ -83,6 +83,12 @@ set(ULTRAGUI_SOURCES
     src/text/text_engine.cpp
     src/layout/layout.cpp
     src/animation/animator.cpp
+    src/widgets/widget.cpp
+    src/widgets/panel.cpp
+    src/widgets/text.cpp
+    src/widgets/button.cpp
+    src/widgets/image.cpp
+    src/widgets/scroll_view.cpp
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)
