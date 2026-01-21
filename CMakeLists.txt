@@ -81,6 +81,8 @@ set(ULTRAGUI_SOURCES
     src/style/style.cpp
     src/style/transition.cpp
     src/text/text_engine.cpp
+    src/layout/layout.cpp
+    src/animation/animator.cpp
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)
