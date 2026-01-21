@@ -103,6 +103,8 @@ bool VulkanRHI::init(const RHIConfig& config) {
         return false;
     if (!create_pipeline())
         return false;
+    if (!create_text_pipeline())
+        return false;
     if (!create_framebuffers())
         return false;
     if (!create_command_resources())
@@ -536,6 +538,106 @@ bool VulkanRHI::create_pipeline() {
 
     VkResult result =
         vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pi, nullptr, &pipeline_);
+
+    vkDestroyShaderModule(device_, vert_mod, nullptr);
+    vkDestroyShaderModule(device_, frag_mod, nullptr);
+
+    return result == VK_SUCCESS;
+}
+
+bool VulkanRHI::create_text_pipeline() {
+    auto vert_mod = load_shader("text.vert.spv");
+    auto frag_mod = load_shader("text.frag.spv");
+    if (!vert_mod || !frag_mod)
+        return false;
+
+    VkPipelineShaderStageCreateInfo stages[2] = {};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert_mod;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag_mod;
+    stages[1].pName = "main";
+
+    // Same vertex layout as quad pipeline
+    VkVertexInputBindingDescription binding{};
+    binding.binding = 0;
+    binding.stride = sizeof(Vertex2D);
+    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription attrs[5] = {};
+    attrs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, pos)};
+    attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, uv)};
+    attrs[2] = {2, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color)};
+    attrs[3] = {3, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, corner_radius)};
+    attrs[4] = {4, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, half_size)};
+
+    VkPipelineVertexInputStateCreateInfo vertex_input{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vertex_input.vertexBindingDescriptionCount = 1;
+    vertex_input.pVertexBindingDescriptions = &binding;
+    vertex_input.vertexAttributeDescriptionCount = 5;
+    vertex_input.pVertexAttributeDescriptions = attrs;
+
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewport_state{
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport_state.viewportCount = 1;
+    viewport_state.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo raster{
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.lineWidth = 1.0f;
+    raster.cullMode = VK_CULL_MODE_NONE;
+
+    VkPipelineMultisampleStateCreateInfo multisample{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState blend_att{};
+    blend_att.blendEnable = VK_TRUE;
+    blend_att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blend_att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_att.colorBlendOp = VK_BLEND_OP_ADD;
+    blend_att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend_att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_att.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo color_blend{
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    color_blend.attachmentCount = 1;
+    color_blend.pAttachments = &blend_att;
+
+    VkDynamicState dyn_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic_state{
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic_state.dynamicStateCount = 2;
+    dynamic_state.pDynamicStates = dyn_states;
+
+    VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pi.stageCount = 2;
+    pi.pStages = stages;
+    pi.pVertexInputState = &vertex_input;
+    pi.pInputAssemblyState = &input_assembly;
+    pi.pViewportState = &viewport_state;
+    pi.pRasterizationState = &raster;
+    pi.pMultisampleState = &multisample;
+    pi.pColorBlendState = &color_blend;
+    pi.pDynamicState = &dynamic_state;
+    pi.layout = pipeline_layout_; // Same layout as quad pipeline
+    pi.renderPass = render_pass_;
+    pi.subpass = 0;
+
+    VkResult result =
+        vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pi, nullptr, &text_pipeline_);
 
     vkDestroyShaderModule(device_, vert_mod, nullptr);
     vkDestroyShaderModule(device_, frag_mod, nullptr);
@@ -997,6 +1099,56 @@ void VulkanRHI::draw_triangles(const Vertex2D* vertices, u32 vertex_count, const
     vkCmdDrawIndexed(f.cmd_buffer, index_count, 1, 0, 0, 0);
 }
 
+void VulkanRHI::draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+                                    u32 index_count, RHITextureHandle atlas_texture) {
+    if (vertex_count == 0 || index_count == 0)
+        return;
+
+    auto& f = frames_[current_frame_];
+
+    ensure_vertex_capacity(vertex_count);
+    ensure_index_capacity(index_count);
+
+    void* data;
+    vkMapMemory(device_, f.vertex_memory, 0, vertex_count * sizeof(Vertex2D), 0, &data);
+    std::memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
+    vkUnmapMemory(device_, f.vertex_memory);
+
+    vkMapMemory(device_, f.index_memory, 0, index_count * sizeof(u32), 0, &data);
+    std::memcpy(data, indices, index_count * sizeof(u32));
+    vkUnmapMemory(device_, f.index_memory);
+
+    // Switch to text pipeline
+    vkCmdBindPipeline(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, text_pipeline_);
+
+    // Bind atlas texture
+    RHITextureHandle tex = atlas_texture;
+    if (tex < MAX_TEXTURES && textures_[tex].in_use) {
+        vkCmdBindDescriptorSets(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0,
+                                1, &textures_[tex].descriptor, 0, nullptr);
+    }
+
+    // Re-push constants (pipeline change resets them)
+    f32 push[4] = {
+        2.0f / static_cast<f32>(swapchain_extent_.width),
+        2.0f / static_cast<f32>(swapchain_extent_.height),
+        -1.0f,
+        -1.0f,
+    };
+    vkCmdPushConstants(f.cmd_buffer, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push),
+                       push);
+
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(f.cmd_buffer, 0, 1, &f.vertex_buffer, &offset);
+    vkCmdBindIndexBuffer(f.cmd_buffer, f.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(f.cmd_buffer, index_count, 1, 0, 0, 0);
+
+    // Switch back to quad pipeline
+    vkCmdBindPipeline(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdPushConstants(f.cmd_buffer, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push),
+                       push);
+}
+
 Vec2 VulkanRHI::display_size() const {
     return {static_cast<f32>(swapchain_extent_.width), static_cast<f32>(swapchain_extent_.height)};
 }
@@ -1043,6 +1195,8 @@ void VulkanRHI::shutdown() {
         vkDestroyDescriptorPool(device_, desc_pool_, nullptr);
     if (pipeline_)
         vkDestroyPipeline(device_, pipeline_, nullptr);
+    if (text_pipeline_)
+        vkDestroyPipeline(device_, text_pipeline_, nullptr);
     if (pipeline_layout_)
         vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     if (desc_set_layout_)

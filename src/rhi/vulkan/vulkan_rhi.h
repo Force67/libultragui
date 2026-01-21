@@ -20,6 +20,8 @@ public:
     void reset_scissor() override;
     void draw_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
                         u32 index_count, RHITextureHandle texture) override;
+    void draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+                             u32 index_count, RHITextureHandle atlas_texture) override;
     RHITextureHandle create_texture(u32 width, u32 height, RHIFormat format,
                                     const void* pixels) override;
     void destroy_texture(RHITextureHandle handle) override;
@@ -36,6 +38,7 @@ private:
     bool create_render_pass();
     bool create_descriptor_layout();
     bool create_pipeline();
+    bool create_text_pipeline();
     bool create_framebuffers();
     bool create_command_resources();
     bool create_sync_objects();
@@ -75,6 +78,7 @@ private:
     VkDescriptorSetLayout desc_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
+    VkPipeline text_pipeline_ = VK_NULL_HANDLE;
 
     // Descriptors
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;

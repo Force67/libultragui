@@ -37,6 +37,10 @@ public:
     virtual void draw_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
                                 u32 index_count, RHITextureHandle texture = INVALID_TEXTURE) = 0;
 
+    /// Draw text glyphs using the R8 alpha-only pipeline.
+    virtual void draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+                                     u32 index_count, RHITextureHandle atlas_texture) = 0;
+
     virtual RHITextureHandle create_texture(u32 width, u32 height, RHIFormat format,
                                             const void* pixels) = 0;
     virtual void destroy_texture(RHITextureHandle handle) = 0;

@@ -53,6 +53,8 @@ file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
 set(SHADER_SOURCES
     ${SHADER_DIR}/quad.vert
     ${SHADER_DIR}/quad.frag
+    ${SHADER_DIR}/text.vert
+    ${SHADER_DIR}/text.frag
 )
 
 set(SHADER_OUTPUTS)
@@ -76,6 +78,9 @@ set(ULTRAGUI_SOURCES
     src/core/string_utils.cpp
     src/platform/platform_glfw.cpp
     src/render/renderer2d.cpp
+    src/style/style.cpp
+    src/style/transition.cpp
+    src/text/text_engine.cpp
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)
