@@ -18,3 +18,22 @@ result
 # OS
 .DS_Store
 Thumbs.db
+/.cache
+/CMakeFiles
+/examples/CMakeFiles
+*.a
+*.spv
+/tests/CMakeFiles
+
+# In-source CMake artifacts
+CMakeCache.txt
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+examples/Makefile
+examples/cmake_install.cmake
+examples/ultragui_demo
+examples/ultragui_showcase
+tests/CTestTestfile.cmake
+tests/Makefile
+tests/cmake_install.cmake
