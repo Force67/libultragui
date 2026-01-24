@@ -43,6 +43,7 @@ public:
 
     virtual RHITextureHandle create_texture(u32 width, u32 height, RHIFormat format,
                                             const void* pixels) = 0;
+    virtual void update_texture(RHITextureHandle handle, const void* pixels) = 0;
     virtual void destroy_texture(RHITextureHandle handle) = 0;
 
     virtual Vec2 display_size() const = 0;

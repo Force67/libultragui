@@ -24,6 +24,7 @@ public:
                              u32 index_count, RHITextureHandle atlas_texture) override;
     RHITextureHandle create_texture(u32 width, u32 height, RHIFormat format,
                                     const void* pixels) override;
+    void update_texture(RHITextureHandle handle, const void* pixels) override;
     void destroy_texture(RHITextureHandle handle) override;
     Vec2 display_size() const override;
 
@@ -49,9 +50,12 @@ private:
                        VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& memory);
     void ensure_vertex_capacity(u32 vertex_count);
     void ensure_index_capacity(u32 index_count);
+    void ensure_text_vertex_capacity(u32 vertex_count);
+    void ensure_text_index_capacity(u32 index_count);
 
     GLFWwindow* window_ = nullptr;
     std::string shader_dir_;
+    f32 dpi_scale_ = 1.0f;
 
     // Instance & device
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -83,25 +87,37 @@ private:
     // Descriptors
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
 
-    // Per-frame data
+    // Per-frame data (one per in-flight frame)
     static constexpr u32 MAX_FRAMES = 2;
     struct FrameData {
         VkCommandPool cmd_pool = VK_NULL_HANDLE;
         VkCommandBuffer cmd_buffer = VK_NULL_HANDLE;
         VkSemaphore image_available = VK_NULL_HANDLE;
-        VkSemaphore render_finished = VK_NULL_HANDLE;
         VkFence in_flight = VK_NULL_HANDLE;
+        // Quad pipeline buffers
         VkBuffer vertex_buffer = VK_NULL_HANDLE;
         VkDeviceMemory vertex_memory = VK_NULL_HANDLE;
         u32 vertex_capacity = 0;
         VkBuffer index_buffer = VK_NULL_HANDLE;
         VkDeviceMemory index_memory = VK_NULL_HANDLE;
         u32 index_capacity = 0;
+        // Text pipeline buffers (separate to avoid overwrite conflicts)
+        VkBuffer text_vertex_buffer = VK_NULL_HANDLE;
+        VkDeviceMemory text_vertex_memory = VK_NULL_HANDLE;
+        u32 text_vertex_capacity = 0;
+        VkBuffer text_index_buffer = VK_NULL_HANDLE;
+        VkDeviceMemory text_index_memory = VK_NULL_HANDLE;
+        u32 text_index_capacity = 0;
     };
     FrameData frames_[MAX_FRAMES];
     u32 current_frame_ = 0;
     u32 image_index_ = 0;
     bool framebuffer_resized_ = false;
+
+    // Per-swapchain-image semaphores for presentation.
+    // Indexed by image_index_ to avoid reuse while presentation engine holds them.
+    static constexpr u32 MAX_SWAPCHAIN_IMAGES = 8;
+    VkSemaphore render_finished_[MAX_SWAPCHAIN_IMAGES] = {};
 
     // Default resources
     VkSampler default_sampler_ = VK_NULL_HANDLE;
@@ -111,6 +127,9 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         VkDescriptorSet descriptor = VK_NULL_HANDLE;
+        u32 width = 0;
+        u32 height = 0;
+        u32 pixel_size = 0; // bytes per pixel
         bool in_use = false;
     };
     static constexpr u32 MAX_TEXTURES = 256;

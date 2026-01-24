@@ -13,6 +13,8 @@
 
 namespace ugui {
 
+static VulkanRHI* s_rhi_instance = nullptr;
+
 // ---------------------------------------------------------------------------
 // Debug callback
 // ---------------------------------------------------------------------------
@@ -81,10 +83,25 @@ bool VulkanRHI::init(const RHIConfig& config) {
     validation_enabled_ = config.validation;
     shader_dir_ = config.shader_dir ? config.shader_dir : "shaders";
 
-    glfwSetWindowUserPointer(window_, this);
-    glfwSetFramebufferSizeCallback(window_, [](GLFWwindow* w, int, int) {
-        auto* rhi = static_cast<VulkanRHI*>(glfwGetWindowUserPointer(w));
-        rhi->framebuffer_resized_ = true;
+    // Compute DPI scale: ratio of framebuffer pixels to window (screen) coordinates
+    {
+        int fw, fh, ww, wh;
+        glfwGetFramebufferSize(window_, &fw, &fh);
+        glfwGetWindowSize(window_, &ww, &wh);
+        dpi_scale_ = (ww > 0) ? static_cast<f32>(fw) / static_cast<f32>(ww) : 1.0f;
+    }
+
+    // Use a static to avoid glfwSetWindowUserPointer conflict with InputRouter
+    s_rhi_instance = this;
+    glfwSetFramebufferSizeCallback(window_, [](GLFWwindow*, int, int) {
+        if (!s_rhi_instance)
+            return;
+        s_rhi_instance->framebuffer_resized_ = true;
+        int fw2, fh2, ww2, wh2;
+        glfwGetFramebufferSize(s_rhi_instance->window_, &fw2, &fh2);
+        glfwGetWindowSize(s_rhi_instance->window_, &ww2, &wh2);
+        s_rhi_instance->dpi_scale_ =
+            (ww2 > 0) ? static_cast<f32>(fw2) / static_cast<f32>(ww2) : 1.0f;
     });
 
     if (!create_instance())
@@ -443,23 +460,22 @@ bool VulkanRHI::create_pipeline() {
     binding.stride = sizeof(Vertex2D);
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attrs[5] = {};
-    // pos: float2 at offset 0
+    VkVertexInputAttributeDescription attrs[9] = {};
     attrs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, pos)};
-    // uv: float2 at offset 8
     attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, uv)};
-    // color: uint32 at offset 16
     attrs[2] = {2, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color)};
-    // corner_radius: float at offset 20
-    attrs[3] = {3, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, corner_radius)};
-    // half_size: float2 at offset 24
-    attrs[4] = {4, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, half_size)};
+    attrs[3] = {3, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color2)};
+    attrs[4] = {4, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, corner_radius)};
+    attrs[5] = {5, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, softness)};
+    attrs[6] = {6, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, half_size)};
+    attrs[7] = {7, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, border_width)};
+    attrs[8] = {8, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, border_color)};
 
     VkPipelineVertexInputStateCreateInfo vertex_input{
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertex_input.vertexBindingDescriptionCount = 1;
     vertex_input.pVertexBindingDescriptions = &binding;
-    vertex_input.vertexAttributeDescriptionCount = 5;
+    vertex_input.vertexAttributeDescriptionCount = 9;
     vertex_input.pVertexAttributeDescriptions = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly{
@@ -567,18 +583,22 @@ bool VulkanRHI::create_text_pipeline() {
     binding.stride = sizeof(Vertex2D);
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attrs[5] = {};
+    VkVertexInputAttributeDescription attrs[9] = {};
     attrs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, pos)};
     attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, uv)};
     attrs[2] = {2, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color)};
-    attrs[3] = {3, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, corner_radius)};
-    attrs[4] = {4, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, half_size)};
+    attrs[3] = {3, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color2)};
+    attrs[4] = {4, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, corner_radius)};
+    attrs[5] = {5, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, softness)};
+    attrs[6] = {6, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, half_size)};
+    attrs[7] = {7, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, border_width)};
+    attrs[8] = {8, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, border_color)};
 
     VkPipelineVertexInputStateCreateInfo vertex_input{
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertex_input.vertexBindingDescriptionCount = 1;
     vertex_input.pVertexBindingDescriptions = &binding;
-    vertex_input.vertexAttributeDescriptionCount = 5;
+    vertex_input.vertexAttributeDescriptionCount = 9;
     vertex_input.pVertexAttributeDescriptions = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly{
@@ -691,11 +711,17 @@ bool VulkanRHI::create_sync_objects() {
     for (u32 i = 0; i < MAX_FRAMES; ++i) {
         if (vkCreateSemaphore(device_, &sci, nullptr, &frames_[i].image_available) != VK_SUCCESS)
             return false;
-        if (vkCreateSemaphore(device_, &sci, nullptr, &frames_[i].render_finished) != VK_SUCCESS)
-            return false;
         if (vkCreateFence(device_, &fci, nullptr, &frames_[i].in_flight) != VK_SUCCESS)
             return false;
     }
+
+    // Per-swapchain-image semaphores: safe to reuse only after image re-acquired
+    u32 image_count = static_cast<u32>(swapchain_images_.size());
+    for (u32 i = 0; i < image_count && i < MAX_SWAPCHAIN_IMAGES; ++i) {
+        if (vkCreateSemaphore(device_, &sci, nullptr, &render_finished_[i]) != VK_SUCCESS)
+            return false;
+    }
+
     return true;
 }
 
@@ -768,6 +794,42 @@ void VulkanRHI::ensure_index_capacity(u32 index_count) {
                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                   f.index_buffer, f.index_memory);
     f.index_capacity = new_cap;
+}
+
+void VulkanRHI::ensure_text_vertex_capacity(u32 vertex_count) {
+    auto& f = frames_[current_frame_];
+    if (f.text_vertex_capacity >= vertex_count)
+        return;
+
+    if (f.text_vertex_buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, f.text_vertex_buffer, nullptr);
+        vkFreeMemory(device_, f.text_vertex_memory, nullptr);
+    }
+
+    u32 new_cap = std::max(vertex_count, f.text_vertex_capacity * 2);
+    new_cap = std::max(new_cap, 4096u);
+    create_buffer(new_cap * sizeof(Vertex2D), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                  f.text_vertex_buffer, f.text_vertex_memory);
+    f.text_vertex_capacity = new_cap;
+}
+
+void VulkanRHI::ensure_text_index_capacity(u32 index_count) {
+    auto& f = frames_[current_frame_];
+    if (f.text_index_capacity >= index_count)
+        return;
+
+    if (f.text_index_buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, f.text_index_buffer, nullptr);
+        vkFreeMemory(device_, f.text_index_memory, nullptr);
+    }
+
+    u32 new_cap = std::max(index_count, f.text_index_capacity * 2);
+    new_cap = std::max(new_cap, 8192u);
+    create_buffer(new_cap * sizeof(u32), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                  f.text_index_buffer, f.text_index_memory);
+    f.text_index_capacity = new_cap;
 }
 
 // ---------------------------------------------------------------------------
@@ -941,8 +1003,82 @@ RHITextureHandle VulkanRHI::create_texture(u32 width, u32 height, RHIFormat form
     write.pImageInfo = &dii;
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 
+    slot.width = width;
+    slot.height = height;
+    slot.pixel_size = pixel_size;
     slot.in_use = true;
     return handle;
+}
+
+void VulkanRHI::update_texture(RHITextureHandle handle, const void* pixels) {
+    if (handle >= MAX_TEXTURES || !textures_[handle].in_use)
+        return;
+
+    auto& slot = textures_[handle];
+    VkDeviceSize image_size = slot.width * slot.height * slot.pixel_size;
+
+    // Staging buffer
+    VkBuffer staging;
+    VkDeviceMemory staging_mem;
+    create_buffer(image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                  staging, staging_mem);
+
+    void* data;
+    vkMapMemory(device_, staging_mem, 0, image_size, 0, &data);
+    std::memcpy(data, pixels, image_size);
+    vkUnmapMemory(device_, staging_mem);
+
+    // Upload via temporary command buffer
+    VkCommandBuffer cmd;
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = frames_[0].cmd_pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(device_, &cai, &cmd);
+
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    // Transition: SHADER_READ -> TRANSFER_DST
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = slot.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {slot.width, slot.height, 1};
+    vkCmdCopyBufferToImage(cmd, staging, slot.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                           &region);
+
+    // Transition: TRANSFER_DST -> SHADER_READ
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &barrier);
+
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(graphics_queue_, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphics_queue_);
+    vkFreeCommandBuffers(device_, frames_[0].cmd_pool, 1, &cmd);
+
+    vkDestroyBuffer(device_, staging, nullptr);
+    vkFreeMemory(device_, staging_mem, nullptr);
 }
 
 void VulkanRHI::destroy_texture(RHITextureHandle handle) {
@@ -1001,10 +1137,13 @@ bool VulkanRHI::begin_frame(Color clear_color) {
     VkRect2D scissor{{0, 0}, swapchain_extent_};
     vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
 
-    // Push orthographic projection
+    // Push orthographic projection - use window (screen) coordinates so that
+    // vertex positions match the mouse/input coordinate space.
+    f32 win_w = static_cast<f32>(swapchain_extent_.width) / dpi_scale_;
+    f32 win_h = static_cast<f32>(swapchain_extent_.height) / dpi_scale_;
     f32 push[4] = {
-        2.0f / static_cast<f32>(swapchain_extent_.width),
-        2.0f / static_cast<f32>(swapchain_extent_.height),
+        2.0f / win_w,
+        2.0f / win_h,
         -1.0f,
         -1.0f,
     };
@@ -1019,6 +1158,8 @@ void VulkanRHI::end_frame() {
     vkCmdEndRenderPass(f.cmd_buffer);
     vkEndCommandBuffer(f.cmd_buffer);
 
+    VkSemaphore signal_sem = render_finished_[image_index_];
+
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.waitSemaphoreCount = 1;
@@ -1027,12 +1168,12 @@ void VulkanRHI::end_frame() {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &f.cmd_buffer;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &f.render_finished;
+    si.pSignalSemaphores = &signal_sem;
     vkQueueSubmit(graphics_queue_, 1, &si, f.in_flight);
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &f.render_finished;
+    pi.pWaitSemaphores = &signal_sem;
     pi.swapchainCount = 1;
     pi.pSwapchains = &swapchain_;
     pi.pImageIndices = &image_index_;
@@ -1052,9 +1193,12 @@ void VulkanRHI::end_frame() {
 
 void VulkanRHI::set_scissor(Rect rect) {
     auto& f = frames_[current_frame_];
+    // Convert from window/screen coordinates to framebuffer pixels
     VkRect2D scissor{};
-    scissor.offset = {static_cast<i32>(rect.x), static_cast<i32>(rect.y)};
-    scissor.extent = {static_cast<u32>(rect.w), static_cast<u32>(rect.h)};
+    scissor.offset = {static_cast<i32>(rect.x * dpi_scale_),
+                      static_cast<i32>(rect.y * dpi_scale_)};
+    scissor.extent = {static_cast<u32>(rect.w * dpi_scale_),
+                      static_cast<u32>(rect.h * dpi_scale_)};
     vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
 }
 
@@ -1106,17 +1250,18 @@ void VulkanRHI::draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, 
 
     auto& f = frames_[current_frame_];
 
-    ensure_vertex_capacity(vertex_count);
-    ensure_index_capacity(index_count);
+    // Use SEPARATE buffers for text to avoid overwriting quad data
+    ensure_text_vertex_capacity(vertex_count);
+    ensure_text_index_capacity(index_count);
 
     void* data;
-    vkMapMemory(device_, f.vertex_memory, 0, vertex_count * sizeof(Vertex2D), 0, &data);
+    vkMapMemory(device_, f.text_vertex_memory, 0, vertex_count * sizeof(Vertex2D), 0, &data);
     std::memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
-    vkUnmapMemory(device_, f.vertex_memory);
+    vkUnmapMemory(device_, f.text_vertex_memory);
 
-    vkMapMemory(device_, f.index_memory, 0, index_count * sizeof(u32), 0, &data);
+    vkMapMemory(device_, f.text_index_memory, 0, index_count * sizeof(u32), 0, &data);
     std::memcpy(data, indices, index_count * sizeof(u32));
-    vkUnmapMemory(device_, f.index_memory);
+    vkUnmapMemory(device_, f.text_index_memory);
 
     // Switch to text pipeline
     vkCmdBindPipeline(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, text_pipeline_);
@@ -1128,10 +1273,12 @@ void VulkanRHI::draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, 
                                 1, &textures_[tex].descriptor, 0, nullptr);
     }
 
-    // Re-push constants (pipeline change resets them)
+    // Re-push constants (pipeline change resets them) - window coordinates
+    f32 win_w = static_cast<f32>(swapchain_extent_.width) / dpi_scale_;
+    f32 win_h = static_cast<f32>(swapchain_extent_.height) / dpi_scale_;
     f32 push[4] = {
-        2.0f / static_cast<f32>(swapchain_extent_.width),
-        2.0f / static_cast<f32>(swapchain_extent_.height),
+        2.0f / win_w,
+        2.0f / win_h,
         -1.0f,
         -1.0f,
     };
@@ -1139,8 +1286,8 @@ void VulkanRHI::draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, 
                        push);
 
     VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(f.cmd_buffer, 0, 1, &f.vertex_buffer, &offset);
-    vkCmdBindIndexBuffer(f.cmd_buffer, f.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindVertexBuffers(f.cmd_buffer, 0, 1, &f.text_vertex_buffer, &offset);
+    vkCmdBindIndexBuffer(f.cmd_buffer, f.text_index_buffer, 0, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(f.cmd_buffer, index_count, 1, 0, 0, 0);
 
     // Switch back to quad pipeline
@@ -1150,7 +1297,9 @@ void VulkanRHI::draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, 
 }
 
 Vec2 VulkanRHI::display_size() const {
-    return {static_cast<f32>(swapchain_extent_.width), static_cast<f32>(swapchain_extent_.height)};
+    // Return window/screen coordinates (UI coordinate space), not framebuffer pixels
+    return {static_cast<f32>(swapchain_extent_.width) / dpi_scale_,
+            static_cast<f32>(swapchain_extent_.height) / dpi_scale_};
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,6 +1307,8 @@ Vec2 VulkanRHI::display_size() const {
 // ---------------------------------------------------------------------------
 
 void VulkanRHI::shutdown() {
+    s_rhi_instance = nullptr;
+
     if (device_)
         vkDeviceWaitIdle(device_);
 
@@ -1170,6 +1321,12 @@ void VulkanRHI::shutdown() {
     if (default_sampler_)
         vkDestroySampler(device_, default_sampler_, nullptr);
 
+    // Per-swapchain-image semaphores
+    for (u32 i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i) {
+        if (render_finished_[i])
+            vkDestroySemaphore(device_, render_finished_[i], nullptr);
+    }
+
     // Per-frame resources
     for (u32 i = 0; i < MAX_FRAMES; ++i) {
         auto& f = frames_[i];
@@ -1181,10 +1338,16 @@ void VulkanRHI::shutdown() {
             vkDestroyBuffer(device_, f.index_buffer, nullptr);
         if (f.index_memory)
             vkFreeMemory(device_, f.index_memory, nullptr);
+        if (f.text_vertex_buffer)
+            vkDestroyBuffer(device_, f.text_vertex_buffer, nullptr);
+        if (f.text_vertex_memory)
+            vkFreeMemory(device_, f.text_vertex_memory, nullptr);
+        if (f.text_index_buffer)
+            vkDestroyBuffer(device_, f.text_index_buffer, nullptr);
+        if (f.text_index_memory)
+            vkFreeMemory(device_, f.text_index_memory, nullptr);
         if (f.in_flight)
             vkDestroyFence(device_, f.in_flight, nullptr);
-        if (f.render_finished)
-            vkDestroySemaphore(device_, f.render_finished, nullptr);
         if (f.image_available)
             vkDestroySemaphore(device_, f.image_available, nullptr);
         if (f.cmd_pool)
