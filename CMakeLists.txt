@@ -92,6 +92,7 @@ set(ULTRAGUI_SOURCES
     src/idl/parser.cpp
     src/idl/builder.cpp
     src/input/input.cpp
+    src/scripting/lua_runtime.cpp
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)

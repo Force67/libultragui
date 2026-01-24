@@ -6,6 +6,8 @@
 
 #include <functional>
 
+struct GLFWwindow;
+
 namespace ugui {
 
 class Widget;
@@ -71,13 +73,12 @@ public:
 private:
     void install_callbacks();
 
-    static void glfw_mouse_pos_callback(struct GLFWwindow* window, double x, double y);
-    static void glfw_mouse_button_callback(struct GLFWwindow* window, int button, int action,
-                                           int mods);
-    static void glfw_scroll_callback(struct GLFWwindow* window, double x, double y);
-    static void glfw_key_callback(struct GLFWwindow* window, int key, int scancode, int action,
+    static void glfw_mouse_pos_callback(::GLFWwindow* window, double x, double y);
+    static void glfw_mouse_button_callback(::GLFWwindow* window, int button, int action, int mods);
+    static void glfw_scroll_callback(::GLFWwindow* window, double x, double y);
+    static void glfw_key_callback(::GLFWwindow* window, int key, int scancode, int action,
                                   int mods);
-    static void glfw_char_callback(struct GLFWwindow* window, unsigned int codepoint);
+    static void glfw_char_callback(::GLFWwindow* window, unsigned int codepoint);
 
     Platform* platform_ = nullptr;
     Widget* hovered_ = nullptr;
