@@ -18,10 +18,20 @@ static EdgeInsets lerp_insets(const EdgeInsets& a, const EdgeInsets& b, f32 t) {
     };
 }
 
+static BoxShadow lerp_shadow(const BoxShadow& a, const BoxShadow& b, f32 t) {
+    return {
+        ugui::lerp(a.color, b.color, t),
+        ugui::lerp(a.blur, b.blur, t),
+        ugui::lerp(a.spread, b.spread, t),
+        ugui::lerp(a.offset, b.offset, t),
+    };
+}
+
 Style Style::lerp(const Style& a, const Style& b, f32 t) {
     Style result = a; // Start with 'a', interpolate animatable fields
 
     result.background = ugui::lerp(a.background, b.background, t);
+    result.background_end = ugui::lerp(a.background_end, b.background_end, t);
     result.border_color = ugui::lerp(a.border_color, b.border_color, t);
     result.border_width = ugui::lerp(a.border_width, b.border_width, t);
     result.corner_radius = ugui::lerp(a.corner_radius, b.corner_radius, t);
@@ -29,6 +39,8 @@ Style Style::lerp(const Style& a, const Style& b, f32 t) {
     result.text_color = ugui::lerp(a.text_color, b.text_color, t);
     result.font_size = ugui::lerp(a.font_size, b.font_size, t);
     result.gap = ugui::lerp(a.gap, b.gap, t);
+
+    result.shadow = lerp_shadow(a.shadow, b.shadow, t);
 
     result.width = lerp_length(a.width, b.width, t);
     result.height = lerp_length(a.height, b.height, t);
@@ -64,6 +76,8 @@ Style resolve_style(const Style& base, const StyleOverride* overrides, u32 overr
         // Apply masked properties
         if (ov.mask & StyleMask::Background)
             result.background = ov.style.background;
+        if (ov.mask & StyleMask::BackgroundEnd)
+            result.background_end = ov.style.background_end;
         if (ov.mask & StyleMask::BorderColor)
             result.border_color = ov.style.border_color;
         if (ov.mask & StyleMask::BorderWidth)
@@ -84,6 +98,8 @@ Style resolve_style(const Style& base, const StyleOverride* overrides, u32 overr
             result.margin = ov.style.margin;
         if (ov.mask & StyleMask::Padding)
             result.padding = ov.style.padding;
+        if (ov.mask & StyleMask::Shadow)
+            result.shadow = ov.style.shadow;
     }
 
     return result;

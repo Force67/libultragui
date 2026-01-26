@@ -9,6 +9,7 @@ extern "C" {
 #include <lualib.h>
 }
 
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -226,8 +227,10 @@ int LuaRuntime::lua_ugui_set_prop(lua_State* L) {
         return 0;
 
     auto it = s_widget_registry->find(name);
-    if (it == s_widget_registry->end())
+    if (it == s_widget_registry->end()) {
+        std::fprintf(stderr, "ultragui/lua: ugui.set — widget '%s' not found\n", name);
         return 0;
+    }
 
     Widget* w = it->second;
     Style s = w->style();
@@ -236,10 +239,28 @@ int LuaRuntime::lua_ugui_set_prop(lua_State* L) {
         s.opacity = static_cast<f32>(luaL_checknumber(L, 3));
     } else if (strcmp(prop, "visible") == 0) {
         s.visibility = lua_toboolean(L, 3) ? Visibility::Visible : Visibility::Hidden;
+        w->set_style(s);
+        return 0;
     } else if (strcmp(prop, "font-size") == 0) {
         s.font_size = static_cast<f32>(luaL_checknumber(L, 3));
     } else if (strcmp(prop, "corner-radius") == 0) {
         s.corner_radius = static_cast<f32>(luaL_checknumber(L, 3));
+    } else if (strcmp(prop, "color") == 0) {
+        const char* val = luaL_checkstring(L, 3);
+        if (val[0] == '#' && strlen(val) == 7) {
+            u32 hex = 0;
+            std::from_chars(val + 1, val + 7, hex, 16);
+            s.text_color = Color::from_hex(hex);
+        }
+    } else if (strcmp(prop, "background") == 0) {
+        const char* val = luaL_checkstring(L, 3);
+        if (strcmp(val, "transparent") == 0) {
+            s.background = Color::transparent();
+        } else if (val[0] == '#' && strlen(val) == 7) {
+            u32 hex = 0;
+            std::from_chars(val + 1, val + 7, hex, 16);
+            s.background = Color::from_hex(hex);
+        }
     } else if (strcmp(prop, "text") == 0) {
         if (auto* text = dynamic_cast<Text*>(w)) {
             text->set_text(luaL_checkstring(L, 3));

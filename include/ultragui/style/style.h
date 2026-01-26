@@ -8,6 +8,14 @@
 
 namespace ugui {
 
+/// Box shadow definition (CSS-like).
+struct BoxShadow {
+    Color color = Color::transparent();
+    f32 blur = 0.0f;
+    f32 spread = 0.0f;
+    Vec2 offset = Vec2::zero();
+};
+
 /// Complete visual style for a widget. Every widget has one of these.
 /// Properties use CSS-like naming. Default values produce an invisible,
 /// auto-sized, flow-layout element (like an unstyled <div>).
@@ -45,10 +53,14 @@ struct Style {
 
     // --- Visual ---
     Color background = Color::transparent();
+    Color background_end = Color::transparent(); // If != transparent, linear gradient top->bottom
     Color border_color = Color::transparent();
     f32 border_width = 0.0f;
     f32 corner_radius = 0.0f;
     f32 opacity = 1.0f;
+
+    // --- Box shadow ---
+    BoxShadow shadow;
 
     // --- Text ---
     Color text_color = Color::white();
@@ -59,6 +71,16 @@ struct Style {
     Transition background_transition;
     Transition transform_transition;
     Transition opacity_transition;
+
+    /// Check if this style has a gradient background
+    bool has_gradient() const {
+        return background_end.a > 0.0f && background_end != background;
+    }
+
+    /// Check if this style has a box shadow
+    bool has_shadow() const {
+        return shadow.color.a > 0.0f && (shadow.blur > 0.0f || shadow.spread > 0.0f);
+    }
 
     /// Linearly interpolate between two styles for animation.
     /// Only interpolates animatable properties (colors, sizes, opacity, etc).
@@ -88,6 +110,8 @@ constexpr u64 Height = 1ull << 8;
 constexpr u64 Margin = 1ull << 9;
 constexpr u64 Padding = 1ull << 10;
 constexpr u64 Transform = 1ull << 11;
+constexpr u64 Shadow = 1ull << 12;
+constexpr u64 BackgroundEnd = 1ull << 13;
 } // namespace StyleMask
 
 /// Resolve the effective style for a widget given its base style,

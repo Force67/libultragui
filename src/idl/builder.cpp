@@ -17,6 +17,37 @@ static f32 parse_float(const std::string& s) {
     return v;
 }
 
+static EdgeInsets parse_edge_insets(const std::string& s) {
+    // Parse 1, 2, or 4 values like CSS shorthand:
+    // "10" -> all sides = 10
+    // "10 20" -> vertical=10, horizontal=20
+    // "10 20 30 40" -> top=10, right=20, bottom=30, left=40
+    f32 vals[4] = {};
+    int count = 0;
+    const char* ptr = s.data();
+    const char* end = s.data() + s.size();
+    while (ptr < end && count < 4) {
+        while (ptr < end && (*ptr == ' ' || *ptr == '\t'))
+            ++ptr;
+        if (ptr >= end)
+            break;
+        f32 v = 0;
+        auto result = std::from_chars(ptr, end, v);
+        if (result.ptr == ptr)
+            break;
+        vals[count++] = v;
+        ptr = result.ptr;
+    }
+
+    if (count == 1)
+        return EdgeInsets(vals[0]);
+    if (count == 2)
+        return EdgeInsets(vals[0], vals[1]);
+    if (count >= 4)
+        return EdgeInsets(vals[0], vals[1], vals[2], vals[3]);
+    return EdgeInsets(vals[0]);
+}
+
 static Length parse_length(const std::string& s) {
     if (s == "auto")
         return Length::auto_();
@@ -115,11 +146,9 @@ Style UguiBuilder::parse_style(const std::unordered_map<std::string, std::string
         } else if (key == "flex-shrink") {
             s.flex_shrink = parse_float(val);
         } else if (key == "padding") {
-            f32 v = parse_float(val);
-            s.padding = EdgeInsets(v);
+            s.padding = parse_edge_insets(val);
         } else if (key == "margin") {
-            f32 v = parse_float(val);
-            s.margin = EdgeInsets(v);
+            s.margin = parse_edge_insets(val);
         } else if (key == "gap") {
             s.gap = parse_float(val);
         } else if (key == "background") {
@@ -150,6 +179,18 @@ Style UguiBuilder::parse_style(const std::unordered_map<std::string, std::string
                 s.overflow = Overflow::Hidden;
             else if (val == "scroll")
                 s.overflow = Overflow::Scroll;
+        } else if (key == "background-end" || key == "gradient-end") {
+            s.background_end = parse_color(val);
+        } else if (key == "shadow-color") {
+            s.shadow.color = parse_color(val);
+        } else if (key == "shadow-blur") {
+            s.shadow.blur = parse_float(val);
+        } else if (key == "shadow-spread") {
+            s.shadow.spread = parse_float(val);
+        } else if (key == "shadow-x") {
+            s.shadow.offset.x = parse_float(val);
+        } else if (key == "shadow-y") {
+            s.shadow.offset.y = parse_float(val);
         }
     }
 
@@ -282,6 +323,11 @@ void UguiBuilder::apply_properties(Widget* widget, const UguiNode& node) {
                 mask |= StyleMask::Width;
             else if (key == "height")
                 mask |= StyleMask::Height;
+            else if (key == "background-end" || key == "gradient-end")
+                mask |= StyleMask::BackgroundEnd;
+            else if (key == "shadow-color" || key == "shadow-blur" || key == "shadow-spread" ||
+                     key == "shadow-x" || key == "shadow-y")
+                mask |= StyleMask::Shadow;
         }
 
         widget->add_state_override(state, override_style, mask);
