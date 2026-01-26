@@ -58,13 +58,44 @@ void Renderer2D::end_frame() {
 }
 
 void Renderer2D::draw_rect(Rect rect, Color color, f32 corner_radius) {
-    emit_quad(rect, Vertex2D::pack_color(color.r, color.g, color.b, color.a), corner_radius,
-              INVALID_TEXTURE);
+    u32 packed = Vertex2D::pack_color(color.r, color.g, color.b, color.a);
+    emit_quad(rect, packed, packed, corner_radius, 0.0f, 0.0f, 0, INVALID_TEXTURE);
 }
 
 void Renderer2D::draw_textured_rect(Rect rect, RHITextureHandle texture, Color tint,
                                     f32 corner_radius) {
-    emit_quad(rect, Vertex2D::pack_color(tint.r, tint.g, tint.b, tint.a), corner_radius, texture);
+    u32 packed = Vertex2D::pack_color(tint.r, tint.g, tint.b, tint.a);
+    emit_quad(rect, packed, packed, corner_radius, 0.0f, 0.0f, 0, texture);
+}
+
+void Renderer2D::draw_rect_gradient(Rect rect, Color top_color, Color bottom_color,
+                                    f32 corner_radius) {
+    u32 c1 = Vertex2D::pack_color(top_color.r, top_color.g, top_color.b, top_color.a);
+    u32 c2 = Vertex2D::pack_color(bottom_color.r, bottom_color.g, bottom_color.b, bottom_color.a);
+    emit_quad(rect, c1, c2, corner_radius, 0.0f, 0.0f, 0, INVALID_TEXTURE);
+}
+
+void Renderer2D::draw_shadow(Rect rect, Color shadow_color, f32 blur, f32 spread, Vec2 offset,
+                             f32 corner_radius) {
+    Rect shadow_rect = {
+        rect.x + offset.x - spread - blur,
+        rect.y + offset.y - spread - blur,
+        rect.w + (spread + blur) * 2.0f,
+        rect.h + (spread + blur) * 2.0f,
+    };
+    u32 packed = Vertex2D::pack_color(shadow_color.r, shadow_color.g, shadow_color.b,
+                                      shadow_color.a);
+    f32 shadow_radius = corner_radius + spread;
+    emit_quad(shadow_rect, packed, packed, shadow_radius, blur, 0.0f, 0, INVALID_TEXTURE);
+}
+
+void Renderer2D::draw_bordered_rect(Rect rect, Color fill, Color border_color, f32 border_width,
+                                    f32 corner_radius) {
+    u32 fill_packed = Vertex2D::pack_color(fill.r, fill.g, fill.b, fill.a);
+    u32 border_packed = Vertex2D::pack_color(border_color.r, border_color.g, border_color.b,
+                                             border_color.a);
+    emit_quad(rect, fill_packed, fill_packed, corner_radius, 0.0f, border_width, border_packed,
+              INVALID_TEXTURE);
 }
 
 void Renderer2D::push_scissor(Rect rect) {
@@ -83,8 +114,9 @@ void Renderer2D::pop_scissor() {
     }
 }
 
-void Renderer2D::emit_quad(Rect rect, u32 color, f32 corner_radius, RHITextureHandle texture) {
-    // Start a new batch if texture or scissor changed
+void Renderer2D::emit_quad(Rect rect, u32 color, u32 color2, f32 corner_radius, f32 softness,
+                           f32 border_width, u32 border_color, RHITextureHandle texture) {
+    // Start a new batch if texture changed
     if (texture != current_texture_) {
         flush_batch();
         current_texture_ = texture;
@@ -96,14 +128,17 @@ void Renderer2D::emit_quad(Rect rect, u32 color, f32 corner_radius, RHITextureHa
     u32 base = static_cast<u32>(vertices_.size());
 
     // Top-left
-    vertices_.push_back({{rect.x, rect.y}, {0, 0}, color, corner_radius, {hw, hh}});
+    vertices_.push_back({{rect.x, rect.y}, {0, 0}, color, color2, corner_radius, softness,
+                         {hw, hh}, border_width, border_color});
     // Top-right
-    vertices_.push_back({{rect.x + rect.w, rect.y}, {1, 0}, color, corner_radius, {hw, hh}});
+    vertices_.push_back({{rect.x + rect.w, rect.y}, {1, 0}, color, color2, corner_radius,
+                         softness, {hw, hh}, border_width, border_color});
     // Bottom-right
-    vertices_.push_back(
-        {{rect.x + rect.w, rect.y + rect.h}, {1, 1}, color, corner_radius, {hw, hh}});
+    vertices_.push_back({{rect.x + rect.w, rect.y + rect.h}, {1, 1}, color, color2,
+                         corner_radius, softness, {hw, hh}, border_width, border_color});
     // Bottom-left
-    vertices_.push_back({{rect.x, rect.y + rect.h}, {0, 1}, color, corner_radius, {hw, hh}});
+    vertices_.push_back({{rect.x, rect.y + rect.h}, {0, 1}, color, color2, corner_radius,
+                         softness, {hw, hh}, border_width, border_color});
 
     // Two triangles: 0-1-2, 0-2-3
     indices_.push_back(base + 0);
@@ -176,10 +211,14 @@ void Renderer2D::draw_text(Vec2 pos, const TextRun& run, Color color,
         f32 h = g.bmp_h;
 
         u32 base = static_cast<u32>(text_vertices_.size());
-        text_vertices_.push_back({{x, y}, {g.u0, g.v0}, packed_color, 0, {0, 0}});
-        text_vertices_.push_back({{x + w, y}, {g.u1, g.v0}, packed_color, 0, {0, 0}});
-        text_vertices_.push_back({{x + w, y + h}, {g.u1, g.v1}, packed_color, 0, {0, 0}});
-        text_vertices_.push_back({{x, y + h}, {g.u0, g.v1}, packed_color, 0, {0, 0}});
+        text_vertices_.push_back({{x, y}, {g.u0, g.v0}, packed_color, packed_color,
+                                  0, 0, {0, 0}, 0, 0});
+        text_vertices_.push_back({{x + w, y}, {g.u1, g.v0}, packed_color, packed_color,
+                                  0, 0, {0, 0}, 0, 0});
+        text_vertices_.push_back({{x + w, y + h}, {g.u1, g.v1}, packed_color, packed_color,
+                                  0, 0, {0, 0}, 0, 0});
+        text_vertices_.push_back({{x, y + h}, {g.u0, g.v1}, packed_color, packed_color,
+                                  0, 0, {0, 0}, 0, 0});
 
         text_indices_.push_back(base + 0);
         text_indices_.push_back(base + 1);
@@ -200,17 +239,13 @@ void Renderer2D::draw_text_layout(Vec2 pos, const TextRun& run, const TextLayout
     for (u32 li = 0; li < layout.line_count; ++li) {
         auto& line = layout.lines[li];
 
-        // Text alignment offset
         f32 x_offset = 0.0f;
         if (max_width > 0.0f) {
             f32 slack = max_width - line.width;
-            // We don't have config here, so just left-align
-            // Proper alignment handled by caller
             x_offset = 0.0f;
             (void)slack;
         }
 
-        // Build a sub-run for this line
         TextRun line_run = run;
         line_run.glyphs = run.glyphs + line.glyph_start;
         line_run.glyph_count = line.glyph_count;

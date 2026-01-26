@@ -20,9 +20,27 @@ public:
     void begin_frame();
     void end_frame();
 
+    // --- Solid color drawing ---
     void draw_rect(Rect rect, Color color, f32 corner_radius = 0.0f);
     void draw_textured_rect(Rect rect, RHITextureHandle texture, Color tint = Color::white(),
                             f32 corner_radius = 0.0f);
+
+    // --- Visual effects ---
+
+    /// Draw a rectangle with a linear gradient (top-to-bottom).
+    void draw_rect_gradient(Rect rect, Color top_color, Color bottom_color,
+                            f32 corner_radius = 0.0f);
+
+    /// Draw a box shadow behind a rectangle.
+    /// blur = softness of edge, spread = expand beyond rect, offset = shadow displacement.
+    void draw_shadow(Rect rect, Color shadow_color, f32 blur, f32 spread, Vec2 offset,
+                     f32 corner_radius = 0.0f);
+
+    /// Draw a rect with a border (fill + outline in one draw).
+    void draw_bordered_rect(Rect rect, Color fill, Color border_color, f32 border_width,
+                            f32 corner_radius = 0.0f);
+
+    // --- Text ---
 
     /// Draw shaped text at the given position.
     /// `pos` is the top-left origin; `run` comes from TextEngine::shape().
@@ -38,7 +56,8 @@ public:
 private:
     void flush_batch();
     void flush_text_batch();
-    void emit_quad(Rect rect, u32 color, f32 corner_radius, RHITextureHandle texture);
+    void emit_quad(Rect rect, u32 color, u32 color2, f32 corner_radius, f32 softness,
+                   f32 border_width, u32 border_color, RHITextureHandle texture);
 
     RHI* rhi_ = nullptr;
 
