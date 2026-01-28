@@ -2,7 +2,7 @@
 
 /// libultragui - Lean GPU-accelerated game GUI library
 ///
-/// Umbrella header. Includes core types for convenience.
+/// Umbrella header. Includes core types and the UIContext for convenience.
 
 #include <ultragui/core/arena.h>
 #include <ultragui/core/color.h>
@@ -14,3 +14,4 @@
 #include <ultragui/platform/platform.h>
 #include <ultragui/render/renderer2d.h>
 #include <ultragui/rhi/rhi.h>
+#include <ultragui/ui_context.h>
