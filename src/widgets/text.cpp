@@ -14,23 +14,20 @@ void Text::measure(f32& out_width, f32& out_height) {
         text_engine_->shape(font_, text_.c_str(), static_cast<u32>(text_.size()), style_.font_size);
     out_width = run.total_advance;
     out_height = run.line_height;
-    cached_run_ = run;
-    run_dirty_ = false;
 }
 
 void Text::on_paint(Renderer2D& renderer) {
-    Widget::on_paint(renderer); // Background
+    Widget::on_paint(renderer); // Background, shadow, border
 
     if (!text_engine_ || font_ == INVALID_FONT || text_.empty())
         return;
 
     auto s = computed_style();
+    f32 alpha = s.opacity;
 
-    if (run_dirty_) {
-        cached_run_ =
-            text_engine_->shape(font_, text_.c_str(), static_cast<u32>(text_.size()), s.font_size);
-        run_dirty_ = false;
-    }
+    // Always shape fresh - the scratch buffer pointer from measure may be stale
+    auto run =
+        text_engine_->shape(font_, text_.c_str(), static_cast<u32>(text_.size()), s.font_size);
 
     // Position text within content rect
     f32 x = content_rect_.x;
@@ -39,19 +36,19 @@ void Text::on_paint(Renderer2D& renderer) {
     // Horizontal alignment
     switch (s.text_align) {
     case TextAlign::Center:
-        x += (content_rect_.w - cached_run_.total_advance) * 0.5f;
+        x += (content_rect_.w - run.total_advance) * 0.5f;
         break;
     case TextAlign::Right:
-        x += content_rect_.w - cached_run_.total_advance;
+        x += content_rect_.w - run.total_advance;
         break;
     default:
         break;
     }
 
     // Vertical center
-    y += (content_rect_.h - cached_run_.line_height) * 0.5f;
+    y += (content_rect_.h - run.line_height) * 0.5f;
 
-    renderer.draw_text(Vec2{x, y}, cached_run_, s.text_color.with_alpha(s.text_color.a * s.opacity),
+    renderer.draw_text(Vec2{x, y}, run, s.text_color.with_alpha(s.text_color.a * alpha),
                        text_engine_->atlas_texture());
 }
 

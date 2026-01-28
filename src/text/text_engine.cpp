@@ -61,8 +61,10 @@ struct TextEngine::Impl {
 
     std::unordered_map<GlyphKey, CachedGlyph, GlyphKeyHash> glyph_cache;
 
-    // Scratch buffers for shape() and layout() results
-    std::vector<TextRun::Glyph> scratch_glyphs;
+    // Per-shape glyph buffers. Each shape() call gets its own vector.
+    // Moving inner vectors (when the outer vector grows) doesn't move heap data,
+    // so TextRun::glyphs pointers into inner vectors remain valid for the frame.
+    std::vector<std::vector<TextRun::Glyph>> glyph_runs;
     std::vector<TextLayout::Line> scratch_lines;
 
     CachedGlyph* rasterize_glyph(FontHandle font, u32 glyph_id, u32 pixel_size);
@@ -83,7 +85,8 @@ bool TextEngine::init(RHI* rhi) {
         return false;
     }
 
-    // Initialize atlas with transparent pixels
+    // Initialize atlas with transparent pixels. The GPU texture is created
+    // on the first flush_atlas() call, which happens before the render pass.
     std::memset(impl_->atlas_pixels, 0, sizeof(impl_->atlas_pixels));
     impl_->atlas_dirty = true;
 
@@ -201,6 +204,13 @@ CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id, u3
 // Text shaping (HarfBuzz)
 // ---------------------------------------------------------------------------
 
+void TextEngine::begin_frame() {
+    if (impl_) {
+        impl_->glyph_runs.clear();
+        impl_->scratch_lines.clear();
+    }
+}
+
 TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 font_size) {
     assert(impl_ && font < MAX_FONTS && impl_->fonts[font].in_use);
 
@@ -218,12 +228,15 @@ TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 f
     hb_glyph_info_t* glyph_info = hb_buffer_get_glyph_infos(buf, &glyph_count);
     hb_glyph_position_t* glyph_pos = hb_buffer_get_glyph_positions(buf, &glyph_count);
 
-    impl_->scratch_glyphs.clear();
-    impl_->scratch_glyphs.resize(glyph_count);
+    // Each shape() call gets its own glyph vector. The outer vector may
+    // reallocate on push_back, but that only moves the inner vector metadata -
+    // the heap-allocated glyph array stays in place, so pointers remain valid.
+    impl_->glyph_runs.emplace_back(glyph_count);
+    auto& glyphs = impl_->glyph_runs.back();
 
     f32 cursor_x = 0.0f;
     for (u32 i = 0; i < glyph_count; ++i) {
-        auto& g = impl_->scratch_glyphs[i];
+        auto& g = glyphs[i];
         g.glyph_id = glyph_info[i].codepoint;
         g.x_offset = static_cast<f32>(glyph_pos[i].x_offset) / 64.0f;
         g.y_offset = static_cast<f32>(glyph_pos[i].y_offset) / 64.0f;
@@ -252,7 +265,7 @@ TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 f
     f32 line_height = static_cast<f32>(slot.ft_face->size->metrics.height) / 64.0f;
 
     TextRun run{};
-    run.glyphs = impl_->scratch_glyphs.data();
+    run.glyphs = glyphs.data();
     run.glyph_count = glyph_count;
     run.total_advance = cursor_x;
     run.ascent = ascent;
@@ -333,12 +346,14 @@ void TextEngine::flush_atlas() {
     if (!impl_->atlas_dirty)
         return;
 
-    if (atlas_texture_ != INVALID_TEXTURE) {
-        rhi_->destroy_texture(atlas_texture_);
+    if (atlas_texture_ == INVALID_TEXTURE) {
+        // First time: create the texture (includes upload).
+        atlas_texture_ =
+            rhi_->create_texture(ATLAS_SIZE, ATLAS_SIZE, RHIFormat::R8_UNORM, impl_->atlas_pixels);
+    } else {
+        // Subsequent: update in place (handle stays stable).
+        rhi_->update_texture(atlas_texture_, impl_->atlas_pixels);
     }
-
-    atlas_texture_ =
-        rhi_->create_texture(ATLAS_SIZE, ATLAS_SIZE, RHIFormat::R8_UNORM, impl_->atlas_pixels);
     impl_->atlas_dirty = false;
 }
 

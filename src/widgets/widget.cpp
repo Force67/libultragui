@@ -80,9 +80,40 @@ void Widget::on_layout(const Rect& rect, const Rect& content_rect) {
 
 void Widget::on_paint(Renderer2D& renderer) {
     auto s = computed_style();
-    if (s.background.a > 0.0f) {
-        renderer.draw_rect(rect_, s.background.with_alpha(s.background.a * s.opacity),
-                           s.corner_radius);
+    f32 alpha = s.opacity;
+
+    // Box shadow (drawn before background)
+    if (s.has_shadow()) {
+        Color sc = s.shadow.color.with_alpha(s.shadow.color.a * alpha);
+        renderer.draw_shadow(rect_, sc, s.shadow.blur, s.shadow.spread,
+                             s.shadow.offset, s.corner_radius);
+    }
+
+    // Background (with optional gradient and border)
+    if (s.background.a > 0.0f || s.border_width > 0.0f) {
+        Color bg = s.background.with_alpha(s.background.a * alpha);
+
+        if (s.border_width > 0.0f && s.border_color.a > 0.0f) {
+            Color bc = s.border_color.with_alpha(s.border_color.a * alpha);
+            if (s.has_gradient()) {
+                // Border with gradient: draw border first, then gradient fill inset
+                renderer.draw_bordered_rect(rect_, Color::transparent(), bc, s.border_width,
+                                            s.corner_radius);
+                Rect inner = rect_.shrunk(s.border_width);
+                f32 inner_radius = s.corner_radius > s.border_width
+                                       ? s.corner_radius - s.border_width
+                                       : 0.0f;
+                Color bg2 = s.background_end.with_alpha(s.background_end.a * alpha);
+                renderer.draw_rect_gradient(inner, bg, bg2, inner_radius);
+            } else {
+                renderer.draw_bordered_rect(rect_, bg, bc, s.border_width, s.corner_radius);
+            }
+        } else if (s.has_gradient()) {
+            Color bg2 = s.background_end.with_alpha(s.background_end.a * alpha);
+            renderer.draw_rect_gradient(rect_, bg, bg2, s.corner_radius);
+        } else {
+            renderer.draw_rect(rect_, bg, s.corner_radius);
+        }
     }
 }
 

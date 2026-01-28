@@ -85,6 +85,10 @@ public:
     /// Lay out a shaped run into wrapped, aligned lines.
     TextLayout layout(const TextRun& run, const TextLayoutConfig& config);
 
+    /// Call at the start of each frame to reset internal scratch buffers.
+    /// All previously returned TextRun/TextLayout pointers become invalid.
+    void begin_frame();
+
     /// Must be called once per frame to upload any new glyphs to the GPU atlas.
     void flush_atlas();
 

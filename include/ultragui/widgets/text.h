@@ -31,8 +31,6 @@ private:
     std::string text_;
     FontHandle font_ = INVALID_FONT;
     TextEngine* text_engine_ = nullptr;
-    TextRun cached_run_ = {};
-    bool run_dirty_ = true;
 };
 
 } // namespace ugui

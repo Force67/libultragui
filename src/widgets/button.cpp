@@ -18,20 +18,14 @@ void Button::measure(f32& out_width, f32& out_height) {
 }
 
 void Button::on_paint(Renderer2D& renderer) {
-    auto s = computed_style();
-
-    // Button background
-    f32 alpha = s.opacity;
-    renderer.draw_rect(rect_, s.background.with_alpha(s.background.a * alpha), s.corner_radius);
-
-    // Border
-    if (s.border_width > 0.0f && s.border_color.a > 0.0f) {
-        // Draw border as a slightly larger rect behind (simple approach)
-        // TODO: proper border rendering in shader
-    }
+    // Use base Widget paint for shadow, background, border, gradient
+    Widget::on_paint(renderer);
 
     // Label
     if (text_engine_ && font_ != INVALID_FONT && !label_.empty()) {
+        auto s = computed_style();
+        f32 alpha = s.opacity;
+
         auto run = text_engine_->shape(font_, label_.c_str(), static_cast<u32>(label_.size()),
                                        s.font_size);
 
