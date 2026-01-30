@@ -226,11 +226,15 @@ void LayoutEngine::layout_flex(LayoutNode* nodes, u32 parent_index, f32 containe
         break;
     }
 
+    // Determine if the cross axis is auto-sized.
+    // Per flexbox spec, stretch has no effect when the container's cross size is auto.
+    bool cross_auto = is_row ? parent.style.height.is_auto() : parent.style.width.is_auto();
+
     // Position children
     f32 main_cursor = justify_offset;
     f32 content_x = parent.content_rect.x;
     f32 content_y = parent.content_rect.y;
-    f32 auto_height = 0.0f;
+    f32 auto_cross = 0.0f;
 
     for (usize i = 0; i < children.size(); ++i) {
         auto& ci = children[is_reverse ? children.size() - 1 - i : i];
@@ -250,45 +254,28 @@ void LayoutEngine::layout_flex(LayoutNode* nodes, u32 parent_index, f32 containe
             align = static_cast<AlignItems>(static_cast<u8>(self_align) - 1);
         }
 
-        if (child_cross <= 0 && align == AlignItems::Stretch) {
+        // Don't stretch when container cross size is auto - children use natural size first
+        if (child_cross <= 0 && align == AlignItems::Stretch && !cross_auto) {
             f32 cross_margin = is_row ? ci.margin.vertical() : ci.margin.horizontal();
             child_cross = cross_size - cross_margin;
         }
 
-        // Cross-axis position
-        f32 cross_pos = margin_cross_before;
-        f32 cross_margin = is_row ? ci.margin.vertical() : ci.margin.horizontal();
-        switch (align) {
-        case AlignItems::Start:
-            break;
-        case AlignItems::End:
-            cross_pos = cross_size - child_cross - (is_row ? ci.margin.bottom : ci.margin.right);
-            break;
-        case AlignItems::Center:
-            cross_pos = (cross_size - child_cross - cross_margin) * 0.5f + margin_cross_before;
-            break;
-        case AlignItems::Stretch:
-            break;
-        case AlignItems::Baseline:
-            break; // TODO: baseline alignment
-        }
-
         if (is_row) {
-            c.computed_rect = {content_x + main_cursor, content_y + cross_pos, ci.main_basis,
-                               child_cross};
+            c.computed_rect = {content_x + main_cursor, content_y + margin_cross_before,
+                               ci.main_basis, child_cross};
         } else {
-            c.computed_rect = {content_x + cross_pos, content_y + main_cursor, child_cross,
-                               ci.main_basis};
+            c.computed_rect = {content_x + margin_cross_before, content_y + main_cursor,
+                               child_cross, ci.main_basis};
         }
 
-        // Recurse into children
+        // Recurse into children - this may shrink-wrap auto-sized dimensions
         compute_node(nodes, ci.index, c.computed_rect.w, c.computed_rect.h, viewport);
 
-        // Update auto height from children
-        f32 child_bottom = is_row ? (c.computed_rect.h + ci.margin.vertical())
-                                  : (main_cursor + ci.main_basis + margin_after);
-        if (child_bottom > auto_height)
-            auto_height = child_bottom;
+        // Track actual cross size after compute_node (may have shrink-wrapped)
+        f32 actual_cross = is_row ? c.computed_rect.h : c.computed_rect.w;
+        f32 cross_margin = is_row ? ci.margin.vertical() : ci.margin.horizontal();
+        if (actual_cross + cross_margin > auto_cross)
+            auto_cross = actual_cross + cross_margin;
 
         main_cursor += ci.main_basis + margin_after + justify_gap;
     }
@@ -296,23 +283,73 @@ void LayoutEngine::layout_flex(LayoutNode* nodes, u32 parent_index, f32 containe
     // If parent has auto height, shrink-wrap to content
     if (parent.style.height.is_auto()) {
         if (is_row) {
-            // Row: height is tallest child
-            parent.computed_rect.h = auto_height + parent.computed_padding.vertical();
+            parent.computed_rect.h = auto_cross + parent.computed_padding.vertical();
         } else {
-            // Column: height is total stacked height
             parent.computed_rect.h = main_cursor - justify_gap + parent.computed_padding.vertical();
         }
         parent.content_rect.h = parent.computed_rect.h - parent.computed_padding.vertical();
     }
     if (parent.style.width.is_auto() && !is_row) {
-        f32 max_w = 0;
-        for (auto& ci : children) {
-            f32 w = nodes[ci.index].computed_rect.w + ci.margin.horizontal();
-            if (w > max_w)
-                max_w = w;
+        parent.computed_rect.w = auto_cross + parent.computed_padding.horizontal();
+        parent.content_rect.w = auto_cross;
+    }
+
+    // Second pass: apply stretch and cross-axis alignment now that we know the final cross size
+    f32 final_cross = is_row ? parent.content_rect.h : parent.content_rect.w;
+    for (auto& ci : children) {
+        auto& c = nodes[ci.index];
+        AlignItems align = parent.style.align_items;
+        AlignSelf self_align = c.style.align_self;
+        if (self_align != AlignSelf::Auto)
+            align = static_cast<AlignItems>(static_cast<u8>(self_align) - 1);
+
+        f32 child_cross_size = is_row ? c.computed_rect.h : c.computed_rect.w;
+        f32 margin_cross_before = is_row ? ci.margin.top : ci.margin.left;
+        f32 cross_margin = is_row ? ci.margin.vertical() : ci.margin.horizontal();
+
+        f32 cross_pos = margin_cross_before;
+        bool needs_stretch = false;
+
+        switch (align) {
+        case AlignItems::Start:
+            break;
+        case AlignItems::End:
+            cross_pos = final_cross - child_cross_size -
+                        (is_row ? ci.margin.bottom : ci.margin.right);
+            break;
+        case AlignItems::Center:
+            cross_pos = (final_cross - child_cross_size - cross_margin) * 0.5f + margin_cross_before;
+            break;
+        case AlignItems::Stretch:
+            if (ci.cross_basis <= 0) {
+                child_cross_size = final_cross - cross_margin;
+                needs_stretch = true;
+            }
+            break;
+        case AlignItems::Baseline:
+            break;
         }
-        parent.computed_rect.w = max_w + parent.computed_padding.horizontal();
-        parent.content_rect.w = max_w;
+
+        if (is_row) {
+            c.computed_rect.y = parent.content_rect.y + cross_pos;
+            if (needs_stretch)
+                c.computed_rect.h = child_cross_size;
+        } else {
+            c.computed_rect.x = parent.content_rect.x + cross_pos;
+            if (needs_stretch)
+                c.computed_rect.w = child_cross_size;
+        }
+
+        // Re-compute content rect if stretched
+        if (needs_stretch) {
+            c.computed_padding = c.style.padding;
+            c.content_rect = {
+                c.computed_rect.x + c.computed_padding.left,
+                c.computed_rect.y + c.computed_padding.top,
+                std::max(c.computed_rect.w - c.computed_padding.horizontal(), 0.0f),
+                std::max(c.computed_rect.h - c.computed_padding.vertical(), 0.0f),
+            };
+        }
     }
 }
 

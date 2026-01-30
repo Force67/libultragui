@@ -127,6 +127,7 @@ panel root {
             layout: row;
             justify: space-between;
             align: center;
+            min-height: 48;
 
             text page_title {
                 text: "Dashboard";
@@ -161,6 +162,7 @@ panel root {
         panel stats_row {
             layout: row;
             gap: 16;
+            align: start;
 
             panel stat_card_1 {
                 layout: column;
@@ -258,6 +260,7 @@ panel root {
             layout: row;
             flex-grow: 1;
             gap: 16;
+            align: start;
 
             // Recent activity card
             panel activity_card {
