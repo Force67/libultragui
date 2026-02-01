@@ -44,6 +44,10 @@ pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
 # GLFW (for examples/platform)
 find_package(glfw3 3.3 REQUIRED)
 
+# Yoga layout engine (built from source)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/yoga EXCLUDE_FROM_ALL)
+
 # --- Shader compilation ---
 find_program(GLSLC glslc REQUIRED)
 set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
@@ -123,6 +127,7 @@ target_link_libraries(ultragui
         PkgConfig::HARFBUZZ
         PkgConfig::LUA
         glfw
+        yogacore
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)
