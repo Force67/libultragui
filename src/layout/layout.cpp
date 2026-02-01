@@ -271,13 +271,19 @@ void LayoutEngine::layout_flex(LayoutNode* nodes, u32 parent_index, f32 containe
         // Recurse into children - this may shrink-wrap auto-sized dimensions
         compute_node(nodes, ci.index, c.computed_rect.w, c.computed_rect.h, viewport);
 
-        // Track actual cross size after compute_node (may have shrink-wrapped)
+        // After compute_node, the child may have shrink-wrapped to a different size
+        // than main_basis (especially for auto-sized containers). Use the actual
+        // computed size for cursor advancement and cross tracking.
+        f32 actual_main = is_row ? c.computed_rect.w : c.computed_rect.h;
         f32 actual_cross = is_row ? c.computed_rect.h : c.computed_rect.w;
         f32 cross_margin = is_row ? ci.margin.vertical() : ci.margin.horizontal();
         if (actual_cross + cross_margin > auto_cross)
             auto_cross = actual_cross + cross_margin;
 
-        main_cursor += ci.main_basis + margin_after + justify_gap;
+        // Use the larger of main_basis (from flex distribution) and actual computed size
+        // (from shrink-wrap). This ensures auto-sized containers get proper spacing.
+        f32 effective_main = std::max(ci.main_basis, actual_main);
+        main_cursor += effective_main + margin_after + justify_gap;
     }
 
     // If parent has auto height, shrink-wrap to content
