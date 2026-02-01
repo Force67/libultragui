@@ -192,6 +192,10 @@ private:
             } else if (src_[pos_] == 's' && (pos_ + 1 >= len_ || !std::isalpha(src_[pos_ + 1]))) {
                 val += "s";
                 advance();
+            } else if (pos_ + 1 < len_ && src_[pos_] == 'f' && src_[pos_ + 1] == 'r') {
+                val += "fr";
+                advance();
+                advance();
             }
         }
         return {TokenType::Number, val, line, col};

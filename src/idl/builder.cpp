@@ -60,6 +60,11 @@ static Length parse_length(const std::string& s) {
         return Length::vw(v);
     if (unit == "vh")
         return Length::vh(v);
+    if (unit == "fr" || unit == "frac")
+        return Length::frac(v);
+    // Bare decimal 0.0-1.0 without unit -> treat as fractional
+    if (unit.empty() && v > 0.0f && v <= 1.0f && s.find('.') != std::string::npos)
+        return Length::frac(v);
     return Length::px(v);
 }
 
