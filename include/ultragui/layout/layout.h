@@ -26,7 +26,7 @@ struct LayoutNode {
     u32 child_count = 0;
 
     // Output (computed by layout)
-    Rect computed_rect = {};     // Final position + size in parent-local coords
+    Rect computed_rect = {};     // Final position + size in absolute coords
     Rect content_rect = {};      // Inner rect (after padding + border)
     EdgeInsets computed_margin;  // Resolved margins
     EdgeInsets computed_padding; // Resolved padding
@@ -35,24 +35,17 @@ struct LayoutNode {
     bool layout_dirty = true;
 };
 
-/// Viewport info needed for resolving vw/vh units
+/// Viewport info needed for resolving vw/vh/frac units
 struct LayoutViewport {
     f32 width = 1280.0f;
     f32 height = 720.0f;
 };
 
-/// Runs the flexbox layout algorithm on a tree of LayoutNodes.
+/// Runs the Yoga layout algorithm on a tree of LayoutNodes.
 class LayoutEngine {
 public:
     /// Compute layout for all nodes. The root node fills the viewport.
     void compute(LayoutNode* nodes, u32 node_count, const LayoutViewport& viewport);
-
-private:
-    void compute_node(LayoutNode* nodes, u32 node_index, f32 available_width, f32 available_height,
-                      const LayoutViewport& viewport);
-
-    void layout_flex(LayoutNode* nodes, u32 parent_index, f32 container_width, f32 container_height,
-                     const LayoutViewport& viewport);
 };
 
 } // namespace ugui
