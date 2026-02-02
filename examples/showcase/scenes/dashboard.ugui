@@ -1,0 +1,805 @@
+// Mission Control - DevOps monitoring dashboard
+// Deep indigo palette, card-based layout, sidebar navigation
+
+panel root {
+    layout: row;
+    background: #0a0a1a;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+
+    // Sidebar: 260px fixed navigation
+    panel sidebar {
+        layout: column;
+        width: 260;
+        height: 100%;
+        background: #0e0e20;
+        background-end: #10102a;
+        padding: 28 20;
+        gap: 4;
+        border-color: #1e1e3e;
+        border-width: 0 1 0 0;
+
+        // Logo area
+        panel logo_area {
+            layout: row;
+            align: center;
+            gap: 12;
+            padding: 0 0 24 0;
+
+            panel logo_dot {
+                width: 10;
+                height: 10;
+                background: #6366f1;
+                corner-radius: 5;
+                shadow-color: #6366f140;
+                shadow-blur: 8;
+            }
+
+            text logo_text {
+                text: "MISSION CTRL";
+                font-size: 16;
+                color: #e2e2ff;
+            }
+        }
+
+        // Section label
+        text nav_label {
+            text: "NAVIGATION";
+            font-size: 11;
+            color: #585878;
+            padding: 8 8 12 8;
+        }
+
+        // Nav items
+        button nav_overview {
+            text: "Overview";
+            font-size: 14;
+            color: #e2e2ff;
+            background: #6366f118;
+            corner-radius: 8;
+            padding: 11 14;
+            border-color: #6366f140;
+            border-width: 1;
+            :hover {
+                background: #6366f128;
+            }
+            :pressed {
+                background: #6366f138;
+            }
+        }
+
+        button nav_deployments {
+            text: "Deployments";
+            font-size: 14;
+            color: #9898b8;
+            background: transparent;
+            corner-radius: 8;
+            padding: 11 14;
+            :hover {
+                background: #1a1a38;
+                color: #e2e2ff;
+            }
+        }
+
+        button nav_services {
+            text: "Services";
+            font-size: 14;
+            color: #9898b8;
+            background: transparent;
+            corner-radius: 8;
+            padding: 11 14;
+            :hover {
+                background: #1a1a38;
+                color: #e2e2ff;
+            }
+        }
+
+        button nav_incidents {
+            text: "Incidents";
+            font-size: 14;
+            color: #9898b8;
+            background: transparent;
+            corner-radius: 8;
+            padding: 11 14;
+            :hover {
+                background: #1a1a38;
+                color: #e2e2ff;
+            }
+        }
+
+        button nav_logs {
+            text: "Logs";
+            font-size: 14;
+            color: #9898b8;
+            background: transparent;
+            corner-radius: 8;
+            padding: 11 14;
+            :hover {
+                background: #1a1a38;
+                color: #e2e2ff;
+            }
+        }
+
+        // Divider
+        panel nav_divider {
+            height: 1;
+            background: #1e1e3e;
+            margin: 12 0;
+        }
+
+        // Secondary section
+        text nav_label_2 {
+            text: "SETTINGS";
+            font-size: 11;
+            color: #585878;
+            padding: 4 8 12 8;
+        }
+
+        button nav_team {
+            text: "Team";
+            font-size: 14;
+            color: #9898b8;
+            background: transparent;
+            corner-radius: 8;
+            padding: 11 14;
+            :hover {
+                background: #1a1a38;
+                color: #e2e2ff;
+            }
+        }
+
+        button nav_config {
+            text: "Configuration";
+            font-size: 14;
+            color: #9898b8;
+            background: transparent;
+            corner-radius: 8;
+            padding: 11 14;
+            :hover {
+                background: #1a1a38;
+                color: #e2e2ff;
+            }
+        }
+
+        // Push remaining to bottom
+        panel sidebar_push {
+            flex-grow: 1;
+        }
+
+        // Status indicator at bottom
+        panel sidebar_status {
+            layout: row;
+            align: center;
+            gap: 10;
+            background: #12122a;
+            corner-radius: 8;
+            padding: 12 14;
+            border-color: #1e1e3e;
+            border-width: 1;
+
+            panel status_dot {
+                width: 8;
+                height: 8;
+                background: #22c55e;
+                corner-radius: 4;
+                shadow-color: #22c55e50;
+                shadow-blur: 6;
+            }
+
+            text status_text {
+                text: "All systems nominal";
+                font-size: 12;
+                color: #585878;
+            }
+        }
+    }
+
+    // Main content
+    panel main {
+        layout: column;
+        flex-grow: 1;
+        height: 100%;
+        padding: 0;
+
+        // Top bar
+        panel topbar {
+            layout: row;
+            justify: space-between;
+            align: center;
+            padding: 20 32;
+            min-height: 72;
+            border-color: #1e1e3e;
+            border-width: 0 0 1 0;
+
+            panel topbar_left {
+                layout: column;
+                gap: 2;
+
+                text page_title {
+                    text: "Overview";
+                    font-size: 28;
+                    color: #e2e2ff;
+                }
+
+                text page_subtitle {
+                    text: "Last updated 2 minutes ago";
+                    font-size: 12;
+                    color: #585878;
+                }
+            }
+
+            panel topbar_actions {
+                layout: row;
+                gap: 10;
+                align: center;
+
+                button btn_refresh {
+                    text: "Refresh";
+                    font-size: 13;
+                    color: #9898b8;
+                    background: #12122a;
+                    corner-radius: 8;
+                    padding: 9 16;
+                    border-color: #1e1e3e;
+                    border-width: 1;
+                    :hover {
+                        background: #1a1a38;
+                        color: #e2e2ff;
+                    }
+                }
+
+                button btn_deploy {
+                    text: "Deploy";
+                    font-size: 13;
+                    color: #ffffff;
+                    background: #6366f1;
+                    corner-radius: 8;
+                    padding: 9 20;
+                    shadow-color: #6366f140;
+                    shadow-blur: 12;
+                    shadow-y: 3;
+                    :hover {
+                        background: #7577f5;
+                        shadow-blur: 18;
+                    }
+                    :pressed {
+                        background: #5254d8;
+                    }
+                }
+            }
+        }
+
+        // Scrollable content
+        panel content {
+            layout: column;
+            flex-grow: 1;
+            padding: 28 32;
+            gap: 20;
+            overflow: scroll;
+
+            // Stat cards row
+            panel stats_row {
+                layout: row;
+                gap: 16;
+
+                // Card 1: Uptime
+                panel card_uptime {
+                    layout: column;
+                    flex-grow: 1;
+                    background: #12122a;
+                    corner-radius: 12;
+                    padding: 22 24;
+                    gap: 10;
+                    border-color: #1e1e3e;
+                    border-width: 1;
+                    shadow-color: #00000060;
+                    shadow-blur: 20;
+                    shadow-y: 8;
+
+                    panel uptime_header {
+                        layout: row;
+                        justify: space-between;
+                        align: center;
+
+                        text uptime_label {
+                            text: "Uptime";
+                            font-size: 14;
+                            color: #7878a0;
+                        }
+
+                        panel uptime_badge {
+                            background: #22c55e18;
+                            corner-radius: 6;
+                            padding: 4 10;
+
+                            text uptime_badge_text {
+                                text: "HEALTHY";
+                                font-size: 11;
+                                color: #22c55e;
+                            }
+                        }
+                    }
+
+                    text uptime_value {
+                        text: "99.98%";
+                        font-size: 32;
+                        color: #e2e2ff;
+                    }
+
+                    text uptime_detail {
+                        text: "43d 7h since last incident";
+                        font-size: 12;
+                        color: #585878;
+                    }
+                }
+
+                // Card 2: Requests
+                panel card_requests {
+                    layout: column;
+                    flex-grow: 1;
+                    background: #12122a;
+                    corner-radius: 12;
+                    padding: 22 24;
+                    gap: 10;
+                    border-color: #1e1e3e;
+                    border-width: 1;
+                    shadow-color: #00000060;
+                    shadow-blur: 20;
+                    shadow-y: 8;
+
+                    panel requests_header {
+                        layout: row;
+                        justify: space-between;
+                        align: center;
+
+                        text requests_label {
+                            text: "Requests / sec";
+                            font-size: 14;
+                            color: #7878a0;
+                        }
+
+                        panel requests_badge {
+                            background: #6366f118;
+                            corner-radius: 6;
+                            padding: 4 10;
+
+                            text requests_badge_text {
+                                text: "+14%";
+                                font-size: 11;
+                                color: #6366f1;
+                            }
+                        }
+                    }
+
+                    text requests_value {
+                        text: "12,847";
+                        font-size: 32;
+                        color: #e2e2ff;
+                    }
+
+                    text requests_detail {
+                        text: "Peak: 18,204 at 14:32 UTC";
+                        font-size: 12;
+                        color: #585878;
+                    }
+                }
+
+                // Card 3: Error Rate
+                panel card_errors {
+                    layout: column;
+                    flex-grow: 1;
+                    background: #12122a;
+                    corner-radius: 12;
+                    padding: 22 24;
+                    gap: 10;
+                    border-color: #1e1e3e;
+                    border-width: 1;
+                    shadow-color: #00000060;
+                    shadow-blur: 20;
+                    shadow-y: 8;
+
+                    panel errors_header {
+                        layout: row;
+                        justify: space-between;
+                        align: center;
+
+                        text errors_label {
+                            text: "Error Rate";
+                            font-size: 14;
+                            color: #7878a0;
+                        }
+
+                        panel errors_badge {
+                            background: #f59e0b18;
+                            corner-radius: 6;
+                            padding: 4 10;
+
+                            text errors_badge_text {
+                                text: "WARNING";
+                                font-size: 11;
+                                color: #f59e0b;
+                            }
+                        }
+                    }
+
+                    text errors_value {
+                        text: "0.42%";
+                        font-size: 32;
+                        color: #e2e2ff;
+                    }
+
+                    text errors_detail {
+                        text: "Threshold: 0.50%";
+                        font-size: 12;
+                        color: #f59e0b;
+                    }
+                }
+            }
+
+            // Bottom section: Activity + Alerts
+            panel bottom_row {
+                layout: row;
+                flex-grow: 1;
+                gap: 16;
+
+                // Activity feed
+                panel activity_card {
+                    layout: column;
+                    flex-grow: 3;
+                    background: #12122a;
+                    corner-radius: 12;
+                    padding: 24;
+                    gap: 14;
+                    border-color: #1e1e3e;
+                    border-width: 1;
+                    shadow-color: #00000060;
+                    shadow-blur: 20;
+                    shadow-y: 8;
+
+                    panel activity_header {
+                        layout: row;
+                        justify: space-between;
+                        align: center;
+                        padding: 0 0 4 0;
+
+                        text activity_title {
+                            text: "Recent Deployments";
+                            font-size: 16;
+                            color: #9898b8;
+                        }
+
+                        button btn_view_all {
+                            text: "View All";
+                            font-size: 12;
+                            color: #6366f1;
+                            background: transparent;
+                            padding: 4 8;
+                            :hover {
+                                color: #8183f5;
+                            }
+                        }
+                    }
+
+                    // Deploy entries
+                    panel deploy_1 {
+                        layout: row;
+                        align: center;
+                        gap: 14;
+                        background: #0e0e20;
+                        corner-radius: 8;
+                        padding: 14 16;
+                        :hover { background: #14142e; }
+
+                        panel d1_status {
+                            width: 8;
+                            height: 8;
+                            background: #22c55e;
+                            corner-radius: 4;
+                        }
+
+                        panel d1_info {
+                            layout: column;
+                            flex-grow: 1;
+                            gap: 3;
+
+                            text d1_name {
+                                text: "api-gateway v3.12.1";
+                                font-size: 14;
+                                color: #e2e2ff;
+                            }
+
+                            text d1_meta {
+                                text: "production  ·  2 min ago  ·  by ops-bot";
+                                font-size: 12;
+                                color: #585878;
+                            }
+                        }
+
+                        text d1_duration {
+                            text: "42s";
+                            font-size: 12;
+                            color: #7878a0;
+                        }
+                    }
+
+                    panel deploy_2 {
+                        layout: row;
+                        align: center;
+                        gap: 14;
+                        background: #0e0e20;
+                        corner-radius: 8;
+                        padding: 14 16;
+                        :hover { background: #14142e; }
+
+                        panel d2_status {
+                            width: 8;
+                            height: 8;
+                            background: #22c55e;
+                            corner-radius: 4;
+                        }
+
+                        panel d2_info {
+                            layout: column;
+                            flex-grow: 1;
+                            gap: 3;
+
+                            text d2_name {
+                                text: "auth-service v2.8.0";
+                                font-size: 14;
+                                color: #e2e2ff;
+                            }
+
+                            text d2_meta {
+                                text: "production  ·  18 min ago  ·  by jchen";
+                                font-size: 12;
+                                color: #585878;
+                            }
+                        }
+
+                        text d2_duration {
+                            text: "1m 04s";
+                            font-size: 12;
+                            color: #7878a0;
+                        }
+                    }
+
+                    panel deploy_3 {
+                        layout: row;
+                        align: center;
+                        gap: 14;
+                        background: #0e0e20;
+                        corner-radius: 8;
+                        padding: 14 16;
+                        :hover { background: #14142e; }
+
+                        panel d3_status {
+                            width: 8;
+                            height: 8;
+                            background: #ef4444;
+                            corner-radius: 4;
+                        }
+
+                        panel d3_info {
+                            layout: column;
+                            flex-grow: 1;
+                            gap: 3;
+
+                            text d3_name {
+                                text: "worker-pool v1.4.3";
+                                font-size: 14;
+                                color: #e2e2ff;
+                            }
+
+                            text d3_meta {
+                                text: "staging  ·  47 min ago  ·  by deploy-ci";
+                                font-size: 12;
+                                color: #585878;
+                            }
+                        }
+
+                        text d3_duration {
+                            text: "FAILED";
+                            font-size: 12;
+                            color: #ef4444;
+                        }
+                    }
+
+                    panel deploy_4 {
+                        layout: row;
+                        align: center;
+                        gap: 14;
+                        background: #0e0e20;
+                        corner-radius: 8;
+                        padding: 14 16;
+                        :hover { background: #14142e; }
+
+                        panel d4_status {
+                            width: 8;
+                            height: 8;
+                            background: #22c55e;
+                            corner-radius: 4;
+                        }
+
+                        panel d4_info {
+                            layout: column;
+                            flex-grow: 1;
+                            gap: 3;
+
+                            text d4_name {
+                                text: "frontend v4.1.0";
+                                font-size: 14;
+                                color: #e2e2ff;
+                            }
+
+                            text d4_meta {
+                                text: "production  ·  1h ago  ·  by mwatson";
+                                font-size: 12;
+                                color: #585878;
+                            }
+                        }
+
+                        text d4_duration {
+                            text: "38s";
+                            font-size: 12;
+                            color: #7878a0;
+                        }
+                    }
+                }
+
+                // Alerts panel
+                panel alerts_card {
+                    layout: column;
+                    flex-grow: 2;
+                    background: #12122a;
+                    corner-radius: 12;
+                    padding: 24;
+                    gap: 14;
+                    border-color: #1e1e3e;
+                    border-width: 1;
+                    shadow-color: #00000060;
+                    shadow-blur: 20;
+                    shadow-y: 8;
+
+                    text alerts_title {
+                        text: "Active Alerts";
+                        font-size: 16;
+                        color: #9898b8;
+                        padding: 0 0 4 0;
+                    }
+
+                    // Critical alert
+                    panel alert_1 {
+                        layout: row;
+                        align: center;
+                        gap: 12;
+                        background: #ef444410;
+                        corner-radius: 8;
+                        padding: 14 16;
+                        border-color: #ef444430;
+                        border-width: 1;
+
+                        panel a1_dot {
+                            width: 8;
+                            height: 8;
+                            background: #ef4444;
+                            corner-radius: 4;
+                        }
+
+                        panel a1_body {
+                            layout: column;
+                            flex-grow: 1;
+                            gap: 3;
+
+                            text a1_msg {
+                                text: "worker-pool crash loop";
+                                font-size: 14;
+                                color: #ef4444;
+                            }
+
+                            text a1_time {
+                                text: "Triggered 47 min ago";
+                                font-size: 12;
+                                color: #585878;
+                            }
+                        }
+                    }
+
+                    // Warning alert
+                    panel alert_2 {
+                        layout: row;
+                        align: center;
+                        gap: 12;
+                        background: #f59e0b10;
+                        corner-radius: 8;
+                        padding: 14 16;
+                        border-color: #f59e0b30;
+                        border-width: 1;
+
+                        panel a2_dot {
+                            width: 8;
+                            height: 8;
+                            background: #f59e0b;
+                            corner-radius: 4;
+                        }
+
+                        panel a2_body {
+                            layout: column;
+                            flex-grow: 1;
+                            gap: 3;
+
+                            text a2_msg {
+                                text: "Error rate approaching threshold";
+                                font-size: 14;
+                                color: #f59e0b;
+                            }
+
+                            text a2_time {
+                                text: "Triggered 12 min ago";
+                                font-size: 12;
+                                color: #585878;
+                            }
+                        }
+                    }
+
+                    // Info alert
+                    panel alert_3 {
+                        layout: row;
+                        align: center;
+                        gap: 12;
+                        background: #6366f110;
+                        corner-radius: 8;
+                        padding: 14 16;
+                        border-color: #6366f130;
+                        border-width: 1;
+
+                        panel a3_dot {
+                            width: 8;
+                            height: 8;
+                            background: #6366f1;
+                            corner-radius: 4;
+                        }
+
+                        panel a3_body {
+                            layout: column;
+                            flex-grow: 1;
+                            gap: 3;
+
+                            text a3_msg {
+                                text: "SSL cert expires in 14 days";
+                                font-size: 14;
+                                color: #9898b8;
+                            }
+
+                            text a3_time {
+                                text: "Triggered 3h ago";
+                                font-size: 12;
+                                color: #585878;
+                            }
+                        }
+                    }
+
+                    // Push actions to bottom
+                    panel alerts_spacer {
+                        flex-grow: 1;
+                    }
+
+                    button btn_ack_all {
+                        text: "Acknowledge All";
+                        font-size: 13;
+                        color: #9898b8;
+                        background: #0e0e20;
+                        corner-radius: 8;
+                        padding: 11 16;
+                        border-color: #1e1e3e;
+                        border-width: 1;
+                        :hover {
+                            background: #1a1a38;
+                            color: #e2e2ff;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

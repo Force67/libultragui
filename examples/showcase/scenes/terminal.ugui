@@ -1,0 +1,1015 @@
+// Terminal - network operations center
+// Pure black, phosphor green only, no corner-radius, no shadows, TUI aesthetic
+
+panel root {
+    layout: column;
+    background: #000000;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+
+    // Top header bar
+    panel header_bar {
+        layout: row;
+        justify: space-between;
+        align: center;
+        padding: 8 16;
+        min-height: 36;
+        background: #000000;
+        border-color: #00ff4130;
+        border-width: 0 0 1 0;
+        corner-radius: 0;
+
+        panel header_left {
+            layout: row;
+            gap: 16;
+            align: center;
+
+            text hostname {
+                text: "noc-primary.corp.internal";
+                font-size: 13;
+                color: #00ff41;
+            }
+
+            panel header_sep_1 {
+                width: 1;
+                height: 14;
+                background: #00ff4130;
+            }
+
+            text uptime_label {
+                text: "UP";
+                font-size: 11;
+                color: #00ff4160;
+            }
+
+            text uptime_value {
+                text: "142d 07:23:41";
+                font-size: 13;
+                color: #00ff41;
+            }
+        }
+
+        panel header_center {
+            layout: row;
+            gap: 8;
+            align: center;
+
+            text status_indicator {
+                text: "[OPERATIONAL]";
+                font-size: 13;
+                color: #00ff41;
+            }
+        }
+
+        panel header_right {
+            layout: row;
+            gap: 16;
+            align: center;
+
+            text alerts_label {
+                text: "ALERTS:";
+                font-size: 11;
+                color: #00ff4160;
+            }
+
+            text alerts_count {
+                text: "3";
+                font-size: 13;
+                color: #00ff41;
+            }
+
+            panel header_sep_2 {
+                width: 1;
+                height: 14;
+                background: #00ff4130;
+            }
+
+            text clock_value {
+                text: "02:14:38 UTC";
+                font-size: 13;
+                color: #00ff41;
+            }
+        }
+    }
+
+    // Secondary bar: tabs
+    panel tab_bar {
+        layout: row;
+        padding: 0;
+        min-height: 32;
+        border-color: #00ff4130;
+        border-width: 0 0 1 0;
+        corner-radius: 0;
+
+        button tab_overview {
+            text: "OVERVIEW";
+            font-size: 11;
+            color: #00ff41;
+            background: #00ff4112;
+            corner-radius: 0;
+            padding: 8 20;
+            border-color: #00ff4130;
+            border-width: 0 1 0 0;
+            :hover { background: #00ff4120; }
+        }
+
+        button tab_processes {
+            text: "PROCESSES";
+            font-size: 11;
+            color: #00ff4180;
+            background: transparent;
+            corner-radius: 0;
+            padding: 8 20;
+            border-color: #00ff4130;
+            border-width: 0 1 0 0;
+            :hover {
+                background: #00ff4108;
+                color: #00ff41;
+            }
+        }
+
+        button tab_network {
+            text: "NETWORK";
+            font-size: 11;
+            color: #00ff4180;
+            background: transparent;
+            corner-radius: 0;
+            padding: 8 20;
+            border-color: #00ff4130;
+            border-width: 0 1 0 0;
+            :hover {
+                background: #00ff4108;
+                color: #00ff41;
+            }
+        }
+
+        button tab_logs {
+            text: "LOGS";
+            font-size: 11;
+            color: #00ff4180;
+            background: transparent;
+            corner-radius: 0;
+            padding: 8 20;
+            border-color: #00ff4130;
+            border-width: 0 1 0 0;
+            :hover {
+                background: #00ff4108;
+                color: #00ff41;
+            }
+        }
+
+        button tab_alerts {
+            text: "ALERTS";
+            font-size: 11;
+            color: #00ff4180;
+            background: transparent;
+            corner-radius: 0;
+            padding: 8 20;
+            :hover {
+                background: #00ff4108;
+                color: #00ff41;
+            }
+        }
+    }
+
+    // Main content: three-column grid
+    panel main_grid {
+        layout: row;
+        flex-grow: 1;
+        padding: 0;
+
+        // Left column: system stats
+        panel col_stats {
+            layout: column;
+            width: 280;
+            padding: 0;
+            border-color: #00ff4130;
+            border-width: 0 1 0 0;
+            corner-radius: 0;
+
+            // CPU section
+            panel cpu_section {
+                layout: column;
+                padding: 12 16;
+                gap: 6;
+                border-color: #00ff4130;
+                border-width: 0 0 1 0;
+                corner-radius: 0;
+
+                text cpu_header {
+                    text: "CPU";
+                    font-size: 11;
+                    color: #00ff4160;
+                }
+
+                panel cpu_row_1 {
+                    layout: row;
+                    justify: space-between;
+
+                    text cpu_label_usage {
+                        text: "usage";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text cpu_val_usage {
+                        text: "34.2%";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                // CPU bar
+                panel cpu_bar_bg {
+                    height: 3;
+                    background: #00ff4110;
+                    corner-radius: 0;
+
+                    panel cpu_bar_fill {
+                        width: 34%;
+                        height: 3;
+                        background: #00ff4180;
+                        corner-radius: 0;
+                    }
+                }
+
+                panel cpu_row_2 {
+                    layout: row;
+                    justify: space-between;
+
+                    text cpu_label_load {
+                        text: "load avg";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text cpu_val_load {
+                        text: "2.41 1.87 1.62";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel cpu_row_3 {
+                    layout: row;
+                    justify: space-between;
+
+                    text cpu_label_cores {
+                        text: "cores";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text cpu_val_cores {
+                        text: "16 / 16 online";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel cpu_row_4 {
+                    layout: row;
+                    justify: space-between;
+
+                    text cpu_label_temp {
+                        text: "temp";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text cpu_val_temp {
+                        text: "62C";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+            }
+
+            // Memory section
+            panel mem_section {
+                layout: column;
+                padding: 12 16;
+                gap: 6;
+                border-color: #00ff4130;
+                border-width: 0 0 1 0;
+                corner-radius: 0;
+
+                text mem_header {
+                    text: "MEMORY";
+                    font-size: 11;
+                    color: #00ff4160;
+                }
+
+                panel mem_row_1 {
+                    layout: row;
+                    justify: space-between;
+
+                    text mem_label_used {
+                        text: "used";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text mem_val_used {
+                        text: "12.4 / 32.0 GB";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel mem_bar_bg {
+                    height: 3;
+                    background: #00ff4110;
+                    corner-radius: 0;
+
+                    panel mem_bar_fill {
+                        width: 39%;
+                        height: 3;
+                        background: #00ff4180;
+                        corner-radius: 0;
+                    }
+                }
+
+                panel mem_row_2 {
+                    layout: row;
+                    justify: space-between;
+
+                    text mem_label_swap {
+                        text: "swap";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text mem_val_swap {
+                        text: "0.2 / 8.0 GB";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel mem_row_3 {
+                    layout: row;
+                    justify: space-between;
+
+                    text mem_label_cache {
+                        text: "cached";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text mem_val_cache {
+                        text: "8.7 GB";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+            }
+
+            // Network section
+            panel net_section {
+                layout: column;
+                padding: 12 16;
+                gap: 6;
+                border-color: #00ff4130;
+                border-width: 0 0 1 0;
+                corner-radius: 0;
+
+                text net_header {
+                    text: "NETWORK";
+                    font-size: 11;
+                    color: #00ff4160;
+                }
+
+                panel net_row_1 {
+                    layout: row;
+                    justify: space-between;
+
+                    text net_label_rx {
+                        text: "rx";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text net_val_rx {
+                        text: "847.2 Mbit/s";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel net_row_2 {
+                    layout: row;
+                    justify: space-between;
+
+                    text net_label_tx {
+                        text: "tx";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text net_val_tx {
+                        text: "234.8 Mbit/s";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel net_row_3 {
+                    layout: row;
+                    justify: space-between;
+
+                    text net_label_conns {
+                        text: "connections";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text net_val_conns {
+                        text: "4,218";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel net_row_4 {
+                    layout: row;
+                    justify: space-between;
+
+                    text net_label_dropped {
+                        text: "dropped";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text net_val_dropped {
+                        text: "0";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+            }
+
+            // Disk section
+            panel disk_section {
+                layout: column;
+                padding: 12 16;
+                gap: 6;
+                corner-radius: 0;
+
+                text disk_header {
+                    text: "DISK";
+                    font-size: 11;
+                    color: #00ff4160;
+                }
+
+                panel disk_row_1 {
+                    layout: row;
+                    justify: space-between;
+
+                    text disk_label_root {
+                        text: "/";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text disk_val_root {
+                        text: "142 / 500 GB (28%)";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel disk_bar_root {
+                    height: 3;
+                    background: #00ff4110;
+                    corner-radius: 0;
+
+                    panel disk_bar_root_fill {
+                        width: 28%;
+                        height: 3;
+                        background: #00ff4180;
+                        corner-radius: 0;
+                    }
+                }
+
+                panel disk_row_2 {
+                    layout: row;
+                    justify: space-between;
+
+                    text disk_label_data {
+                        text: "/data";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text disk_val_data {
+                        text: "1.2 / 2.0 TB (60%)";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+
+                panel disk_bar_data {
+                    height: 3;
+                    background: #00ff4110;
+                    corner-radius: 0;
+
+                    panel disk_bar_data_fill {
+                        width: 60%;
+                        height: 3;
+                        background: #00ff4180;
+                        corner-radius: 0;
+                    }
+                }
+
+                panel disk_row_3 {
+                    layout: row;
+                    justify: space-between;
+
+                    text disk_label_iops {
+                        text: "iops";
+                        font-size: 13;
+                        color: #00ff4180;
+                    }
+
+                    text disk_val_iops {
+                        text: "3,847 r / 1,204 w";
+                        font-size: 13;
+                        color: #00ff41;
+                    }
+                }
+            }
+        }
+
+        // Center column: process list
+        panel col_processes {
+            layout: column;
+            flex-grow: 1;
+            padding: 0;
+            border-color: #00ff4130;
+            border-width: 0 1 0 0;
+            corner-radius: 0;
+
+            // Process header
+            panel proc_header {
+                layout: row;
+                padding: 8 16;
+                border-color: #00ff4130;
+                border-width: 0 0 1 0;
+                corner-radius: 0;
+
+                text proc_col_pid {
+                    text: "PID";
+                    font-size: 11;
+                    color: #00ff4160;
+                    width: 60;
+                }
+
+                text proc_col_name {
+                    text: "COMMAND";
+                    font-size: 11;
+                    color: #00ff4160;
+                    flex-grow: 1;
+                }
+
+                text proc_col_cpu {
+                    text: "CPU%";
+                    font-size: 11;
+                    color: #00ff4160;
+                    width: 60;
+                    text-align: right;
+                }
+
+                text proc_col_mem {
+                    text: "MEM%";
+                    font-size: 11;
+                    color: #00ff4160;
+                    width: 60;
+                    text-align: right;
+                }
+
+                text proc_col_state {
+                    text: "STATE";
+                    font-size: 11;
+                    color: #00ff4160;
+                    width: 48;
+                    text-align: right;
+                }
+            }
+
+            // Process list (scrollable)
+            panel proc_list {
+                layout: column;
+                flex-grow: 1;
+                overflow: scroll;
+                corner-radius: 0;
+
+                panel proc_row_1 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p1_pid { text: "1204"; font-size: 13; color: #00ff41; width: 60; }
+                    text p1_cmd { text: "nginx"; font-size: 13; color: #00ff41; flex-grow: 1; }
+                    text p1_cpu { text: "12.4"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p1_mem { text: "2.1"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p1_st  { text: "RUN"; font-size: 13; color: #00ff41; width: 48; text-align: right; }
+                }
+
+                panel proc_row_2 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p2_pid { text: "1847"; font-size: 13; color: #00ff41; width: 60; }
+                    text p2_cmd { text: "postgres"; font-size: 13; color: #00ff41; flex-grow: 1; }
+                    text p2_cpu { text: "8.7"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p2_mem { text: "14.3"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p2_st  { text: "RUN"; font-size: 13; color: #00ff41; width: 48; text-align: right; }
+                }
+
+                panel proc_row_3 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p3_pid { text: "2041"; font-size: 13; color: #00ff41; width: 60; }
+                    text p3_cmd { text: "redis-server"; font-size: 13; color: #00ff41; flex-grow: 1; }
+                    text p3_cpu { text: "3.2"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p3_mem { text: "6.8"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p3_st  { text: "RUN"; font-size: 13; color: #00ff41; width: 48; text-align: right; }
+                }
+
+                panel proc_row_4 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p4_pid { text: "2198"; font-size: 13; color: #00ff41; width: 60; }
+                    text p4_cmd { text: "node worker.js"; font-size: 13; color: #00ff41; flex-grow: 1; }
+                    text p4_cpu { text: "5.1"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p4_mem { text: "3.4"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p4_st  { text: "RUN"; font-size: 13; color: #00ff41; width: 48; text-align: right; }
+                }
+
+                panel proc_row_5 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p5_pid { text: "2347"; font-size: 13; color: #00ff41; width: 60; }
+                    text p5_cmd { text: "grafana-server"; font-size: 13; color: #00ff41; flex-grow: 1; }
+                    text p5_cpu { text: "1.8"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p5_mem { text: "4.2"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p5_st  { text: "RUN"; font-size: 13; color: #00ff41; width: 48; text-align: right; }
+                }
+
+                panel proc_row_6 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p6_pid { text: "2501"; font-size: 13; color: #00ff41; width: 60; }
+                    text p6_cmd { text: "prometheus"; font-size: 13; color: #00ff41; flex-grow: 1; }
+                    text p6_cpu { text: "2.4"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p6_mem { text: "5.7"; font-size: 13; color: #00ff41; width: 60; text-align: right; }
+                    text p6_st  { text: "RUN"; font-size: 13; color: #00ff41; width: 48; text-align: right; }
+                }
+
+                panel proc_row_7 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p7_pid { text: "2688"; font-size: 13; color: #00ff4180; width: 60; }
+                    text p7_cmd { text: "cron"; font-size: 13; color: #00ff4180; flex-grow: 1; }
+                    text p7_cpu { text: "0.0"; font-size: 13; color: #00ff4180; width: 60; text-align: right; }
+                    text p7_mem { text: "0.1"; font-size: 13; color: #00ff4180; width: 60; text-align: right; }
+                    text p7_st  { text: "SLP"; font-size: 13; color: #00ff4160; width: 48; text-align: right; }
+                }
+
+                panel proc_row_8 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p8_pid { text: "2744"; font-size: 13; color: #00ff4180; width: 60; }
+                    text p8_cmd { text: "sshd"; font-size: 13; color: #00ff4180; flex-grow: 1; }
+                    text p8_cpu { text: "0.0"; font-size: 13; color: #00ff4180; width: 60; text-align: right; }
+                    text p8_mem { text: "0.3"; font-size: 13; color: #00ff4180; width: 60; text-align: right; }
+                    text p8_st  { text: "SLP"; font-size: 13; color: #00ff4160; width: 48; text-align: right; }
+                }
+
+                panel proc_row_9 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p9_pid { text: "2891"; font-size: 13; color: #00ff4180; width: 60; }
+                    text p9_cmd { text: "rsyslogd"; font-size: 13; color: #00ff4180; flex-grow: 1; }
+                    text p9_cpu { text: "0.1"; font-size: 13; color: #00ff4180; width: 60; text-align: right; }
+                    text p9_mem { text: "0.4"; font-size: 13; color: #00ff4180; width: 60; text-align: right; }
+                    text p9_st  { text: "SLP"; font-size: 13; color: #00ff4160; width: 48; text-align: right; }
+                }
+
+                panel proc_row_10 {
+                    layout: row;
+                    padding: 6 16;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text p10_pid { text: "3042"; font-size: 13; color: #00ff4180; width: 60; }
+                    text p10_cmd { text: "containerd"; font-size: 13; color: #00ff4180; flex-grow: 1; }
+                    text p10_cpu { text: "0.3"; font-size: 13; color: #00ff4180; width: 60; text-align: right; }
+                    text p10_mem { text: "1.2"; font-size: 13; color: #00ff4180; width: 60; text-align: right; }
+                    text p10_st  { text: "RUN"; font-size: 13; color: #00ff4160; width: 48; text-align: right; }
+                }
+
+                // Summary row
+                panel proc_summary {
+                    layout: row;
+                    padding: 8 16;
+                    border-color: #00ff4130;
+                    border-width: 1 0 0 0;
+                    corner-radius: 0;
+                    margin: 4 0 0 0;
+
+                    text proc_total {
+                        text: "247 processes  ·  186 sleeping  ·  61 running  ·  0 zombie";
+                        font-size: 11;
+                        color: #00ff4160;
+                    }
+                }
+            }
+        }
+
+        // Right column: log feed
+        panel col_logs {
+            layout: column;
+            width: 380;
+            padding: 0;
+            corner-radius: 0;
+
+            // Log header
+            panel log_header {
+                layout: row;
+                justify: space-between;
+                align: center;
+                padding: 8 16;
+                border-color: #00ff4130;
+                border-width: 0 0 1 0;
+                corner-radius: 0;
+
+                text log_title {
+                    text: "SYSTEM LOG";
+                    font-size: 11;
+                    color: #00ff4160;
+                }
+
+                button btn_clear_log {
+                    text: "[CLEAR]";
+                    font-size: 11;
+                    color: #00ff4140;
+                    background: transparent;
+                    corner-radius: 0;
+                    padding: 2 6;
+                    :hover { color: #00ff41; }
+                }
+            }
+
+            // Log entries
+            panel log_feed {
+                layout: column;
+                flex-grow: 1;
+                padding: 8 0;
+                gap: 0;
+                overflow: scroll;
+                corner-radius: 0;
+
+                panel log_1 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l1_time { text: "02:14:38"; font-size: 13; color: #00ff4140; }
+                    text l1_src  { text: "nginx"; font-size: 13; color: #00ff4180; }
+                    text l1_msg  { text: "GET /api/health 200 2ms"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_2 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l2_time { text: "02:14:37"; font-size: 13; color: #00ff4140; }
+                    text l2_src  { text: "postgres"; font-size: 13; color: #00ff4180; }
+                    text l2_msg  { text: "checkpoint complete: 0 buffers written"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_3 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l3_time { text: "02:14:35"; font-size: 13; color: #00ff4140; }
+                    text l3_src  { text: "worker"; font-size: 13; color: #00ff4180; }
+                    text l3_msg  { text: "processed 847 jobs in 12.4s"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_4 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l4_time { text: "02:14:32"; font-size: 13; color: #00ff4140; }
+                    text l4_src  { text: "redis"; font-size: 13; color: #00ff4180; }
+                    text l4_msg  { text: "background save completed"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_5 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l5_time { text: "02:14:30"; font-size: 13; color: #00ff4140; }
+                    text l5_src  { text: "nginx"; font-size: 13; color: #00ff4180; }
+                    text l5_msg  { text: "GET /api/metrics 200 8ms"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_6 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l6_time { text: "02:14:28"; font-size: 13; color: #00ff4140; }
+                    text l6_src  { text: "sshd"; font-size: 13; color: #00ff4180; }
+                    text l6_msg  { text: "session opened for user ops"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_7 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l7_time { text: "02:14:24"; font-size: 13; color: #00ff4140; }
+                    text l7_src  { text: "prom"; font-size: 13; color: #00ff4180; }
+                    text l7_msg  { text: "scrape complete: 42 targets, 0 errors"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_8 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l8_time { text: "02:14:21"; font-size: 13; color: #00ff4140; }
+                    text l8_src  { text: "nginx"; font-size: 13; color: #00ff4180; }
+                    text l8_msg  { text: "POST /api/deploy 201 142ms"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_9 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l9_time { text: "02:14:18"; font-size: 13; color: #00ff4140; }
+                    text l9_src  { text: "kernel"; font-size: 13; color: #00ff4180; }
+                    text l9_msg  { text: "TCP: rto_min changed 200 -> 100ms"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_10 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l10_time { text: "02:14:15"; font-size: 13; color: #00ff4140; }
+                    text l10_src  { text: "worker"; font-size: 13; color: #00ff4180; }
+                    text l10_msg  { text: "queue depth: 12 pending"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_11 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l11_time { text: "02:14:10"; font-size: 13; color: #00ff4140; }
+                    text l11_src  { text: "cron"; font-size: 13; color: #00ff4180; }
+                    text l11_msg  { text: "job log-rotate completed (0)"; font-size: 13; color: #00ff41; }
+                }
+
+                panel log_12 {
+                    layout: row;
+                    padding: 3 16;
+                    gap: 8;
+                    corner-radius: 0;
+                    :hover { background: #00ff4108; }
+
+                    text l12_time { text: "02:14:04"; font-size: 13; color: #00ff4140; }
+                    text l12_src  { text: "nginx"; font-size: 13; color: #00ff4180; }
+                    text l12_msg  { text: "GET /api/status 200 1ms"; font-size: 13; color: #00ff41; }
+                }
+            }
+
+            // Log footer
+            panel log_footer {
+                layout: row;
+                justify: space-between;
+                align: center;
+                padding: 6 16;
+                border-color: #00ff4130;
+                border-width: 1 0 0 0;
+                corner-radius: 0;
+
+                text log_count {
+                    text: "12,847 entries today";
+                    font-size: 11;
+                    color: #00ff4140;
+                }
+
+                text log_rate {
+                    text: "~42/sec";
+                    font-size: 11;
+                    color: #00ff4160;
+                }
+            }
+        }
+    }
+
+    // Bottom status bar
+    panel status_bar {
+        layout: row;
+        justify: space-between;
+        align: center;
+        padding: 6 16;
+        min-height: 28;
+        background: #00ff4108;
+        border-color: #00ff4130;
+        border-width: 1 0 0 0;
+        corner-radius: 0;
+
+        panel status_left {
+            layout: row;
+            gap: 16;
+
+            text st_kernel {
+                text: "Linux 6.18.13-zen1";
+                font-size: 11;
+                color: #00ff4160;
+            }
+
+            text st_arch {
+                text: "x86_64";
+                font-size: 11;
+                color: #00ff4140;
+            }
+        }
+
+        panel status_right {
+            layout: row;
+            gap: 16;
+
+            text st_users {
+                text: "3 users";
+                font-size: 11;
+                color: #00ff4160;
+            }
+
+            text st_sess {
+                text: "session: ops@tty1";
+                font-size: 11;
+                color: #00ff4140;
+            }
+        }
+    }
+}

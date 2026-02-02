@@ -1,0 +1,665 @@
+// Glass - music player / media center
+// Dark backdrop, frosted glass surfaces, soft violet accent, generous spacing
+
+panel root {
+    layout: column;
+    background: #0d0d14;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+
+    // Top bar
+    panel top_bar {
+        layout: row;
+        justify: space-between;
+        align: center;
+        padding: 20 32;
+        min-height: 64;
+
+        text app_name {
+            text: "Glass";
+            font-size: 20;
+            color: #a78bfa;
+        }
+
+        panel top_actions {
+            layout: row;
+            gap: 8;
+            align: center;
+
+            button btn_library {
+                text: "Library";
+                font-size: 13;
+                color: #ffffff90;
+                background: #1a1a2a;
+                corner-radius: 20;
+                padding: 8 18;
+                border-color: #ffffff18;
+                border-width: 1;
+                :hover {
+                    background: #242438;
+                    color: #ffffffd0;
+                }
+            }
+
+            button btn_search {
+                text: "Search";
+                font-size: 13;
+                color: #ffffff60;
+                background: transparent;
+                corner-radius: 20;
+                padding: 8 18;
+                border-color: #ffffff10;
+                border-width: 1;
+                :hover {
+                    background: #1a1a2a;
+                    color: #ffffff90;
+                }
+            }
+        }
+    }
+
+    // Main content
+    panel main_body {
+        layout: row;
+        flex-grow: 1;
+        padding: 0 32 0 32;
+        gap: 20;
+
+        // Left: Now Playing
+        panel now_playing {
+            layout: column;
+            width: 380;
+            gap: 24;
+            padding: 0 0 28 0;
+
+            // Album art placeholder - colored rectangle
+            panel album_art {
+                layout: column;
+                width: 380;
+                height: 380;
+                corner-radius: 20;
+                justify: center;
+                align: center;
+                background: #1e1430;
+                background-end: #2a1848;
+                shadow-color: #00000080;
+                shadow-blur: 24;
+                shadow-y: 12;
+                border-color: #ffffff10;
+                border-width: 1;
+
+                // Inner glow shape
+                panel art_inner_glow {
+                    width: 120;
+                    height: 120;
+                    background: #a78bfa20;
+                    corner-radius: 60;
+                    shadow-color: #a78bfa30;
+                    shadow-blur: 40;
+                }
+            }
+
+            // Track info
+            panel track_info {
+                layout: column;
+                gap: 6;
+                padding: 0 4;
+
+                text track_title {
+                    text: "Midnight Frequencies";
+                    font-size: 24;
+                    color: #ffffffe0;
+                }
+
+                text track_artist {
+                    text: "Aether Collective";
+                    font-size: 16;
+                    color: #ffffff60;
+                }
+
+                text track_album {
+                    text: "Luminance  ·  2025";
+                    font-size: 13;
+                    color: #ffffff38;
+                }
+            }
+
+            // Progress bar
+            panel progress_area {
+                layout: column;
+                gap: 10;
+                padding: 0 4;
+
+                panel progress_track {
+                    layout: row;
+                    height: 4;
+                    background: #ffffff12;
+                    corner-radius: 2;
+
+                    panel progress_fill {
+                        width: 38%;
+                        height: 4;
+                        background: #a78bfa;
+                        corner-radius: 2;
+                        shadow-color: #a78bfa40;
+                        shadow-blur: 8;
+                    }
+                }
+
+                panel progress_times {
+                    layout: row;
+                    justify: space-between;
+
+                    text time_current {
+                        text: "1:42";
+                        font-size: 12;
+                        color: #ffffff40;
+                    }
+
+                    text time_total {
+                        text: "4:28";
+                        font-size: 12;
+                        color: #ffffff40;
+                    }
+                }
+            }
+
+            // Playback controls
+            panel controls {
+                layout: row;
+                justify: center;
+                align: center;
+                gap: 20;
+                padding: 8 0;
+
+                button btn_shuffle {
+                    text: "Shuffle";
+                    font-size: 12;
+                    color: #ffffff30;
+                    background: transparent;
+                    corner-radius: 20;
+                    padding: 8 14;
+                    :hover { color: #ffffff70; }
+                }
+
+                button btn_prev {
+                    text: "Prev";
+                    font-size: 14;
+                    color: #ffffff80;
+                    background: transparent;
+                    corner-radius: 20;
+                    padding: 10 18;
+                    :hover { color: #ffffffd0; }
+                }
+
+                button btn_play {
+                    text: "Pause";
+                    font-size: 16;
+                    color: #0d0d14;
+                    background: #a78bfa;
+                    corner-radius: 24;
+                    padding: 14 32;
+                    shadow-color: #a78bfa40;
+                    shadow-blur: 16;
+                    shadow-y: 4;
+                    :hover {
+                        background: #b89cff;
+                        shadow-blur: 22;
+                    }
+                    :pressed {
+                        background: #9578e0;
+                    }
+                }
+
+                button btn_next {
+                    text: "Next";
+                    font-size: 14;
+                    color: #ffffff80;
+                    background: transparent;
+                    corner-radius: 20;
+                    padding: 10 18;
+                    :hover { color: #ffffffd0; }
+                }
+
+                button btn_repeat {
+                    text: "Repeat";
+                    font-size: 12;
+                    color: #ffffff30;
+                    background: transparent;
+                    corner-radius: 20;
+                    padding: 8 14;
+                    :hover { color: #ffffff70; }
+                }
+            }
+
+            // Volume
+            panel volume_area {
+                layout: row;
+                align: center;
+                gap: 12;
+                padding: 0 4;
+
+                text volume_label {
+                    text: "Vol";
+                    font-size: 12;
+                    color: #ffffff30;
+                }
+
+                panel volume_track {
+                    layout: row;
+                    flex-grow: 1;
+                    height: 3;
+                    background: #ffffff10;
+                    corner-radius: 2;
+
+                    panel volume_fill {
+                        width: 68%;
+                        height: 3;
+                        background: #a78bfa80;
+                        corner-radius: 2;
+                    }
+                }
+
+                text volume_pct {
+                    text: "68%";
+                    font-size: 12;
+                    color: #ffffff30;
+                }
+            }
+        }
+
+        // Right: Playlist
+        panel playlist_area {
+            layout: column;
+            flex-grow: 1;
+            gap: 0;
+            padding: 0 0 28 0;
+
+            // Playlist header
+            panel playlist_header {
+                layout: row;
+                justify: space-between;
+                align: center;
+                padding: 0 0 20 0;
+
+                panel playlist_title_block {
+                    layout: column;
+                    gap: 4;
+
+                    text playlist_title {
+                        text: "Luminance";
+                        font-size: 20;
+                        color: #ffffffe0;
+                    }
+
+                    text playlist_meta {
+                        text: "12 tracks  ·  48 min";
+                        font-size: 13;
+                        color: #ffffff40;
+                    }
+                }
+
+                button btn_queue {
+                    text: "Queue";
+                    font-size: 12;
+                    color: #a78bfa;
+                    background: #a78bfa15;
+                    corner-radius: 20;
+                    padding: 7 16;
+                    border-color: #a78bfa30;
+                    border-width: 1;
+                    :hover {
+                        background: #a78bfa28;
+                    }
+                }
+            }
+
+            // Playlist container (scrollable glass surface)
+            panel playlist_scroll {
+                layout: column;
+                flex-grow: 1;
+                background: #1a1a2a;
+                corner-radius: 20;
+                padding: 8;
+                gap: 2;
+                border-color: #ffffff10;
+                border-width: 1;
+                overflow: scroll;
+                shadow-color: #00000040;
+                shadow-blur: 16;
+                shadow-y: 6;
+
+                // Track 1 (currently playing - highlighted)
+                panel track_row_1 {
+                    layout: row;
+                    align: center;
+                    gap: 14;
+                    background: #a78bfa15;
+                    corner-radius: 14;
+                    padding: 14 18;
+
+                    panel tr1_dot {
+                        width: 6;
+                        height: 6;
+                        background: #a78bfa;
+                        corner-radius: 3;
+                        shadow-color: #a78bfa60;
+                        shadow-blur: 6;
+                    }
+
+                    panel tr1_info {
+                        layout: column;
+                        flex-grow: 1;
+                        gap: 2;
+
+                        text tr1_name {
+                            text: "Midnight Frequencies";
+                            font-size: 15;
+                            color: #a78bfa;
+                        }
+
+                        text tr1_artist {
+                            text: "Aether Collective";
+                            font-size: 12;
+                            color: #ffffff38;
+                        }
+                    }
+
+                    text tr1_dur {
+                        text: "4:28";
+                        font-size: 13;
+                        color: #ffffff30;
+                    }
+                }
+
+                // Track 2
+                panel track_row_2 {
+                    layout: row;
+                    align: center;
+                    gap: 14;
+                    background: transparent;
+                    corner-radius: 14;
+                    padding: 14 18;
+                    :hover { background: #ffffff08; }
+
+                    text tr2_num {
+                        text: "2";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+
+                    panel tr2_info {
+                        layout: column;
+                        flex-grow: 1;
+                        gap: 2;
+
+                        text tr2_name {
+                            text: "Aurora Drift";
+                            font-size: 15;
+                            color: #ffffffb0;
+                        }
+
+                        text tr2_artist {
+                            text: "Aether Collective";
+                            font-size: 12;
+                            color: #ffffff28;
+                        }
+                    }
+
+                    text tr2_dur {
+                        text: "3:51";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+                }
+
+                // Track 3
+                panel track_row_3 {
+                    layout: row;
+                    align: center;
+                    gap: 14;
+                    background: transparent;
+                    corner-radius: 14;
+                    padding: 14 18;
+                    :hover { background: #ffffff08; }
+
+                    text tr3_num {
+                        text: "3";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+
+                    panel tr3_info {
+                        layout: column;
+                        flex-grow: 1;
+                        gap: 2;
+
+                        text tr3_name {
+                            text: "Soft Collision";
+                            font-size: 15;
+                            color: #ffffffb0;
+                        }
+
+                        text tr3_artist {
+                            text: "Aether Collective";
+                            font-size: 12;
+                            color: #ffffff28;
+                        }
+                    }
+
+                    text tr3_dur {
+                        text: "5:12";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+                }
+
+                // Track 4
+                panel track_row_4 {
+                    layout: row;
+                    align: center;
+                    gap: 14;
+                    background: transparent;
+                    corner-radius: 14;
+                    padding: 14 18;
+                    :hover { background: #ffffff08; }
+
+                    text tr4_num {
+                        text: "4";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+
+                    panel tr4_info {
+                        layout: column;
+                        flex-grow: 1;
+                        gap: 2;
+
+                        text tr4_name {
+                            text: "Velvet Static";
+                            font-size: 15;
+                            color: #ffffffb0;
+                        }
+
+                        text tr4_artist {
+                            text: "Aether Collective";
+                            font-size: 12;
+                            color: #ffffff28;
+                        }
+                    }
+
+                    text tr4_dur {
+                        text: "4:03";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+                }
+
+                // Track 5
+                panel track_row_5 {
+                    layout: row;
+                    align: center;
+                    gap: 14;
+                    background: transparent;
+                    corner-radius: 14;
+                    padding: 14 18;
+                    :hover { background: #ffffff08; }
+
+                    text tr5_num {
+                        text: "5";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+
+                    panel tr5_info {
+                        layout: column;
+                        flex-grow: 1;
+                        gap: 2;
+
+                        text tr5_name {
+                            text: "Iridescent";
+                            font-size: 15;
+                            color: #ffffffb0;
+                        }
+
+                        text tr5_artist {
+                            text: "Aether Collective";
+                            font-size: 12;
+                            color: #ffffff28;
+                        }
+                    }
+
+                    text tr5_dur {
+                        text: "3:37";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+                }
+
+                // Track 6
+                panel track_row_6 {
+                    layout: row;
+                    align: center;
+                    gap: 14;
+                    background: transparent;
+                    corner-radius: 14;
+                    padding: 14 18;
+                    :hover { background: #ffffff08; }
+
+                    text tr6_num {
+                        text: "6";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+
+                    panel tr6_info {
+                        layout: column;
+                        flex-grow: 1;
+                        gap: 2;
+
+                        text tr6_name {
+                            text: "Phase Bloom";
+                            font-size: 15;
+                            color: #ffffffb0;
+                        }
+
+                        text tr6_artist {
+                            text: "Aether Collective";
+                            font-size: 12;
+                            color: #ffffff28;
+                        }
+                    }
+
+                    text tr6_dur {
+                        text: "4:44";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+                }
+
+                // Track 7
+                panel track_row_7 {
+                    layout: row;
+                    align: center;
+                    gap: 14;
+                    background: transparent;
+                    corner-radius: 14;
+                    padding: 14 18;
+                    :hover { background: #ffffff08; }
+
+                    text tr7_num {
+                        text: "7";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+
+                    panel tr7_info {
+                        layout: column;
+                        flex-grow: 1;
+                        gap: 2;
+
+                        text tr7_name {
+                            text: "Echoes in Glass";
+                            font-size: 15;
+                            color: #ffffffb0;
+                        }
+
+                        text tr7_artist {
+                            text: "Aether Collective";
+                            font-size: 12;
+                            color: #ffffff28;
+                        }
+                    }
+
+                    text tr7_dur {
+                        text: "5:02";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+                }
+
+                // Track 8
+                panel track_row_8 {
+                    layout: row;
+                    align: center;
+                    gap: 14;
+                    background: transparent;
+                    corner-radius: 14;
+                    padding: 14 18;
+                    :hover { background: #ffffff08; }
+
+                    text tr8_num {
+                        text: "8";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+
+                    panel tr8_info {
+                        layout: column;
+                        flex-grow: 1;
+                        gap: 2;
+
+                        text tr8_name {
+                            text: "Dissolve";
+                            font-size: 15;
+                            color: #ffffffb0;
+                        }
+
+                        text tr8_artist {
+                            text: "Aether Collective";
+                            font-size: 12;
+                            color: #ffffff28;
+                        }
+                    }
+
+                    text tr8_dur {
+                        text: "3:19";
+                        font-size: 13;
+                        color: #ffffff20;
+                    }
+                }
+            }
+        }
+    }
+}

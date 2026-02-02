@@ -1,9 +1,10 @@
-/// libultragui showcase - a beautiful dashboard UI demonstrating the framework.
+/// libultragui showcase - demonstrates multiple visual identities.
 ///
 /// Usage:
-///   ./ultragui_showcase [font_path]
+///   ./ultragui_showcase [scene] [font_path]
 ///
-/// If no font path is given, it tries common locations for Inter or other modern fonts.
+/// Scenes: dashboard (default), neon, glass, terminal
+/// Press 1-4 to switch scenes at runtime.
 
 #include <ultragui/ultragui.h>
 #include <ultragui/widgets/button.h>
@@ -13,23 +14,22 @@
 #include <filesystem>
 #include <string>
 
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 namespace fs = std::filesystem;
 
 static const char* find_font() {
     static std::string found_path;
 
-    // Check env var first
     const char* env_font = std::getenv("ULTRAGUI_FONT");
     if (env_font && fs::exists(env_font))
         return env_font;
 
-    // Use fc-match to find the best sans-serif font (works on NixOS and all Linux).
-    // fc-match does proper font matching - much better than scanning fc-list.
     FILE* pipe = popen("fc-match -f '%{file}' 'sans:style=Regular' 2>/dev/null", "r");
     if (pipe) {
         char line[1024];
         if (std::fgets(line, sizeof(line), pipe)) {
-            // Strip trailing newline
             std::string path(line);
             while (!path.empty() && (path.back() == '\n' || path.back() == '\r'))
                 path.pop_back();
@@ -42,7 +42,6 @@ static const char* find_font() {
         pclose(pipe);
     }
 
-    // Fallback: try specific known paths
     static const char* candidates[] = {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -50,75 +49,124 @@ static const char* find_font() {
         "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
     };
-
     for (auto* path : candidates) {
         if (fs::exists(path))
             return path;
     }
-
     return nullptr;
 }
 
+struct Scene {
+    const char* name;
+    const char* ugui_file;
+    const char* lua_file;
+    ugui::Color clear_color;
+};
+
+static const Scene scenes[] = {
+    {"dashboard", "scenes/dashboard.ugui", "scenes/dashboard.lua",
+     ugui::Color::from_hex(0x0a0a1a)},
+    {"neon", "scenes/neon.ugui", "scenes/neon.lua",
+     ugui::Color::from_hex(0x000000)},
+    {"glass", "scenes/glass.ugui", "scenes/glass.lua",
+     ugui::Color::from_hex(0x0d0d14)},
+    {"terminal", "scenes/terminal.ugui", "scenes/terminal.lua",
+     ugui::Color::from_hex(0x000000)},
+};
+static constexpr int SCENE_COUNT = 4;
+
+static int current_scene = 0;
+static bool scene_dirty = true;
+static bool key_was_down[4] = {};
+
+static void load_scene(ugui::UIContext& ui, int idx) {
+    auto& s = scenes[idx];
+    std::string base = ULTRAGUI_SHOWCASE_DIR;
+    std::string ugui_path = base + "/" + s.ugui_file;
+    std::string lua_path = base + "/" + s.lua_file;
+
+    if (!ui.load_ui(ugui_path.c_str())) {
+        std::fprintf(stderr, "Failed to load scene '%s'\n", s.name);
+        return;
+    }
+    ui.load_script(lua_path.c_str());
+
+    // Wire click handler
+    ui.input().set_on_click([&ui](ugui::Widget* widget, ugui::MouseButton btn) {
+        if (btn != ugui::MouseButton::Left || widget->name().empty())
+            return;
+        std::string handler = "on_" + widget->name();
+        ui.lua().call_handler(handler.c_str(), widget);
+    });
+
+    std::printf("Scene: %s\n", s.name);
+}
+
 int main(int argc, char* argv[]) {
-    // Find font
-    const char* font_path = argc > 1 ? argv[1] : find_font();
+    // Parse args
+    const char* font_path = nullptr;
+    for (int i = 1; i < argc; ++i) {
+        bool is_scene = false;
+        for (int j = 0; j < SCENE_COUNT; ++j) {
+            if (std::string(argv[i]) == scenes[j].name) {
+                current_scene = j;
+                is_scene = true;
+                break;
+            }
+        }
+        if (!is_scene)
+            font_path = argv[i];
+    }
+
+    if (!font_path)
+        font_path = find_font();
     if (!font_path) {
         std::fprintf(stderr,
-                     "No font found. Provide a TTF path as argument or set ULTRAGUI_FONT env var.\n"
-                     "  Usage: %s [path/to/font.ttf]\n",
+                     "No font found. Set ULTRAGUI_FONT or pass a TTF path.\n"
+                     "  Usage: %s [dashboard|neon|glass|terminal] [font.ttf]\n",
                      argv[0]);
         return 1;
     }
-    std::printf("Using font: %s\n", font_path);
+    std::printf("Font: %s\n", font_path);
 
-    // Initialize framework
     ugui::UIConfig config;
     config.title = "ultragui showcase";
     config.width = 1280;
     config.height = 800;
-    config.clear_color = ugui::Color::from_hex(0x0f0f1a);
+    config.clear_color = scenes[current_scene].clear_color;
     config.shader_dir = ULTRAGUI_SHADER_DIR;
 
     ugui::UIContext ui;
     if (!ui.init(config)) {
-        std::fprintf(stderr, "Failed to initialize ultragui\n");
+        std::fprintf(stderr, "Failed to initialize\n");
         return 1;
     }
 
-    // Load font
     auto font = ui.load_font(font_path);
     if (font == ugui::INVALID_FONT) {
-        std::fprintf(stderr, "Failed to load font: %s\n", font_path);
         ui.shutdown();
         return 1;
     }
     ui.set_default_font(font);
 
-    // Load UI layout
-    if (!ui.load_ui(ULTRAGUI_SHOWCASE_DIR "/ui.ugui")) {
-        std::fprintf(stderr, "Failed to load UI layout\n");
-        ui.shutdown();
-        return 1;
-    }
+    auto* window = static_cast<GLFWwindow*>(ui.platform()->native_handle());
+    std::printf("Press 1-4 to switch scenes: dashboard, neon, glass, terminal\n");
 
-    // Wire up button click handlers via Lua
-    ui.load_script(ULTRAGUI_SHOWCASE_DIR "/logic.lua");
-
-    // Set up click handler to call Lua functions by widget name
-    ui.input().set_on_click([&ui](ugui::Widget* widget, ugui::MouseButton btn) {
-        if (btn != ugui::MouseButton::Left)
-            return;
-        if (widget->name().empty())
-            return;
-
-        std::string handler = "on_" + widget->name();
-        ui.lua().call_handler(handler.c_str(), widget);
-    });
-
-    std::printf("ultragui showcase running (%dx%d)\n", config.width, config.height);
-
-    // Main loop
     while (ui.running()) {
+        // Poll scene-switch keys (1-4) without hijacking GLFW callbacks
+        for (int i = 0; i < SCENE_COUNT; ++i) {
+            bool down = glfwGetKey(window, GLFW_KEY_1 + i) == GLFW_PRESS;
+            if (down && !key_was_down[i] && i != current_scene) {
+                current_scene = i;
+                scene_dirty = true;
+            }
+            key_was_down[i] = down;
+        }
+
+        if (scene_dirty) {
+            scene_dirty = false;
+            load_scene(ui, current_scene);
+        }
         ui.update();
     }
 
