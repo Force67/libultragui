@@ -274,13 +274,14 @@ static void readback_results(YGNodeRef yg, LayoutNode* nodes, u32 node_index, f3
 
     node.layout_dirty = false;
 
-    // Recurse children - Yoga positions are parent-relative, so accumulate offsets
+    // Recurse children - Yoga positions are relative to parent's border box
+    // (padding is already accounted for in the child's position), so pass
+    // only the parent's absolute origin, not origin + padding.
     u32 child_idx = node.first_child;
     u32 yg_child_i = 0;
     while (child_idx != ~0u) {
         YGNodeRef child_yg = YGNodeGetChild(yg, yg_child_i);
-        readback_results(child_yg, nodes, child_idx, x + node.computed_padding.left,
-                         y + node.computed_padding.top);
+        readback_results(child_yg, nodes, child_idx, x, y);
         child_idx = nodes[child_idx].next_sibling;
         ++yg_child_i;
     }
