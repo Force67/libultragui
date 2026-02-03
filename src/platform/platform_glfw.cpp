@@ -62,6 +62,25 @@ public:
 
     void* native_handle() const override { return window_; }
 
+    void set_cursor(Cursor cursor) override {
+        // Create cursors on first use
+        static GLFWcursor* cursors[6] = {};
+        static bool init = false;
+        if (!init) {
+            cursors[1] = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+            cursors[2] = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
+            cursors[3] = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
+            cursors[4] = glfwCreateStandardCursor(GLFW_CROSSHAIR_CURSOR);
+            cursors[5] = glfwCreateStandardCursor(GLFW_NOT_ALLOWED_CURSOR);
+            init = true;
+        }
+        int idx = static_cast<int>(cursor);
+        if (idx > 0 && idx < 6 && cursors[idx])
+            glfwSetCursor(window_, cursors[idx]);
+        else
+            glfwSetCursor(window_, nullptr); // default
+    }
+
 private:
     GLFWwindow* window_ = nullptr;
 };

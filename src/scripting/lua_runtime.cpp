@@ -244,7 +244,12 @@ int LuaRuntime::lua_ugui_set_prop(lua_State* L) {
     } else if (strcmp(prop, "font-size") == 0) {
         s.font_size = static_cast<f32>(luaL_checknumber(L, 3));
     } else if (strcmp(prop, "corner-radius") == 0) {
-        s.corner_radius = static_cast<f32>(luaL_checknumber(L, 3));
+        f32 r = static_cast<f32>(luaL_checknumber(L, 3));
+        s.corner_radius = r;
+        s.corner_radius_tl = r;
+        s.corner_radius_tr = r;
+        s.corner_radius_br = r;
+        s.corner_radius_bl = r;
     } else if (strcmp(prop, "color") == 0) {
         const char* val = luaL_checkstring(L, 3);
         if (val[0] == '#' && strlen(val) == 7) {

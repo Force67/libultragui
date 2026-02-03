@@ -35,10 +35,20 @@ Style Style::lerp(const Style& a, const Style& b, f32 t) {
     result.border_color = ugui::lerp(a.border_color, b.border_color, t);
     result.border_width = ugui::lerp(a.border_width, b.border_width, t);
     result.corner_radius = ugui::lerp(a.corner_radius, b.corner_radius, t);
+    result.corner_radius_tl = ugui::lerp(a.corner_radius_tl, b.corner_radius_tl, t);
+    result.corner_radius_tr = ugui::lerp(a.corner_radius_tr, b.corner_radius_tr, t);
+    result.corner_radius_br = ugui::lerp(a.corner_radius_br, b.corner_radius_br, t);
+    result.corner_radius_bl = ugui::lerp(a.corner_radius_bl, b.corner_radius_bl, t);
     result.opacity = ugui::lerp(a.opacity, b.opacity, t);
+    result.aspect_ratio = ugui::lerp(a.aspect_ratio, b.aspect_ratio, t);
     result.text_color = ugui::lerp(a.text_color, b.text_color, t);
     result.font_size = ugui::lerp(a.font_size, b.font_size, t);
     result.gap = ugui::lerp(a.gap, b.gap, t);
+    result.letter_spacing = ugui::lerp(a.letter_spacing, b.letter_spacing, t);
+    result.line_height_multiplier = ugui::lerp(a.line_height_multiplier, b.line_height_multiplier, t);
+    result.text_shadow_color = ugui::lerp(a.text_shadow_color, b.text_shadow_color, t);
+    result.text_shadow_blur = ugui::lerp(a.text_shadow_blur, b.text_shadow_blur, t);
+    result.text_shadow_offset = ugui::lerp(a.text_shadow_offset, b.text_shadow_offset, t);
 
     result.shadow = lerp_shadow(a.shadow, b.shadow, t);
 
@@ -82,8 +92,13 @@ Style resolve_style(const Style& base, const StyleOverride* overrides, u32 overr
             result.border_color = ov.style.border_color;
         if (ov.mask & StyleMask::BorderWidth)
             result.border_width = ov.style.border_width;
-        if (ov.mask & StyleMask::CornerRadius)
+        if (ov.mask & StyleMask::CornerRadius) {
             result.corner_radius = ov.style.corner_radius;
+            result.corner_radius_tl = ov.style.corner_radius_tl;
+            result.corner_radius_tr = ov.style.corner_radius_tr;
+            result.corner_radius_br = ov.style.corner_radius_br;
+            result.corner_radius_bl = ov.style.corner_radius_bl;
+        }
         if (ov.mask & StyleMask::Opacity)
             result.opacity = ov.style.opacity;
         if (ov.mask & StyleMask::TextColor)

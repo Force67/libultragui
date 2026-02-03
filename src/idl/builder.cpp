@@ -165,7 +165,20 @@ Style UguiBuilder::parse_style(const std::unordered_map<std::string, std::string
         } else if (key == "border-width") {
             s.border_width = parse_float(val);
         } else if (key == "border-radius" || key == "corner-radius") {
-            s.corner_radius = parse_float(val);
+            f32 r = parse_float(val);
+            s.corner_radius = r;
+            s.corner_radius_tl = r;
+            s.corner_radius_tr = r;
+            s.corner_radius_br = r;
+            s.corner_radius_bl = r;
+        } else if (key == "corner-radius-tl") {
+            s.corner_radius_tl = parse_float(val);
+        } else if (key == "corner-radius-tr") {
+            s.corner_radius_tr = parse_float(val);
+        } else if (key == "corner-radius-br") {
+            s.corner_radius_br = parse_float(val);
+        } else if (key == "corner-radius-bl") {
+            s.corner_radius_bl = parse_float(val);
         } else if (key == "opacity") {
             s.opacity = parse_float(val);
         } else if (key == "font-size") {
@@ -196,6 +209,42 @@ Style UguiBuilder::parse_style(const std::unordered_map<std::string, std::string
             s.shadow.offset.x = parse_float(val);
         } else if (key == "shadow-y") {
             s.shadow.offset.y = parse_float(val);
+        } else if (key == "letter-spacing") {
+            s.letter_spacing = parse_float(val);
+        } else if (key == "line-height") {
+            s.line_height_multiplier = parse_float(val);
+        } else if (key == "text-transform") {
+            if (val == "uppercase")
+                s.text_transform = TextTransform::Uppercase;
+            else if (val == "lowercase")
+                s.text_transform = TextTransform::Lowercase;
+            else if (val == "capitalize")
+                s.text_transform = TextTransform::Capitalize;
+            else
+                s.text_transform = TextTransform::None;
+        } else if (key == "text-shadow-color") {
+            s.text_shadow_color = parse_color(val);
+        } else if (key == "text-shadow-blur") {
+            s.text_shadow_blur = parse_float(val);
+        } else if (key == "text-shadow-x") {
+            s.text_shadow_offset.x = parse_float(val);
+        } else if (key == "text-shadow-y") {
+            s.text_shadow_offset.y = parse_float(val);
+        } else if (key == "cursor") {
+            if (val == "default")
+                s.cursor = Cursor::Default;
+            else if (val == "pointer")
+                s.cursor = Cursor::Pointer;
+            else if (val == "text")
+                s.cursor = Cursor::Text;
+            else if (val == "move")
+                s.cursor = Cursor::Move;
+            else if (val == "not-allowed")
+                s.cursor = Cursor::NotAllowed;
+            else
+                s.cursor = Cursor::Auto;
+        } else if (key == "aspect-ratio") {
+            s.aspect_ratio = parse_float(val);
         }
     }
 
@@ -316,7 +365,9 @@ void UguiBuilder::apply_properties(Widget* widget, const UguiNode& node) {
                 mask |= StyleMask::BorderColor;
             else if (key == "border-width")
                 mask |= StyleMask::BorderWidth;
-            else if (key == "border-radius" || key == "corner-radius")
+            else if (key == "border-radius" || key == "corner-radius" ||
+                     key == "corner-radius-tl" || key == "corner-radius-tr" ||
+                     key == "corner-radius-br" || key == "corner-radius-bl")
                 mask |= StyleMask::CornerRadius;
             else if (key == "opacity")
                 mask |= StyleMask::Opacity;

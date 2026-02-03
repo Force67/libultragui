@@ -1,10 +1,22 @@
 #include <ultragui/layout/layout.h>
 #include <ultragui/render/renderer2d.h>
+#include <ultragui/render/vertex.h>
 #include <ultragui/widgets/widget.h>
 
 #include <algorithm>
 
 namespace ugui {
+
+/// Compute packed per-corner radii from a resolved style.
+/// Uses individual corner values if any are non-zero, otherwise falls back to uniform corner_radius.
+static u32 style_corner_radii(const Style& s) {
+    if (s.corner_radius_tl > 0.0f || s.corner_radius_tr > 0.0f ||
+        s.corner_radius_br > 0.0f || s.corner_radius_bl > 0.0f) {
+        return Vertex2D::pack_radii(s.corner_radius_tl, s.corner_radius_tr,
+                                    s.corner_radius_br, s.corner_radius_bl);
+    }
+    return Vertex2D::pack_radii(s.corner_radius);
+}
 
 Widget::~Widget() {
     for (auto* child : children_) {
@@ -81,12 +93,13 @@ void Widget::on_layout(const Rect& rect, const Rect& content_rect) {
 void Widget::on_paint(Renderer2D& renderer) {
     auto s = computed_style();
     f32 alpha = s.opacity;
+    u32 radii = style_corner_radii(s);
 
     // Box shadow (drawn before background)
     if (s.has_shadow()) {
         Color sc = s.shadow.color.with_alpha(s.shadow.color.a * alpha);
         renderer.draw_shadow(rect_, sc, s.shadow.blur, s.shadow.spread,
-                             s.shadow.offset, s.corner_radius);
+                             s.shadow.offset, radii);
     }
 
     // Background (with optional gradient and border)
@@ -98,21 +111,28 @@ void Widget::on_paint(Renderer2D& renderer) {
             if (s.has_gradient()) {
                 // Border with gradient: draw border first, then gradient fill inset
                 renderer.draw_bordered_rect(rect_, Color::transparent(), bc, s.border_width,
-                                            s.corner_radius);
+                                            radii);
                 Rect inner = rect_.shrunk(s.border_width);
-                f32 inner_radius = s.corner_radius > s.border_width
-                                       ? s.corner_radius - s.border_width
-                                       : 0.0f;
+                // Shrink each corner radius by border_width
+                f32 tl = (radii & 0xFFu);
+                f32 tr = ((radii >> 8) & 0xFFu);
+                f32 br = ((radii >> 16) & 0xFFu);
+                f32 bl = ((radii >> 24) & 0xFFu);
+                u32 inner_radii = Vertex2D::pack_radii(
+                    tl > s.border_width ? tl - s.border_width : 0.0f,
+                    tr > s.border_width ? tr - s.border_width : 0.0f,
+                    br > s.border_width ? br - s.border_width : 0.0f,
+                    bl > s.border_width ? bl - s.border_width : 0.0f);
                 Color bg2 = s.background_end.with_alpha(s.background_end.a * alpha);
-                renderer.draw_rect_gradient(inner, bg, bg2, inner_radius);
+                renderer.draw_rect_gradient(inner, bg, bg2, inner_radii);
             } else {
-                renderer.draw_bordered_rect(rect_, bg, bc, s.border_width, s.corner_radius);
+                renderer.draw_bordered_rect(rect_, bg, bc, s.border_width, radii);
             }
         } else if (s.has_gradient()) {
             Color bg2 = s.background_end.with_alpha(s.background_end.a * alpha);
-            renderer.draw_rect_gradient(rect_, bg, bg2, s.corner_radius);
+            renderer.draw_rect_gradient(rect_, bg, bg2, radii);
         } else {
-            renderer.draw_rect(rect_, bg, s.corner_radius);
+            renderer.draw_rect(rect_, bg, radii);
         }
     }
 }

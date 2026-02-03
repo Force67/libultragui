@@ -80,7 +80,8 @@ public:
 
     /// Shape a UTF-8 string into positioned glyphs.
     /// The returned TextRun is valid until the next call to shape() or end_frame().
-    TextRun shape(FontHandle font, const char* text, u32 text_len, f32 font_size);
+    TextRun shape(FontHandle font, const char* text, u32 text_len, f32 font_size,
+                  f32 letter_spacing = 0.0f, f32 line_height_mult = 1.0f);
 
     /// Lay out a shaped run into wrapped, aligned lines.
     TextLayout layout(const TextRun& run, const TextLayoutConfig& config);

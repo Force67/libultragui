@@ -2,6 +2,7 @@
 
 #include <ultragui/core/math.h>
 #include <ultragui/core/types.h>
+#include <ultragui/style/enums.h>
 
 namespace ugui {
 
@@ -31,6 +32,9 @@ public:
 
     /// Returns native window handle for RHI backend initialization
     virtual void* native_handle() const = 0;
+
+    /// Set the mouse cursor style
+    virtual void set_cursor(Cursor cursor) = 0;
 };
 
 /// Create the default GLFW-based platform

@@ -57,26 +57,26 @@ void Renderer2D::end_frame() {
     }
 }
 
-void Renderer2D::draw_rect(Rect rect, Color color, f32 corner_radius) {
+void Renderer2D::draw_rect(Rect rect, Color color, u32 corner_radii) {
     u32 packed = Vertex2D::pack_color(color.r, color.g, color.b, color.a);
-    emit_quad(rect, packed, packed, corner_radius, 0.0f, 0.0f, 0, INVALID_TEXTURE);
+    emit_quad(rect, packed, packed, corner_radii, 0.0f, 0.0f, 0, INVALID_TEXTURE);
 }
 
 void Renderer2D::draw_textured_rect(Rect rect, RHITextureHandle texture, Color tint,
-                                    f32 corner_radius) {
+                                    u32 corner_radii) {
     u32 packed = Vertex2D::pack_color(tint.r, tint.g, tint.b, tint.a);
-    emit_quad(rect, packed, packed, corner_radius, 0.0f, 0.0f, 0, texture);
+    emit_quad(rect, packed, packed, corner_radii, 0.0f, 0.0f, 0, texture);
 }
 
 void Renderer2D::draw_rect_gradient(Rect rect, Color top_color, Color bottom_color,
-                                    f32 corner_radius) {
+                                    u32 corner_radii) {
     u32 c1 = Vertex2D::pack_color(top_color.r, top_color.g, top_color.b, top_color.a);
     u32 c2 = Vertex2D::pack_color(bottom_color.r, bottom_color.g, bottom_color.b, bottom_color.a);
-    emit_quad(rect, c1, c2, corner_radius, 0.0f, 0.0f, 0, INVALID_TEXTURE);
+    emit_quad(rect, c1, c2, corner_radii, 0.0f, 0.0f, 0, INVALID_TEXTURE);
 }
 
 void Renderer2D::draw_shadow(Rect rect, Color shadow_color, f32 blur, f32 spread, Vec2 offset,
-                             f32 corner_radius) {
+                             u32 corner_radii) {
     Rect shadow_rect = {
         rect.x + offset.x - spread - blur,
         rect.y + offset.y - spread - blur,
@@ -85,16 +85,23 @@ void Renderer2D::draw_shadow(Rect rect, Color shadow_color, f32 blur, f32 spread
     };
     u32 packed = Vertex2D::pack_color(shadow_color.r, shadow_color.g, shadow_color.b,
                                       shadow_color.a);
-    f32 shadow_radius = corner_radius + spread;
-    emit_quad(shadow_rect, packed, packed, shadow_radius, blur, 0.0f, 0, INVALID_TEXTURE);
+    // Add spread to each corner radius
+    u32 tl = (corner_radii & 0xFFu);
+    u32 tr = ((corner_radii >> 8) & 0xFFu);
+    u32 br = ((corner_radii >> 16) & 0xFFu);
+    u32 bl = ((corner_radii >> 24) & 0xFFu);
+    u32 shadow_radii = Vertex2D::pack_radii(
+        static_cast<f32>(tl) + spread, static_cast<f32>(tr) + spread,
+        static_cast<f32>(br) + spread, static_cast<f32>(bl) + spread);
+    emit_quad(shadow_rect, packed, packed, shadow_radii, blur, 0.0f, 0, INVALID_TEXTURE);
 }
 
 void Renderer2D::draw_bordered_rect(Rect rect, Color fill, Color border_color, f32 border_width,
-                                    f32 corner_radius) {
+                                    u32 corner_radii) {
     u32 fill_packed = Vertex2D::pack_color(fill.r, fill.g, fill.b, fill.a);
     u32 border_packed = Vertex2D::pack_color(border_color.r, border_color.g, border_color.b,
                                              border_color.a);
-    emit_quad(rect, fill_packed, fill_packed, corner_radius, 0.0f, border_width, border_packed,
+    emit_quad(rect, fill_packed, fill_packed, corner_radii, 0.0f, border_width, border_packed,
               INVALID_TEXTURE);
 }
 
@@ -114,7 +121,7 @@ void Renderer2D::pop_scissor() {
     }
 }
 
-void Renderer2D::emit_quad(Rect rect, u32 color, u32 color2, f32 corner_radius, f32 softness,
+void Renderer2D::emit_quad(Rect rect, u32 color, u32 color2, u32 corner_radii, f32 softness,
                            f32 border_width, u32 border_color, RHITextureHandle texture) {
     // Start a new batch if texture changed
     if (texture != current_texture_) {
@@ -128,16 +135,16 @@ void Renderer2D::emit_quad(Rect rect, u32 color, u32 color2, f32 corner_radius, 
     u32 base = static_cast<u32>(vertices_.size());
 
     // Top-left
-    vertices_.push_back({{rect.x, rect.y}, {0, 0}, color, color2, corner_radius, softness,
+    vertices_.push_back({{rect.x, rect.y}, {0, 0}, color, color2, corner_radii, softness,
                          {hw, hh}, border_width, border_color});
     // Top-right
-    vertices_.push_back({{rect.x + rect.w, rect.y}, {1, 0}, color, color2, corner_radius,
+    vertices_.push_back({{rect.x + rect.w, rect.y}, {1, 0}, color, color2, corner_radii,
                          softness, {hw, hh}, border_width, border_color});
     // Bottom-right
     vertices_.push_back({{rect.x + rect.w, rect.y + rect.h}, {1, 1}, color, color2,
-                         corner_radius, softness, {hw, hh}, border_width, border_color});
+                         corner_radii, softness, {hw, hh}, border_width, border_color});
     // Bottom-left
-    vertices_.push_back({{rect.x, rect.y + rect.h}, {0, 1}, color, color2, corner_radius,
+    vertices_.push_back({{rect.x, rect.y + rect.h}, {0, 1}, color, color2, corner_radii,
                          softness, {hw, hh}, border_width, border_color});
 
     // Two triangles: 0-1-2, 0-2-3

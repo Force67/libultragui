@@ -465,7 +465,7 @@ bool VulkanRHI::create_pipeline() {
     attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, uv)};
     attrs[2] = {2, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color)};
     attrs[3] = {3, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color2)};
-    attrs[4] = {4, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, corner_radius)};
+    attrs[4] = {4, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, corner_radii)};
     attrs[5] = {5, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, softness)};
     attrs[6] = {6, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, half_size)};
     attrs[7] = {7, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, border_width)};
@@ -588,7 +588,7 @@ bool VulkanRHI::create_text_pipeline() {
     attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, uv)};
     attrs[2] = {2, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color)};
     attrs[3] = {3, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, color2)};
-    attrs[4] = {4, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, corner_radius)};
+    attrs[4] = {4, 0, VK_FORMAT_R32_UINT, offsetof(Vertex2D, corner_radii)};
     attrs[5] = {5, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, softness)};
     attrs[6] = {6, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex2D, half_size)};
     attrs[7] = {7, 0, VK_FORMAT_R32_SFLOAT, offsetof(Vertex2D, border_width)};

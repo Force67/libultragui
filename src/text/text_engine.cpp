@@ -211,7 +211,8 @@ void TextEngine::begin_frame() {
     }
 }
 
-TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 font_size) {
+TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 font_size,
+                          f32 letter_spacing, f32 line_height_mult) {
     assert(impl_ && font < MAX_FONTS && impl_->fonts[font].in_use);
 
     auto& slot = impl_->fonts[font];
@@ -240,7 +241,7 @@ TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 f
         g.glyph_id = glyph_info[i].codepoint;
         g.x_offset = static_cast<f32>(glyph_pos[i].x_offset) / 64.0f;
         g.y_offset = static_cast<f32>(glyph_pos[i].y_offset) / 64.0f;
-        g.x_advance = static_cast<f32>(glyph_pos[i].x_advance) / 64.0f;
+        g.x_advance = static_cast<f32>(glyph_pos[i].x_advance) / 64.0f + letter_spacing;
 
         auto* cached = impl_->rasterize_glyph(font, g.glyph_id, pixel_size);
         if (cached) {
@@ -262,7 +263,7 @@ TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 f
     // Get font metrics for this size
     f32 ascent = static_cast<f32>(slot.ft_face->size->metrics.ascender) / 64.0f;
     f32 descent = static_cast<f32>(slot.ft_face->size->metrics.descender) / 64.0f;
-    f32 line_height = static_cast<f32>(slot.ft_face->size->metrics.height) / 64.0f;
+    f32 line_height = static_cast<f32>(slot.ft_face->size->metrics.height) / 64.0f * line_height_mult;
 
     TextRun run{};
     run.glyphs = glyphs.data();

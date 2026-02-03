@@ -37,3 +37,4 @@ examples/ultragui_showcase
 tests/CTestTestfile.cmake
 tests/Makefile
 tests/cmake_install.cmake
+/_deps

@@ -1,5 +1,6 @@
 #define GLFW_INCLUDE_NONE
 #include <ultragui/input/input.h>
+#include <ultragui/style/style.h>
 #include <ultragui/widgets/button.h>
 #include <ultragui/widgets/scroll_view.h>
 #include <ultragui/widgets/widget.h>
@@ -95,6 +96,12 @@ bool InputRouter::process(Widget* root) {
                 hovered_->set_widget_state(hovered_->widget_state() | WidgetState::Hovered);
                 if (on_hover_)
                     on_hover_(hovered_, true);
+
+                // Update cursor based on hovered widget's style
+                Cursor cur = hovered_->computed_style().cursor;
+                platform_->set_cursor(cur);
+            } else {
+                platform_->set_cursor(Cursor::Auto);
             }
             consumed = true;
         }

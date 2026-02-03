@@ -1,4 +1,5 @@
 #include <ultragui/render/renderer2d.h>
+#include <ultragui/render/vertex.h>
 #include <ultragui/widgets/scroll_view.h>
 
 #include <algorithm>
@@ -57,8 +58,13 @@ void ScrollView::on_paint(Renderer2D& renderer) {
 
     // Background
     if (s.background.a > 0.0f) {
+        u32 radii = (s.corner_radius_tl > 0.0f || s.corner_radius_tr > 0.0f ||
+                     s.corner_radius_br > 0.0f || s.corner_radius_bl > 0.0f)
+                        ? Vertex2D::pack_radii(s.corner_radius_tl, s.corner_radius_tr,
+                                               s.corner_radius_br, s.corner_radius_bl)
+                        : Vertex2D::pack_radii(s.corner_radius);
         renderer.draw_rect(rect_, s.background.with_alpha(s.background.a * s.opacity),
-                           s.corner_radius);
+                           radii);
     }
 
     // Clip children to content rect
@@ -75,7 +81,7 @@ void ScrollView::on_paint(Renderer2D& renderer) {
         f32 bar_y = content_rect_.y + scroll_ratio * (content_rect_.h - bar_height);
 
         renderer.draw_rect({content_rect_.right() - 4, bar_y, 4, bar_height}, Color{1, 1, 1, 0.3f},
-                           2.0f);
+                           Vertex2D::pack_radii(2.0f));
     }
 
     renderer.pop_scissor();

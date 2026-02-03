@@ -97,4 +97,22 @@ enum class Visibility : u8 {
     Collapsed, // Hidden + does not take up space
 };
 
+/// Text transform (CSS text-transform)
+enum class TextTransform : u8 {
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+};
+
+/// Cursor style
+enum class Cursor : u8 {
+    Auto,
+    Default,
+    Pointer,
+    Text,
+    Move,
+    NotAllowed,
+};
+
 } // namespace ugui

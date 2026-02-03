@@ -56,8 +56,13 @@ struct Style {
     Color background_end = Color::transparent(); // If != transparent, linear gradient top->bottom
     Color border_color = Color::transparent();
     f32 border_width = 0.0f;
-    f32 corner_radius = 0.0f;
+    f32 corner_radius = 0.0f;    // Convenience: sets all 4 corners
+    f32 corner_radius_tl = 0.0f; // Per-corner: top-left
+    f32 corner_radius_tr = 0.0f; // Per-corner: top-right
+    f32 corner_radius_br = 0.0f; // Per-corner: bottom-right
+    f32 corner_radius_bl = 0.0f; // Per-corner: bottom-left
     f32 opacity = 1.0f;
+    f32 aspect_ratio = 0.0f;     // 0 = none, positive = width/height
 
     // --- Box shadow ---
     BoxShadow shadow;
@@ -66,6 +71,17 @@ struct Style {
     Color text_color = Color::white();
     f32 font_size = 16.0f;
     TextAlign text_align = TextAlign::Left;
+    f32 letter_spacing = 0.0f;         // Extra pixels between characters
+    f32 line_height_multiplier = 1.0f; // Multiplier on default line height
+    TextTransform text_transform = TextTransform::None;
+
+    // --- Text shadow ---
+    Color text_shadow_color = Color::transparent();
+    f32 text_shadow_blur = 0.0f;
+    Vec2 text_shadow_offset = Vec2::zero();
+
+    // --- Cursor ---
+    Cursor cursor = Cursor::Auto;
 
     // --- Transitions (keyed by property group) ---
     Transition background_transition;

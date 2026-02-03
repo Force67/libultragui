@@ -225,6 +225,10 @@ static void apply_style(YGNodeRef yg, const Style& s, const LayoutViewport& vp) 
     if (s.gap > 0.0f)
         YGNodeStyleSetGap(yg, YGGutterAll, s.gap);
 
+    // Aspect ratio
+    if (s.aspect_ratio > 0.0f)
+        YGNodeStyleSetAspectRatio(yg, s.aspect_ratio);
+
     // Position offsets
     if (!s.top.is_auto())
         YGNodeStyleSetPosition(yg, YGEdgeTop, s.top.resolve(0, vw, vh, true));
