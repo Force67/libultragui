@@ -36,6 +36,7 @@ panel root {
                 padding: 8 18;
                 border-color: #ffffff18;
                 border-width: 1;
+                cursor: pointer;
                 :hover {
                     background: #242438;
                     color: #ffffffd0;
@@ -51,6 +52,7 @@ panel root {
                 padding: 8 18;
                 border-color: #ffffff10;
                 border-width: 1;
+                cursor: pointer;
                 :hover {
                     background: #1a1a2a;
                     color: #ffffff90;
@@ -72,13 +74,21 @@ panel root {
             width: 380;
             gap: 24;
             padding: 0 0 28 0;
+            corner-radius-tl: 20;
+            corner-radius-bl: 20;
+            corner-radius-tr: 0;
+            corner-radius-br: 0;
 
             // Album art placeholder - colored rectangle
             panel album_art {
                 layout: column;
                 width: 380;
                 height: 380;
-                corner-radius: 20;
+                corner-radius-tl: 20;
+                corner-radius-bl: 20;
+                corner-radius-tr: 20;
+                corner-radius-br: 20;
+                aspect-ratio: 1;
                 justify: center;
                 align: center;
                 background: #1e1430;
@@ -110,18 +120,22 @@ panel root {
                     text: "Midnight Frequencies";
                     font-size: 24;
                     color: #ffffffe0;
+                    letter-spacing: 0.5;
                 }
 
                 text track_artist {
                     text: "Aether Collective";
                     font-size: 16;
                     color: #ffffff60;
+                    letter-spacing: 0.5;
                 }
 
                 text track_album {
                     text: "Luminance  ·  2025";
                     font-size: 13;
                     color: #ffffff38;
+                    letter-spacing: 0.5;
+                    line-height: 1.4;
                 }
             }
 
@@ -180,6 +194,7 @@ panel root {
                     background: transparent;
                     corner-radius: 20;
                     padding: 8 14;
+                    cursor: pointer;
                     :hover { color: #ffffff70; }
                 }
 
@@ -190,6 +205,7 @@ panel root {
                     background: transparent;
                     corner-radius: 20;
                     padding: 10 18;
+                    cursor: pointer;
                     :hover { color: #ffffffd0; }
                 }
 
@@ -203,6 +219,7 @@ panel root {
                     shadow-color: #a78bfa40;
                     shadow-blur: 16;
                     shadow-y: 4;
+                    cursor: pointer;
                     :hover {
                         background: #b89cff;
                         shadow-blur: 22;
@@ -219,6 +236,7 @@ panel root {
                     background: transparent;
                     corner-radius: 20;
                     padding: 10 18;
+                    cursor: pointer;
                     :hover { color: #ffffffd0; }
                 }
 
@@ -229,6 +247,7 @@ panel root {
                     background: transparent;
                     corner-radius: 20;
                     padding: 8 14;
+                    cursor: pointer;
                     :hover { color: #ffffff70; }
                 }
             }
@@ -275,6 +294,10 @@ panel root {
             flex-grow: 1;
             gap: 0;
             padding: 0 0 28 0;
+            corner-radius-tr: 20;
+            corner-radius-br: 20;
+            corner-radius-tl: 0;
+            corner-radius-bl: 0;
 
             // Playlist header
             panel playlist_header {
@@ -291,12 +314,15 @@ panel root {
                         text: "Luminance";
                         font-size: 20;
                         color: #ffffffe0;
+                        text-transform: uppercase;
+                        letter-spacing: 2;
                     }
 
                     text playlist_meta {
                         text: "12 tracks  ·  48 min";
                         font-size: 13;
                         color: #ffffff40;
+                        line-height: 1.4;
                     }
                 }
 
@@ -309,6 +335,7 @@ panel root {
                     padding: 7 16;
                     border-color: #a78bfa30;
                     border-width: 1;
+                    cursor: pointer;
                     :hover {
                         background: #a78bfa28;
                     }
@@ -320,7 +347,10 @@ panel root {
                 layout: column;
                 flex-grow: 1;
                 background: #1a1a2a;
-                corner-radius: 20;
+                corner-radius-tr: 20;
+                corner-radius-br: 20;
+                corner-radius-tl: 0;
+                corner-radius-bl: 0;
                 padding: 8;
                 gap: 2;
                 border-color: #ffffff10;
@@ -338,6 +368,7 @@ panel root {
                     background: #a78bfa15;
                     corner-radius: 14;
                     padding: 14 18;
+                    cursor: pointer;
 
                     panel tr1_dot {
                         width: 6;
@@ -381,6 +412,7 @@ panel root {
                     background: transparent;
                     corner-radius: 14;
                     padding: 14 18;
+                    cursor: pointer;
                     :hover { background: #ffffff08; }
 
                     text tr2_num {
@@ -422,6 +454,7 @@ panel root {
                     background: transparent;
                     corner-radius: 14;
                     padding: 14 18;
+                    cursor: pointer;
                     :hover { background: #ffffff08; }
 
                     text tr3_num {
@@ -463,6 +496,7 @@ panel root {
                     background: transparent;
                     corner-radius: 14;
                     padding: 14 18;
+                    cursor: pointer;
                     :hover { background: #ffffff08; }
 
                     text tr4_num {
@@ -504,6 +538,7 @@ panel root {
                     background: transparent;
                     corner-radius: 14;
                     padding: 14 18;
+                    cursor: pointer;
                     :hover { background: #ffffff08; }
 
                     text tr5_num {
@@ -545,6 +580,7 @@ panel root {
                     background: transparent;
                     corner-radius: 14;
                     padding: 14 18;
+                    cursor: pointer;
                     :hover { background: #ffffff08; }
 
                     text tr6_num {
@@ -586,6 +622,7 @@ panel root {
                     background: transparent;
                     corner-radius: 14;
                     padding: 14 18;
+                    cursor: pointer;
                     :hover { background: #ffffff08; }
 
                     text tr7_num {
@@ -627,6 +664,7 @@ panel root {
                     background: transparent;
                     corner-radius: 14;
                     padding: 14 18;
+                    cursor: pointer;
                     :hover { background: #ffffff08; }
 
                     text tr8_num {

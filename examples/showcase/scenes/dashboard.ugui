@@ -40,6 +40,9 @@ panel root {
                 text: "MISSION CTRL";
                 font-size: 16;
                 color: #e2e2ff;
+                text-shadow-color: #6366f140;
+                text-shadow-x: 0;
+                text-shadow-y: 0;
             }
         }
 
@@ -49,6 +52,8 @@ panel root {
             font-size: 11;
             color: #585878;
             padding: 8 8 12 8;
+            letter-spacing: 0.5;
+            text-transform: uppercase;
         }
 
         // Nav items
@@ -61,6 +66,7 @@ panel root {
             padding: 11 14;
             border-color: #6366f140;
             border-width: 1;
+            cursor: pointer;
             :hover {
                 background: #6366f128;
             }
@@ -76,6 +82,7 @@ panel root {
             background: transparent;
             corner-radius: 8;
             padding: 11 14;
+            cursor: pointer;
             :hover {
                 background: #1a1a38;
                 color: #e2e2ff;
@@ -89,6 +96,7 @@ panel root {
             background: transparent;
             corner-radius: 8;
             padding: 11 14;
+            cursor: pointer;
             :hover {
                 background: #1a1a38;
                 color: #e2e2ff;
@@ -102,6 +110,7 @@ panel root {
             background: transparent;
             corner-radius: 8;
             padding: 11 14;
+            cursor: pointer;
             :hover {
                 background: #1a1a38;
                 color: #e2e2ff;
@@ -115,6 +124,7 @@ panel root {
             background: transparent;
             corner-radius: 8;
             padding: 11 14;
+            cursor: pointer;
             :hover {
                 background: #1a1a38;
                 color: #e2e2ff;
@@ -134,6 +144,8 @@ panel root {
             font-size: 11;
             color: #585878;
             padding: 4 8 12 8;
+            letter-spacing: 0.5;
+            text-transform: uppercase;
         }
 
         button nav_team {
@@ -143,6 +155,7 @@ panel root {
             background: transparent;
             corner-radius: 8;
             padding: 11 14;
+            cursor: pointer;
             :hover {
                 background: #1a1a38;
                 color: #e2e2ff;
@@ -156,6 +169,7 @@ panel root {
             background: transparent;
             corner-radius: 8;
             padding: 11 14;
+            cursor: pointer;
             :hover {
                 background: #1a1a38;
                 color: #e2e2ff;
@@ -220,6 +234,9 @@ panel root {
                     text: "Overview";
                     font-size: 28;
                     color: #e2e2ff;
+                    text-shadow-color: #6366f140;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
 
                 text page_subtitle {
@@ -243,6 +260,7 @@ panel root {
                     padding: 9 16;
                     border-color: #1e1e3e;
                     border-width: 1;
+                    cursor: pointer;
                     :hover {
                         background: #1a1a38;
                         color: #e2e2ff;
@@ -259,6 +277,7 @@ panel root {
                     shadow-color: #6366f140;
                     shadow-blur: 12;
                     shadow-y: 3;
+                    cursor: pointer;
                     :hover {
                         background: #7577f5;
                         shadow-blur: 18;
@@ -306,6 +325,8 @@ panel root {
                             text: "Uptime";
                             font-size: 14;
                             color: #7878a0;
+                            text-transform: uppercase;
+                            letter-spacing: 1;
                         }
 
                         panel uptime_badge {
@@ -357,6 +378,8 @@ panel root {
                             text: "Requests / sec";
                             font-size: 14;
                             color: #7878a0;
+                            text-transform: uppercase;
+                            letter-spacing: 1;
                         }
 
                         panel requests_badge {
@@ -408,6 +431,8 @@ panel root {
                             text: "Error Rate";
                             font-size: 14;
                             color: #7878a0;
+                            text-transform: uppercase;
+                            letter-spacing: 1;
                         }
 
                         panel errors_badge {
@@ -475,6 +500,7 @@ panel root {
                             color: #6366f1;
                             background: transparent;
                             padding: 4 8;
+                            cursor: pointer;
                             :hover {
                                 color: #8183f5;
                             }
@@ -793,6 +819,7 @@ panel root {
                         padding: 11 16;
                         border-color: #1e1e3e;
                         border-width: 1;
+                        cursor: pointer;
                         :hover {
                             background: #1a1a38;
                             color: #e2e2ff;

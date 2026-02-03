@@ -44,6 +44,11 @@ panel root {
                     text-align: center;
                     shadow-color: #ff00aa40;
                     shadow-blur: 12;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
+                    text-shadow-color: #ff00aa80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
 
                 text title_main {
@@ -53,6 +58,11 @@ panel root {
                     text-align: center;
                     shadow-color: #00f0ff50;
                     shadow-blur: 30;
+                    text-transform: uppercase;
+                    letter-spacing: 3;
+                    text-shadow-color: #00f0ff80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
 
                 text title_edition {
@@ -62,6 +72,11 @@ panel root {
                     text-align: center;
                     shadow-color: #ff00aa40;
                     shadow-blur: 12;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
+                    text-shadow-color: #ff00aa80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
             }
         }
@@ -83,6 +98,11 @@ panel root {
                     text: "HIGH SCORE";
                     font-size: 11;
                     color: #ff00aa;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
+                    text-shadow-color: #ff00aa80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
 
                 text score_value_1 {
@@ -91,6 +111,10 @@ panel root {
                     color: #00f0ff;
                     shadow-color: #00f0ff40;
                     shadow-blur: 12;
+                    letter-spacing: 4;
+                    text-shadow-color: #00f0ff80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
             }
 
@@ -103,6 +127,11 @@ panel root {
                     text: "CREDITS";
                     font-size: 11;
                     color: #ff00aa;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
+                    text-shadow-color: #ff00aa80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
 
                 text credits_value {
@@ -111,6 +140,10 @@ panel root {
                     color: #ff00aa;
                     shadow-color: #ff00aa40;
                     shadow-blur: 12;
+                    letter-spacing: 4;
+                    text-shadow-color: #ff00aa80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
             }
 
@@ -123,6 +156,11 @@ panel root {
                     text: "LAST SCORE";
                     font-size: 11;
                     color: #ff00aa;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
+                    text-shadow-color: #ff00aa80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
 
                 text score_value_2 {
@@ -131,6 +169,10 @@ panel root {
                     color: #00f0ff;
                     shadow-color: #00f0ff40;
                     shadow-blur: 12;
+                    letter-spacing: 4;
+                    text-shadow-color: #00f0ff80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
             }
         }
@@ -161,6 +203,12 @@ panel root {
                     border-width: 2;
                     shadow-color: #00f0ff30;
                     shadow-blur: 20;
+                    cursor: pointer;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
+                    text-shadow-color: #00f0ff80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                     :hover {
                         background: #00f0ff;
                         color: #000000;
@@ -181,6 +229,9 @@ panel root {
                     padding: 16 24;
                     border-color: #00f0ff30;
                     border-width: 1;
+                    cursor: pointer;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
                     :hover {
                         color: #00f0ff;
                         border-color: #00f0ff;
@@ -204,6 +255,9 @@ panel root {
                     padding: 16 24;
                     border-color: #ff00aa30;
                     border-width: 1;
+                    cursor: pointer;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
                     :hover {
                         color: #ff00aa;
                         border-color: #ff00aa;
@@ -227,6 +281,9 @@ panel root {
                     padding: 16 24;
                     border-color: #00f0ff30;
                     border-width: 1;
+                    cursor: pointer;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
                     :hover {
                         color: #00f0ff;
                         border-color: #00f0ff;
@@ -250,6 +307,9 @@ panel root {
                     padding: 16 24;
                     border-color: #00f0ff30;
                     border-width: 1;
+                    cursor: pointer;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
                     :hover {
                         color: #00f0ff;
                         border-color: #00f0ff;
@@ -283,6 +343,11 @@ panel root {
                     font-size: 14;
                     color: #ff00aa;
                     padding: 0 0 8 0;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
+                    text-shadow-color: #ff00aa80;
+                    text-shadow-x: 0;
+                    text-shadow-y: 0;
                 }
 
                 // Character slot 1 (selected)
@@ -296,11 +361,17 @@ panel root {
                     gap: 6;
                     shadow-color: #ff00aa30;
                     shadow-blur: 20;
+                    cursor: pointer;
 
                     text char_name_1 {
                         text: "NOVA";
                         font-size: 18;
                         color: #ff00aa;
+                        text-transform: uppercase;
+                        letter-spacing: 2;
+                        text-shadow-color: #ff00aa80;
+                        text-shadow-x: 0;
+                        text-shadow-y: 0;
                     }
 
                     panel char_stat_row_1 {
@@ -346,11 +417,14 @@ panel root {
                     corner-radius: 0;
                     padding: 14 16;
                     gap: 6;
+                    cursor: pointer;
 
                     text char_name_2 {
                         text: "CIPHER";
                         font-size: 18;
                         color: #00f0ff60;
+                        text-transform: uppercase;
+                        letter-spacing: 2;
                     }
 
                     panel char_stat_row_2 {
@@ -393,11 +467,14 @@ panel root {
                     corner-radius: 0;
                     padding: 14 16;
                     gap: 6;
+                    cursor: pointer;
 
                     text char_name_3 {
                         text: "RAZE";
                         font-size: 18;
                         color: #00f0ff60;
+                        text-transform: uppercase;
+                        letter-spacing: 2;
                     }
 
                     panel char_stat_row_3 {
@@ -440,11 +517,14 @@ panel root {
                     corner-radius: 0;
                     padding: 14 16;
                     gap: 6;
+                    cursor: pointer;
 
                     text char_name_4 {
                         text: "VORTEX";
                         font-size: 18;
                         color: #ff00aa40;
+                        text-transform: uppercase;
+                        letter-spacing: 2;
                     }
 
                     panel char_stat_row_4 {
@@ -497,12 +577,16 @@ panel root {
                     text: "[ENTER] SELECT";
                     font-size: 13;
                     color: #00f0ff60;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
                 }
 
                 text hint_move {
                     text: "[W/S] MOVE";
                     font-size: 13;
                     color: #00f0ff60;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
                 }
             }
 
@@ -514,12 +598,16 @@ panel root {
                     text: "v2.0.41";
                     font-size: 13;
                     color: #ff00aa40;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
                 }
 
                 text region_tag {
                     text: "REGION: NA-EAST";
                     font-size: 13;
                     color: #ff00aa40;
+                    text-transform: uppercase;
+                    letter-spacing: 2;
                 }
             }
         }

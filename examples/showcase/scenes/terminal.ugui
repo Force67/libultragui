@@ -29,6 +29,7 @@ panel root {
                 text: "noc-primary.corp.internal";
                 font-size: 13;
                 color: #00ff41;
+                letter-spacing: 1;
             }
 
             panel header_sep_1 {
@@ -41,6 +42,8 @@ panel root {
                 text: "UP";
                 font-size: 11;
                 color: #00ff4160;
+                text-transform: uppercase;
+                letter-spacing: 1;
             }
 
             text uptime_value {
@@ -59,6 +62,8 @@ panel root {
                 text: "[OPERATIONAL]";
                 font-size: 13;
                 color: #00ff41;
+                text-transform: uppercase;
+                letter-spacing: 1;
             }
         }
 
@@ -71,6 +76,8 @@ panel root {
                 text: "ALERTS:";
                 font-size: 11;
                 color: #00ff4160;
+                text-transform: uppercase;
+                letter-spacing: 1;
             }
 
             text alerts_count {
@@ -111,6 +118,9 @@ panel root {
             padding: 8 20;
             border-color: #00ff4130;
             border-width: 0 1 0 0;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1;
             :hover { background: #00ff4120; }
         }
 
@@ -123,6 +133,9 @@ panel root {
             padding: 8 20;
             border-color: #00ff4130;
             border-width: 0 1 0 0;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1;
             :hover {
                 background: #00ff4108;
                 color: #00ff41;
@@ -138,6 +151,9 @@ panel root {
             padding: 8 20;
             border-color: #00ff4130;
             border-width: 0 1 0 0;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1;
             :hover {
                 background: #00ff4108;
                 color: #00ff41;
@@ -153,6 +169,9 @@ panel root {
             padding: 8 20;
             border-color: #00ff4130;
             border-width: 0 1 0 0;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1;
             :hover {
                 background: #00ff4108;
                 color: #00ff41;
@@ -166,6 +185,9 @@ panel root {
             background: transparent;
             corner-radius: 0;
             padding: 8 20;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1;
             :hover {
                 background: #00ff4108;
                 color: #00ff41;
@@ -201,6 +223,8 @@ panel root {
                     text: "CPU";
                     font-size: 11;
                     color: #00ff4160;
+                    text-transform: uppercase;
+                    letter-spacing: 1;
                 }
 
                 panel cpu_row_1 {
@@ -299,6 +323,8 @@ panel root {
                     text: "MEMORY";
                     font-size: 11;
                     color: #00ff4160;
+                    text-transform: uppercase;
+                    letter-spacing: 1;
                 }
 
                 panel mem_row_1 {
@@ -379,6 +405,8 @@ panel root {
                     text: "NETWORK";
                     font-size: 11;
                     color: #00ff4160;
+                    text-transform: uppercase;
+                    letter-spacing: 1;
                 }
 
                 panel net_row_1 {
@@ -461,6 +489,8 @@ panel root {
                     text: "DISK";
                     font-size: 11;
                     color: #00ff4160;
+                    text-transform: uppercase;
+                    letter-spacing: 1;
                 }
 
                 panel disk_row_1 {
@@ -564,6 +594,8 @@ panel root {
                     font-size: 11;
                     color: #00ff4160;
                     width: 60;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5;
                 }
 
                 text proc_col_name {
@@ -571,6 +603,8 @@ panel root {
                     font-size: 11;
                     color: #00ff4160;
                     flex-grow: 1;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5;
                 }
 
                 text proc_col_cpu {
@@ -579,6 +613,8 @@ panel root {
                     color: #00ff4160;
                     width: 60;
                     text-align: right;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5;
                 }
 
                 text proc_col_mem {
@@ -587,6 +623,8 @@ panel root {
                     color: #00ff4160;
                     width: 60;
                     text-align: right;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5;
                 }
 
                 text proc_col_state {
@@ -595,6 +633,8 @@ panel root {
                     color: #00ff4160;
                     width: 48;
                     text-align: right;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5;
                 }
             }
 
@@ -774,6 +814,8 @@ panel root {
                     text: "SYSTEM LOG";
                     font-size: 11;
                     color: #00ff4160;
+                    text-transform: uppercase;
+                    letter-spacing: 1;
                 }
 
                 button btn_clear_log {
@@ -783,6 +825,7 @@ panel root {
                     background: transparent;
                     corner-radius: 0;
                     padding: 2 6;
+                    cursor: pointer;
                     :hover { color: #00ff41; }
                 }
             }
