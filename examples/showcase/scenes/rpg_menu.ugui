@@ -1,0 +1,531 @@
+// RPG pause menu - inspired by classic Elder Scrolls UI aesthetic
+// Translucent dark overlay, minimal left-aligned navigation, clean typography
+// Demonstrates: gradients, opacity, letter-spacing, text-shadow, cursor, large text
+
+panel root {
+    layout: column;
+    width: 100%;
+    height: 100%;
+    background: #000000;
+    padding: 0;
+
+    // Full-screen subtle gradient backdrop (simulates the blurred game world)
+    panel backdrop {
+        layout: row;
+        width: 100%;
+        height: 100%;
+        background: #0a0c10;
+        background-end: #12151c;
+        padding: 0;
+
+        // Left content column - where the menu lives
+        panel menu_column {
+            layout: column;
+            width: 420;
+            height: 100%;
+            padding: 0;
+
+            // Top gradient fade (simulates vignette)
+            panel top_fade {
+                width: 100%;
+                height: 80;
+                background: #00000080;
+                background-end: transparent;
+            }
+
+            // Menu content area
+            panel menu_area {
+                layout: column;
+                flex-grow: 1;
+                padding: 40 60 40 60;
+                justify: center;
+                gap: 0;
+
+                // Thin horizontal rule above menu
+                panel rule_top {
+                    width: 100%;
+                    height: 1;
+                    background: #8b8b8b40;
+                    margin: 0 0 32 0;
+                }
+
+                // Menu items - large, spaced, minimal
+                button menu_quests {
+                    text: "QUESTS";
+                    font-size: 28;
+                    letter-spacing: 6;
+                    text-transform: uppercase;
+                    color: #b8b8b8;
+                    background: transparent;
+                    padding: 18 0;
+                    cursor: pointer;
+                    text-align: left;
+                    :hover {
+                        color: #ffffff;
+                        text-shadow-color: #ffffff20;
+                        text-shadow-x: 0;
+                        text-shadow-y: 0;
+                    }
+                    :pressed {
+                        color: #d0d0d0;
+                    }
+                }
+
+                // Subtle separator
+                panel sep_1 {
+                    width: 200;
+                    height: 1;
+                    background: #8b8b8b18;
+                    margin: 2 0;
+                }
+
+                button menu_inventory {
+                    text: "INVENTORY";
+                    font-size: 28;
+                    letter-spacing: 6;
+                    text-transform: uppercase;
+                    color: #b8b8b8;
+                    background: transparent;
+                    padding: 18 0;
+                    cursor: pointer;
+                    text-align: left;
+                    :hover {
+                        color: #ffffff;
+                        text-shadow-color: #ffffff20;
+                        text-shadow-x: 0;
+                        text-shadow-y: 0;
+                    }
+                    :pressed {
+                        color: #d0d0d0;
+                    }
+                }
+
+                panel sep_2 {
+                    width: 200;
+                    height: 1;
+                    background: #8b8b8b18;
+                    margin: 2 0;
+                }
+
+                button menu_magic {
+                    text: "MAGIC";
+                    font-size: 28;
+                    letter-spacing: 6;
+                    text-transform: uppercase;
+                    color: #b8b8b8;
+                    background: transparent;
+                    padding: 18 0;
+                    cursor: pointer;
+                    text-align: left;
+                    :hover {
+                        color: #ffffff;
+                        text-shadow-color: #ffffff20;
+                        text-shadow-x: 0;
+                        text-shadow-y: 0;
+                    }
+                    :pressed {
+                        color: #d0d0d0;
+                    }
+                }
+
+                panel sep_3 {
+                    width: 200;
+                    height: 1;
+                    background: #8b8b8b18;
+                    margin: 2 0;
+                }
+
+                button menu_map {
+                    text: "MAP";
+                    font-size: 28;
+                    letter-spacing: 6;
+                    text-transform: uppercase;
+                    color: #b8b8b8;
+                    background: transparent;
+                    padding: 18 0;
+                    cursor: pointer;
+                    text-align: left;
+                    :hover {
+                        color: #ffffff;
+                        text-shadow-color: #ffffff20;
+                        text-shadow-x: 0;
+                        text-shadow-y: 0;
+                    }
+                    :pressed {
+                        color: #d0d0d0;
+                    }
+                }
+
+                panel sep_4 {
+                    width: 200;
+                    height: 1;
+                    background: #8b8b8b18;
+                    margin: 2 0;
+                }
+
+                button menu_skills {
+                    text: "SKILLS";
+                    font-size: 28;
+                    letter-spacing: 6;
+                    text-transform: uppercase;
+                    color: #b8b8b8;
+                    background: transparent;
+                    padding: 18 0;
+                    cursor: pointer;
+                    text-align: left;
+                    :hover {
+                        color: #ffffff;
+                        text-shadow-color: #ffffff20;
+                        text-shadow-x: 0;
+                        text-shadow-y: 0;
+                    }
+                    :pressed {
+                        color: #d0d0d0;
+                    }
+                }
+
+                panel sep_5 {
+                    width: 200;
+                    height: 1;
+                    background: #8b8b8b18;
+                    margin: 2 0;
+                }
+
+                button menu_system {
+                    text: "SYSTEM";
+                    font-size: 28;
+                    letter-spacing: 6;
+                    text-transform: uppercase;
+                    color: #b8b8b8;
+                    background: transparent;
+                    padding: 18 0;
+                    cursor: pointer;
+                    text-align: left;
+                    :hover {
+                        color: #ffffff;
+                        text-shadow-color: #ffffff20;
+                        text-shadow-x: 0;
+                        text-shadow-y: 0;
+                    }
+                    :pressed {
+                        color: #d0d0d0;
+                    }
+                }
+
+                // Thin horizontal rule below menu
+                panel rule_bottom {
+                    width: 100%;
+                    height: 1;
+                    background: #8b8b8b40;
+                    margin: 32 0 0 0;
+                }
+            }
+
+            // Bottom fade
+            panel bottom_fade {
+                width: 100%;
+                height: 80;
+                background: transparent;
+                background-end: #00000080;
+            }
+        }
+
+        // Right side - detail panel (appears on hover)
+        panel detail_area {
+            layout: column;
+            flex-grow: 1;
+            height: 100%;
+            padding: 0;
+
+            // Very subtle left edge line
+            panel detail_edge {
+                layout: column;
+                width: 100%;
+                height: 100%;
+                border-color: #8b8b8b10;
+                border-width: 0;
+                padding: 80 60;
+                justify: center;
+
+                // Detail content - shown for selected menu item
+                panel detail_content {
+                    layout: column;
+                    gap: 16;
+                    padding: 0;
+
+                    text detail_title {
+                        text: "QUESTS";
+                        font-size: 20;
+                        letter-spacing: 4;
+                        text-transform: uppercase;
+                        color: #8b8b8b;
+                    }
+
+                    panel detail_divider {
+                        width: 120;
+                        height: 1;
+                        background: #8b8b8b30;
+                    }
+
+                    // Quest entries
+                    panel quest_1 {
+                        layout: column;
+                        padding: 12 0;
+                        gap: 4;
+
+                        text quest_1_name {
+                            text: "The Way of the Voice";
+                            font-size: 18;
+                            color: #c8c8c8;
+                            letter-spacing: 0.5;
+                        }
+                        text quest_1_desc {
+                            text: "Speak to the Greybeards";
+                            font-size: 14;
+                            color: #6a6a6a;
+                            letter-spacing: 0.5;
+                            line-height: 1.4;
+                        }
+                    }
+
+                    panel quest_sep_1 {
+                        width: 80;
+                        height: 1;
+                        background: #8b8b8b10;
+                    }
+
+                    panel quest_2 {
+                        layout: column;
+                        padding: 12 0;
+                        gap: 4;
+
+                        text quest_2_name {
+                            text: "A Blade in the Dark";
+                            font-size: 18;
+                            color: #c8c8c8;
+                            letter-spacing: 0.5;
+                        }
+                        text quest_2_desc {
+                            text: "Locate the dragon burial site";
+                            font-size: 14;
+                            color: #6a6a6a;
+                            letter-spacing: 0.5;
+                            line-height: 1.4;
+                        }
+                    }
+
+                    panel quest_sep_2 {
+                        width: 80;
+                        height: 1;
+                        background: #8b8b8b10;
+                    }
+
+                    panel quest_3 {
+                        layout: column;
+                        padding: 12 0;
+                        gap: 4;
+
+                        text quest_3_name {
+                            text: "Diplomatic Immunity";
+                            font-size: 18;
+                            color: #c8c8c8;
+                            letter-spacing: 0.5;
+                        }
+                        text quest_3_desc {
+                            text: "Infiltrate the embassy";
+                            font-size: 14;
+                            color: #6a6a6a;
+                            letter-spacing: 0.5;
+                            line-height: 1.4;
+                        }
+                    }
+
+                    panel quest_sep_3 {
+                        width: 80;
+                        height: 1;
+                        background: #8b8b8b10;
+                    }
+
+                    panel quest_4 {
+                        layout: column;
+                        padding: 12 0;
+                        gap: 4;
+
+                        text quest_4_name {
+                            text: "The Fallen";
+                            font-size: 18;
+                            color: #c8c8c8;
+                            letter-spacing: 0.5;
+                        }
+                        text quest_4_desc {
+                            text: "Capture a dragon in Dragonsreach";
+                            font-size: 14;
+                            color: #6a6a6a;
+                            letter-spacing: 0.5;
+                            line-height: 1.4;
+                        }
+                    }
+                }
+
+                // Spacer
+                panel detail_spacer {
+                    flex-grow: 1;
+                }
+
+                // Bottom stats bar
+                panel stats_bar {
+                    layout: row;
+                    gap: 40;
+                    padding: 0;
+
+                    panel stat_level {
+                        layout: column;
+                        gap: 4;
+
+                        text stat_level_label {
+                            text: "LEVEL";
+                            font-size: 11;
+                            letter-spacing: 2;
+                            text-transform: uppercase;
+                            color: #5a5a5a;
+                        }
+                        text stat_level_value {
+                            text: "42";
+                            font-size: 24;
+                            color: #9a9a9a;
+                            letter-spacing: 1;
+                        }
+                    }
+
+                    panel stat_health {
+                        layout: column;
+                        gap: 4;
+
+                        text stat_health_label {
+                            text: "HEALTH";
+                            font-size: 11;
+                            letter-spacing: 2;
+                            text-transform: uppercase;
+                            color: #5a5a5a;
+                        }
+
+                        // Health bar
+                        panel health_bar_bg {
+                            width: 120;
+                            height: 4;
+                            background: #2a2a2a;
+                            corner-radius: 2;
+
+                            panel health_bar_fill {
+                                width: 85%;
+                                height: 100%;
+                                background: #8b2020;
+                                background-end: #a03030;
+                                corner-radius: 2;
+                            }
+                        }
+                    }
+
+                    panel stat_magicka {
+                        layout: column;
+                        gap: 4;
+
+                        text stat_magicka_label {
+                            text: "MAGICKA";
+                            font-size: 11;
+                            letter-spacing: 2;
+                            text-transform: uppercase;
+                            color: #5a5a5a;
+                        }
+
+                        panel magicka_bar_bg {
+                            width: 120;
+                            height: 4;
+                            background: #2a2a2a;
+                            corner-radius: 2;
+
+                            panel magicka_bar_fill {
+                                width: 60%;
+                                height: 100%;
+                                background: #203060;
+                                background-end: #304080;
+                                corner-radius: 2;
+                            }
+                        }
+                    }
+
+                    panel stat_stamina {
+                        layout: column;
+                        gap: 4;
+
+                        text stat_stamina_label {
+                            text: "STAMINA";
+                            font-size: 11;
+                            letter-spacing: 2;
+                            text-transform: uppercase;
+                            color: #5a5a5a;
+                        }
+
+                        panel stamina_bar_bg {
+                            width: 120;
+                            height: 4;
+                            background: #2a2a2a;
+                            corner-radius: 2;
+
+                            panel stamina_bar_fill {
+                                width: 72%;
+                                height: 100%;
+                                background: #2a5020;
+                                background-end: #3a6830;
+                                corner-radius: 2;
+                            }
+                        }
+                    }
+
+                    // Spacer
+                    panel stats_spacer {
+                        flex-grow: 1;
+                    }
+
+                    panel stat_gold {
+                        layout: column;
+                        gap: 4;
+
+                        text stat_gold_label {
+                            text: "GOLD";
+                            font-size: 11;
+                            letter-spacing: 2;
+                            text-transform: uppercase;
+                            color: #5a5a5a;
+                        }
+                        text stat_gold_value {
+                            text: "14,832";
+                            font-size: 24;
+                            color: #9a8a5a;
+                            letter-spacing: 1;
+                        }
+                    }
+
+                    panel stat_weight {
+                        layout: column;
+                        gap: 4;
+
+                        text stat_weight_label {
+                            text: "CARRY";
+                            font-size: 11;
+                            letter-spacing: 2;
+                            text-transform: uppercase;
+                            color: #5a5a5a;
+                        }
+                        text stat_weight_value {
+                            text: "247/350";
+                            font-size: 24;
+                            color: #7a7a7a;
+                            letter-spacing: 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

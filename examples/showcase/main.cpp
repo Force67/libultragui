@@ -72,8 +72,10 @@ static const Scene scenes[] = {
      ugui::Color::from_hex(0x0d0d14)},
     {"terminal", "scenes/terminal.ugui", "scenes/terminal.lua",
      ugui::Color::from_hex(0x000000)},
+    {"rpg", "scenes/rpg_menu.ugui", "scenes/rpg_menu.lua",
+     ugui::Color::from_hex(0x000000)},
 };
-static constexpr int SCENE_COUNT = 4;
+static constexpr int SCENE_COUNT = 5;
 
 static int current_scene = 0;
 static bool scene_dirty = true;
@@ -150,7 +152,7 @@ int main(int argc, char* argv[]) {
     ui.set_default_font(font);
 
     auto* window = static_cast<GLFWwindow*>(ui.platform()->native_handle());
-    std::printf("Press 1-4 to switch scenes: dashboard, neon, glass, terminal\n");
+    std::printf("Press 1-5 to switch scenes: dashboard, neon, glass, terminal, rpg\n");
 
     while (ui.running()) {
         // Poll scene-switch keys (1-4) without hijacking GLFW callbacks
