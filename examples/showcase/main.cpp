@@ -79,7 +79,7 @@ static constexpr int SCENE_COUNT = 5;
 
 static int current_scene = 0;
 static bool scene_dirty = true;
-static bool key_was_down[4] = {};
+static bool key_was_down[16] = {};
 
 static void load_scene(ugui::UIContext& ui, int idx) {
     auto& s = scenes[idx];
