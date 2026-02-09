@@ -18,12 +18,46 @@ panel root {
         layout: column;
         padding: 0 60;
 
-        // Outer rule
-        panel tab_outer_rule {
+        // Tab chamfered top
+        panel tab_chamfer_top {
+            layout: row;
             width: 100%;
-            height: 2;
-            background: #6a645840;
-            background-end: #6a645820;
+            align: end;
+
+            panel tab_ch_tl {
+                width: 12;
+                height: 12;
+                background: #09080b;
+                border-color: #6a645840;
+                border-width: 1;
+                corner-radius-br: 12;
+            }
+
+            panel tab_top_double {
+                layout: column;
+                flex-grow: 1;
+
+                panel tab_top_r1 {
+                    width: 100%;
+                    height: 1;
+                    background: #6a645848;
+                }
+                panel tab_top_gap { height: 2; }
+                panel tab_top_r2 {
+                    width: 100%;
+                    height: 1;
+                    background: #6a645820;
+                }
+            }
+
+            panel tab_ch_tr {
+                width: 12;
+                height: 12;
+                background: #09080b;
+                border-color: #6a645840;
+                border-width: 1;
+                corner-radius-bl: 12;
+            }
         }
 
         panel tab_bar {
@@ -127,41 +161,130 @@ panel root {
             }
         }
 
-        // Bottom rule (double)
-        panel tab_inner_rule {
+        // Tab chamfered bottom
+        panel tab_chamfer_bot {
+            layout: row;
             width: 100%;
-            height: 1;
-            background: #6a645840;
-        }
-        panel tab_inner_rule2 {
-            width: 100%;
-            height: 1;
-            background: #6a645818;
-            margin: 2 0 0 0;
+            align: start;
+
+            panel tab_ch_bl {
+                width: 12;
+                height: 12;
+                background: #09080b;
+                border-color: #6a645840;
+                border-width: 1;
+                corner-radius-tr: 12;
+            }
+
+            panel tab_bot_double {
+                layout: column;
+                flex-grow: 1;
+
+                panel tab_bot_r1 {
+                    width: 100%;
+                    height: 1;
+                    background: #6a645820;
+                }
+                panel tab_bot_gap { height: 2; }
+                panel tab_bot_r2 {
+                    width: 100%;
+                    height: 1;
+                    background: #6a645848;
+                }
+            }
+
+            panel tab_ch_br {
+                width: 12;
+                height: 12;
+                background: #09080b;
+                border-color: #6a645840;
+                border-width: 1;
+                corner-radius-tl: 12;
+            }
         }
     }
 
-    // MAIN CONTENT FRAME - double border, warm background
+    // MAIN CONTENT FRAME - double border with chamfered corners
     panel content_wrap {
         layout: column;
         flex-grow: 1;
         padding: 8 60;
 
-        // Outer border frame
-        panel frame_outer {
-            layout: column;
-            flex-grow: 1;
-            border-color: #5a584e30;
-            border-width: 1;
-            padding: 3;
+        // Chamfered top edge
+        // Row of: corner cut | top border line | corner cut
+        panel chamfer_top {
+            layout: row;
+            width: 100%;
+            align: end;
 
-            // Inner border frame (double-border effect)
+            // Top-left chamfer: small background-colored square over the corner
+            panel chamfer_tl {
+                width: 16;
+                height: 16;
+                background: #09080b;
+                // Diagonal illusion: border only on bottom-right edges
+                border-color: #5a584e30;
+                border-width: 1;
+                corner-radius-br: 16;
+            }
+
+            // Top double rule between chamfers
+            panel top_rules {
+                layout: column;
+                flex-grow: 1;
+
+                panel top_rule_1 {
+                    width: 100%;
+                    height: 1;
+                    background: #5a584e38;
+                }
+                panel top_rule_gap { height: 3; }
+                panel top_rule_2 {
+                    width: 100%;
+                    height: 1;
+                    background: #5a584e1c;
+                }
+            }
+
+            // Top-right chamfer
+            panel chamfer_tr {
+                width: 16;
+                height: 16;
+                background: #09080b;
+                border-color: #5a584e30;
+                border-width: 1;
+                corner-radius-bl: 16;
+            }
+        }
+
+        // Main frame body (between chamfered top and bottom)
+        panel frame_body {
+            layout: row;
+            flex-grow: 1;
+
+            // Left double rule (vertical)
+            panel left_rules {
+                layout: row;
+                height: 100%;
+
+                panel left_rule_1 {
+                    width: 1;
+                    height: 100%;
+                    background: #5a584e38;
+                }
+                panel left_rule_gap { width: 3; }
+                panel left_rule_2 {
+                    width: 1;
+                    height: 100%;
+                    background: #5a584e1c;
+                }
+            }
+
+            // Inner content area
             panel frame_inner {
                 layout: row;
                 flex-grow: 1;
-                background: #0e0d1060;
-                border-color: #5a584e18;
-                border-width: 1;
+                background: #0e0d1050;
                 padding: 0;
 
                 // LEFT: Menu items
@@ -403,6 +526,69 @@ panel root {
                     panel detail_fill { flex-grow: 1; }
                 }
             }
+
+            // Right double rule (vertical)
+            panel right_rules {
+                layout: row;
+                height: 100%;
+
+                panel right_rule_2 {
+                    width: 1;
+                    height: 100%;
+                    background: #5a584e1c;
+                }
+                panel right_rule_gap { width: 3; }
+                panel right_rule_1 {
+                    width: 1;
+                    height: 100%;
+                    background: #5a584e38;
+                }
+            }
+        }
+
+        // Chamfered bottom edge
+        panel chamfer_bottom {
+            layout: row;
+            width: 100%;
+            align: start;
+
+            // Bottom-left chamfer
+            panel chamfer_bl {
+                width: 16;
+                height: 16;
+                background: #09080b;
+                border-color: #5a584e30;
+                border-width: 1;
+                corner-radius-tr: 16;
+            }
+
+            // Bottom double rule between chamfers
+            panel bottom_rules {
+                layout: column;
+                flex-grow: 1;
+
+                panel bottom_rule_2 {
+                    width: 100%;
+                    height: 1;
+                    background: #5a584e1c;
+                }
+                panel bottom_rule_gap { height: 3; }
+                panel bottom_rule_1 {
+                    width: 100%;
+                    height: 1;
+                    background: #5a584e38;
+                }
+            }
+
+            // Bottom-right chamfer
+            panel chamfer_br_panel {
+                width: 16;
+                height: 16;
+                background: #09080b;
+                border-color: #5a584e30;
+                border-width: 1;
+                corner-radius-tl: 16;
+            }
         }
     }
 
@@ -411,28 +597,41 @@ panel root {
         layout: column;
         padding: 0 60;
 
-        // Corner ornaments + rule
+        // Double rule with diamond endpoints
         panel bottom_orn_row {
             layout: row;
             width: 100%;
             align: center;
 
-            text orn_bl {
-                text: "◆";
-                font-size: 8;
-                color: #5a584e;
-                padding: 0 8 0 0;
+            text orn_bl_d {
+                text: "◇";
+                font-size: 11;
+                color: #5a584e60;
+                padding: 0 6 0 0;
             }
-            panel bottom_rule_line {
+
+            panel bottom_double_rules {
+                layout: column;
                 flex-grow: 1;
-                height: 1;
-                background: #5a584e40;
+
+                panel bot_bar_r1 {
+                    width: 100%;
+                    height: 1;
+                    background: #5a584e48;
+                }
+                panel bot_bar_gap { height: 2; }
+                panel bot_bar_r2 {
+                    width: 100%;
+                    height: 1;
+                    background: #5a584e20;
+                }
             }
-            text orn_br {
-                text: "◆";
-                font-size: 8;
-                color: #5a584e;
-                padding: 0 0 0 8;
+
+            text orn_br_d {
+                text: "◇";
+                font-size: 11;
+                color: #5a584e60;
+                padding: 0 0 0 6;
             }
         }
 
