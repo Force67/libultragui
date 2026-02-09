@@ -1,30 +1,29 @@
-// RPG pause menu - faithful recreation of the Elder Scrolls V journal/system UI
-// Tab bar on top, bordered content panel, left menu + right detail, bottom status bar
+// RPG journal/system menu - dense recreation of the Elder Scrolls V aesthetic
+// Ornamental details via Unicode glyphs, double-border frame, warm parchment tones,
+// selection indicator, per-tab content, version string
 
 panel root {
     layout: column;
     width: 100%;
     height: 100%;
-    background: #0a0a0c;
-    background-end: #0e0d10;
+    background: #09080b;
+    background-end: #0d0c0f;
     padding: 0;
 
-    // Top spacer
-    panel top_spacer {
-        height: 40;
-    }
+    // Top margin
+    panel top_margin { height: 36; }
 
-    // Tab bar
-    panel tab_bar_outer {
+    // TAB BAR - ornamental diamonds at edges, tabs centered
+    panel tab_section {
         layout: column;
-        align: center;
-        padding: 0 80;
+        padding: 0 60;
 
-        // Top rule
-        panel tab_rule_top {
+        // Outer rule
+        panel tab_outer_rule {
             width: 100%;
-            height: 1;
-            background: #6a6a6a60;
+            height: 2;
+            background: #6a645840;
+            background-end: #6a645820;
         }
 
         panel tab_bar {
@@ -32,361 +31,478 @@ panel root {
             width: 100%;
             justify: center;
             align: center;
-            padding: 12 0;
+            padding: 0;
             gap: 0;
-            background: #18161a80;
+            background: #14121680;
+
+            // Left ornament
+            text orn_l {
+                text: "◆";
+                font-size: 10;
+                color: #6a6458;
+                padding: 10 16;
+            }
+
+            // Left rule segment
+            panel tab_rule_l {
+                flex-grow: 1;
+                height: 1;
+                background: #5a584e30;
+            }
 
             button tab_quests {
                 text: "QUESTS";
-                font-size: 20;
-                letter-spacing: 4;
+                font-size: 18;
+                letter-spacing: 5;
                 text-transform: uppercase;
                 text-align: center;
-                color: #c0b8a8;
+                color: #9a9488;
                 background: transparent;
-                padding: 4 40;
+                padding: 10 32;
                 cursor: pointer;
-                :hover { color: #ffffff; }
+                :hover { color: #e8e0d0; }
+            }
+
+            // Diamond separator
+            text orn_sep1 {
+                text: "◆";
+                font-size: 7;
+                color: #5a584e50;
+                padding: 0 4;
             }
 
             button tab_stats {
                 text: "GENERAL STATS";
-                font-size: 20;
-                letter-spacing: 4;
+                font-size: 18;
+                letter-spacing: 5;
                 text-transform: uppercase;
                 text-align: center;
-                color: #c0b8a8;
+                color: #9a9488;
                 background: transparent;
-                padding: 4 40;
+                padding: 10 32;
                 cursor: pointer;
-                :hover { color: #ffffff; }
+                :hover { color: #e8e0d0; }
             }
 
-            // Arrow indicators
-            text tab_arrow_l {
-                text: "<";
-                font-size: 18;
-                color: #6a6258;
-                padding: 0 20;
+            // Arrows
+            text tab_arr_l {
+                text: "◂";
+                font-size: 14;
+                color: #5a584e;
+                padding: 0 14;
             }
-
-            text tab_arrow_r {
-                text: ">";
-                font-size: 18;
-                color: #6a6258;
-                padding: 0 20;
+            text tab_arr_r {
+                text: "▸";
+                font-size: 14;
+                color: #5a584e;
+                padding: 0 14;
             }
 
             button tab_system {
                 text: "SYSTEM";
-                font-size: 20;
-                letter-spacing: 4;
+                font-size: 18;
+                letter-spacing: 5;
                 text-transform: uppercase;
                 text-align: center;
-                color: #e0d8c8;
+                color: #d8d0c0;
                 background: transparent;
-                padding: 4 40;
+                padding: 10 32;
                 cursor: pointer;
-                :hover { color: #ffffff; }
+                :hover { color: #e8e0d0; }
+            }
+
+            // Right rule segment
+            panel tab_rule_r {
+                flex-grow: 1;
+                height: 1;
+                background: #5a584e30;
+            }
+
+            // Right ornament
+            text orn_r {
+                text: "◆";
+                font-size: 10;
+                color: #6a6458;
+                padding: 10 16;
             }
         }
 
-        // Bottom rule
-        panel tab_rule_bottom {
+        // Bottom rule (double)
+        panel tab_inner_rule {
             width: 100%;
             height: 1;
-            background: #6a6a6a60;
+            background: #6a645840;
+        }
+        panel tab_inner_rule2 {
+            width: 100%;
+            height: 1;
+            background: #6a645818;
+            margin: 2 0 0 0;
         }
     }
 
-    // Main content panel (bordered, semi-transparent)
-    panel content_outer {
+    // MAIN CONTENT FRAME - double border, warm background
+    panel content_wrap {
         layout: column;
         flex-grow: 1;
-        padding: 12 80;
+        padding: 8 60;
 
-        panel content_frame {
-            layout: row;
+        // Outer border frame
+        panel frame_outer {
+            layout: column;
             flex-grow: 1;
-            background: #10101480;
-            border-color: #5a5a5a38;
+            border-color: #5a584e30;
             border-width: 1;
-            padding: 0;
+            padding: 3;
 
-            // Left menu column
-            panel left_menu {
-                layout: column;
-                width: 340;
-                height: 100%;
-                padding: 30 40 30 30;
-                justify: start;
-                align: end;
-                gap: 2;
-
-                // Menu items - right-aligned, smaller text
-                button menu_quicksave {
-                    text: "QUICKSAVE";
-                    font-size: 16;
-                    letter-spacing: 2;
-                    text-transform: uppercase;
-                    text-align: right;
-                    color: #9a9490;
-                    background: transparent;
-                    padding: 6 0;
-                    cursor: pointer;
-                    :hover { color: #e8e0d8; }
-                    :pressed { color: #b0a898; }
-                }
-
-                button menu_save {
-                    text: "SAVE";
-                    font-size: 16;
-                    letter-spacing: 2;
-                    text-transform: uppercase;
-                    text-align: right;
-                    color: #9a9490;
-                    background: transparent;
-                    padding: 6 0;
-                    cursor: pointer;
-                    :hover { color: #e8e0d8; }
-                    :pressed { color: #b0a898; }
-                }
-
-                button menu_load {
-                    text: "LOAD";
-                    font-size: 16;
-                    letter-spacing: 2;
-                    text-transform: uppercase;
-                    text-align: right;
-                    color: #9a9490;
-                    background: transparent;
-                    padding: 6 0;
-                    cursor: pointer;
-                    :hover { color: #e8e0d8; }
-                    :pressed { color: #b0a898; }
-                }
-
-                button menu_mods {
-                    text: "MODS";
-                    font-size: 16;
-                    letter-spacing: 2;
-                    text-transform: uppercase;
-                    text-align: right;
-                    color: #9a9490;
-                    background: transparent;
-                    padding: 6 0;
-                    cursor: pointer;
-                    :hover { color: #e8e0d8; }
-                    :pressed { color: #b0a898; }
-                }
-
-                button menu_settings {
-                    text: "SETTINGS";
-                    font-size: 16;
-                    letter-spacing: 2;
-                    text-transform: uppercase;
-                    text-align: right;
-                    color: #9a9490;
-                    background: transparent;
-                    padding: 6 0;
-                    cursor: pointer;
-                    :hover { color: #e8e0d8; }
-                    :pressed { color: #b0a898; }
-                }
-
-                button menu_controls {
-                    text: "CONTROLS";
-                    font-size: 16;
-                    letter-spacing: 2;
-                    text-transform: uppercase;
-                    text-align: right;
-                    color: #9a9490;
-                    background: transparent;
-                    padding: 6 0;
-                    cursor: pointer;
-                    :hover { color: #e8e0d8; }
-                    :pressed { color: #b0a898; }
-                }
-
-                button menu_help {
-                    text: "HELP";
-                    font-size: 16;
-                    letter-spacing: 2;
-                    text-transform: uppercase;
-                    text-align: right;
-                    color: #9a9490;
-                    background: transparent;
-                    padding: 6 0;
-                    cursor: pointer;
-                    :hover { color: #e8e0d8; }
-                    :pressed { color: #b0a898; }
-                }
-
-                // Spacer pushes QUIT to bottom area
-                panel menu_spacer {
-                    flex-grow: 1;
-                }
-
-                // QUIT - larger, bolder
-                button menu_quit {
-                    text: "QUIT";
-                    font-size: 26;
-                    letter-spacing: 4;
-                    text-transform: uppercase;
-                    text-align: right;
-                    color: #c8c0b4;
-                    background: transparent;
-                    padding: 8 0;
-                    cursor: pointer;
-                    :hover { color: #ffffff; }
-                    :pressed { color: #b0a898; }
-                }
-            }
-
-            // Vertical divider
-            panel divider {
-                width: 1;
-                height: 100%;
-                background: #5a5a5a30;
-            }
-
-            // Right detail column
-            panel right_detail {
-                layout: column;
-                flex-grow: 1;
-                height: 100%;
-                padding: 30 40;
-                gap: 8;
-
-                // Detail content (changes based on selection)
-                text detail_title {
-                    text: "Main Menu";
-                    font-size: 22;
-                    letter-spacing: 1;
-                    color: #d0c8bc;
-                    padding: 0 0 4 0;
-                }
-
-                button detail_option_1 {
-                    text: "Desktop";
-                    font-size: 18;
-                    letter-spacing: 1;
-                    color: #8a8478;
-                    background: transparent;
-                    padding: 4 0;
-                    cursor: pointer;
-                    :hover { color: #d0c8b8; }
-                }
-
-                button detail_option_2 {
-                    text: "";
-                    font-size: 18;
-                    letter-spacing: 1;
-                    color: #8a8478;
-                    background: transparent;
-                    padding: 4 0;
-                    cursor: pointer;
-                    :hover { color: #d0c8b8; }
-                }
-
-                button detail_option_3 {
-                    text: "";
-                    font-size: 18;
-                    letter-spacing: 1;
-                    color: #8a8478;
-                    background: transparent;
-                    padding: 4 0;
-                    cursor: pointer;
-                    :hover { color: #d0c8b8; }
-                }
-
-                // Fill rest
-                panel detail_fill {
-                    flex-grow: 1;
-                }
-            }
-        }
-    }
-
-    // Bottom status bar
-    panel bottom_bar_outer {
-        layout: column;
-        padding: 0 80;
-
-        panel bottom_rule {
-            width: 100%;
-            height: 1;
-            background: #6a6a6a60;
-        }
-
-        panel bottom_bar {
-            layout: row;
-            width: 100%;
-            padding: 10 0 16 0;
-            align: center;
-            justify: space-between;
-
-            // Left: Level + XP bar
-            panel level_group {
+            // Inner border frame (double-border effect)
+            panel frame_inner {
                 layout: row;
-                align: center;
-                gap: 12;
+                flex-grow: 1;
+                background: #0e0d1060;
+                border-color: #5a584e18;
+                border-width: 1;
+                padding: 0;
 
-                text level_label {
-                    text: "LEVEL";
-                    font-size: 14;
-                    letter-spacing: 3;
-                    text-transform: uppercase;
-                    color: #8a8478;
-                }
+                // LEFT: Menu items
+                panel left_col {
+                    layout: column;
+                    width: 320;
+                    height: 100%;
+                    padding: 28 0 28 20;
+                    align: end;
+                    gap: 0;
 
-                text level_value {
-                    text: "42";
-                    font-size: 22;
-                    color: #d0c8bc;
-                    letter-spacing: 1;
-                }
-
-                // XP progress bar
-                panel xp_bar_outer {
-                    layout: row;
-                    align: center;
-                    gap: 6;
-
-                    text xp_arrow_l {
-                        text: "<";
-                        font-size: 12;
-                        color: #5a5650;
+                    button menu_quicksave {
+                        text: "QUICKSAVE";
+                        font-size: 15;
+                        letter-spacing: 2;
+                        text-transform: uppercase;
+                        text-align: right;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 24 5 0;
+                        cursor: pointer;
+                        :hover { color: #d8d0c4; }
                     }
 
-                    panel xp_bar_bg {
-                        width: 200;
-                        height: 3;
-                        background: #3a3830;
-                        corner-radius: 1;
+                    button menu_save {
+                        text: "SAVE";
+                        font-size: 15;
+                        letter-spacing: 2;
+                        text-transform: uppercase;
+                        text-align: right;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 24 5 0;
+                        cursor: pointer;
+                        :hover { color: #d8d0c4; }
+                    }
 
-                        panel xp_bar_fill {
-                            width: 65%;
-                            height: 100%;
-                            background: #8a8470;
-                            corner-radius: 1;
+                    button menu_load {
+                        text: "LOAD";
+                        font-size: 15;
+                        letter-spacing: 2;
+                        text-transform: uppercase;
+                        text-align: right;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 24 5 0;
+                        cursor: pointer;
+                        :hover { color: #d8d0c4; }
+                    }
+
+                    button menu_mods {
+                        text: "MODS";
+                        font-size: 15;
+                        letter-spacing: 2;
+                        text-transform: uppercase;
+                        text-align: right;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 24 5 0;
+                        cursor: pointer;
+                        :hover { color: #d8d0c4; }
+                    }
+
+                    button menu_settings {
+                        text: "SETTINGS";
+                        font-size: 15;
+                        letter-spacing: 2;
+                        text-transform: uppercase;
+                        text-align: right;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 24 5 0;
+                        cursor: pointer;
+                        :hover { color: #d8d0c4; }
+                    }
+
+                    button menu_controls {
+                        text: "CONTROLS";
+                        font-size: 15;
+                        letter-spacing: 2;
+                        text-transform: uppercase;
+                        text-align: right;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 24 5 0;
+                        cursor: pointer;
+                        :hover { color: #d8d0c4; }
+                    }
+
+                    button menu_help {
+                        text: "HELP";
+                        font-size: 15;
+                        letter-spacing: 2;
+                        text-transform: uppercase;
+                        text-align: right;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 24 5 0;
+                        cursor: pointer;
+                        :hover { color: #d8d0c4; }
+                    }
+
+                    // Push QUIT down
+                    panel quit_spacer { flex-grow: 1; }
+
+                    // QUIT - bigger, with selection chevron
+                    panel quit_row {
+                        layout: row;
+                        align: center;
+                        justify: end;
+                        gap: 0;
+                        padding: 0 0 0 0;
+
+                        button menu_quit {
+                            text: "QUIT";
+                            font-size: 24;
+                            letter-spacing: 4;
+                            text-transform: uppercase;
+                            text-align: right;
+                            color: #c8c0b0;
+                            background: transparent;
+                            padding: 6 0 6 0;
+                            cursor: pointer;
+                            :hover { color: #f0e8d8; }
+                        }
+
+                        // Selection arrow (always visible for QUIT, Lua toggles for others)
+                        text sel_arrow {
+                            text: "▸";
+                            font-size: 20;
+                            color: #c8c0b0;
+                            padding: 0 0 0 8;
                         }
                     }
 
-                    text xp_arrow_r {
-                        text: ">";
+                    // Version string (bottom-left of menu column)
+                    text version_str {
+                        text: "1.6.353.0.8";
+                        font-size: 11;
+                        color: #4a4840;
+                        letter-spacing: 0.5;
+                        padding: 12 0 0 0;
+                    }
+                }
+
+                // DIVIDER
+                panel col_divider {
+                    width: 1;
+                    height: 100%;
+                    background: #5a584e28;
+                }
+
+                // RIGHT: Detail panel
+                panel right_col {
+                    layout: column;
+                    flex-grow: 1;
+                    height: 100%;
+                    padding: 28 32;
+                    gap: 4;
+
+                    text detail_heading {
+                        text: "";
                         font-size: 12;
-                        color: #5a5650;
+                        letter-spacing: 3;
+                        text-transform: uppercase;
+                        color: #5a584e;
+                        padding: 0 0 8 0;
+                    }
+
+                    text detail_title {
+                        text: "Main Menu";
+                        font-size: 21;
+                        letter-spacing: 0.5;
+                        color: #ccc4b4;
+                    }
+
+                    panel detail_sep {
+                        width: 60;
+                        height: 1;
+                        background: #5a584e20;
+                        margin: 6 0;
+                    }
+
+                    button detail_opt_1 {
+                        text: "Desktop";
+                        font-size: 17;
+                        letter-spacing: 0.5;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 0;
+                        cursor: pointer;
+                        :hover { color: #d0c8b8; }
+                    }
+
+                    button detail_opt_2 {
+                        text: "";
+                        font-size: 17;
+                        letter-spacing: 0.5;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 0;
+                        cursor: pointer;
+                        :hover { color: #d0c8b8; }
+                    }
+
+                    button detail_opt_3 {
+                        text: "";
+                        font-size: 17;
+                        letter-spacing: 0.5;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 0;
+                        cursor: pointer;
+                        :hover { color: #d0c8b8; }
+                    }
+
+                    button detail_opt_4 {
+                        text: "";
+                        font-size: 17;
+                        letter-spacing: 0.5;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 0;
+                        cursor: pointer;
+                        :hover { color: #d0c8b8; }
+                    }
+
+                    button detail_opt_5 {
+                        text: "";
+                        font-size: 17;
+                        letter-spacing: 0.5;
+                        color: #8a8478;
+                        background: transparent;
+                        padding: 5 0;
+                        cursor: pointer;
+                        :hover { color: #d0c8b8; }
+                    }
+
+                    panel detail_fill { flex-grow: 1; }
+                }
+            }
+        }
+    }
+
+    // BOTTOM STATUS BAR - level, XP, date
+    panel bottom_section {
+        layout: column;
+        padding: 0 60;
+
+        // Corner ornaments + rule
+        panel bottom_orn_row {
+            layout: row;
+            width: 100%;
+            align: center;
+
+            text orn_bl {
+                text: "◆";
+                font-size: 8;
+                color: #5a584e;
+                padding: 0 8 0 0;
+            }
+            panel bottom_rule_line {
+                flex-grow: 1;
+                height: 1;
+                background: #5a584e40;
+            }
+            text orn_br {
+                text: "◆";
+                font-size: 8;
+                color: #5a584e;
+                padding: 0 0 0 8;
+            }
+        }
+
+        panel status_bar {
+            layout: row;
+            width: 100%;
+            padding: 8 8 20 8;
+            align: center;
+            justify: space-between;
+
+            // Level + XP
+            panel level_block {
+                layout: row;
+                align: center;
+                gap: 10;
+
+                text lbl_level {
+                    text: "LEVEL";
+                    font-size: 13;
+                    letter-spacing: 3;
+                    text-transform: uppercase;
+                    color: #7a7468;
+                }
+
+                text val_level {
+                    text: "42";
+                    font-size: 24;
+                    color: #c8c0b0;
+                    letter-spacing: 1;
+                }
+
+                // XP bar with arrow bookends
+                panel xp_group {
+                    layout: row;
+                    align: center;
+                    gap: 5;
+
+                    text xp_l {
+                        text: "◂";
+                        font-size: 10;
+                        color: #4a4840;
+                    }
+
+                    panel xp_track {
+                        width: 180;
+                        height: 3;
+                        background: #2a2820;
+
+                        panel xp_fill {
+                            width: 65%;
+                            height: 100%;
+                            background: #7a7464;
+                            background-end: #8a846e;
+                        }
+                    }
+
+                    text xp_r {
+                        text: "▸";
+                        font-size: 10;
+                        color: #4a4840;
                     }
                 }
             }
 
-            // Right: Date/time
-            text datetime_text {
+            // Date
+            text game_date {
                 text: "Morndas, 5:11 PM, 18th of Last Seed, 4E 201";
-                font-size: 14;
+                font-size: 13;
                 letter-spacing: 0.5;
-                color: #8a8478;
+                color: #7a7468;
             }
         }
     }
