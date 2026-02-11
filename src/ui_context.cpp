@@ -2,6 +2,13 @@
 #include <ultragui/widgets/button.h>
 #include <ultragui/widgets/text.h>
 
+#if ULTRAGUI_AUDIO
+extern "C" {
+#include <lauxlib.h>
+#include <lua.h>
+}
+#endif
+
 #include <cstdio>
 #include <cstring>
 
@@ -63,6 +70,14 @@ bool UIContext::init(const UIConfig& config) {
 
     // Lua
     lua_.init();
+
+#if ULTRAGUI_AUDIO
+    // Audio
+    if (!audio_.init()) {
+        std::fprintf(stderr, "ultragui: audio init failed (non-fatal)\n");
+    }
+    register_audio_lua();
+#endif
 
     // Builder
     builder_.set_text_engine(&text_engine_);
@@ -260,6 +275,9 @@ void UIContext::shutdown() {
         owns_root_ = false;
     }
 
+#if ULTRAGUI_AUDIO
+    audio_.shutdown();
+#endif
     lua_.shutdown();
     renderer_.shutdown();
     text_engine_.shutdown();
@@ -275,6 +293,10 @@ void UIContext::shutdown() {
         delete platform_;
         platform_ = nullptr;
     }
+}
+
+RHITextureHandle UIContext::load_svg(const char* path, u32 width, u32 height) {
+    return load_svg_texture(rhi_, path, width, height);
 }
 
 RHITextureHandle UIContext::create_render_target(u32 width, u32 height) {
@@ -439,5 +461,107 @@ static void measure_tree_recursive(Widget* widget) {
     widget->measure(w, h);
     widget->set_intrinsic_size(w, h);
 }
+
+// ---------------------------------------------------------------------------
+// Audio Lua bindings
+// ---------------------------------------------------------------------------
+
+#if ULTRAGUI_AUDIO
+void UIContext::register_audio_lua() {
+    // ugui.play_sound(path [, volume [, loop]]) -> handle
+    lua_.register_function("play_sound", [this](lua_State* L) -> int {
+        const char* path = luaL_checkstring(L, 1);
+        f32 volume = lua_isnumber(L, 2) ? static_cast<f32>(lua_tonumber(L, 2)) : 1.0f;
+        bool loop = lua_isboolean(L, 3) ? lua_toboolean(L, 3) : false;
+        SoundHandle h = audio_.play(path, volume, loop);
+        lua_pushinteger(L, h);
+        return 1;
+    });
+
+    // ugui.load_sound(path) -> handle
+    lua_.register_function("load_sound", [this](lua_State* L) -> int {
+        const char* path = luaL_checkstring(L, 1);
+        SoundHandle h = audio_.load(path);
+        lua_pushinteger(L, h);
+        return 1;
+    });
+
+    // ugui.play_loaded(handle [, volume [, loop]]) -> new handle
+    lua_.register_function("play_loaded", [this](lua_State* L) -> int {
+        SoundHandle src = static_cast<SoundHandle>(luaL_checkinteger(L, 1));
+        f32 volume = lua_isnumber(L, 2) ? static_cast<f32>(lua_tonumber(L, 2)) : 1.0f;
+        bool loop = lua_isboolean(L, 3) ? lua_toboolean(L, 3) : false;
+        SoundHandle h = audio_.play_loaded(src, volume, loop);
+        lua_pushinteger(L, h);
+        return 1;
+    });
+
+    // ugui.stop_sound(handle)
+    lua_.register_function("stop_sound", [this](lua_State* L) -> int {
+        SoundHandle h = static_cast<SoundHandle>(luaL_checkinteger(L, 1));
+        audio_.stop(h);
+        return 0;
+    });
+
+    // ugui.sound_playing(handle) -> bool
+    lua_.register_function("sound_playing", [this](lua_State* L) -> int {
+        SoundHandle h = static_cast<SoundHandle>(luaL_checkinteger(L, 1));
+        lua_pushboolean(L, audio_.is_playing(h));
+        return 1;
+    });
+
+    // ugui.sound_volume(handle, volume)
+    lua_.register_function("sound_volume", [this](lua_State* L) -> int {
+        SoundHandle h = static_cast<SoundHandle>(luaL_checkinteger(L, 1));
+        f32 vol = static_cast<f32>(luaL_checknumber(L, 2));
+        audio_.set_volume(h, vol);
+        return 0;
+    });
+
+    // ugui.sound_pan(handle, pan)
+    lua_.register_function("sound_pan", [this](lua_State* L) -> int {
+        SoundHandle h = static_cast<SoundHandle>(luaL_checkinteger(L, 1));
+        f32 pan = static_cast<f32>(luaL_checknumber(L, 2));
+        audio_.set_pan(h, pan);
+        return 0;
+    });
+
+    // ugui.sound_pitch(handle, pitch)
+    lua_.register_function("sound_pitch", [this](lua_State* L) -> int {
+        SoundHandle h = static_cast<SoundHandle>(luaL_checkinteger(L, 1));
+        f32 pitch = static_cast<f32>(luaL_checknumber(L, 2));
+        audio_.set_pitch(h, pitch);
+        return 0;
+    });
+
+    // ugui.master_volume(volume) or ugui.master_volume() -> number
+    lua_.register_function("master_volume", [this](lua_State* L) -> int {
+        if (lua_gettop(L) >= 1 && lua_isnumber(L, 1)) {
+            audio_.set_master_volume(static_cast<f32>(lua_tonumber(L, 1)));
+            return 0;
+        }
+        lua_pushnumber(L, audio_.master_volume());
+        return 1;
+    });
+
+    // ugui.stop_all_sounds()
+    lua_.register_function("stop_all_sounds", [this](lua_State*) -> int {
+        audio_.stop_all();
+        return 0;
+    });
+
+    // ugui.pause_all_sounds()
+    lua_.register_function("pause_all_sounds", [this](lua_State*) -> int {
+        audio_.pause_all();
+        return 0;
+    });
+
+    // ugui.resume_all_sounds()
+    lua_.register_function("resume_all_sounds", [this](lua_State*) -> int {
+        audio_.resume_all();
+        return 0;
+    });
+}
+#endif
 
 } // namespace ugui

@@ -1,6 +1,9 @@
 #pragma once
 
 #include <ultragui/animation/animator.h>
+#if ULTRAGUI_AUDIO
+#include <ultragui/audio/audio.h>
+#endif
 #include <ultragui/core/color.h>
 #include <ultragui/idl/builder.h>
 #include <ultragui/idl/parser.h>
@@ -11,6 +14,7 @@
 #include <ultragui/rhi/rhi.h>
 #include <ultragui/scripting/lua_runtime.h>
 #include <ultragui/text/text_engine.h>
+#include <ultragui/svg/svg.h>
 #include <ultragui/widgets/widget.h>
 
 #include <functional>
@@ -93,6 +97,9 @@ public:
     Animator& animator() { return animator_; }
     LuaRuntime& lua() { return lua_; }
     UguiBuilder& builder() { return builder_; }
+#if ULTRAGUI_AUDIO
+    AudioEngine& audio() { return audio_; }
+#endif
 
     /// Get current time in seconds.
     f64 time() const;
@@ -105,6 +112,10 @@ public:
 
     /// Find a widget by name in the tree.
     Widget* find_widget(const char* name) const;
+
+    /// Load an SVG file and create a GPU texture.
+    /// If width/height are 0, uses the SVG's native dimensions.
+    RHITextureHandle load_svg(const char* path, u32 width = 0, u32 height = 0);
 
     /// Create an offscreen render target (delegates to RHI).
     RHITextureHandle create_render_target(u32 width, u32 height);
@@ -127,6 +138,9 @@ private:
     // Build layout node array from widget tree
     void build_layout_nodes(Widget* widget, u32 parent_index);
     void apply_layout_results(Widget* widget, u32& node_index);
+#if ULTRAGUI_AUDIO
+    void register_audio_lua();
+#endif
 
     Platform* platform_ = nullptr;
     RHI* rhi_ = nullptr;
@@ -137,6 +151,9 @@ private:
     Animator animator_;
     LuaRuntime lua_;
     UguiBuilder builder_;
+#if ULTRAGUI_AUDIO
+    AudioEngine audio_;
+#endif
 
     Widget* root_ = nullptr;
     FontHandle default_font_ = INVALID_FONT;

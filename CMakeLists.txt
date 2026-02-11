@@ -15,6 +15,7 @@ option(ULTRAGUI_BUILD_EXAMPLES "Build example applications" ON)
 option(ULTRAGUI_BUILD_TESTS "Build tests" ON)
 option(ULTRAGUI_BACKEND_VULKAN "Enable Vulkan backend" ON)
 option(ULTRAGUI_BACKEND_D3D12 "Enable D3D12 backend" OFF)
+option(ULTRAGUI_AUDIO "Enable audio engine (miniaudio)" ON)
 
 # Compiler warnings
 add_library(ultragui_warnings INTERFACE)
@@ -97,11 +98,18 @@ set(ULTRAGUI_SOURCES
     src/idl/builder.cpp
     src/input/input.cpp
     src/scripting/lua_runtime.cpp
+    src/svg/svg.cpp
+    src/svg/svg_parser.cpp
+    src/svg/svg_rasterizer.cpp
     src/ui_context.cpp
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)
     list(APPEND ULTRAGUI_SOURCES src/rhi/vulkan/vulkan_rhi.cpp)
+endif()
+
+if(ULTRAGUI_AUDIO)
+    list(APPEND ULTRAGUI_SOURCES src/audio/audio.cpp)
 endif()
 
 add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
@@ -113,6 +121,7 @@ target_include_directories(ultragui
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        $<$<BOOL:${ULTRAGUI_AUDIO}>:${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio>
 )
 
 target_compile_definitions(ultragui PRIVATE
@@ -133,6 +142,19 @@ target_link_libraries(ultragui
 if(ULTRAGUI_BACKEND_VULKAN)
     target_link_libraries(ultragui PRIVATE Vulkan::Vulkan)
     target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_VULKAN=1)
+endif()
+
+if(ULTRAGUI_AUDIO)
+    target_compile_definitions(ultragui PUBLIC ULTRAGUI_AUDIO=1)
+    # miniaudio uses dlopen for audio backends on Linux, pthread for threading
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(ultragui PRIVATE pthread m dl)
+    elseif(APPLE)
+        find_library(COREAUDIO_LIB CoreAudio)
+        find_library(AUDIOUNIT_LIB AudioUnit)
+        find_library(COREFOUNDATION_LIB CoreFoundation)
+        target_link_libraries(ultragui PRIVATE ${COREAUDIO_LIB} ${AUDIOUNIT_LIB} ${COREFOUNDATION_LIB})
+    endif()
 endif()
 
 # --- Examples ---
