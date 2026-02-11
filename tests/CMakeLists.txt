@@ -9,3 +9,10 @@ if(ULTRAGUI_AUDIO)
     target_link_libraries(test_audio ultragui)
     add_test(NAME audio COMMAND test_audio)
 endif()
+
+# Lottie animation test
+if(ULTRAGUI_LOTTIE)
+    add_executable(test_lottie test_lottie.cpp)
+    target_link_libraries(test_lottie ultragui rlottie)
+    add_test(NAME lottie COMMAND test_lottie)
+endif()

@@ -2,11 +2,15 @@
 #include <ultragui/widgets/button.h>
 #include <ultragui/widgets/text.h>
 
-#if ULTRAGUI_AUDIO
+#if ULTRAGUI_AUDIO || ULTRAGUI_LOTTIE
 extern "C" {
 #include <lauxlib.h>
 #include <lua.h>
 }
+#endif
+
+#if ULTRAGUI_LOTTIE
+#include <ultragui/widgets/image.h>
 #endif
 
 #include <cstdio>
@@ -77,6 +81,10 @@ bool UIContext::init(const UIConfig& config) {
         std::fprintf(stderr, "ultragui: audio init failed (non-fatal)\n");
     }
     register_audio_lua();
+#endif
+
+#if ULTRAGUI_LOTTIE
+    register_lottie_lua();
 #endif
 
     // Builder
@@ -208,6 +216,14 @@ void UIContext::update() {
         update_tree_recursive(root_, dt_);
     }
 
+#if ULTRAGUI_LOTTIE
+    // Update all managed Lottie animations (re-renders changed frames to GPU)
+    for (auto* anim : lottie_anims_) {
+        if (anim)
+            anim->update(dt_);
+    }
+#endif
+
     // --- Text shaping and atlas management (BEFORE render pass) ---
     // Measure all widgets to determine intrinsic sizes and rasterize glyphs.
     // Then flush the atlas to GPU while no render pass is active - this avoids
@@ -275,6 +291,11 @@ void UIContext::shutdown() {
         owns_root_ = false;
     }
 
+#if ULTRAGUI_LOTTIE
+    for (auto* anim : lottie_anims_)
+        delete anim;
+    lottie_anims_.clear();
+#endif
 #if ULTRAGUI_AUDIO
     audio_.shutdown();
 #endif
@@ -298,6 +319,18 @@ void UIContext::shutdown() {
 RHITextureHandle UIContext::load_svg(const char* path, u32 width, u32 height) {
     return load_svg_texture(rhi_, path, width, height);
 }
+
+#if ULTRAGUI_LOTTIE
+LottieAnimation* UIContext::load_lottie(const char* path, u32 width, u32 height) {
+    auto* anim = new LottieAnimation();
+    if (!anim->load(rhi_, path, width, height)) {
+        delete anim;
+        return nullptr;
+    }
+    lottie_anims_.push_back(anim);
+    return anim;
+}
+#endif
 
 RHITextureHandle UIContext::create_render_target(u32 width, u32 height) {
     return rhi_ ? rhi_->create_render_target(width, height) : INVALID_TEXTURE;
@@ -559,6 +592,104 @@ void UIContext::register_audio_lua() {
     // ugui.resume_all_sounds()
     lua_.register_function("resume_all_sounds", [this](lua_State*) -> int {
         audio_.resume_all();
+        return 0;
+    });
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// Lottie Lua bindings
+// ---------------------------------------------------------------------------
+
+#if ULTRAGUI_LOTTIE
+void UIContext::register_lottie_lua() {
+    // ugui.load_lottie(path, width, height) -> anim lightuserdata
+    lua_.register_function("load_lottie", [this](lua_State* L) -> int {
+        const char* path = luaL_checkstring(L, 1);
+        u32 w = static_cast<u32>(luaL_checkinteger(L, 2));
+        u32 h = static_cast<u32>(luaL_checkinteger(L, 3));
+        LottieAnimation* anim = load_lottie(path, w, h);
+        if (anim)
+            lua_pushlightuserdata(L, anim);
+        else
+            lua_pushnil(L);
+        return 1;
+    });
+
+    // ugui.lottie_play(anim)
+    lua_.register_function("lottie_play", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        if (a) a->play();
+        return 0;
+    });
+
+    // ugui.lottie_pause(anim)
+    lua_.register_function("lottie_pause", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        if (a) a->pause();
+        return 0;
+    });
+
+    // ugui.lottie_stop(anim)
+    lua_.register_function("lottie_stop", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        if (a) a->stop();
+        return 0;
+    });
+
+    // ugui.lottie_loop(anim, bool)
+    lua_.register_function("lottie_loop", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        if (a) a->set_loop(lua_toboolean(L, 2));
+        return 0;
+    });
+
+    // ugui.lottie_speed(anim, speed)
+    lua_.register_function("lottie_speed", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        if (a) a->set_speed(static_cast<f32>(luaL_checknumber(L, 2)));
+        return 0;
+    });
+
+    // ugui.lottie_seek(anim, progress)  -- 0.0 to 1.0
+    lua_.register_function("lottie_seek", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        if (a) a->seek(static_cast<f32>(luaL_checknumber(L, 2)));
+        return 0;
+    });
+
+    // ugui.lottie_playing(anim) -> bool
+    lua_.register_function("lottie_playing", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        lua_pushboolean(L, a && a->is_playing());
+        return 1;
+    });
+
+    // ugui.lottie_progress(anim) -> number
+    lua_.register_function("lottie_progress", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        lua_pushnumber(L, a ? a->progress() : 0);
+        return 1;
+    });
+
+    // ugui.lottie_duration(anim) -> number (seconds)
+    lua_.register_function("lottie_duration", [](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        lua_pushnumber(L, a ? a->duration() : 0);
+        return 1;
+    });
+
+    // ugui.lottie_attach(anim, "widget_name") - set texture on an Image widget
+    lua_.register_function("lottie_attach", [this](lua_State* L) -> int {
+        auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
+        const char* name = luaL_checkstring(L, 2);
+        if (a) {
+            Widget* w = find_widget(name);
+            if (auto* img = dynamic_cast<Image*>(w)) {
+                img->set_texture(a->texture(), static_cast<f32>(a->width()),
+                                 static_cast<f32>(a->height()));
+            }
+        }
         return 0;
     });
 }

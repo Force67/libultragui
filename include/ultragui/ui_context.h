@@ -4,6 +4,9 @@
 #if ULTRAGUI_AUDIO
 #include <ultragui/audio/audio.h>
 #endif
+#if ULTRAGUI_LOTTIE
+#include <ultragui/lottie/lottie.h>
+#endif
 #include <ultragui/core/color.h>
 #include <ultragui/idl/builder.h>
 #include <ultragui/idl/parser.h>
@@ -117,6 +120,12 @@ public:
     /// If width/height are 0, uses the SVG's native dimensions.
     RHITextureHandle load_svg(const char* path, u32 width = 0, u32 height = 0);
 
+#if ULTRAGUI_LOTTIE
+    /// Load a Lottie animation. The returned animation is owned by UIContext
+    /// and automatically updated each frame. Returns nullptr on failure.
+    LottieAnimation* load_lottie(const char* path, u32 width, u32 height);
+#endif
+
     /// Create an offscreen render target (delegates to RHI).
     RHITextureHandle create_render_target(u32 width, u32 height);
 
@@ -141,6 +150,9 @@ private:
 #if ULTRAGUI_AUDIO
     void register_audio_lua();
 #endif
+#if ULTRAGUI_LOTTIE
+    void register_lottie_lua();
+#endif
 
     Platform* platform_ = nullptr;
     RHI* rhi_ = nullptr;
@@ -153,6 +165,9 @@ private:
     UguiBuilder builder_;
 #if ULTRAGUI_AUDIO
     AudioEngine audio_;
+#endif
+#if ULTRAGUI_LOTTIE
+    std::vector<LottieAnimation*> lottie_anims_;
 #endif
 
     Widget* root_ = nullptr;

@@ -12,3 +12,13 @@ target_compile_definitions(ultragui_showcase PRIVATE
     ULTRAGUI_SHOWCASE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/showcase"
 )
 add_dependencies(ultragui_showcase ultragui_shaders)
+
+if(ULTRAGUI_LOTTIE)
+    add_executable(lottie_demo lottie_demo/main.cpp)
+    target_link_libraries(lottie_demo PRIVATE ultragui glfw rlottie)
+    target_compile_definitions(lottie_demo PRIVATE
+        ULTRAGUI_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"
+        ULTRAGUI_LOTTIE_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/lottie_demo"
+    )
+    add_dependencies(lottie_demo ultragui_shaders)
+endif()

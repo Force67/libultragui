@@ -16,6 +16,7 @@ option(ULTRAGUI_BUILD_TESTS "Build tests" ON)
 option(ULTRAGUI_BACKEND_VULKAN "Enable Vulkan backend" ON)
 option(ULTRAGUI_BACKEND_D3D12 "Enable D3D12 backend" OFF)
 option(ULTRAGUI_AUDIO "Enable audio engine (miniaudio)" ON)
+option(ULTRAGUI_LOTTIE "Enable Lottie animation support (rlottie)" ON)
 
 # Compiler warnings
 add_library(ultragui_warnings INTERFACE)
@@ -48,6 +49,15 @@ find_package(glfw3 3.3 REQUIRED)
 # Yoga layout engine (built from source)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/yoga EXCLUDE_FROM_ALL)
+
+# rlottie (Lottie animation renderer)
+if(ULTRAGUI_LOTTIE)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(LOTTIE_MODULE OFF CACHE BOOL "" FORCE)
+    set(LOTTIE_TEST OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/rlottie EXCLUDE_FROM_ALL)
+endif()
 
 # --- Shader compilation ---
 find_program(GLSLC glslc REQUIRED)
@@ -112,6 +122,10 @@ if(ULTRAGUI_AUDIO)
     list(APPEND ULTRAGUI_SOURCES src/audio/audio.cpp)
 endif()
 
+if(ULTRAGUI_LOTTIE)
+    list(APPEND ULTRAGUI_SOURCES src/lottie/lottie.cpp)
+endif()
+
 add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
 add_dependencies(ultragui ultragui_shaders)
 
@@ -142,6 +156,11 @@ target_link_libraries(ultragui
 if(ULTRAGUI_BACKEND_VULKAN)
     target_link_libraries(ultragui PRIVATE Vulkan::Vulkan)
     target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_VULKAN=1)
+endif()
+
+if(ULTRAGUI_LOTTIE)
+    target_link_libraries(ultragui PRIVATE rlottie)
+    target_compile_definitions(ultragui PUBLIC ULTRAGUI_LOTTIE=1)
 endif()
 
 if(ULTRAGUI_AUDIO)
