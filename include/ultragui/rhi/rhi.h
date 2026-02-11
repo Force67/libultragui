@@ -46,6 +46,26 @@ public:
     virtual void update_texture(RHITextureHandle handle, const void* pixels) = 0;
     virtual void destroy_texture(RHITextureHandle handle) = 0;
 
+    /// Acquire the next frame (fence wait, swapchain image, command buffer begin)
+    /// without starting a render pass. Call this before begin_offscreen() if you
+    /// need offscreen passes before the swapchain pass. If not called explicitly,
+    /// begin_frame() will call it internally.
+    virtual bool acquire_frame() = 0;
+
+    /// Create an offscreen render target that can be drawn into and sampled as a texture.
+    /// Returns a texture handle usable with both begin_offscreen() and draw_textured_rect().
+    virtual RHITextureHandle create_render_target(u32 width, u32 height) = 0;
+
+    /// Destroy a render target and release all associated GPU resources.
+    virtual void destroy_render_target(RHITextureHandle handle) = 0;
+
+    /// Begin rendering to an offscreen target. Must be called after acquire_frame()
+    /// and outside any other render pass.
+    virtual bool begin_offscreen(RHITextureHandle target, Color clear_color) = 0;
+
+    /// End the offscreen render pass and transition the image to shader-readable layout.
+    virtual void end_offscreen(RHITextureHandle target) = 0;
+
     virtual Vec2 display_size() const = 0;
 };
 

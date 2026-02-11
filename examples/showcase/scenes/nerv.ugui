@@ -1,0 +1,235 @@
+// NERV-style energy countdown panel (Evangelion aesthetic)
+// Rendered to an offscreen texture, displayed on a "monitor" in the main scene.
+
+panel root {
+    layout: column;
+    width: 100%;
+    height: 100%;
+    background: #0a0a18;
+    padding: 12;
+    gap: 6;
+
+    // === Top header row ===
+    panel header_row {
+        layout: row;
+        width: 100%;
+        justify: space-between;
+        align: center;
+
+        // Left: label
+        panel header_left {
+            layout: column;
+            gap: 2;
+
+            text label_atr_jp {
+                text: "ACTIVE TIME REMAINING:";
+                font-size: 11;
+                color: #cc7700;
+                letter-spacing: 2;
+                text-transform: uppercase;
+            }
+        }
+
+        // Right: INTERNAL box
+        panel internal_box {
+            layout: row;
+            padding: 4 10;
+            border-color: #cc7700;
+            border-width: 2;
+            gap: 8;
+            align: center;
+
+            text label_internal {
+                text: "INTERNAL";
+                font-size: 13;
+                color: #ff9900;
+                letter-spacing: 2;
+                text-transform: uppercase;
+            }
+
+            // Red diagonal stripe accent
+            panel stripe_box {
+                width: 18;
+                height: 22;
+                background: #cc2200;
+                corner-radius: 2;
+            }
+        }
+    }
+
+    // === Main countdown area ===
+    panel countdown_row {
+        layout: row;
+        width: 100%;
+        flex-grow: 1;
+        gap: 12;
+
+        // Left: large countdown digits
+        panel countdown_area {
+            layout: column;
+            flex-grow: 1;
+            justify: center;
+            align: center;
+
+            text countdown {
+                text: "4:59:10";
+                font-size: 80;
+                color: #ff9900;
+                letter-spacing: 6;
+            }
+        }
+
+        // Right: system info panel
+        panel sys_info {
+            layout: column;
+            width: 180;
+            gap: 6;
+            justify: center;
+
+            // Supply system label
+            panel supply_box {
+                layout: column;
+                padding: 6 10;
+                border-color: #cc7700;
+                border-width: 2;
+                gap: 4;
+
+                text label_supply {
+                    text: "MAIN ENERGY";
+                    font-size: 11;
+                    color: #ff9900;
+                    letter-spacing: 2;
+                    text-transform: uppercase;
+                }
+                text label_supply2 {
+                    text: "SUPPLY SYSTEM";
+                    font-size: 11;
+                    color: #ff9900;
+                    letter-spacing: 2;
+                    text-transform: uppercase;
+                }
+            }
+
+            // Sync rate
+            panel sync_row {
+                layout: row;
+                gap: 6;
+                align: center;
+                padding: 4 0;
+
+                text sync_label {
+                    text: "SYNC RATE:";
+                    font-size: 10;
+                    color: #887744;
+                    letter-spacing: 1;
+                }
+                text sync_value {
+                    text: "41.3%";
+                    font-size: 13;
+                    color: #ff9900;
+                    letter-spacing: 1;
+                }
+            }
+
+            // AT Field
+            panel at_row {
+                layout: row;
+                gap: 6;
+                align: center;
+
+                text at_label {
+                    text: "AT FIELD:";
+                    font-size: 10;
+                    color: #887744;
+                    letter-spacing: 1;
+                }
+                text at_value {
+                    text: "NOMINAL";
+                    font-size: 11;
+                    color: #44cc66;
+                    letter-spacing: 1;
+                    text-transform: uppercase;
+                }
+            }
+        }
+    }
+
+    // === Divider ===
+    panel divider {
+        width: 100%;
+        height: 1;
+        background: #cc770040;
+    }
+
+    // === Bottom control buttons ===
+    panel bottom_bar {
+        layout: row;
+        width: 100%;
+        gap: 4;
+        padding: 2 0;
+
+        button btn_stop {
+            text: "STOP";
+            font-size: 12;
+            color: #88ccaa;
+            background: #0a2a1a;
+            border-color: #44aa66;
+            border-width: 1;
+            flex-grow: 1;
+            padding: 6;
+            letter-spacing: 2;
+            text-transform: uppercase;
+            cursor: pointer;
+            :hover { background: #143828; }
+            :pressed { background: #1a4a32; }
+        }
+
+        button btn_slow {
+            text: "SLOW";
+            font-size: 12;
+            color: #88ccaa;
+            background: #0a2a1a;
+            border-color: #44aa66;
+            border-width: 1;
+            flex-grow: 1;
+            padding: 6;
+            letter-spacing: 2;
+            text-transform: uppercase;
+            cursor: pointer;
+            :hover { background: #143828; }
+            :pressed { background: #1a4a32; }
+        }
+
+        button btn_normal {
+            text: "NORMAL";
+            font-size: 12;
+            color: #ccffdd;
+            background: #1a4a2a;
+            border-color: #66cc88;
+            border-width: 1;
+            flex-grow: 1;
+            padding: 6;
+            letter-spacing: 2;
+            text-transform: uppercase;
+            cursor: pointer;
+            :hover { background: #245838; }
+            :pressed { background: #2a6a40; }
+        }
+
+        button btn_racing {
+            text: "RACING";
+            font-size: 12;
+            color: #88ccaa;
+            background: #0a2a1a;
+            border-color: #44aa66;
+            border-width: 1;
+            flex-grow: 1;
+            padding: 6;
+            letter-spacing: 2;
+            text-transform: uppercase;
+            cursor: pointer;
+            :hover { background: #143828; }
+            :pressed { background: #1a4a32; }
+        }
+    }
+}

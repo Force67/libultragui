@@ -26,6 +26,11 @@ public:
                                     const void* pixels) override;
     void update_texture(RHITextureHandle handle, const void* pixels) override;
     void destroy_texture(RHITextureHandle handle) override;
+    bool acquire_frame() override;
+    RHITextureHandle create_render_target(u32 width, u32 height) override;
+    void destroy_render_target(RHITextureHandle handle) override;
+    bool begin_offscreen(RHITextureHandle target, Color clear_color) override;
+    void end_offscreen(RHITextureHandle target) override;
     Vec2 display_size() const override;
 
 private:
@@ -98,16 +103,20 @@ private:
         VkBuffer vertex_buffer = VK_NULL_HANDLE;
         VkDeviceMemory vertex_memory = VK_NULL_HANDLE;
         u32 vertex_capacity = 0;
+        u32 vertex_write_pos = 0; // append position (vertex count)
         VkBuffer index_buffer = VK_NULL_HANDLE;
         VkDeviceMemory index_memory = VK_NULL_HANDLE;
         u32 index_capacity = 0;
+        u32 index_write_pos = 0; // append position (index count)
         // Text pipeline buffers (separate to avoid overwrite conflicts)
         VkBuffer text_vertex_buffer = VK_NULL_HANDLE;
         VkDeviceMemory text_vertex_memory = VK_NULL_HANDLE;
         u32 text_vertex_capacity = 0;
+        u32 text_vertex_write_pos = 0;
         VkBuffer text_index_buffer = VK_NULL_HANDLE;
         VkDeviceMemory text_index_memory = VK_NULL_HANDLE;
         u32 text_index_capacity = 0;
+        u32 text_index_write_pos = 0;
     };
     FrameData frames_[MAX_FRAMES];
     u32 current_frame_ = 0;
@@ -122,6 +131,8 @@ private:
     // Default resources
     VkSampler default_sampler_ = VK_NULL_HANDLE;
 
+    bool create_offscreen_render_pass();
+
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -131,10 +142,26 @@ private:
         u32 height = 0;
         u32 pixel_size = 0; // bytes per pixel
         bool in_use = false;
+        bool is_render_target = false;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
     };
     static constexpr u32 MAX_TEXTURES = 256;
     TextureSlot textures_[MAX_TEXTURES] = {};
     RHITextureHandle white_texture_ = INVALID_TEXTURE;
+
+    // Offscreen rendering state
+    VkRenderPass offscreen_render_pass_ = VK_NULL_HANDLE;
+    bool frame_acquired_ = false;
+    RHITextureHandle active_offscreen_target_ = INVALID_TEXTURE;
+    Vec2 offscreen_display_size_ = {};
+
+    // Vertex dedup: avoid re-uploading the same data within a Renderer2D frame
+    const Vertex2D* last_quad_verts_ = nullptr;
+    u32 last_quad_vert_count_ = 0;
+    VkDeviceSize last_quad_vb_offset_ = 0;
+    const Vertex2D* last_text_verts_ = nullptr;
+    u32 last_text_vert_count_ = 0;
+    VkDeviceSize last_text_vb_offset_ = 0;
 };
 
 } // namespace ugui

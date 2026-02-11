@@ -3,12 +3,14 @@
 /// Usage:
 ///   ./ultragui_showcase [scene] [font_path]
 ///
-/// Scenes: dashboard (default), neon, glass, terminal
-/// Press 1-4 to switch scenes at runtime.
+/// Scenes: dashboard (default), neon, glass, terminal, rpg, nerv
+/// Press 1-6 to switch scenes at runtime.
 
 #include <ultragui/ultragui.h>
 #include <ultragui/widgets/button.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -74,14 +76,99 @@ static const Scene scenes[] = {
      ugui::Color::from_hex(0x000000)},
     {"rpg", "scenes/rpg_menu.ugui", "scenes/rpg_menu.lua",
      ugui::Color::from_hex(0x000000)},
+    {"nerv", "scenes/nerv.ugui", "scenes/nerv.lua",
+     ugui::Color::from_hex(0x050510)},
 };
-static constexpr int SCENE_COUNT = 5;
+static constexpr int SCENE_COUNT = 6;
+static constexpr int NERV_SCENE = 5;
 
 static int current_scene = 0;
 static bool scene_dirty = true;
 static bool key_was_down[16] = {};
 
+// --- NERV render-to-texture state ---
+static ugui::RHITextureHandle nerv_target = ugui::INVALID_TEXTURE;
+static constexpr ugui::u32 NERV_W = 640;
+static constexpr ugui::u32 NERV_H = 400;
+
+static void nerv_setup(ugui::UIContext& ui) {
+    nerv_target = ui.create_render_target(NERV_W, NERV_H);
+    if (nerv_target == ugui::INVALID_TEXTURE) {
+        std::fprintf(stderr, "Failed to create NERV render target\n");
+        return;
+    }
+
+    std::printf("NERV: render target %u (%ux%u)\n", nerv_target, NERV_W, NERV_H);
+    ui.set_on_paint([](ugui::Renderer2D& r, ugui::RHI* rhi) {
+        ugui::Vec2 ds = rhi->display_size();
+        ugui::f32 cx = ds.x * 0.5f;
+        ugui::f32 cy = ds.y * 0.5f;
+        ugui::f32 hw = NERV_W * 0.5f;
+        ugui::f32 hh = NERV_H * 0.5f;
+
+        // 3D perspective transform - tilt the monitor
+        float angle_y = 0.35f;  // ~20 deg around Y axis
+        float angle_x = -0.12f; // slight tilt back
+        float focal = 900.0f;
+        float cy_sin = std::sin(angle_y), cy_cos = std::cos(angle_y);
+        float cx_sin = std::sin(angle_x), cx_cos = std::cos(angle_x);
+
+        // Project a 3D corner to 2D screen coords
+        auto project = [&](float lx, float ly) -> std::pair<float, float> {
+            // Rotate around Y
+            float rx = lx * cy_cos;
+            float rz = -lx * cy_sin;
+            // Rotate around X
+            float ry = ly * cx_cos - rz * cx_sin;
+            float rz2 = ly * cx_sin + rz * cx_cos;
+            // Perspective divide
+            float s = focal / (focal + rz2);
+            return {cx + rx * s, cy + ry * s};
+        };
+
+        // Quad corners: TL, TR, BR, BL
+        auto [tlx, tly] = project(-hw, -hh);
+        auto [trx, try_] = project( hw, -hh);
+        auto [brx, bry] = project( hw,  hh);
+        auto [blx, bly] = project(-hw,  hh);
+
+        // Ambient glow - use the projected bounding box
+        float gx = std::min({tlx, trx, brx, blx}) - 30.0f;
+        float gy = std::min({tly, try_, bry, bly}) - 30.0f;
+        float gw = std::max({tlx, trx, brx, blx}) - gx + 60.0f;
+        float gh = std::max({tly, try_, bry, bly}) - gy + 60.0f;
+        r.draw_shadow({gx, gy, gw, gh}, ugui::Color::from_hex(0xff6600, 0.08f),
+                      50.0f, 0.0f, {0, 0}, ugui::Vertex2D::pack_radii(12, 12, 12, 12));
+
+        // Build a perspective-projected textured quad using raw vertices.
+        // half_size = {0,0} bypasses the SDF rounded-rect logic in the shader,
+        // giving us pure texture * color output.
+        ugui::u32 white = ugui::Vertex2D::pack_color(1, 1, 1, 1);
+        ugui::Vertex2D verts[4] = {
+            {{tlx, tly}, {0, 0}, white, white, 0, 0, {0, 0}, 0, 0},
+            {{trx, try_}, {1, 0}, white, white, 0, 0, {0, 0}, 0, 0},
+            {{brx, bry}, {1, 1}, white, white, 0, 0, {0, 0}, 0, 0},
+            {{blx, bly}, {0, 1}, white, white, 0, 0, {0, 0}, 0, 0},
+        };
+        ugui::u32 indices[6] = {0, 1, 2, 0, 2, 3};
+
+        rhi->draw_triangles(verts, 4, indices, 6, nerv_target);
+    });
+}
+
+static void nerv_teardown(ugui::UIContext& ui) {
+    ui.set_on_paint(nullptr);
+    if (nerv_target != ugui::INVALID_TEXTURE) {
+        ui.rhi()->destroy_render_target(nerv_target);
+        nerv_target = ugui::INVALID_TEXTURE;
+    }
+}
+
 static void load_scene(ugui::UIContext& ui, int idx) {
+    // Tear down NERV state if switching away
+    if (nerv_target != ugui::INVALID_TEXTURE)
+        nerv_teardown(ui);
+
     auto& s = scenes[idx];
     std::string base = ULTRAGUI_SHOWCASE_DIR;
     std::string ugui_path = base + "/" + s.ugui_file;
@@ -100,6 +187,10 @@ static void load_scene(ugui::UIContext& ui, int idx) {
         std::string handler = "on_" + widget->name();
         ui.lua().call_handler(handler.c_str(), widget);
     });
+
+    // Set up NERV render-to-texture if this is the NERV scene
+    if (idx == NERV_SCENE)
+        nerv_setup(ui);
 
     std::printf("Scene: %s\n", s.name);
 }
@@ -125,7 +216,7 @@ int main(int argc, char* argv[]) {
     if (!font_path) {
         std::fprintf(stderr,
                      "No font found. Set ULTRAGUI_FONT or pass a TTF path.\n"
-                     "  Usage: %s [dashboard|neon|glass|terminal] [font.ttf]\n",
+                     "  Usage: %s [dashboard|neon|glass|terminal|rpg|nerv] [font.ttf]\n",
                      argv[0]);
         return 1;
     }
@@ -152,10 +243,10 @@ int main(int argc, char* argv[]) {
     ui.set_default_font(font);
 
     auto* window = static_cast<GLFWwindow*>(ui.platform()->native_handle());
-    std::printf("Press 1-5 to switch scenes: dashboard, neon, glass, terminal, rpg\n");
+    std::printf("Press 1-6 to switch scenes: dashboard, neon, glass, terminal, rpg, nerv\n");
 
     while (ui.running()) {
-        // Poll scene-switch keys (1-4) without hijacking GLFW callbacks
+        // Poll scene-switch keys (1-6) without hijacking GLFW callbacks
         for (int i = 0; i < SCENE_COUNT; ++i) {
             bool down = glfwGetKey(window, GLFW_KEY_1 + i) == GLFW_PRESS;
             if (down && !key_was_down[i] && i != current_scene) {
@@ -167,8 +258,16 @@ int main(int argc, char* argv[]) {
 
         if (scene_dirty) {
             scene_dirty = false;
+            ui.set_clear_color(scenes[current_scene].clear_color);
             load_scene(ui, current_scene);
         }
+
+        // Queue NERV offscreen render before update
+        if (current_scene == NERV_SCENE && nerv_target != ugui::INVALID_TEXTURE) {
+            ui.queue_offscreen(nerv_target, ui.root(),
+                               ugui::Color::from_hex(0x0a0a18));
+        }
+
         ui.update();
     }
 

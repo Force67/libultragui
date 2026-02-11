@@ -1084,6 +1084,10 @@ void VulkanRHI::update_texture(RHITextureHandle handle, const void* pixels) {
 void VulkanRHI::destroy_texture(RHITextureHandle handle) {
     if (handle >= MAX_TEXTURES || !textures_[handle].in_use)
         return;
+    if (textures_[handle].is_render_target) {
+        destroy_render_target(handle);
+        return;
+    }
     vkDeviceWaitIdle(device_);
     auto& slot = textures_[handle];
     vkDestroyImageView(device_, slot.view, nullptr);
@@ -1096,7 +1100,10 @@ void VulkanRHI::destroy_texture(RHITextureHandle handle) {
 // Frame lifecycle
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::begin_frame(Color clear_color) {
+bool VulkanRHI::acquire_frame() {
+    if (frame_acquired_)
+        return true;
+
     auto& f = frames_[current_frame_];
     vkWaitForFences(device_, 1, &f.in_flight, VK_TRUE, UINT64_MAX);
 
@@ -1114,6 +1121,28 @@ bool VulkanRHI::begin_frame(Color clear_color) {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(f.cmd_buffer, &bi);
+
+    // Reset write positions for the ring-buffer approach
+    f.vertex_write_pos = 0;
+    f.index_write_pos = 0;
+    f.text_vertex_write_pos = 0;
+    f.text_index_write_pos = 0;
+
+    // Reset vertex dedup tracking
+    last_quad_verts_ = nullptr;
+    last_quad_vert_count_ = 0;
+    last_text_verts_ = nullptr;
+    last_text_vert_count_ = 0;
+
+    frame_acquired_ = true;
+    return true;
+}
+
+bool VulkanRHI::begin_frame(Color clear_color) {
+    if (!acquire_frame())
+        return false;
+
+    auto& f = frames_[current_frame_];
 
     VkClearValue clear = {};
     clear.color = {{clear_color.r, clear_color.g, clear_color.b, clear_color.a}};
@@ -1184,6 +1213,7 @@ void VulkanRHI::end_frame() {
         recreate_swapchain();
     }
 
+    frame_acquired_ = false;
     current_frame_ = (current_frame_ + 1) % MAX_FRAMES;
 }
 
@@ -1193,19 +1223,26 @@ void VulkanRHI::end_frame() {
 
 void VulkanRHI::set_scissor(Rect rect) {
     auto& f = frames_[current_frame_];
-    // Convert from window/screen coordinates to framebuffer pixels
+    // Offscreen targets are pixel-exact (no DPI scaling)
+    f32 scale = (active_offscreen_target_ != INVALID_TEXTURE) ? 1.0f : dpi_scale_;
     VkRect2D scissor{};
-    scissor.offset = {static_cast<i32>(rect.x * dpi_scale_),
-                      static_cast<i32>(rect.y * dpi_scale_)};
-    scissor.extent = {static_cast<u32>(rect.w * dpi_scale_),
-                      static_cast<u32>(rect.h * dpi_scale_)};
+    scissor.offset = {static_cast<i32>(rect.x * scale),
+                      static_cast<i32>(rect.y * scale)};
+    scissor.extent = {static_cast<u32>(rect.w * scale),
+                      static_cast<u32>(rect.h * scale)};
     vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
 }
 
 void VulkanRHI::reset_scissor() {
     auto& f = frames_[current_frame_];
-    VkRect2D scissor{{0, 0}, swapchain_extent_};
-    vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
+    if (active_offscreen_target_ != INVALID_TEXTURE) {
+        auto& slot = textures_[active_offscreen_target_];
+        VkRect2D scissor{{0, 0}, {slot.width, slot.height}};
+        vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
+    } else {
+        VkRect2D scissor{{0, 0}, swapchain_extent_};
+        vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
+    }
 }
 
 void VulkanRHI::draw_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
@@ -1215,19 +1252,33 @@ void VulkanRHI::draw_triangles(const Vertex2D* vertices, u32 vertex_count, const
 
     auto& f = frames_[current_frame_];
 
-    // Ensure buffers are large enough
-    ensure_vertex_capacity(vertex_count);
-    ensure_index_capacity(index_count);
+    // Renderer2D passes the SAME vertex array for every batch in a frame,
+    // with different index slices. Detect this to avoid redundant uploads.
+    VkDeviceSize vb_byte_offset;
+    if (vertices == last_quad_verts_ && vertex_count == last_quad_vert_count_) {
+        vb_byte_offset = last_quad_vb_offset_;
+    } else {
+        ensure_vertex_capacity(f.vertex_write_pos + vertex_count);
+        vb_byte_offset = f.vertex_write_pos * sizeof(Vertex2D);
+        void* data;
+        vkMapMemory(device_, f.vertex_memory, vb_byte_offset, vertex_count * sizeof(Vertex2D), 0,
+                    &data);
+        std::memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
+        vkUnmapMemory(device_, f.vertex_memory);
+        last_quad_verts_ = vertices;
+        last_quad_vert_count_ = vertex_count;
+        last_quad_vb_offset_ = vb_byte_offset;
+        f.vertex_write_pos += vertex_count;
+    }
 
-    // Upload vertex data
+    // Indices are always different per batch - always append
+    ensure_index_capacity(f.index_write_pos + index_count);
+    VkDeviceSize ib_byte_offset = f.index_write_pos * sizeof(u32);
     void* data;
-    vkMapMemory(device_, f.vertex_memory, 0, vertex_count * sizeof(Vertex2D), 0, &data);
-    std::memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
-    vkUnmapMemory(device_, f.vertex_memory);
-
-    vkMapMemory(device_, f.index_memory, 0, index_count * sizeof(u32), 0, &data);
+    vkMapMemory(device_, f.index_memory, ib_byte_offset, index_count * sizeof(u32), 0, &data);
     std::memcpy(data, indices, index_count * sizeof(u32));
     vkUnmapMemory(device_, f.index_memory);
+    f.index_write_pos += index_count;
 
     // Bind texture descriptor
     RHITextureHandle tex = (texture != INVALID_TEXTURE) ? texture : white_texture_;
@@ -1237,9 +1288,8 @@ void VulkanRHI::draw_triangles(const Vertex2D* vertices, u32 vertex_count, const
     }
 
     // Draw
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(f.cmd_buffer, 0, 1, &f.vertex_buffer, &offset);
-    vkCmdBindIndexBuffer(f.cmd_buffer, f.index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindVertexBuffers(f.cmd_buffer, 0, 1, &f.vertex_buffer, &vb_byte_offset);
+    vkCmdBindIndexBuffer(f.cmd_buffer, f.index_buffer, ib_byte_offset, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(f.cmd_buffer, index_count, 1, 0, 0, 0);
 }
 
@@ -1250,18 +1300,32 @@ void VulkanRHI::draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, 
 
     auto& f = frames_[current_frame_];
 
-    // Use SEPARATE buffers for text to avoid overwriting quad data
-    ensure_text_vertex_capacity(vertex_count);
-    ensure_text_index_capacity(index_count);
+    // Use SEPARATE buffers for text to avoid overwriting quad data.
+    // Deduplicate vertex uploads (same pattern as draw_triangles).
+    VkDeviceSize vb_byte_offset;
+    if (vertices == last_text_verts_ && vertex_count == last_text_vert_count_) {
+        vb_byte_offset = last_text_vb_offset_;
+    } else {
+        ensure_text_vertex_capacity(f.text_vertex_write_pos + vertex_count);
+        vb_byte_offset = f.text_vertex_write_pos * sizeof(Vertex2D);
+        void* data;
+        vkMapMemory(device_, f.text_vertex_memory, vb_byte_offset,
+                    vertex_count * sizeof(Vertex2D), 0, &data);
+        std::memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
+        vkUnmapMemory(device_, f.text_vertex_memory);
+        last_text_verts_ = vertices;
+        last_text_vert_count_ = vertex_count;
+        last_text_vb_offset_ = vb_byte_offset;
+        f.text_vertex_write_pos += vertex_count;
+    }
 
+    ensure_text_index_capacity(f.text_index_write_pos + index_count);
+    VkDeviceSize ib_byte_offset = f.text_index_write_pos * sizeof(u32);
     void* data;
-    vkMapMemory(device_, f.text_vertex_memory, 0, vertex_count * sizeof(Vertex2D), 0, &data);
-    std::memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
-    vkUnmapMemory(device_, f.text_vertex_memory);
-
-    vkMapMemory(device_, f.text_index_memory, 0, index_count * sizeof(u32), 0, &data);
+    vkMapMemory(device_, f.text_index_memory, ib_byte_offset, index_count * sizeof(u32), 0, &data);
     std::memcpy(data, indices, index_count * sizeof(u32));
     vkUnmapMemory(device_, f.text_index_memory);
+    f.text_index_write_pos += index_count;
 
     // Switch to text pipeline
     vkCmdBindPipeline(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, text_pipeline_);
@@ -1273,22 +1337,24 @@ void VulkanRHI::draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, 
                                 1, &textures_[tex].descriptor, 0, nullptr);
     }
 
-    // Re-push constants (pipeline change resets them) - window coordinates
-    f32 win_w = static_cast<f32>(swapchain_extent_.width) / dpi_scale_;
-    f32 win_h = static_cast<f32>(swapchain_extent_.height) / dpi_scale_;
+    // Re-push constants (pipeline change resets them) - use display_size()
+    // which returns offscreen dimensions when inside an offscreen pass.
+    Vec2 ds = display_size();
     f32 push[4] = {
-        2.0f / win_w,
-        2.0f / win_h,
+        2.0f / ds.x,
+        2.0f / ds.y,
         -1.0f,
         -1.0f,
     };
     vkCmdPushConstants(f.cmd_buffer, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push),
                        push);
 
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(f.cmd_buffer, 0, 1, &f.text_vertex_buffer, &offset);
-    vkCmdBindIndexBuffer(f.cmd_buffer, f.text_index_buffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindVertexBuffers(f.cmd_buffer, 0, 1, &f.text_vertex_buffer, &vb_byte_offset);
+    vkCmdBindIndexBuffer(f.cmd_buffer, f.text_index_buffer, ib_byte_offset, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(f.cmd_buffer, index_count, 1, 0, 0, 0);
+
+    f.text_vertex_write_pos += vertex_count;
+    f.text_index_write_pos += index_count;
 
     // Switch back to quad pipeline
     vkCmdBindPipeline(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
@@ -1297,9 +1363,262 @@ void VulkanRHI::draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, 
 }
 
 Vec2 VulkanRHI::display_size() const {
+    if (active_offscreen_target_ != INVALID_TEXTURE)
+        return offscreen_display_size_;
     // Return window/screen coordinates (UI coordinate space), not framebuffer pixels
     return {static_cast<f32>(swapchain_extent_.width) / dpi_scale_,
             static_cast<f32>(swapchain_extent_.height) / dpi_scale_};
+}
+
+// ---------------------------------------------------------------------------
+// Offscreen rendering
+// ---------------------------------------------------------------------------
+
+bool VulkanRHI::create_offscreen_render_pass() {
+    if (offscreen_render_pass_)
+        return true;
+
+    VkAttachmentDescription color_att{};
+    color_att.format = swapchain_format_;
+    color_att.samples = VK_SAMPLE_COUNT_1_BIT;
+    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color_att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color_att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    color_att.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color_ref;
+
+    VkSubpassDependency dep{};
+    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dep.dstSubpass = 0;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.srcAccessMask = 0;
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    ci.attachmentCount = 1;
+    ci.pAttachments = &color_att;
+    ci.subpassCount = 1;
+    ci.pSubpasses = &subpass;
+    ci.dependencyCount = 1;
+    ci.pDependencies = &dep;
+
+    return vkCreateRenderPass(device_, &ci, nullptr, &offscreen_render_pass_) == VK_SUCCESS;
+}
+
+RHITextureHandle VulkanRHI::create_render_target(u32 width, u32 height) {
+    if (!create_offscreen_render_pass())
+        return INVALID_TEXTURE;
+
+    // Find a free slot
+    RHITextureHandle handle = INVALID_TEXTURE;
+    for (u32 i = 0; i < MAX_TEXTURES; ++i) {
+        if (!textures_[i].in_use) {
+            handle = i;
+            break;
+        }
+    }
+    if (handle == INVALID_TEXTURE)
+        return INVALID_TEXTURE;
+
+    auto& slot = textures_[handle];
+
+    // Create image with COLOR_ATTACHMENT + SAMPLED usage
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.extent = {width, height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.format = swapchain_format_;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    if (vkCreateImage(device_, &ici, nullptr, &slot.image) != VK_SUCCESS)
+        return INVALID_TEXTURE;
+
+    VkMemoryRequirements reqs;
+    vkGetImageMemoryRequirements(device_, slot.image, &reqs);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = reqs.size;
+    ai.memoryTypeIndex = find_memory_type(reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(device_, &ai, nullptr, &slot.memory);
+    vkBindImageMemory(device_, slot.image, slot.memory, 0);
+
+    // Image view
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = slot.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = swapchain_format_;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCreateImageView(device_, &vci, nullptr, &slot.view);
+
+    // Framebuffer for offscreen rendering
+    VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fci.renderPass = offscreen_render_pass_;
+    fci.attachmentCount = 1;
+    fci.pAttachments = &slot.view;
+    fci.width = width;
+    fci.height = height;
+    fci.layers = 1;
+    if (vkCreateFramebuffer(device_, &fci, nullptr, &slot.framebuffer) != VK_SUCCESS) {
+        vkDestroyImageView(device_, slot.view, nullptr);
+        vkDestroyImage(device_, slot.image, nullptr);
+        vkFreeMemory(device_, slot.memory, nullptr);
+        slot = {};
+        return INVALID_TEXTURE;
+    }
+
+    // Transition to SHADER_READ_ONLY so sampling before first render is safe
+    VkCommandBuffer cmd;
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = frames_[0].cmd_pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(device_, &cai, &cmd);
+
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = slot.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &barrier);
+
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(graphics_queue_, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphics_queue_);
+    vkFreeCommandBuffers(device_, frames_[0].cmd_pool, 1, &cmd);
+
+    // Descriptor set for sampling this texture
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = desc_pool_;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &desc_set_layout_;
+    vkAllocateDescriptorSets(device_, &dai, &slot.descriptor);
+
+    VkDescriptorImageInfo dii{};
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageView = slot.view;
+    dii.sampler = default_sampler_;
+
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = slot.descriptor;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+
+    slot.width = width;
+    slot.height = height;
+    slot.pixel_size = 4;
+    slot.in_use = true;
+    slot.is_render_target = true;
+    return handle;
+}
+
+void VulkanRHI::destroy_render_target(RHITextureHandle handle) {
+    if (handle >= MAX_TEXTURES || !textures_[handle].in_use || !textures_[handle].is_render_target)
+        return;
+    vkDeviceWaitIdle(device_);
+    auto& slot = textures_[handle];
+    if (slot.framebuffer)
+        vkDestroyFramebuffer(device_, slot.framebuffer, nullptr);
+    vkDestroyImageView(device_, slot.view, nullptr);
+    vkDestroyImage(device_, slot.image, nullptr);
+    vkFreeMemory(device_, slot.memory, nullptr);
+    slot = {};
+}
+
+bool VulkanRHI::begin_offscreen(RHITextureHandle target, Color clear_color) {
+    if (target >= MAX_TEXTURES || !textures_[target].in_use || !textures_[target].is_render_target)
+        return false;
+
+    auto& slot = textures_[target];
+    auto& f = frames_[current_frame_];
+
+    active_offscreen_target_ = target;
+    offscreen_display_size_ = {static_cast<f32>(slot.width), static_cast<f32>(slot.height)};
+
+    VkClearValue clear = {};
+    clear.color = {{clear_color.r, clear_color.g, clear_color.b, clear_color.a}};
+
+    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rbi.renderPass = offscreen_render_pass_;
+    rbi.framebuffer = slot.framebuffer;
+    rbi.renderArea = {{0, 0}, {slot.width, slot.height}};
+    rbi.clearValueCount = 1;
+    rbi.pClearValues = &clear;
+    vkCmdBeginRenderPass(f.cmd_buffer, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+
+    VkViewport viewport{};
+    viewport.width = static_cast<f32>(slot.width);
+    viewport.height = static_cast<f32>(slot.height);
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(f.cmd_buffer, 0, 1, &viewport);
+
+    VkRect2D scissor{{0, 0}, {slot.width, slot.height}};
+    vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
+
+    // Orthographic projection for pixel-exact offscreen coordinates
+    f32 push[4] = {
+        2.0f / static_cast<f32>(slot.width),
+        2.0f / static_cast<f32>(slot.height),
+        -1.0f,
+        -1.0f,
+    };
+    vkCmdPushConstants(f.cmd_buffer, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push),
+                       push);
+
+    return true;
+}
+
+void VulkanRHI::end_offscreen(RHITextureHandle target) {
+    if (active_offscreen_target_ == INVALID_TEXTURE)
+        return;
+
+    auto& f = frames_[current_frame_];
+    vkCmdEndRenderPass(f.cmd_buffer);
+
+    // Pipeline barrier: ensure the offscreen render is complete before it is
+    // sampled as a texture in a subsequent render pass.
+    auto& slot = textures_[target];
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = slot.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(f.cmd_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &barrier);
+
+    active_offscreen_target_ = INVALID_TEXTURE;
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,6 +1683,8 @@ void VulkanRHI::shutdown() {
         vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     if (desc_set_layout_)
         vkDestroyDescriptorSetLayout(device_, desc_set_layout_, nullptr);
+    if (offscreen_render_pass_)
+        vkDestroyRenderPass(device_, offscreen_render_pass_, nullptr);
     if (render_pass_)
         vkDestroyRenderPass(device_, render_pass_, nullptr);
 

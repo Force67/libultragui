@@ -201,16 +201,45 @@ void UIContext::update() {
     if (root_) {
         measure_tree_recursive(root_);
     }
+    for (auto& pass : offscreen_queue_) {
+        if (pass.root)
+            measure_tree_recursive(pass.root);
+    }
     text_engine_.flush_atlas();
 
-    // --- GPU render pass ---
+    // --- Offscreen render passes ---
+    if (!offscreen_queue_.empty()) {
+        if (!rhi_->acquire_frame()) {
+            offscreen_queue_.clear();
+            return;
+        }
+
+        for (auto& pass : offscreen_queue_) {
+            if (!rhi_->begin_offscreen(pass.target, pass.clear_color))
+                continue;
+
+            renderer_.begin_frame();
+            if (pass.root) {
+                compute_layout(pass.root);
+                paint_tree(pass.root);
+            }
+            text_engine_.flush_atlas();
+            renderer_.end_frame();
+            rhi_->end_offscreen(pass.target);
+        }
+        offscreen_queue_.clear();
+    }
+
+    // --- Main swapchain render pass ---
     if (!rhi_->begin_frame(config_.clear_color))
         return;
 
     renderer_.begin_frame();
 
-    if (root_) {
-        compute_layout();
+    if (on_paint_cb_) {
+        on_paint_cb_(renderer_, rhi_);
+    } else if (root_) {
+        compute_layout(root_);
         paint_tree(root_);
     }
 
@@ -248,6 +277,18 @@ void UIContext::shutdown() {
     }
 }
 
+RHITextureHandle UIContext::create_render_target(u32 width, u32 height) {
+    return rhi_ ? rhi_->create_render_target(width, height) : INVALID_TEXTURE;
+}
+
+void UIContext::queue_offscreen(RHITextureHandle target, Widget* root, Color clear_color) {
+    offscreen_queue_.push_back({target, root, clear_color});
+}
+
+void UIContext::set_on_paint(PaintCallback cb) {
+    on_paint_cb_ = std::move(cb);
+}
+
 Widget* UIContext::find_widget(const char* name) const {
     if (!root_)
         return nullptr;
@@ -278,12 +319,12 @@ void UIContext::register_widgets_lua(Widget* widget) {
 // Layout
 // ---------------------------------------------------------------------------
 
-void UIContext::compute_layout() {
-    if (!root_)
+void UIContext::compute_layout(Widget* tree_root) {
+    if (!tree_root)
         return;
 
     layout_nodes_.clear();
-    build_layout_nodes(root_, ~0u);
+    build_layout_nodes(tree_root, ~0u);
 
     LayoutViewport vp;
     vp.width = rhi_->display_size().x;
@@ -292,7 +333,7 @@ void UIContext::compute_layout() {
     layout_engine_.compute(layout_nodes_.data(), static_cast<u32>(layout_nodes_.size()), vp);
 
     u32 idx = 0;
-    apply_layout_results(root_, idx);
+    apply_layout_results(tree_root, idx);
 }
 
 void UIContext::build_layout_nodes(Widget* widget, u32 parent_index) {

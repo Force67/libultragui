@@ -13,6 +13,7 @@
 #include <ultragui/text/text_engine.h>
 #include <ultragui/widgets/widget.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -99,11 +100,26 @@ public:
     /// Get delta time since last frame.
     f64 delta_time() const { return dt_; }
 
+    /// Set the swapchain clear color (background).
+    void set_clear_color(Color color) { config_.clear_color = color; }
+
     /// Find a widget by name in the tree.
     Widget* find_widget(const char* name) const;
 
+    /// Create an offscreen render target (delegates to RHI).
+    RHITextureHandle create_render_target(u32 width, u32 height);
+
+    /// Queue a widget tree to be rendered to an offscreen target during the
+    /// next update() call, before the main swapchain pass.
+    void queue_offscreen(RHITextureHandle target, Widget* root, Color clear_color);
+
+    /// Custom paint callback for the swapchain pass. When set, replaces the
+    /// default compute_layout() + paint_tree() with the callback.
+    using PaintCallback = std::function<void(Renderer2D&, RHI*)>;
+    void set_on_paint(PaintCallback cb);
+
 private:
-    void compute_layout();
+    void compute_layout(Widget* tree_root);
     void paint_tree(Widget* widget);
     void register_widgets_lua(Widget* widget);
     Widget* find_widget_recursive(Widget* widget, const char* name) const;
@@ -131,6 +147,14 @@ private:
 
     std::vector<LayoutNode> layout_nodes_;
     bool owns_root_ = false; // true if root was created by load_ui
+
+    struct OffscreenPass {
+        RHITextureHandle target;
+        Widget* root;
+        Color clear_color;
+    };
+    std::vector<OffscreenPass> offscreen_queue_;
+    PaintCallback on_paint_cb_;
 };
 
 } // namespace ugui
