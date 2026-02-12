@@ -2,6 +2,7 @@
 
 #include <ultragui/core/math.h>
 #include <ultragui/core/types.h>
+#include <ultragui/input/input_queue.h>
 #include <ultragui/style/enums.h>
 
 namespace ugui {
@@ -35,6 +36,10 @@ public:
 
     /// Set the mouse cursor style
     virtual void set_cursor(Cursor cursor) = 0;
+
+    /// Access the platform's input event queue.
+    /// Filled during poll_events(), consumed by InputRouter.
+    virtual InputQueue& input_queue() = 0;
 };
 
 /// Create the default GLFW-based platform

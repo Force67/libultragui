@@ -28,17 +28,19 @@ static std::string apply_transform(const std::string& s, TextTransform t) {
 }
 
 void Button::measure(f32& out_width, f32& out_height) {
-    if (!text_engine_ || font_ == INVALID_FONT || label_.empty()) {
+    auto* te = text_engine();
+    FontHandle fh = effective_font();
+    if (!te || fh == INVALID_FONT || label_.empty()) {
         out_width = 0;
         out_height = style_.font_size + style_.padding.vertical();
         return;
     }
 
     std::string display_label = apply_transform(label_, style_.text_transform);
-    auto run = text_engine_->shape(font_, display_label.c_str(),
-                                   static_cast<u32>(display_label.size()),
-                                   style_.font_size, style_.letter_spacing,
-                                   style_.line_height_multiplier);
+    auto run = te->shape(fh, display_label.c_str(),
+                         static_cast<u32>(display_label.size()),
+                         style_.font_size, style_.letter_spacing,
+                         style_.line_height_multiplier);
     out_width = run.total_advance + style_.padding.horizontal();
     out_height = run.line_height + style_.padding.vertical();
 }
@@ -48,15 +50,17 @@ void Button::on_paint(Renderer2D& renderer) {
     Widget::on_paint(renderer);
 
     // Label
-    if (text_engine_ && font_ != INVALID_FONT && !label_.empty()) {
+    auto* te = text_engine();
+    FontHandle fh = effective_font();
+    if (te && fh != INVALID_FONT && !label_.empty()) {
         auto s = computed_style();
         f32 alpha = s.opacity;
 
         std::string display_label = apply_transform(label_, s.text_transform);
-        auto run = text_engine_->shape(font_, display_label.c_str(),
-                                       static_cast<u32>(display_label.size()),
-                                       s.font_size, s.letter_spacing,
-                                       s.line_height_multiplier);
+        auto run = te->shape(fh, display_label.c_str(),
+                             static_cast<u32>(display_label.size()),
+                             s.font_size, s.letter_spacing,
+                             s.line_height_multiplier);
 
         // Center text in button
         f32 x = content_rect_.x + (content_rect_.w - run.total_advance) * 0.5f;
@@ -68,10 +72,10 @@ void Button::on_paint(Renderer2D& renderer) {
         if (s.text_shadow_color.a > 0.0f) {
             Vec2 shadow_pos = {x + s.text_shadow_offset.x, y + s.text_shadow_offset.y};
             Color shadow_color = s.text_shadow_color.with_alpha(s.text_shadow_color.a * alpha);
-            renderer.draw_text(shadow_pos, run, shadow_color, text_engine_->atlas_texture());
+            renderer.draw_text(shadow_pos, run, shadow_color, te->atlas_texture());
         }
 
-        renderer.draw_text(Vec2{x, y}, run, text_color, text_engine_->atlas_texture());
+        renderer.draw_text(Vec2{x, y}, run, text_color, te->atlas_texture());
     }
 }
 

@@ -16,6 +16,8 @@ public:
 
     Vec2 content_size() const { return content_size_; }
 
+    bool on_scroll(Vec2 delta) override;
+
     void on_layout(const Rect& rect, const Rect& content_rect) override;
     void on_paint(Renderer2D& renderer) override;
     void on_update(f64 dt) override;

@@ -25,6 +25,14 @@ public:
             return false;
         }
 
+        // Install input callbacks
+        glfwSetWindowUserPointer(window_, this);
+        glfwSetCursorPosCallback(window_, glfw_mouse_pos_cb);
+        glfwSetMouseButtonCallback(window_, glfw_mouse_button_cb);
+        glfwSetScrollCallback(window_, glfw_scroll_cb);
+        glfwSetKeyCallback(window_, glfw_key_cb);
+        glfwSetCharCallback(window_, glfw_char_cb);
+
         return true;
     }
 
@@ -38,7 +46,10 @@ public:
 
     bool should_close() const override { return glfwWindowShouldClose(window_); }
 
-    void poll_events() override { glfwPollEvents(); }
+    void poll_events() override {
+        queue_.clear();
+        glfwPollEvents();
+    }
 
     Vec2 window_size() const override {
         int w, h;
@@ -81,8 +92,35 @@ public:
             glfwSetCursor(window_, nullptr); // default
     }
 
+    InputQueue& input_queue() override { return queue_; }
+
 private:
+    static void glfw_mouse_pos_cb(GLFWwindow* window, double x, double y) {
+        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
+        self->queue_.push_move({static_cast<f32>(x), static_cast<f32>(y)});
+    }
+
+    static void glfw_mouse_button_cb(GLFWwindow* window, int button, int action, int) {
+        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
+        self->queue_.push_button(static_cast<MouseButton>(button), action == GLFW_PRESS);
+    }
+
+    static void glfw_scroll_cb(GLFWwindow* window, double x, double y) {
+        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
+        self->queue_.push_scroll({static_cast<f32>(x), static_cast<f32>(y)});
+    }
+
+    static void glfw_key_cb(GLFWwindow* window, int key, int scancode, int action, int mods) {
+        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
+        self->queue_.push_key(key, scancode, action == GLFW_PRESS, action == GLFW_REPEAT, mods);
+    }
+
+    static void glfw_char_cb(GLFWwindow*, unsigned int) {
+        // For future TextInput widget
+    }
+
     GLFWwindow* window_ = nullptr;
+    InputQueue queue_;
 };
 
 Platform* create_glfw_platform() {

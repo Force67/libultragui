@@ -12,12 +12,18 @@ extern "C" {
 #include <charconv>
 #include <cstdio>
 #include <cstring>
-#include <unordered_map>
 
 namespace ugui {
 
-static std::unordered_map<std::string, Widget*>* s_widget_registry = nullptr;
-static LuaRuntime* s_runtime = nullptr;
+// Registry key for storing the LuaRuntime* in Lua's registry
+static const char* const REGISTRY_KEY = "ugui_runtime";
+
+LuaRuntime* LuaRuntime::from_state(lua_State* L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, REGISTRY_KEY);
+    auto* rt = static_cast<LuaRuntime*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return rt;
+}
 
 bool LuaRuntime::init() {
     L_ = luaL_newstate();
@@ -34,8 +40,9 @@ bool LuaRuntime::init() {
     luaL_requiref(L_, LUA_MATHLIBNAME, luaopen_math, 1);
     lua_pop(L_, 1);
 
-    s_runtime = this;
-    s_widget_registry = new std::unordered_map<std::string, Widget*>();
+    // Store `this` in Lua's registry so static callbacks can find us
+    lua_pushlightuserdata(L_, this);
+    lua_setfield(L_, LUA_REGISTRYINDEX, REGISTRY_KEY);
 
     register_api();
     return true;
@@ -46,9 +53,7 @@ void LuaRuntime::shutdown() {
         lua_close(L_);
         L_ = nullptr;
     }
-    delete s_widget_registry;
-    s_widget_registry = nullptr;
-    s_runtime = nullptr;
+    widget_registry_.clear();
 }
 
 bool LuaRuntime::exec(const char* script, const char* name) {
@@ -80,15 +85,20 @@ bool LuaRuntime::exec_file(const char* path) {
 }
 
 void LuaRuntime::register_widget(Widget* widget) {
-    if (s_widget_registry && !widget->name().empty()) {
-        (*s_widget_registry)[widget->name()] = widget;
+    if (!widget->name().empty()) {
+        widget_registry_[widget->name()] = widget;
     }
 }
 
 void LuaRuntime::unregister_widget(Widget* widget) {
-    if (s_widget_registry && !widget->name().empty()) {
-        s_widget_registry->erase(widget->name());
+    if (!widget->name().empty()) {
+        widget_registry_.erase(widget->name());
     }
+}
+
+Widget* LuaRuntime::find_registered_widget(const char* name) const {
+    auto it = widget_registry_.find(name);
+    return it != widget_registry_.end() ? it->second : nullptr;
 }
 
 bool LuaRuntime::call_handler(const char* func_name, Widget* widget) {
@@ -115,15 +125,12 @@ bool LuaRuntime::call_handler(const char* func_name, Widget* widget) {
 }
 
 void LuaRuntime::register_function(const char* name, NativeFunction func) {
-    // Store function in a static map and use a trampoline
-    // For simplicity, use lua_pushcclosure with upvalue
     lua_getglobal(L_, "ugui");
     if (!lua_istable(L_, -1)) {
         lua_pop(L_, 1);
         return;
     }
 
-    // Create a C closure wrapping the std::function
     auto* fn = new NativeFunction(std::move(func));
     lua_pushlightuserdata(L_, fn);
     lua_pushcclosure(
@@ -142,22 +149,17 @@ void LuaRuntime::register_function(const char* name, NativeFunction func) {
 // ---------------------------------------------------------------------------
 
 void LuaRuntime::register_api() {
-    // Create ugui global table
     lua_newtable(L_);
 
-    // ugui.find(name) -> widget table or nil
     lua_pushcfunction(L_, lua_ugui_find);
     lua_setfield(L_, -2, "find");
 
-    // ugui.get(name, property) -> value
     lua_pushcfunction(L_, lua_ugui_get_prop);
     lua_setfield(L_, -2, "get");
 
-    // ugui.set(name, property, value)
     lua_pushcfunction(L_, lua_ugui_set_prop);
     lua_setfield(L_, -2, "set");
 
-    // ugui.log(message)
     lua_pushcfunction(L_, lua_ugui_log);
     lua_setfield(L_, -2, "log");
 
@@ -165,19 +167,15 @@ void LuaRuntime::register_api() {
 }
 
 int LuaRuntime::lua_ugui_find(lua_State* L) {
+    auto* rt = from_state(L);
     const char* name = luaL_checkstring(L, 1);
-    if (!s_widget_registry) {
+
+    Widget* w = rt->find_registered_widget(name);
+    if (!w) {
         lua_pushnil(L);
         return 1;
     }
 
-    auto it = s_widget_registry->find(name);
-    if (it == s_widget_registry->end()) {
-        lua_pushnil(L);
-        return 1;
-    }
-
-    Widget* w = it->second;
     lua_newtable(L);
     lua_pushstring(L, w->name().c_str());
     lua_setfield(L, -2, "name");
@@ -188,21 +186,16 @@ int LuaRuntime::lua_ugui_find(lua_State* L) {
 }
 
 int LuaRuntime::lua_ugui_get_prop(lua_State* L) {
+    auto* rt = from_state(L);
     const char* name = luaL_checkstring(L, 1);
     const char* prop = luaL_checkstring(L, 2);
 
-    if (!s_widget_registry) {
+    Widget* w = rt->find_registered_widget(name);
+    if (!w) {
         lua_pushnil(L);
         return 1;
     }
 
-    auto it = s_widget_registry->find(name);
-    if (it == s_widget_registry->end()) {
-        lua_pushnil(L);
-        return 1;
-    }
-
-    Widget* w = it->second;
     const Style& s = w->style();
 
     if (strcmp(prop, "opacity") == 0)
@@ -220,19 +213,16 @@ int LuaRuntime::lua_ugui_get_prop(lua_State* L) {
 }
 
 int LuaRuntime::lua_ugui_set_prop(lua_State* L) {
+    auto* rt = from_state(L);
     const char* name = luaL_checkstring(L, 1);
     const char* prop = luaL_checkstring(L, 2);
 
-    if (!s_widget_registry)
-        return 0;
-
-    auto it = s_widget_registry->find(name);
-    if (it == s_widget_registry->end()) {
+    Widget* w = rt->find_registered_widget(name);
+    if (!w) {
         std::fprintf(stderr, "ultragui/lua: ugui.set — widget '%s' not found\n", name);
         return 0;
     }
 
-    Widget* w = it->second;
     Style s = w->style();
 
     if (strcmp(prop, "opacity") == 0) {

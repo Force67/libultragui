@@ -104,10 +104,14 @@ set(ULTRAGUI_SOURCES
     src/widgets/button.cpp
     src/widgets/image.cpp
     src/widgets/scroll_view.cpp
+    src/widgets/widget_tree.cpp
     src/idl/parser.cpp
     src/idl/builder.cpp
     src/input/input.cpp
     src/scripting/lua_runtime.cpp
+    src/scripting/lua_widgets.cpp
+    src/layout/layout_tree.cpp
+    src/render/paint.cpp
     src/svg/svg.cpp
     src/svg/svg_parser.cpp
     src/svg/svg_rasterizer.cpp
@@ -119,11 +123,11 @@ if(ULTRAGUI_BACKEND_VULKAN)
 endif()
 
 if(ULTRAGUI_AUDIO)
-    list(APPEND ULTRAGUI_SOURCES src/audio/audio.cpp)
+    list(APPEND ULTRAGUI_SOURCES src/audio/audio.cpp src/scripting/lua_audio.cpp)
 endif()
 
 if(ULTRAGUI_LOTTIE)
-    list(APPEND ULTRAGUI_SOURCES src/lottie/lottie.cpp)
+    list(APPEND ULTRAGUI_SOURCES src/lottie/lottie.cpp src/scripting/lua_lottie.cpp)
 endif()
 
 add_library(ultragui STATIC ${ULTRAGUI_SOURCES})

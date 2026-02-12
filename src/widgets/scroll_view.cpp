@@ -12,6 +12,11 @@ void ScrollView::scroll_by(Vec2 delta) {
     mark_paint_dirty();
 }
 
+bool ScrollView::on_scroll(Vec2 delta) {
+    scroll_by(delta);
+    return true;
+}
+
 void ScrollView::on_layout(const Rect& rect, const Rect& content_rect) {
     Widget::on_layout(rect, content_rect);
 

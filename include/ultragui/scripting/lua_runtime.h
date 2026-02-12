@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <string>
+#include <unordered_map>
 
 struct lua_State;
 
@@ -38,15 +39,21 @@ public:
 
     lua_State* state() const { return L_; }
 
+    /// Access the widget registry (for Lua callbacks)
+    Widget* find_registered_widget(const char* name) const;
+
 private:
     static int lua_ugui_find(lua_State* L);
     static int lua_ugui_get_prop(lua_State* L);
     static int lua_ugui_set_prop(lua_State* L);
     static int lua_ugui_log(lua_State* L);
 
+    static LuaRuntime* from_state(lua_State* L);
+
     void register_api();
 
     lua_State* L_ = nullptr;
+    std::unordered_map<std::string, Widget*> widget_registry_;
 };
 
 } // namespace ugui

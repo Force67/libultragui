@@ -1,6 +1,9 @@
 #pragma once
 
 #include <ultragui/animation/animator.h>
+#include <ultragui/layout/layout_tree.h>
+#include <ultragui/render/paint.h>
+#include <ultragui/widgets/widget_tree.h>
 #if ULTRAGUI_AUDIO
 #include <ultragui/audio/audio.h>
 #endif
@@ -139,21 +142,6 @@ public:
     void set_on_paint(PaintCallback cb);
 
 private:
-    void compute_layout(Widget* tree_root);
-    void paint_tree(Widget* widget);
-    void register_widgets_lua(Widget* widget);
-    Widget* find_widget_recursive(Widget* widget, const char* name) const;
-
-    // Build layout node array from widget tree
-    void build_layout_nodes(Widget* widget, u32 parent_index);
-    void apply_layout_results(Widget* widget, u32& node_index);
-#if ULTRAGUI_AUDIO
-    void register_audio_lua();
-#endif
-#if ULTRAGUI_LOTTIE
-    void register_lottie_lua();
-#endif
-
     Platform* platform_ = nullptr;
     RHI* rhi_ = nullptr;
     Renderer2D renderer_;
@@ -173,6 +161,7 @@ private:
     Widget* root_ = nullptr;
     FontHandle default_font_ = INVALID_FONT;
     UIConfig config_;
+    WidgetContext widget_ctx_;
 
     f64 last_time_ = 0.0;
     f64 dt_ = 0.0;

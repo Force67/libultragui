@@ -1,5 +1,4 @@
 #include <ultragui/idl/builder.h>
-#include <ultragui/text/text_engine.h>
 #include <ultragui/widgets/button.h>
 #include <ultragui/widgets/image.h>
 #include <ultragui/widgets/panel.h>
@@ -295,7 +294,6 @@ Widget* UguiBuilder::build_node(const UguiNode& node, u32& id_counter) {
         widget = new Panel(id);
     } else if (node.type == "text" || node.type == "label") {
         auto* text = new Text(id);
-        text->set_text_engine(text_engine_);
         auto text_it = node.properties.find("content");
         if (text_it == node.properties.end())
             text_it = node.properties.find("text");
@@ -304,7 +302,6 @@ Widget* UguiBuilder::build_node(const UguiNode& node, u32& id_counter) {
         widget = text;
     } else if (node.type == "button") {
         auto* btn = new Button(id);
-        btn->set_text_engine(text_engine_);
         auto text_it = node.properties.find("text");
         if (text_it == node.properties.end())
             text_it = node.properties.find("label");

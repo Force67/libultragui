@@ -2,58 +2,22 @@
 
 #include <ultragui/core/math.h>
 #include <ultragui/core/types.h>
-#include <ultragui/platform/platform.h>
+#include <ultragui/input/input_queue.h>
 
 #include <functional>
-
-struct GLFWwindow;
 
 namespace ugui {
 
 class Widget;
+class Platform;
 
-/// Mouse button identifiers
-enum class MouseButton : u8 {
-    Left = 0,
-    Right = 1,
-    Middle = 2,
-};
-
-/// Input event types
-struct MouseMoveEvent {
-    Vec2 position;
-};
-
-struct MouseButtonEvent {
-    MouseButton button;
-    bool pressed;
-    Vec2 position;
-};
-
-struct MouseScrollEvent {
-    Vec2 delta;
-    Vec2 position;
-};
-
-struct KeyEvent {
-    i32 key; // GLFW key code
-    i32 scancode;
-    bool pressed;
-    bool repeat;
-    i32 mods; // Modifier flags
-};
-
-struct CharEvent {
-    u32 codepoint;
-};
-
-/// Manages input routing to the widget tree.
-/// Tracks hover, press, focus state and dispatches events.
+/// Routes input events from an InputQueue to the widget tree.
+/// Manages hover, press, and focus state. Platform-agnostic.
 class InputRouter {
 public:
     void init(Platform* platform);
 
-    /// Process all pending input. Call once per frame before rendering.
+    /// Process all pending input from the queue. Call once per frame.
     /// Returns true if any input was consumed.
     bool process(Widget* root);
 
@@ -71,31 +35,11 @@ public:
     void set_on_hover(HoverHandler handler) { on_hover_ = std::move(handler); }
 
 private:
-    void install_callbacks();
-
-    static void glfw_mouse_pos_callback(::GLFWwindow* window, double x, double y);
-    static void glfw_mouse_button_callback(::GLFWwindow* window, int button, int action, int mods);
-    static void glfw_scroll_callback(::GLFWwindow* window, double x, double y);
-    static void glfw_key_callback(::GLFWwindow* window, int key, int scancode, int action,
-                                  int mods);
-    static void glfw_char_callback(::GLFWwindow* window, unsigned int codepoint);
-
     Platform* platform_ = nullptr;
     Widget* hovered_ = nullptr;
     Widget* focused_ = nullptr;
     Widget* pressed_ = nullptr;
     Vec2 mouse_pos_ = Vec2::zero();
-
-    // Event queues (filled by GLFW callbacks, consumed by process())
-    static constexpr u32 MAX_EVENTS = 64;
-    MouseMoveEvent move_events_[MAX_EVENTS];
-    u32 move_count_ = 0;
-    MouseButtonEvent button_events_[MAX_EVENTS];
-    u32 button_count_ = 0;
-    MouseScrollEvent scroll_events_[MAX_EVENTS];
-    u32 scroll_count_ = 0;
-    KeyEvent key_events_[MAX_EVENTS];
-    u32 key_count_ = 0;
 
     ClickHandler on_click_;
     HoverHandler on_hover_;

@@ -3,6 +3,7 @@
 #include <ultragui/core/rect.h>
 #include <ultragui/core/types.h>
 #include <ultragui/style/style.h>
+#include <ultragui/widgets/widget_context.h>
 
 #include <string>
 #include <vector>
@@ -10,7 +11,6 @@
 namespace ugui {
 
 class Renderer2D;
-class TextEngine;
 struct LayoutNode;
 
 /// Base class for all UI widgets. Provides lifecycle, tree structure,
@@ -69,6 +69,10 @@ public:
     bool contains(Vec2 point) const { return rect_.contains(point); }
     Widget* hit_test(Vec2 point);
 
+    // --- Context propagation ---
+    void set_context(const WidgetContext* ctx);
+    const WidgetContext* context() const { return context_; }
+
     // --- Lifecycle (override in subclasses) ---
     virtual void on_mount() {}
     virtual void on_unmount() {}
@@ -76,6 +80,10 @@ public:
     virtual void on_layout(const Rect& rect, const Rect& content_rect);
     virtual void on_paint(Renderer2D& renderer);
     virtual void measure(f32& out_width, f32& out_height);
+
+    // --- Event dispatch (override in subclasses) ---
+    virtual bool on_click() { return false; }
+    virtual bool on_scroll(Vec2 delta) { return false; }
 
     // --- Layout integration ---
     void populate_layout_node(LayoutNode& node) const;
@@ -86,6 +94,7 @@ protected:
     std::string name_;
     Widget* parent_ = nullptr;
     std::vector<Widget*> children_;
+    const WidgetContext* context_ = nullptr;
 
     Style style_;
     std::vector<StyleOverride> state_overrides_;

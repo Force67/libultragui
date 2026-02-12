@@ -1,6 +1,5 @@
 #pragma once
 
-#include <ultragui/text/text_engine.h>
 #include <ultragui/widgets/widget.h>
 
 #include <string>
@@ -18,19 +17,23 @@ public:
     }
     const std::string& text() const { return text_; }
 
-    void set_font(FontHandle font) { font_ = font; }
-    FontHandle font() const { return font_; }
+    void set_font(FontHandle font) { font_override_ = font; }
+    FontHandle font() const { return font_override_; }
 
     void measure(f32& out_width, f32& out_height) override;
     void on_paint(Renderer2D& renderer) override;
 
-    /// Must be set before measure/paint
-    void set_text_engine(TextEngine* engine) { text_engine_ = engine; }
-
 private:
+    TextEngine* text_engine() const {
+        return context_ ? context_->text_engine : nullptr;
+    }
+    FontHandle effective_font() const {
+        if (font_override_ != INVALID_FONT) return font_override_;
+        return context_ ? context_->default_font : INVALID_FONT;
+    }
+
     std::string text_;
-    FontHandle font_ = INVALID_FONT;
-    TextEngine* text_engine_ = nullptr;
+    FontHandle font_override_ = INVALID_FONT;
 };
 
 } // namespace ugui

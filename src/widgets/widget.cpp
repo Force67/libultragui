@@ -24,11 +24,20 @@ Widget::~Widget() {
     }
 }
 
+void Widget::set_context(const WidgetContext* ctx) {
+    context_ = ctx;
+    for (auto* child : children_) {
+        child->set_context(ctx);
+    }
+}
+
 void Widget::add_child(Widget* child) {
     if (child->parent_)
         child->parent_->remove_child(child);
     child->parent_ = this;
     children_.push_back(child);
+    if (context_)
+        child->set_context(context_);
     mark_dirty();
 }
 
