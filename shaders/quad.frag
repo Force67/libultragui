@@ -13,6 +13,10 @@ layout(set = 0, binding = 0) uniform sampler2D tex_sampler;
 
 layout(location = 0) out vec4 out_color;
 
+vec3 srgb_to_linear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
 float sdf_rounded_rect_4(vec2 p, vec2 b, vec4 radii) {
     // radii = (tl, tr, br, bl)
     // top-left: p.x < 0, p.y < 0 -> radii.x (tl)
@@ -26,6 +30,9 @@ float sdf_rounded_rect_4(vec2 p, vec2 b, vec4 radii) {
 
 void main() {
     vec4 tex_color = texture(tex_sampler, frag_uv);
+    // Texture stores sRGB data in UNORM format - linearize RGB for correct blending.
+    // Alpha channel is always linear.
+    tex_color.rgb = srgb_to_linear(tex_color.rgb);
 
     // Linear gradient: interpolate between color and color2 along V axis
     vec4 base_color = mix(frag_color, frag_color2, frag_uv.y);

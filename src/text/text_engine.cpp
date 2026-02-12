@@ -13,7 +13,7 @@
 
 namespace ugui {
 
-static constexpr u32 ATLAS_SIZE = 1024;
+static constexpr u32 ATLAS_SIZE = 2048;
 static constexpr u32 MAX_FONTS = 32;
 
 struct GlyphKey {
@@ -215,8 +215,14 @@ TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 f
                           f32 letter_spacing, f32 line_height_mult) {
     assert(impl_ && font < MAX_FONTS && impl_->fonts[font].in_use);
 
+    // Rasterize glyphs at physical pixel size for sharpness on HiDPI displays.
+    // All returned metrics (bmp_w, bearing, advance, ascent, etc.) are scaled
+    // back to window coordinates so the vertex layout is unchanged.
+    f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
+    f32 inv_dpi = 1.0f / dpi;
+
     auto& slot = impl_->fonts[font];
-    u32 pixel_size = static_cast<u32>(font_size + 0.5f);
+    u32 pixel_size = static_cast<u32>(font_size * dpi + 0.5f);
     FT_Set_Pixel_Sizes(slot.ft_face, 0, pixel_size);
     hb_ft_font_changed(slot.hb_font);
 
@@ -239,9 +245,11 @@ TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 f
     for (u32 i = 0; i < glyph_count; ++i) {
         auto& g = glyphs[i];
         g.glyph_id = glyph_info[i].codepoint;
-        g.x_offset = static_cast<f32>(glyph_pos[i].x_offset) / 64.0f;
-        g.y_offset = static_cast<f32>(glyph_pos[i].y_offset) / 64.0f;
-        g.x_advance = static_cast<f32>(glyph_pos[i].x_advance) / 64.0f + letter_spacing;
+        // HarfBuzz positions are in FreeType 26.6 fixed-point at the DPI-scaled size;
+        // scale back to window coords.
+        g.x_offset = static_cast<f32>(glyph_pos[i].x_offset) / 64.0f * inv_dpi;
+        g.y_offset = static_cast<f32>(glyph_pos[i].y_offset) / 64.0f * inv_dpi;
+        g.x_advance = static_cast<f32>(glyph_pos[i].x_advance) / 64.0f * inv_dpi + letter_spacing;
 
         auto* cached = impl_->rasterize_glyph(font, g.glyph_id, pixel_size);
         if (cached) {
@@ -249,10 +257,12 @@ TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 f
             g.v0 = cached->v0;
             g.u1 = cached->u1;
             g.v1 = cached->v1;
-            g.bmp_w = cached->bmp_w;
-            g.bmp_h = cached->bmp_h;
-            g.bearing_x = cached->bearing_x;
-            g.bearing_y = cached->bearing_y;
+            // Atlas stores full-resolution bitmaps; scale dimensions to window coords
+            // so the vertex quad covers the right screen area.
+            g.bmp_w = cached->bmp_w * inv_dpi;
+            g.bmp_h = cached->bmp_h * inv_dpi;
+            g.bearing_x = cached->bearing_x * inv_dpi;
+            g.bearing_y = cached->bearing_y * inv_dpi;
         }
 
         cursor_x += g.x_advance;
@@ -260,10 +270,11 @@ TextRun TextEngine::shape(FontHandle font, const char* text, u32 text_len, f32 f
 
     hb_buffer_destroy(buf);
 
-    // Get font metrics for this size
-    f32 ascent = static_cast<f32>(slot.ft_face->size->metrics.ascender) / 64.0f;
-    f32 descent = static_cast<f32>(slot.ft_face->size->metrics.descender) / 64.0f;
-    f32 line_height = static_cast<f32>(slot.ft_face->size->metrics.height) / 64.0f * line_height_mult;
+    // Font metrics from FreeType are at the DPI-scaled size; convert to window coords.
+    f32 ascent = static_cast<f32>(slot.ft_face->size->metrics.ascender) / 64.0f * inv_dpi;
+    f32 descent = static_cast<f32>(slot.ft_face->size->metrics.descender) / 64.0f * inv_dpi;
+    f32 line_height =
+        static_cast<f32>(slot.ft_face->size->metrics.height) / 64.0f * inv_dpi * line_height_mult;
 
     TextRun run{};
     run.glyphs = glyphs.data();
@@ -349,8 +360,9 @@ void TextEngine::flush_atlas() {
 
     if (atlas_texture_ == INVALID_TEXTURE) {
         // First time: create the texture (includes upload).
-        atlas_texture_ =
-            rhi_->create_texture(ATLAS_SIZE, ATLAS_SIZE, RHIFormat::R8_UNORM, impl_->atlas_pixels);
+        // NEAREST filter prevents bilinear bleed between packed glyphs.
+        atlas_texture_ = rhi_->create_texture(ATLAS_SIZE, ATLAS_SIZE, RHIFormat::R8_UNORM,
+                                              impl_->atlas_pixels, RHIFilter::Nearest);
     } else {
         // Subsequent: update in place (handle stays stable).
         rhi_->update_texture(atlas_texture_, impl_->atlas_pixels);

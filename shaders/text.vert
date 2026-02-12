@@ -19,11 +19,17 @@ layout(location = 8) in uint in_border_color;
 layout(location = 0) out vec2 frag_uv;
 layout(location = 1) out vec4 frag_color;
 
+vec3 srgb_to_linear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
 void main() {
     gl_Position = vec4(in_pos * pc.scale + pc.translate, 0.0, 1.0);
     frag_uv = in_uv;
 
-    frag_color =
-        vec4(float(in_color & 0xFFu) / 255.0, float((in_color >> 8) & 0xFFu) / 255.0,
-             float((in_color >> 16) & 0xFFu) / 255.0, float((in_color >> 24) & 0xFFu) / 255.0);
+    vec4 col = vec4(
+        float(in_color & 0xFFu) / 255.0, float((in_color >> 8) & 0xFFu) / 255.0,
+        float((in_color >> 16) & 0xFFu) / 255.0, float((in_color >> 24) & 0xFFu) / 255.0);
+    col.rgb = srgb_to_linear(col.rgb);
+    frag_color = col;
 }

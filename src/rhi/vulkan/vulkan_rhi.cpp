@@ -44,6 +44,14 @@ static std::vector<char> read_file(const std::string& path) {
 }
 
 static VkSurfaceFormatKHR choose_surface_format(const std::vector<VkSurfaceFormatKHR>& formats) {
+    // Prefer sRGB format - the GPU automatically converts linear framebuffer writes
+    // to sRGB on output, giving correct gamma-space anti-aliasing and blending.
+    for (auto& f : formats) {
+        if (f.format == VK_FORMAT_B8G8R8A8_SRGB &&
+            f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+            return f;
+    }
+    // Fallback to UNORM + sRGB colorspace (manual gamma)
     for (auto& f : formats) {
         if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
             f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
@@ -837,7 +845,7 @@ void VulkanRHI::ensure_text_index_capacity(u32 index_count) {
 // ---------------------------------------------------------------------------
 
 bool VulkanRHI::create_default_resources() {
-    // Sampler
+    // Linear sampler (images, general textures)
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = VK_FILTER_LINEAR;
     sci.minFilter = VK_FILTER_LINEAR;
@@ -845,6 +853,16 @@ bool VulkanRHI::create_default_resources() {
     sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (vkCreateSampler(device_, &sci, nullptr, &default_sampler_) != VK_SUCCESS)
+        return false;
+
+    // Nearest sampler (text atlas - pixel-exact, no inter-glyph bleeding)
+    VkSamplerCreateInfo nsci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    nsci.magFilter = VK_FILTER_NEAREST;
+    nsci.minFilter = VK_FILTER_NEAREST;
+    nsci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    nsci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    nsci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateSampler(device_, &nsci, nullptr, &nearest_sampler_) != VK_SUCCESS)
         return false;
 
     // White 1x1 texture
@@ -858,7 +876,7 @@ bool VulkanRHI::create_default_resources() {
 // ---------------------------------------------------------------------------
 
 RHITextureHandle VulkanRHI::create_texture(u32 width, u32 height, RHIFormat format,
-                                           const void* pixels) {
+                                           const void* pixels, RHIFilter filter) {
     // Find a free slot
     RHITextureHandle handle = INVALID_TEXTURE;
     for (u32 i = 0; i < MAX_TEXTURES; ++i) {
@@ -993,7 +1011,7 @@ RHITextureHandle VulkanRHI::create_texture(u32 width, u32 height, RHIFormat form
     VkDescriptorImageInfo dii{};
     dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     dii.imageView = slot.view;
-    dii.sampler = default_sampler_;
+    dii.sampler = (filter == RHIFilter::Nearest) ? nearest_sampler_ : default_sampler_;
 
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = slot.descriptor;
@@ -1370,6 +1388,10 @@ Vec2 VulkanRHI::display_size() const {
             static_cast<f32>(swapchain_extent_.height) / dpi_scale_};
 }
 
+f32 VulkanRHI::dpi_scale() const {
+    return dpi_scale_;
+}
+
 // ---------------------------------------------------------------------------
 // Offscreen rendering
 // ---------------------------------------------------------------------------
@@ -1639,6 +1661,8 @@ void VulkanRHI::shutdown() {
 
     if (default_sampler_)
         vkDestroySampler(device_, default_sampler_, nullptr);
+    if (nearest_sampler_)
+        vkDestroySampler(device_, nearest_sampler_, nullptr);
 
     // Per-swapchain-image semaphores
     for (u32 i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i) {

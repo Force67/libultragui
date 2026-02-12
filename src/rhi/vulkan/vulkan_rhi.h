@@ -23,7 +23,8 @@ public:
     void draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
                              u32 index_count, RHITextureHandle atlas_texture) override;
     RHITextureHandle create_texture(u32 width, u32 height, RHIFormat format,
-                                    const void* pixels) override;
+                                    const void* pixels,
+                                    RHIFilter filter = RHIFilter::Linear) override;
     void update_texture(RHITextureHandle handle, const void* pixels) override;
     void destroy_texture(RHITextureHandle handle) override;
     bool acquire_frame() override;
@@ -32,6 +33,7 @@ public:
     bool begin_offscreen(RHITextureHandle target, Color clear_color) override;
     void end_offscreen(RHITextureHandle target) override;
     Vec2 display_size() const override;
+    f32 dpi_scale() const override;
 
 private:
     bool create_instance();
@@ -129,7 +131,8 @@ private:
     VkSemaphore render_finished_[MAX_SWAPCHAIN_IMAGES] = {};
 
     // Default resources
-    VkSampler default_sampler_ = VK_NULL_HANDLE;
+    VkSampler default_sampler_ = VK_NULL_HANDLE;  // LINEAR
+    VkSampler nearest_sampler_ = VK_NULL_HANDLE; // NEAREST (for text atlases)
 
     bool create_offscreen_render_pass();
 

@@ -42,7 +42,8 @@ public:
                                      u32 index_count, RHITextureHandle atlas_texture) = 0;
 
     virtual RHITextureHandle create_texture(u32 width, u32 height, RHIFormat format,
-                                            const void* pixels) = 0;
+                                            const void* pixels,
+                                            RHIFilter filter = RHIFilter::Linear) = 0;
     virtual void update_texture(RHITextureHandle handle, const void* pixels) = 0;
     virtual void destroy_texture(RHITextureHandle handle) = 0;
 
@@ -67,6 +68,10 @@ public:
     virtual void end_offscreen(RHITextureHandle target) = 0;
 
     virtual Vec2 display_size() const = 0;
+
+    /// Ratio of framebuffer pixels to window coordinates.
+    /// 1.0 on standard displays, 2.0 on typical HiDPI/Retina displays.
+    virtual f32 dpi_scale() const = 0;
 };
 
 RHI* create_vulkan_rhi();

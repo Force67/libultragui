@@ -1,5 +1,7 @@
 #include <ultragui/render/renderer2d.h>
 
+#include <cmath>
+
 namespace ugui {
 
 bool Renderer2D::init(RHI* rhi) {
@@ -129,6 +131,19 @@ void Renderer2D::emit_quad(Rect rect, u32 color, u32 color2, u32 corner_radii, f
         current_texture_ = texture;
     }
 
+    // Snap rect edges to physical pixel boundaries for crisp edges on fractional DPI.
+    // Without this, a panel at x=10.3 on 1.65x DPI straddles framebuffer pixels,
+    // causing the SDF anti-aliasing to blur across an extra pixel.
+    f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
+    if (dpi != 1.0f) {
+        f32 inv = 1.0f / dpi;
+        f32 x0 = std::round(rect.x * dpi) * inv;
+        f32 y0 = std::round(rect.y * dpi) * inv;
+        f32 x1 = std::round((rect.x + rect.w) * dpi) * inv;
+        f32 y1 = std::round((rect.y + rect.h) * dpi) * inv;
+        rect = {x0, y0, x1 - x0, y1 - y0};
+    }
+
     f32 hw = rect.w * 0.5f;
     f32 hh = rect.h * 0.5f;
 
@@ -205,6 +220,12 @@ void Renderer2D::draw_text(Vec2 pos, const TextRun& run, Color color,
     f32 cursor_x = pos.x;
     f32 baseline_y = pos.y + run.ascent;
 
+    // Snap glyph positions to physical pixel boundaries to prevent sub-pixel blur.
+    // On fractional DPI (e.g., 1.65x), unsnapped positions straddle framebuffer
+    // pixels, causing the GPU to bilinear-filter the glyph texture -> fuzz.
+    f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
+    f32 inv_dpi = 1.0f / dpi;
+
     for (u32 i = 0; i < run.glyph_count; ++i) {
         auto& g = run.glyphs[i];
         if (g.bmp_w <= 0 || g.bmp_h <= 0) {
@@ -212,10 +233,13 @@ void Renderer2D::draw_text(Vec2 pos, const TextRun& run, Color color,
             continue;
         }
 
-        f32 x = cursor_x + g.bearing_x + g.x_offset;
-        f32 y = baseline_y - g.bearing_y + g.y_offset;
-        f32 w = g.bmp_w;
-        f32 h = g.bmp_h;
+        // Snap glyph position AND size to physical pixel grid.
+        // Position snap prevents sub-pixel blur from bilinear interpolation.
+        // Size snap ensures the glyph quad covers an integer number of physical pixels.
+        f32 x = std::round((cursor_x + g.bearing_x + g.x_offset) * dpi) * inv_dpi;
+        f32 y = std::round((baseline_y - g.bearing_y + g.y_offset) * dpi) * inv_dpi;
+        f32 w = std::round(g.bmp_w * dpi) * inv_dpi;
+        f32 h = std::round(g.bmp_h * dpi) * inv_dpi;
 
         u32 base = static_cast<u32>(text_vertices_.size());
         text_vertices_.push_back({{x, y}, {g.u0, g.v0}, packed_color, packed_color,
