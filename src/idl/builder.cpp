@@ -1,3 +1,4 @@
+#include <ultragui/animation/animator.h>
 #include <ultragui/idl/builder.h>
 #include <ultragui/widgets/button.h>
 #include <ultragui/widgets/image.h>
@@ -5,6 +6,7 @@
 #include <ultragui/widgets/scroll_view.h>
 #include <ultragui/widgets/text.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdio>
 
@@ -384,6 +386,104 @@ void UguiBuilder::apply_properties(Widget* widget, const UguiNode& node) {
         }
 
         widget->add_state_override(state, override_style, mask);
+
+        // Parse transition properties
+        Transition trans;
+        bool has_transition = false;
+        auto t_it = sb.properties.find("transition");
+        auto td_it = sb.properties.find("transition-duration");
+        auto te_it = sb.properties.find("transition-easing");
+        auto tl_it = sb.properties.find("transition-delay");
+
+        if (t_it != sb.properties.end()) {
+            // Shorthand: "0.3s ease-in-out" or "0.3s ease-in-out 0.1s"
+            has_transition = true;
+            const auto& val = t_it->second;
+            // Parse duration (first token)
+            f32 dur = 0;
+            const char* p = val.c_str();
+            auto r = std::from_chars(p, p + val.size(), dur);
+            if (r.ptr != p) {
+                if (*r.ptr == 'm' && *(r.ptr + 1) == 's')
+                    trans.duration = dur / 1000.0f;
+                else
+                    trans.duration = dur; // assume seconds
+                p = r.ptr;
+                while (*p && (*p == 's' || *p == 'm' || *p == ' '))
+                    ++p;
+            }
+            // Parse optional easing
+            std::string rest(p);
+            if (rest.find("ease-in-out") != std::string::npos)
+                trans.easing = EasingType::EaseInOut;
+            else if (rest.find("ease-in") != std::string::npos)
+                trans.easing = EasingType::EaseIn;
+            else if (rest.find("ease-out") != std::string::npos)
+                trans.easing = EasingType::EaseOut;
+            else if (rest.find("linear") != std::string::npos)
+                trans.easing = EasingType::Linear;
+        }
+        if (td_it != sb.properties.end()) {
+            has_transition = true;
+            f32 dur = 0;
+            const auto& val = td_it->second;
+            std::from_chars(val.data(), val.data() + val.size(), dur);
+            trans.duration = val.find("ms") != std::string::npos ? dur / 1000.0f : dur;
+        }
+        if (te_it != sb.properties.end()) {
+            const auto& val = te_it->second;
+            if (val == "ease-in-out") trans.easing = EasingType::EaseInOut;
+            else if (val == "ease-in") trans.easing = EasingType::EaseIn;
+            else if (val == "ease-out") trans.easing = EasingType::EaseOut;
+            else if (val == "linear") trans.easing = EasingType::Linear;
+        }
+        if (tl_it != sb.properties.end()) {
+            f32 del = 0;
+            const auto& val = tl_it->second;
+            std::from_chars(val.data(), val.data() + val.size(), del);
+            trans.delay = val.find("ms") != std::string::npos ? del / 1000.0f : del;
+        }
+        if (has_transition && state != WidgetState::None)
+            widget->add_state_transition(state, trans);
+    }
+
+    // @keyframes blocks
+    for (auto& kb : node.keyframe_blocks) {
+        if (!animator_ || kb.stops.empty())
+            continue;
+
+        KeyframeAnimation anim;
+        anim.widget_id = widget->id();
+
+        // Parse top-level properties
+        auto d_it = kb.properties.find("duration");
+        if (d_it != kb.properties.end()) {
+            f32 dur = 0;
+            std::from_chars(d_it->second.data(), d_it->second.data() + d_it->second.size(), dur);
+            anim.duration = d_it->second.find("ms") != std::string::npos ? dur / 1000.0f : dur;
+        }
+        auto l_it = kb.properties.find("loop");
+        if (l_it != kb.properties.end())
+            anim.repeat_count = (l_it->second == "true") ? -1 : 1;
+        auto a_it = kb.properties.find("alternate");
+        if (a_it != kb.properties.end())
+            anim.alternate = (a_it->second == "true");
+
+        // Parse stops into keyframes
+        for (auto& stop : kb.stops) {
+            Keyframe kf;
+            kf.time = stop.percent;
+            kf.style = parse_style(stop.properties);
+            anim.keyframes.push_back(kf);
+        }
+
+        // Sort keyframes by time
+        std::sort(anim.keyframes.begin(), anim.keyframes.end(),
+                  [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
+
+        anim.active = true;
+        anim.start_time = 0; // Will be set when UIContext starts the animator
+        animator_->start_animation(anim, 0);
     }
 }
 

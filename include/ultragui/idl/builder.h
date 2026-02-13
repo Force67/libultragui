@@ -11,6 +11,8 @@
 
 namespace ugui {
 
+class Animator;
+
 /// Builds a widget tree from a parsed .ugui document.
 /// Maps element types to widget constructors, resolves properties to styles.
 class UguiBuilder {
@@ -18,6 +20,7 @@ public:
     using WidgetFactory = std::function<Widget*(const std::string& name)>;
 
     void register_type(const std::string& type_name, WidgetFactory factory);
+    void set_animator(Animator* a) { animator_ = a; }
 
     /// Build a widget tree from a document. Caller owns the returned widgets.
     Widget* build(const UguiDocument& doc);
@@ -32,6 +35,7 @@ private:
     Style parse_style(const std::unordered_map<std::string, std::string>& props);
 
     std::unordered_map<std::string, WidgetFactory> factories_;
+    Animator* animator_ = nullptr;
 };
 
 } // namespace ugui

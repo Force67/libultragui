@@ -3,6 +3,19 @@
 
 namespace ugui {
 
+Widget* find_widget_by_id(Widget* root, u32 id) {
+    if (!root)
+        return nullptr;
+    if (root->id() == id)
+        return root;
+    for (u32 i = 0; i < root->child_count(); ++i) {
+        Widget* found = find_widget_by_id(root->child_at(i), id);
+        if (found)
+            return found;
+    }
+    return nullptr;
+}
+
 Widget* find_widget(Widget* root, const char* name) {
     if (!root)
         return nullptr;

@@ -7,6 +7,7 @@
 #if ULTRAGUI_AUDIO
 #include <ultragui/audio/audio.h>
 #endif
+#include <ultragui/anim/vector_animation.h>
 #if ULTRAGUI_LOTTIE
 #include <ultragui/lottie/lottie.h>
 #endif
@@ -123,6 +124,10 @@ public:
     /// If width/height are 0, uses the SVG's native dimensions.
     RHITextureHandle load_svg(const char* path, u32 width = 0, u32 height = 0);
 
+    /// Load a .uganim vector animation. The returned animation is owned by
+    /// UIContext and automatically updated each frame. Returns nullptr on failure.
+    VectorAnimation* load_anim(const char* path, u32 width, u32 height);
+
 #if ULTRAGUI_LOTTIE
     /// Load a Lottie animation. The returned animation is owned by UIContext
     /// and automatically updated each frame. Returns nullptr on failure.
@@ -154,6 +159,7 @@ private:
 #if ULTRAGUI_AUDIO
     AudioEngine audio_;
 #endif
+    std::vector<VectorAnimation*> vector_anims_;
 #if ULTRAGUI_LOTTIE
     std::vector<LottieAnimation*> lottie_anims_;
 #endif

@@ -124,6 +124,7 @@ struct Document {
 // Internal API
 bool parse_svg(const char* data, usize length, Document& out);
 void rasterize(const Document& doc, u8* pixels, u32 width, u32 height);
+void parse_path_data(const char* d, Path& path);
 
 } // namespace svg
 } // namespace ugui

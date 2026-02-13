@@ -9,6 +9,9 @@ class Widget;
 /// Find a widget by name in a tree. Returns nullptr if not found.
 Widget* find_widget(Widget* root, const char* name);
 
+/// Find a widget by ID in a tree. Returns nullptr if not found.
+Widget* find_widget_by_id(Widget* root, u32 id);
+
 /// Recursively update all widgets (scroll momentum, animations, etc.)
 void update_widget_tree(Widget* root, f64 dt);
 

@@ -1,4 +1,5 @@
 #include <ultragui/ui_context.h>
+#include <ultragui/scripting/lua_anim.h>
 #include <ultragui/scripting/lua_widgets.h>
 
 #if ULTRAGUI_AUDIO
@@ -82,8 +83,21 @@ bool UIContext::init(const UIConfig& config) {
         [this](const char* name) -> Widget* { return find_widget(name); });
 #endif
 
+    // Vector animations lua bindings (always available - zero deps)
+    register_anim_lua(
+        lua_,
+        [this](const char* path, unsigned w, unsigned h) -> VectorAnimation* {
+            return load_anim(path, w, h);
+        },
+        [this](const char* name) -> Widget* { return find_widget(name); });
+
     // Widget context
     widget_ctx_.text_engine = &text_engine_;
+    widget_ctx_.animator = &animator_;
+    widget_ctx_.current_time = &last_time_;
+
+    // Builder
+    builder_.set_animator(&animator_);
 
     last_time_ = platform_->time();
     return true;
@@ -195,12 +209,27 @@ void UIContext::update() {
         input_.process(root_);
 
     // Update animations
-    if (root_)
-        animator_.update(now, [](u32, const Style&, void*) {}, nullptr);
+    if (root_) {
+        animator_.update(
+            now,
+            [](u32 widget_id, const Style& animated_style, void* user_data) {
+                auto* root = static_cast<Widget*>(user_data);
+                Widget* w = find_widget_by_id(root, widget_id);
+                if (w)
+                    w->set_animation_style(animated_style);
+            },
+            root_);
+    }
 
     // Update widgets (scroll momentum, etc.)
     if (root_)
         update_widget_tree(root_, dt_);
+
+    // Update vector animations
+    for (auto* anim : vector_anims_) {
+        if (anim)
+            anim->update(dt_);
+    }
 
 #if ULTRAGUI_LOTTIE
     for (auto* anim : lottie_anims_) {
@@ -271,6 +300,10 @@ void UIContext::shutdown() {
         owns_root_ = false;
     }
 
+    for (auto* anim : vector_anims_)
+        delete anim;
+    vector_anims_.clear();
+
 #if ULTRAGUI_LOTTIE
     for (auto* anim : lottie_anims_)
         delete anim;
@@ -298,6 +331,16 @@ void UIContext::shutdown() {
 
 RHITextureHandle UIContext::load_svg(const char* path, u32 width, u32 height) {
     return load_svg_texture(rhi_, path, width, height);
+}
+
+VectorAnimation* UIContext::load_anim(const char* path, u32 width, u32 height) {
+    auto* anim = new VectorAnimation();
+    if (!anim->load(rhi_, path, width, height)) {
+        delete anim;
+        return nullptr;
+    }
+    vector_anims_.push_back(anim);
+    return anim;
 }
 
 #if ULTRAGUI_LOTTIE

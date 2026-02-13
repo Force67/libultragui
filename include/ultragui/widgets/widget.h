@@ -3,6 +3,7 @@
 #include <ultragui/core/rect.h>
 #include <ultragui/core/types.h>
 #include <ultragui/style/style.h>
+#include <ultragui/style/transition.h>
 #include <ultragui/widgets/widget_context.h>
 
 #include <string>
@@ -43,11 +44,16 @@ public:
     }
 
     void add_state_override(WidgetState state, const Style& override_style, u64 mask);
+    void add_state_transition(WidgetState state, const Transition& transition);
     WidgetState widget_state() const { return state_; }
     void set_widget_state(WidgetState state);
 
-    /// Get the effective style (base + active overrides)
+    /// Get the effective style (base + active overrides + animation)
     Style computed_style() const;
+
+    /// Set an animated style override (used by Animator callback)
+    void set_animation_style(const Style& s);
+    void clear_animation_style();
 
     // --- Layout ---
     Rect rect() const { return rect_; }
@@ -99,6 +105,15 @@ protected:
     Style style_;
     std::vector<StyleOverride> state_overrides_;
     WidgetState state_ = WidgetState::None;
+
+    struct StateTransitionConfig {
+        WidgetState state;
+        Transition transition;
+    };
+    std::vector<StateTransitionConfig> state_transitions_;
+
+    Style animation_style_;
+    bool has_animation_ = false;
 
     Rect rect_;
     Rect content_rect_;

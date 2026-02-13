@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "width": 128, "height": 128,
+  "duration": 1.4,
+  "loop": true,
+
+  "layers": [
+    {
+      "name": "dot1",
+      "shape": "circle",
+      "cx": 28, "cy": 64, "r": 10,
+      "fill": "#ff6a8a",
+      "stroke": "none",
+      "keyframes": {
+        "cy": [
+          {"t": 0.0,  "v": 64},
+          {"t": 0.15, "v": 40, "ease": "ease-out"},
+          {"t": 0.3,  "v": 64, "ease": "ease-in"},
+          {"t": 1.0,  "v": 64}
+        ],
+        "r": [
+          {"t": 0.0,  "v": 10},
+          {"t": 0.15, "v": 12, "ease": "ease-out"},
+          {"t": 0.3,  "v": 10, "ease": "ease-in"},
+          {"t": 1.0,  "v": 10}
+        ]
+      }
+    },
+    {
+      "name": "dot2",
+      "shape": "circle",
+      "cx": 52, "cy": 64, "r": 10,
+      "fill": "#ffa04a",
+      "stroke": "none",
+      "keyframes": {
+        "cy": [
+          {"t": 0.0,  "v": 64},
+          {"t": 0.1,  "v": 64},
+          {"t": 0.25, "v": 40, "ease": "ease-out"},
+          {"t": 0.4,  "v": 64, "ease": "ease-in"},
+          {"t": 1.0,  "v": 64}
+        ],
+        "r": [
+          {"t": 0.0,  "v": 10},
+          {"t": 0.1,  "v": 10},
+          {"t": 0.25, "v": 12, "ease": "ease-out"},
+          {"t": 0.4,  "v": 10, "ease": "ease-in"},
+          {"t": 1.0,  "v": 10}
+        ]
+      }
+    },
+    {
+      "name": "dot3",
+      "shape": "circle",
+      "cx": 76, "cy": 64, "r": 10,
+      "fill": "#4abaff",
+      "stroke": "none",
+      "keyframes": {
+        "cy": [
+          {"t": 0.0,  "v": 64},
+          {"t": 0.2,  "v": 64},
+          {"t": 0.35, "v": 40, "ease": "ease-out"},
+          {"t": 0.5,  "v": 64, "ease": "ease-in"},
+          {"t": 1.0,  "v": 64}
+        ],
+        "r": [
+          {"t": 0.0,  "v": 10},
+          {"t": 0.2,  "v": 10},
+          {"t": 0.35, "v": 12, "ease": "ease-out"},
+          {"t": 0.5,  "v": 10, "ease": "ease-in"},
+          {"t": 1.0,  "v": 10}
+        ]
+      }
+    },
+    {
+      "name": "dot4",
+      "shape": "circle",
+      "cx": 100, "cy": 64, "r": 10,
+      "fill": "#aa6aff",
+      "stroke": "none",
+      "keyframes": {
+        "cy": [
+          {"t": 0.0,  "v": 64},
+          {"t": 0.3,  "v": 64},
+          {"t": 0.45, "v": 40, "ease": "ease-out"},
+          {"t": 0.6,  "v": 64, "ease": "ease-in"},
+          {"t": 1.0,  "v": 64}
+        ],
+        "r": [
+          {"t": 0.0,  "v": 10},
+          {"t": 0.3,  "v": 10},
+          {"t": 0.45, "v": 12, "ease": "ease-out"},
+          {"t": 0.6,  "v": 10, "ease": "ease-in"},
+          {"t": 1.0,  "v": 10}
+        ]
+      }
+    }
+  ]
+}

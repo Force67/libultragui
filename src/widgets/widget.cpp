@@ -1,3 +1,4 @@
+#include <ultragui/animation/animator.h>
 #include <ultragui/layout/layout.h>
 #include <ultragui/render/renderer2d.h>
 #include <ultragui/render/vertex.h>
@@ -58,14 +59,53 @@ void Widget::add_state_override(WidgetState state, const Style& override_style, 
     state_overrides_.push_back({state, override_style, mask});
 }
 
+void Widget::add_state_transition(WidgetState state, const Transition& transition) {
+    state_transitions_.push_back({state, transition});
+}
+
 void Widget::set_widget_state(WidgetState state) {
     if (state_ != state) {
+        WidgetState old_state = state_;
         state_ = state;
+
+        // Trigger transitions if configured
+        if (context_ && context_->animator && context_->current_time && !state_transitions_.empty()) {
+            Style from = resolve_style(style_, state_overrides_.data(),
+                                       static_cast<u32>(state_overrides_.size()), old_state);
+            Style to = resolve_style(style_, state_overrides_.data(),
+                                     static_cast<u32>(state_overrides_.size()), state);
+
+            // Find the best matching transition config
+            for (auto& stc : state_transitions_) {
+                u16 activated = static_cast<u16>(state) & ~static_cast<u16>(old_state);
+                u16 deactivated = static_cast<u16>(old_state) & ~static_cast<u16>(state);
+                bool relevant = (static_cast<u16>(stc.state) & (activated | deactivated)) != 0;
+                if (relevant && !stc.transition.is_instant()) {
+                    context_->animator->start_transition(
+                        id_, from, to, stc.transition, *context_->current_time);
+                    break;
+                }
+            }
+        }
+
         mark_paint_dirty();
     }
 }
 
+void Widget::set_animation_style(const Style& s) {
+    animation_style_ = s;
+    has_animation_ = true;
+    mark_paint_dirty();
+}
+
+void Widget::clear_animation_style() {
+    has_animation_ = false;
+    mark_paint_dirty();
+}
+
 Style Widget::computed_style() const {
+    if (has_animation_)
+        return animation_style_;
     if (state_overrides_.empty())
         return style_;
     return resolve_style(style_, state_overrides_.data(), static_cast<u32>(state_overrides_.size()),

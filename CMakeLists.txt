@@ -110,6 +110,12 @@ set(ULTRAGUI_SOURCES
     src/input/input.cpp
     src/scripting/lua_runtime.cpp
     src/scripting/lua_widgets.cpp
+    src/anim/json.cpp
+    src/anim/anim_parser.cpp
+    src/anim/anim_eval.cpp
+    src/anim/anim_render.cpp
+    src/anim/vector_animation.cpp
+    src/scripting/lua_anim.cpp
     src/layout/layout_tree.cpp
     src/render/paint.cpp
     src/svg/svg.cpp

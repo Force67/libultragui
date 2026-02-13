@@ -631,7 +631,7 @@ static void arc_to_cubics(Path& path, Vec2 from, f32 rx, f32 ry, f32 x_rotation,
     }
 }
 
-static void parse_path_data(const char* d, Path& path) {
+void parse_path_data(const char* d, Path& path) {
     if (!d)
         return;
 

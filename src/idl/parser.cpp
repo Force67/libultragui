@@ -1,5 +1,6 @@
 #include <ultragui/idl/parser.h>
 
+#include <charconv>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -21,6 +22,7 @@ enum class TokenType : u8 {
     Semicolon,
     LBrace,
     RBrace,
+    At,  // @
     Eof,
     Error,
 };
@@ -61,6 +63,10 @@ public:
         if (c == ';') {
             advance();
             return {TokenType::Semicolon, ";", tok_line, tok_col};
+        }
+        if (c == '@') {
+            advance();
+            return {TokenType::At, "@", tok_line, tok_col};
         }
 
         if (c == '"')
@@ -281,6 +287,8 @@ private:
             return "'{'";
         case TokenType::RBrace:
             return "'}'";
+        case TokenType::At:
+            return "'@'";
         case TokenType::Eof:
             return "EOF";
         case TokenType::Error:
@@ -306,7 +314,11 @@ private:
         expect(TokenType::LBrace);
 
         while (current_.type != TokenType::RBrace && current_.type != TokenType::Eof) {
-            if (current_.type == TokenType::Colon) {
+            if (current_.type == TokenType::At) {
+                // @keyframes block
+                auto kb = parse_keyframe_block();
+                node.keyframe_blocks.push_back(std::move(kb));
+            } else if (current_.type == TokenType::Colon) {
                 // State block: :hover { ... }
                 auto sb = parse_state_block();
                 node.state_blocks.push_back(std::move(sb));
@@ -443,6 +455,72 @@ private:
         if (current_.type == TokenType::RBrace)
             advance();
         return sb;
+    }
+
+    // @keyframes name { properties; percent% { props } ... }
+    UguiNode::KeyframeBlock parse_keyframe_block() {
+        UguiNode::KeyframeBlock kb;
+        advance(); // skip '@'
+
+        // Expect "keyframes" identifier
+        if (current_.type != TokenType::Identifier || current_.value != "keyframes") {
+            error("expected 'keyframes' after '@'");
+            return kb;
+        }
+        advance(); // skip "keyframes"
+
+        // Animation name
+        if (current_.type == TokenType::Identifier) {
+            kb.name = current_.value;
+            advance();
+        }
+
+        expect(TokenType::LBrace);
+
+        while (current_.type != TokenType::RBrace && current_.type != TokenType::Eof) {
+            if (current_.type == TokenType::Number && current_.value.back() == '%') {
+                // Percentage keyframe stop: e.g. 50% { opacity: 0.6; }
+                UguiNode::KeyframeBlock::Stop stop;
+                std::string pval = current_.value;
+                pval.pop_back(); // remove '%'
+                stop.percent = 0;
+                std::from_chars(pval.data(), pval.data() + pval.size(), stop.percent);
+                stop.percent /= 100.0f;
+                advance();
+                expect(TokenType::LBrace);
+
+                while (current_.type != TokenType::RBrace && current_.type != TokenType::Eof) {
+                    if (current_.type == TokenType::Identifier) {
+                        std::string key = current_.value;
+                        advance();
+                        expect(TokenType::Colon);
+                        std::string val = parse_value();
+                        if (current_.type == TokenType::Semicolon)
+                            advance();
+                        stop.properties[key] = val;
+                    } else {
+                        advance();
+                    }
+                }
+                if (current_.type == TokenType::RBrace)
+                    advance();
+                kb.stops.push_back(std::move(stop));
+            } else if (current_.type == TokenType::Identifier) {
+                // Top-level property: duration, loop, alternate, easing
+                std::string key = current_.value;
+                advance();
+                expect(TokenType::Colon);
+                std::string val = parse_value();
+                if (current_.type == TokenType::Semicolon)
+                    advance();
+                kb.properties[key] = val;
+            } else {
+                advance();
+            }
+        }
+        if (current_.type == TokenType::RBrace)
+            advance();
+        return kb;
     }
 
     // value = (identifier | string | number | hex_color)+

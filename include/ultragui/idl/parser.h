@@ -31,6 +31,18 @@ struct UguiNode {
         std::unordered_map<std::string, std::string> properties;
     };
     std::vector<StateBlock> state_blocks;
+
+    struct KeyframeBlock {
+        std::string name;
+        std::unordered_map<std::string, std::string> properties; // duration, loop, alternate, easing
+        struct Stop {
+            f32 percent; // 0.0-1.0
+            std::unordered_map<std::string, std::string> properties;
+        };
+        std::vector<Stop> stops;
+    };
+    std::vector<KeyframeBlock> keyframe_blocks;
+
     std::vector<UguiNode> children;
 
     u32 source_line = 0;
