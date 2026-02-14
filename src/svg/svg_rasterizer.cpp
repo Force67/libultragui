@@ -406,16 +406,19 @@ static void rasterize_edges(const std::vector<Edge>& edges, FillRule rule, u8* p
 
     BBox bbox = compute_bbox(edges);
 
-    // Sort edges by min-Y
-    std::vector<usize> sorted(edges.size());
+    // Sort edges by min-Y (reuse scratch to avoid per-call allocation)
+    static thread_local std::vector<usize> sorted;
+    sorted.resize(edges.size());
     for (usize i = 0; i < edges.size(); ++i)
         sorted[i] = i;
     std::sort(sorted.begin(), sorted.end(),
               [&](usize a, usize b) { return edges[a].y0 < edges[b].y0; });
 
     // Coverage buffer for one pixel row
-    std::vector<f32> coverage(width, 0.0f);
-    std::vector<ActiveEdge> active;
+    static thread_local std::vector<f32> coverage;
+    coverage.assign(width, 0.0f);
+    static thread_local std::vector<ActiveEdge> active;
+    active.clear();
 
     usize edge_idx = 0; // next edge to activate
 
@@ -543,9 +546,12 @@ void rasterize(const Document& doc, u8* pixels, u32 width, u32 height) {
         view_xform = Transform::scale(sx, sy);
     }
 
+    // Scratch buffers - reused across shapes (clear preserves capacity)
     std::vector<Vec2> points;
     std::vector<u32> subpath_starts;
     std::vector<Edge> edges;
+    std::vector<Vec2> stroke_points;
+    std::vector<u32> stroke_starts;
 
     for (auto& shape : doc.shapes) {
         Transform xform = view_xform * shape.transform;
@@ -578,8 +584,8 @@ void rasterize(const Document& doc, u8* pixels, u32 width, u32 height) {
             f32 sw = shape.stroke_width * scale;
 
             // Expand stroke to fill outline
-            std::vector<Vec2> stroke_points;
-            std::vector<u32> stroke_starts;
+            stroke_points.clear();
+            stroke_starts.clear();
             stroke_to_fill(points, subpath_starts, sw, stroke_points, stroke_starts);
 
             edges.clear();

@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <sstream>
 
 namespace ugui {
 
@@ -175,14 +174,15 @@ bool parse_anim_document(const JsonValue& root, AnimDocument& out) {
 }
 
 bool parse_anim_file(const char* path, AnimDocument& out) {
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
         std::fprintf(stderr, "ultragui/anim: failed to open '%s'\n", path);
         return false;
     }
-    std::ostringstream ss;
-    ss << file.rdbuf();
-    std::string data = ss.str();
+    auto size = file.tellg();
+    file.seekg(0);
+    std::string data(static_cast<usize>(size), '\0');
+    file.read(data.data(), size);
 
     JsonValue root;
     if (!parse_json(data.c_str(), data.size(), root)) {

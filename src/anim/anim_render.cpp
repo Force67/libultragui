@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 
 namespace ugui {
 
@@ -89,6 +90,19 @@ static void build_rect_path(svg::Path& path, f32 x, f32 y, f32 w, f32 h, f32 cr)
     path.close();
 }
 
+// Cache parsed paths to avoid re-parsing every frame.
+// Keyed by pointer to the layer's path_data string (stable for AnimDocument lifetime).
+static thread_local std::unordered_map<const std::string*, svg::Path> s_path_cache;
+
+static const svg::Path& get_cached_path(const AnimLayer& layer) {
+    auto it = s_path_cache.find(&layer.path_data);
+    if (it != s_path_cache.end())
+        return it->second;
+    auto& path = s_path_cache[&layer.path_data];
+    svg::parse_path_data(layer.path_data.c_str(), path);
+    return path;
+}
+
 static svg::Shape build_shape(const AnimLayer& layer, const EvaluatedLayer& eval) {
     svg::Shape shape;
     shape.opacity = eval.opacity;
@@ -108,10 +122,9 @@ static svg::Shape build_shape(const AnimLayer& layer, const EvaluatedLayer& eval
         break;
     case AnimShapeType::Path:
         if (!layer.path_data.empty())
-            svg::parse_path_data(layer.path_data.c_str(), shape.path);
+            shape.path = get_cached_path(layer);
         break;
     case AnimShapeType::Group:
-        // Groups don't have their own shape - children are processed separately
         break;
     }
 
@@ -168,24 +181,25 @@ static void render_layers(const std::vector<AnimLayer>& layers, f32 normalized_t
 // Public API
 // ---------------------------------------------------------------------------
 
+// Thread-local scratch buffers to avoid per-frame allocation
+static thread_local svg::Document s_svg_doc;
+
 void render_anim_frame(const AnimDocument& doc, f32 time, u8* pixels, u32 width, u32 height) {
     f32 normalized_t = (doc.duration > 0) ? time / doc.duration : 0;
     normalized_t = std::clamp(normalized_t, 0.0f, 1.0f);
 
-    // Clear pixel buffer
-    std::memset(pixels, 0, width * height * 4);
+    // Reuse scratch document (avoid reallocating the shapes vector)
+    s_svg_doc.shapes.clear();
+    s_svg_doc.gradients.clear();
+    s_svg_doc.width = static_cast<f32>(width);
+    s_svg_doc.height = static_cast<f32>(height);
+    s_svg_doc.view_w = doc.width;
+    s_svg_doc.view_h = doc.height;
 
-    // Build SVG document from evaluated layers
-    svg::Document svg_doc;
-    svg_doc.width = static_cast<f32>(width);
-    svg_doc.height = static_cast<f32>(height);
-    svg_doc.view_w = doc.width;
-    svg_doc.view_h = doc.height;
+    render_layers(doc.layers, normalized_t, s_svg_doc, svg::Transform::identity());
 
-    render_layers(doc.layers, normalized_t, svg_doc, svg::Transform::identity());
-
-    // Rasterize
-    svg::rasterize(svg_doc, pixels, width, height);
+    // Rasterize (clears pixels internally)
+    svg::rasterize(s_svg_doc, pixels, width, height);
 }
 
 } // namespace ugui

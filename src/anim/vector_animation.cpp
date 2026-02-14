@@ -96,8 +96,8 @@ void VectorAnimation::update(f64 dt) {
 
     f32 t = static_cast<f32>(impl_->current_time);
 
-    // Only re-render if time changed enough (1ms threshold)
-    if (std::abs(t - impl_->last_rendered_t) > 0.001f) {
+    // Only re-render if time changed enough (~60fps threshold)
+    if (std::abs(t - impl_->last_rendered_t) > 0.012f) {
         render_anim_frame(impl_->doc, t, impl_->rgba_buf.data(), impl_->w, impl_->h);
         impl_->rhi->update_texture(impl_->texture_handle, impl_->rgba_buf.data());
         impl_->last_rendered_t = t;
