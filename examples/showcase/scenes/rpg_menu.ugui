@@ -10,6 +10,13 @@ panel root {
     background-end: #0d0c0f;
     padding: 0;
 
+    // CSS Variables: Parchment palette
+    --parchment: #c8c0b0;
+    --parchment-dark: #6a6458;
+    --border-gold: #6a645840;
+    --bg-dark: #09080b;
+    --accent-gold: #b8a880;
+
     // Top margin
     panel top_margin { height: 36; }
 
@@ -87,6 +94,7 @@ panel root {
             button tab_quests {
                 text: "QUESTS";
                 font-size: 18;
+                font-weight: bold;
                 letter-spacing: 5;
                 text-transform: uppercase;
                 text-align: center;
@@ -94,6 +102,7 @@ panel root {
                 background: transparent;
                 padding: 10 32;
                 cursor: pointer;
+                tab-index: 0;
                 :hover { color: #e8e0d0; }
             }
 
@@ -108,6 +117,7 @@ panel root {
             button tab_stats {
                 text: "GENERAL STATS";
                 font-size: 18;
+                font-weight: bold;
                 letter-spacing: 5;
                 text-transform: uppercase;
                 text-align: center;
@@ -115,6 +125,7 @@ panel root {
                 background: transparent;
                 padding: 10 32;
                 cursor: pointer;
+                tab-index: 1;
                 :hover { color: #e8e0d0; }
             }
 
@@ -135,13 +146,16 @@ panel root {
             button tab_system {
                 text: "SYSTEM";
                 font-size: 18;
+                font-weight: bold;
                 letter-spacing: 5;
                 text-transform: uppercase;
                 text-align: center;
                 color: #d8d0c0;
+                text-decoration: underline;
                 background: transparent;
                 padding: 10 32;
                 cursor: pointer;
+                tab-index: 2;
                 :hover { color: #e8e0d0; }
             }
 
@@ -287,6 +301,11 @@ panel root {
                 background: #0e0d1050;
                 padding: 0;
 
+                // Inset shadow for carved/embossed look
+                shadow-color: #00000060;
+                shadow-blur: 8;
+                shadow-inset: true;
+
                 // LEFT: Menu items
                 panel left_col {
                     layout: column;
@@ -306,7 +325,14 @@ panel root {
                         background: transparent;
                         padding: 5 24 5 0;
                         cursor: pointer;
-                        :hover { color: #d8d0c4; }
+                        tab-index: 3;
+                        tooltip: "Save your current progress instantly";
+                        :hover {
+                            color: #d8d0c4;
+                            background: #c8c0b008;
+                            transition-duration: 0.4s;
+                            transition-easing: spring;
+                        }
                     }
 
                     button menu_save {
@@ -319,7 +345,14 @@ panel root {
                         background: transparent;
                         padding: 5 24 5 0;
                         cursor: pointer;
-                        :hover { color: #d8d0c4; }
+                        tab-index: 4;
+                        tooltip: "Save your current progress";
+                        :hover {
+                            color: #d8d0c4;
+                            background: #c8c0b008;
+                            transition-duration: 0.4s;
+                            transition-easing: spring;
+                        }
                     }
 
                     button menu_load {
@@ -332,7 +365,14 @@ panel root {
                         background: transparent;
                         padding: 5 24 5 0;
                         cursor: pointer;
-                        :hover { color: #d8d0c4; }
+                        tab-index: 5;
+                        tooltip: "Load a previously saved game";
+                        :hover {
+                            color: #d8d0c4;
+                            background: #c8c0b008;
+                            transition-duration: 0.4s;
+                            transition-easing: spring;
+                        }
                     }
 
                     button menu_mods {
@@ -345,7 +385,14 @@ panel root {
                         background: transparent;
                         padding: 5 24 5 0;
                         cursor: pointer;
-                        :hover { color: #d8d0c4; }
+                        tab-index: 6;
+                        tooltip: "Browse and manage installed modifications";
+                        :hover {
+                            color: #d8d0c4;
+                            background: #c8c0b008;
+                            transition-duration: 0.4s;
+                            transition-easing: spring;
+                        }
                     }
 
                     button menu_settings {
@@ -358,7 +405,14 @@ panel root {
                         background: transparent;
                         padding: 5 24 5 0;
                         cursor: pointer;
-                        :hover { color: #d8d0c4; }
+                        tab-index: 7;
+                        tooltip: "Configure display, audio, and gameplay options";
+                        :hover {
+                            color: #d8d0c4;
+                            background: #c8c0b008;
+                            transition-duration: 0.4s;
+                            transition-easing: spring;
+                        }
                     }
 
                     button menu_controls {
@@ -371,7 +425,14 @@ panel root {
                         background: transparent;
                         padding: 5 24 5 0;
                         cursor: pointer;
-                        :hover { color: #d8d0c4; }
+                        tab-index: 8;
+                        tooltip: "Customize keyboard and gamepad bindings";
+                        :hover {
+                            color: #d8d0c4;
+                            background: #c8c0b008;
+                            transition-duration: 0.4s;
+                            transition-easing: spring;
+                        }
                     }
 
                     button menu_help {
@@ -384,7 +445,14 @@ panel root {
                         background: transparent;
                         padding: 5 24 5 0;
                         cursor: pointer;
-                        :hover { color: #d8d0c4; }
+                        tab-index: 9;
+                        tooltip: "View tutorials and gameplay tips";
+                        :hover {
+                            color: #d8d0c4;
+                            background: #c8c0b008;
+                            transition-duration: 0.4s;
+                            transition-easing: spring;
+                        }
                     }
 
                     // Push QUIT down
@@ -401,19 +469,22 @@ panel root {
                         button menu_quit {
                             text: "QUIT";
                             font-size: 24;
+                            font-weight: bold;
                             letter-spacing: 4;
                             text-transform: uppercase;
                             text-align: right;
-                            color: #c8c0b0;
+                            color: --parchment;
                             background: transparent;
                             padding: 6 0 6 0;
                             cursor: pointer;
+                            tab-index: 17;
+                            tooltip: "Return to the main menu or desktop";
                             :hover { color: #f0e8d8; }
                         }
 
                         // Selection arrow (always visible for QUIT, Lua toggles for others)
                         text sel_arrow {
-                            text: "▸";
+                            text: ">";
                             font-size: 20;
                             color: #c8c0b0;
                             padding: 0 0 0 8;
@@ -445,9 +516,15 @@ panel root {
                     padding: 28 32;
                     gap: 4;
 
+                    // Inset shadow for embossed parchment feel
+                    shadow-color: #00000040;
+                    shadow-blur: 6;
+                    shadow-inset: true;
+
                     text detail_heading {
                         text: "";
                         font-size: 12;
+                        font-weight: bold;
                         letter-spacing: 3;
                         text-transform: uppercase;
                         color: #5a584e;
@@ -457,8 +534,9 @@ panel root {
                     text detail_title {
                         text: "Main Menu";
                         font-size: 21;
+                        font-weight: bold;
                         letter-spacing: 0.5;
-                        color: #ccc4b4;
+                        color: --parchment;
                     }
 
                     panel detail_sep {
@@ -466,6 +544,13 @@ panel root {
                         height: 1;
                         background: #5a584e20;
                         margin: 6 0;
+                    }
+
+                    // Quest description area - rich text with styled spans
+                    rich-text quest_desc {
+                        padding: 0 0 4 0;
+                        span { text: "Current Objective: "; font-weight: bold; color: --accent-gold; font-size: 13; }
+                        span { text: "Speak to the Greybeards atop High Hrothgar."; color: #8a8478; font-size: 13; }
                     }
 
                     button detail_opt_1 {
@@ -524,6 +609,196 @@ panel root {
                     }
 
                     panel detail_fill { flex-grow: 1; }
+
+                    // SETTINGS PANEL (shown when SETTINGS tab active)
+                    panel settings_panel {
+                        layout: column;
+                        width: 100%;
+                        gap: 10;
+                        padding: 12 0 0 0;
+
+                        // Inset shadow for recessed settings area
+                        shadow-color: #00000050;
+                        shadow-blur: 6;
+                        shadow-inset: true;
+
+                        // Section: Display Options
+                        text settings_display_label {
+                            text: "DISPLAY";
+                            font-size: 11;
+                            font-weight: bold;
+                            letter-spacing: 3;
+                            text-transform: uppercase;
+                            color: --parchment-dark;
+                            text-decoration: underline;
+                            padding: 0 0 2 0;
+                        }
+
+                        checkbox opt_subtitles {
+                            label: "Subtitles";
+                            checked: true;
+                            tab-index: 10;
+                            font-size: 13;
+                            color: #c8c0b0;
+                            background: #b8a880;
+                            border-color: #6a645860;
+                        }
+
+                        checkbox opt_compass {
+                            label: "Show Compass";
+                            checked: true;
+                            tab-index: 11;
+                            font-size: 13;
+                            color: #c8c0b0;
+                            background: #b8a880;
+                            border-color: #6a645860;
+                        }
+
+                        checkbox opt_crosshair {
+                            label: "Show Crosshair";
+                            tab-index: 12;
+                            font-size: 13;
+                            color: #c8c0b0;
+                            border-color: #6a645860;
+                        }
+
+                        panel settings_display_sep {
+                            width: 100%;
+                            height: 1;
+                            background: #5a584e18;
+                            margin: 2 0;
+                        }
+
+                        // Section: Audio
+                        text settings_audio_label {
+                            text: "AUDIO";
+                            font-size: 11;
+                            font-weight: bold;
+                            letter-spacing: 3;
+                            text-transform: uppercase;
+                            color: --parchment-dark;
+                            text-decoration: underline;
+                            padding: 0 0 2 0;
+                        }
+
+                        panel master_vol_row {
+                            layout: row;
+                            align: center;
+                            gap: 10;
+
+                            text lbl_master_vol {
+                                text: "Master Volume";
+                                font-size: 13;
+                                color: #8a8478;
+                                width: 120;
+                            }
+                            slider sld_master_vol {
+                                min: 0;
+                                max: 100;
+                                value: 80;
+                                flex-grow: 1;
+                                tab-index: 13;
+                                background: #b8a880;
+                                border-color: #5a584e40;
+                                color: #c8c0b0;
+                            }
+                        }
+
+                        panel music_vol_row {
+                            layout: row;
+                            align: center;
+                            gap: 10;
+
+                            text lbl_music_vol {
+                                text: "Music Volume";
+                                font-size: 13;
+                                color: #8a8478;
+                                width: 120;
+                            }
+                            slider sld_music_vol {
+                                min: 0;
+                                max: 100;
+                                value: 60;
+                                flex-grow: 1;
+                                tab-index: 14;
+                                background: #b8a880;
+                                border-color: #5a584e40;
+                                color: #c8c0b0;
+                            }
+                        }
+
+                        panel settings_audio_sep {
+                            width: 100%;
+                            height: 1;
+                            background: #5a584e18;
+                            margin: 2 0;
+                        }
+
+                        // Section: Gameplay
+                        text settings_gameplay_label {
+                            text: "GAMEPLAY";
+                            font-size: 11;
+                            font-weight: bold;
+                            letter-spacing: 3;
+                            text-transform: uppercase;
+                            color: --parchment-dark;
+                            text-decoration: underline;
+                            padding: 0 0 2 0;
+                        }
+
+                        panel brightness_row {
+                            layout: row;
+                            align: center;
+                            gap: 10;
+
+                            text lbl_brightness {
+                                text: "Brightness";
+                                font-size: 13;
+                                color: #8a8478;
+                                width: 120;
+                            }
+                            slider sld_brightness {
+                                min: 0;
+                                max: 100;
+                                value: 50;
+                                flex-grow: 1;
+                                tab-index: 15;
+                                background: #b8a880;
+                                border-color: #5a584e40;
+                                color: #c8c0b0;
+                            }
+                        }
+
+                        panel difficulty_row {
+                            layout: row;
+                            align: center;
+                            gap: 10;
+
+                            text lbl_difficulty {
+                                text: "Difficulty";
+                                font-size: 13;
+                                color: #8a8478;
+                                width: 120;
+                            }
+                            dropdown dd_difficulty {
+                                selected: 1;
+                                flex-grow: 1;
+                                tab-index: 16;
+                                font-size: 13;
+                                color: #c8c0b0;
+                                background: #1a1816;
+                                border-color: #6a645840;
+                                border-width: 1;
+                                corner-radius: 4;
+                                option { text: "Novice"; }
+                                option { text: "Apprentice"; }
+                                option { text: "Adept"; }
+                                option { text: "Expert"; }
+                                option { text: "Master"; }
+                                option { text: "Legendary"; }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -659,7 +934,8 @@ panel root {
                 text val_level {
                     text: "42";
                     font-size: 24;
-                    color: #c8c0b0;
+                    font-weight: bold;
+                    color: --parchment;
                     letter-spacing: 1;
                 }
 
@@ -683,8 +959,8 @@ panel root {
                         panel xp_fill {
                             width: 65%;
                             height: 100%;
-                            background: #7a7464;
-                            background-end: #8a846e;
+                            gradient-stops: #6a6454 0%, #8a846e 50%, #b8a880 100%;
+                            gradient-angle: 90;
                         }
                     }
 

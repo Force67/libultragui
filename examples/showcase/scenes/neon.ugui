@@ -22,6 +22,7 @@ panel root {
         padding: 0;
         shadow-color: #00f0ff30;
         shadow-blur: 30;
+        gradient-stops: #00f0ff00 0%, #00f0ff40 50%, #00f0ff00 100%;
 
         // Title bar
         panel title_bar {
@@ -63,6 +64,8 @@ panel root {
                     text-shadow-color: #00f0ff80;
                     text-shadow-x: 0;
                     text-shadow-y: 0;
+                    font-weight: bold;
+                    gradient-angle: 90;
                 }
 
                 text title_edition {
@@ -209,10 +212,15 @@ panel root {
                     text-shadow-color: #00f0ff80;
                     text-shadow-x: 0;
                     text-shadow-y: 0;
+                    text-decoration: underline;
+                    font-weight: bold;
+                    tab-index: 0;
                     :hover {
                         background: #00f0ff;
                         color: #000000;
                         shadow-blur: 30;
+                        transition-duration: 0.3s;
+                        transition-easing: spring;
                     }
                     :pressed {
                         background: #00c0cc;
@@ -232,6 +240,7 @@ panel root {
                     cursor: pointer;
                     text-transform: uppercase;
                     letter-spacing: 2;
+                    tab-index: 1;
                     :hover {
                         color: #00f0ff;
                         border-color: #00f0ff;
@@ -239,6 +248,8 @@ panel root {
                         background: #00f0ff12;
                         shadow-color: #00f0ff30;
                         shadow-blur: 20;
+                        transition-duration: 0.3s;
+                        transition-easing: spring;
                     }
                     :pressed {
                         background: #00f0ff;
@@ -258,6 +269,7 @@ panel root {
                     cursor: pointer;
                     text-transform: uppercase;
                     letter-spacing: 2;
+                    tab-index: 2;
                     :hover {
                         color: #ff00aa;
                         border-color: #ff00aa;
@@ -265,6 +277,8 @@ panel root {
                         background: #ff00aa12;
                         shadow-color: #ff00aa30;
                         shadow-blur: 20;
+                        transition-duration: 0.3s;
+                        transition-easing: spring;
                     }
                     :pressed {
                         background: #ff00aa;
@@ -284,6 +298,7 @@ panel root {
                     cursor: pointer;
                     text-transform: uppercase;
                     letter-spacing: 2;
+                    tab-index: 3;
                     :hover {
                         color: #00f0ff;
                         border-color: #00f0ff;
@@ -291,6 +306,8 @@ panel root {
                         background: #00f0ff12;
                         shadow-color: #00f0ff30;
                         shadow-blur: 20;
+                        transition-duration: 0.3s;
+                        transition-easing: spring;
                     }
                     :pressed {
                         background: #00f0ff;
@@ -310,6 +327,7 @@ panel root {
                     cursor: pointer;
                     text-transform: uppercase;
                     letter-spacing: 2;
+                    tab-index: 4;
                     :hover {
                         color: #00f0ff;
                         border-color: #00f0ff;
@@ -317,6 +335,8 @@ panel root {
                         background: #00f0ff12;
                         shadow-color: #00f0ff30;
                         shadow-blur: 20;
+                        transition-duration: 0.3s;
+                        transition-easing: spring;
                     }
                     :pressed {
                         background: #00f0ff;
@@ -337,6 +357,9 @@ panel root {
                 width: 260;
                 padding: 32 28;
                 gap: 12;
+                shadow-color: #00000080;
+                shadow-blur: 20;
+                shadow-inset: true;
 
                 text char_title {
                     text: "SELECT FIGHTER";
@@ -348,6 +371,7 @@ panel root {
                     text-shadow-color: #ff00aa80;
                     text-shadow-x: 0;
                     text-shadow-y: 0;
+                    font-weight: bold;
                 }
 
                 // Character slot 1 (selected)
@@ -362,6 +386,8 @@ panel root {
                     shadow-color: #ff00aa30;
                     shadow-blur: 20;
                     cursor: pointer;
+                    tooltip: "NOVA — Striker class, S Tier";
+                    tab-index: 5;
 
                     text char_name_1 {
                         text: "NOVA";
@@ -406,6 +432,16 @@ panel root {
                             shadow-blur: 8;
                         }
                     }
+
+                    rich-text char_stats_display {
+                        font-size: 13;
+                        span { text: "ATK "; color: #00f0ff80; }
+                        span { text: "85  "; color: #00f0ff; font-weight: bold; }
+                        span { text: "DEF "; color: #00f0ff80; }
+                        span { text: "72  "; color: #00f0ff; font-weight: bold; }
+                        span { text: "SPD "; color: #00f0ff80; }
+                        span { text: "93"; color: #00f0ff; font-weight: bold; }
+                    }
                 }
 
                 // Character slot 2
@@ -418,6 +454,8 @@ panel root {
                     padding: 14 16;
                     gap: 6;
                     cursor: pointer;
+                    tooltip: "CIPHER — Technomancer class, A Tier";
+                    tab-index: 6;
 
                     text char_name_2 {
                         text: "CIPHER";
@@ -468,6 +506,8 @@ panel root {
                     padding: 14 16;
                     gap: 6;
                     cursor: pointer;
+                    tooltip: "RAZE — Brawler class, A Tier";
+                    tab-index: 7;
 
                     text char_name_3 {
                         text: "RAZE";
@@ -518,6 +558,8 @@ panel root {
                     padding: 14 16;
                     gap: 6;
                     cursor: pointer;
+                    tooltip: "VORTEX — Support class, B Tier";
+                    tab-index: 8;
 
                     text char_name_4 {
                         text: "VORTEX";

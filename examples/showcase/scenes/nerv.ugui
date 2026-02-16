@@ -8,6 +8,13 @@ panel root {
     background: #0a0a18;
     padding: 12;
     gap: 6;
+    backdrop-blur: 12;
+
+    // CSS Variables: NERV color scheme
+    --nerv-orange: #ff9900;
+    --nerv-red: #cc2200;
+    --nerv-bg: #050510;
+    --nerv-border: #ff990040;
 
     // === Top header row ===
     panel header_row {
@@ -15,6 +22,10 @@ panel root {
         width: 100%;
         justify: space-between;
         align: center;
+
+        // Subtle orange-red pulse gradient
+        gradient-stops: #ff990020 0%, #cc220020 50%, #ff990020 100%;
+        gradient-angle: 90;
 
         // Left: label
         panel header_left {
@@ -24,7 +35,8 @@ panel root {
             text label_atr_jp {
                 text: "ACTIVE TIME REMAINING:";
                 font-size: 11;
-                color: #cc7700;
+                font-weight: bold;
+                color: --nerv-orange;
                 letter-spacing: 2;
                 text-transform: uppercase;
             }
@@ -42,7 +54,8 @@ panel root {
             text label_internal {
                 text: "INTERNAL";
                 font-size: 13;
-                color: #ff9900;
+                font-weight: bold;
+                color: --nerv-orange;
                 letter-spacing: 2;
                 text-transform: uppercase;
             }
@@ -51,7 +64,7 @@ panel root {
             panel stripe_box {
                 width: 18;
                 height: 22;
-                background: #cc2200;
+                background: --nerv-red;
                 corner-radius: 2;
             }
         }
@@ -74,8 +87,12 @@ panel root {
             text countdown {
                 text: "4:59:10";
                 font-size: 80;
-                color: #ff9900;
+                font-weight: bold;
+                color: --nerv-orange;
                 letter-spacing: 6;
+                text-shadow-color: #ff990040;
+                text-shadow-x: 0;
+                text-shadow-y: 2;
             }
         }
 
@@ -86,25 +103,38 @@ panel root {
             gap: 6;
             justify: center;
 
+            // Inset shadow for recessed monitor look
+            shadow-color: #00000080;
+            shadow-blur: 10;
+            shadow-inset: true;
+
             // Supply system label
             panel supply_box {
                 layout: column;
                 padding: 6 10;
-                border-color: #cc7700;
+                border-color: --nerv-border;
                 border-width: 2;
                 gap: 4;
+                tooltip: "Main energy supply status — umbilical cable feed";
+
+                // Inset shadow for recessed monitor cell
+                shadow-color: #00000060;
+                shadow-blur: 6;
+                shadow-inset: true;
 
                 text label_supply {
                     text: "MAIN ENERGY";
                     font-size: 11;
-                    color: #ff9900;
+                    font-weight: bold;
+                    color: --nerv-orange;
                     letter-spacing: 2;
                     text-transform: uppercase;
                 }
                 text label_supply2 {
                     text: "SUPPLY SYSTEM";
                     font-size: 11;
-                    color: #ff9900;
+                    font-weight: bold;
+                    color: --nerv-orange;
                     letter-spacing: 2;
                     text-transform: uppercase;
                 }
@@ -116,17 +146,20 @@ panel root {
                 gap: 6;
                 align: center;
                 padding: 4 0;
+                tooltip: "Pilot-EVA neural synchronization ratio";
 
                 text sync_label {
                     text: "SYNC RATE:";
                     font-size: 10;
+                    font-weight: bold;
                     color: #887744;
                     letter-spacing: 1;
                 }
                 text sync_value {
                     text: "41.3%";
                     font-size: 13;
-                    color: #ff9900;
+                    font-weight: bold;
+                    color: --nerv-orange;
                     letter-spacing: 1;
                 }
             }
@@ -136,16 +169,19 @@ panel root {
                 layout: row;
                 gap: 6;
                 align: center;
+                tooltip: "Absolute Terror Field integrity status";
 
                 text at_label {
                     text: "AT FIELD:";
                     font-size: 10;
+                    font-weight: bold;
                     color: #887744;
                     letter-spacing: 1;
                 }
                 text at_value {
                     text: "NOMINAL";
                     font-size: 11;
+                    font-weight: bold;
                     color: #44cc66;
                     letter-spacing: 1;
                     text-transform: uppercase;
@@ -158,7 +194,7 @@ panel root {
     panel divider {
         width: 100%;
         height: 1;
-        background: #cc770040;
+        background: --nerv-border;
     }
 
     // === Bottom control buttons ===
@@ -171,6 +207,7 @@ panel root {
         button btn_stop {
             text: "STOP";
             font-size: 12;
+            font-weight: bold;
             color: #88ccaa;
             background: #0a2a1a;
             border-color: #44aa66;
@@ -180,13 +217,18 @@ panel root {
             letter-spacing: 2;
             text-transform: uppercase;
             cursor: pointer;
-            :hover { background: #143828; }
+            tab-index: 0;
+            tooltip: "Emergency halt — cut all power systems";
+            :hover {
+                transition-duration: 0.3s;
+                transition-easing: spring; background: #143828; }
             :pressed { background: #1a4a32; }
         }
 
         button btn_slow {
             text: "SLOW";
             font-size: 12;
+            font-weight: bold;
             color: #88ccaa;
             background: #0a2a1a;
             border-color: #44aa66;
@@ -196,15 +238,22 @@ panel root {
             letter-spacing: 2;
             text-transform: uppercase;
             cursor: pointer;
-            :hover { background: #143828; }
+            tab-index: 1;
+            tooltip: "Reduce energy consumption rate";
+            :hover {
+                transition-duration: 0.3s;
+                transition-easing: spring; background: #143828; }
             :pressed { background: #1a4a32; }
         }
 
         button btn_normal {
             text: "NORMAL";
             font-size: 12;
+            font-weight: bold;
             color: #ccffdd;
             background: #1a4a2a;
+            background-end: #0a3a1a;
+            gradient-angle: 135;
             border-color: #66cc88;
             border-width: 1;
             flex-grow: 1;
@@ -212,13 +261,18 @@ panel root {
             letter-spacing: 2;
             text-transform: uppercase;
             cursor: pointer;
-            :hover { background: #245838; }
+            tab-index: 2;
+            tooltip: "Standard operating mode";
+            :hover {
+                transition-duration: 0.3s;
+                transition-easing: spring; background: #245838; }
             :pressed { background: #2a6a40; }
         }
 
         button btn_racing {
             text: "RACING";
             font-size: 12;
+            font-weight: bold;
             color: #88ccaa;
             background: #0a2a1a;
             border-color: #44aa66;
@@ -228,7 +282,11 @@ panel root {
             letter-spacing: 2;
             text-transform: uppercase;
             cursor: pointer;
-            :hover { background: #143828; }
+            tab-index: 3;
+            tooltip: "Maximum output — high energy drain";
+            :hover {
+                transition-duration: 0.3s;
+                transition-easing: spring; background: #143828; }
             :pressed { background: #1a4a32; }
         }
     }

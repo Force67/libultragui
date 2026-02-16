@@ -3,10 +3,20 @@
 
 panel root {
     layout: row;
-    background: #0a0a1a;
+    background: --bg-primary;
     width: 100%;
     height: 100%;
     padding: 0;
+
+    // CSS custom properties - color palette
+    --accent: #6366f1;
+    --bg-primary: #0a0a1a;
+    --bg-card: #12122a;
+    --text-primary: #e2e2ff;
+    --text-muted: #585878;
+    --success: #4aea8a;
+    --warning: #f59e0b;
+    --error: #ef4444;
 
     // Sidebar: 260px fixed navigation
     panel sidebar {
@@ -30,7 +40,7 @@ panel root {
             panel logo_dot {
                 width: 10;
                 height: 10;
-                background: #6366f1;
+                background: --accent;
                 corner-radius: 5;
                 shadow-color: #6366f140;
                 shadow-blur: 8;
@@ -39,36 +49,54 @@ panel root {
             text logo_text {
                 text: "MISSION CTRL";
                 font-size: 16;
-                color: #e2e2ff;
+                color: --text-primary;
                 text-shadow-color: #6366f140;
                 text-shadow-x: 0;
                 text-shadow-y: 0;
             }
         }
 
+        // Search input
+        text-input search_input {
+            placeholder: "Search...";
+            font-size: 13;
+            color: --text-primary;
+            background: #0a0a18;
+            corner-radius: 8;
+            padding: 9 14;
+            border-color: #1e1e3e;
+            border-width: 1;
+            tab-index: 0;
+        }
+
         // Section label
         text nav_label {
             text: "NAVIGATION";
             font-size: 11;
-            color: #585878;
+            color: --text-muted;
             padding: 8 8 12 8;
             letter-spacing: 0.5;
             text-transform: uppercase;
+            font-weight: bold;
         }
 
         // Nav items
         button nav_overview {
             text: "Overview";
             font-size: 14;
-            color: #e2e2ff;
+            color: --text-primary;
             background: #6366f118;
             corner-radius: 8;
             padding: 11 14;
             border-color: #6366f140;
             border-width: 1;
             cursor: pointer;
+            tooltip: "System overview";
+            tab-index: 1;
             :hover {
                 background: #6366f128;
+                transition-easing: spring;
+                transition-duration: 0.3s;
             }
             :pressed {
                 background: #6366f138;
@@ -83,9 +111,13 @@ panel root {
             corner-radius: 8;
             padding: 11 14;
             cursor: pointer;
+            tooltip: "Deployment history";
+            tab-index: 2;
             :hover {
                 background: #1a1a38;
-                color: #e2e2ff;
+                color: --text-primary;
+                transition-easing: spring;
+                transition-duration: 0.3s;
             }
         }
 
@@ -97,9 +129,13 @@ panel root {
             corner-radius: 8;
             padding: 11 14;
             cursor: pointer;
+            tooltip: "Running services";
+            tab-index: 3;
             :hover {
                 background: #1a1a38;
-                color: #e2e2ff;
+                color: --text-primary;
+                transition-easing: spring;
+                transition-duration: 0.3s;
             }
         }
 
@@ -111,9 +147,13 @@ panel root {
             corner-radius: 8;
             padding: 11 14;
             cursor: pointer;
+            tooltip: "Incident reports";
+            tab-index: 4;
             :hover {
                 background: #1a1a38;
-                color: #e2e2ff;
+                color: --text-primary;
+                transition-easing: spring;
+                transition-duration: 0.3s;
             }
         }
 
@@ -125,9 +165,13 @@ panel root {
             corner-radius: 8;
             padding: 11 14;
             cursor: pointer;
+            tooltip: "System logs";
+            tab-index: 5;
             :hover {
                 background: #1a1a38;
-                color: #e2e2ff;
+                color: --text-primary;
+                transition-easing: spring;
+                transition-duration: 0.3s;
             }
         }
 
@@ -142,10 +186,11 @@ panel root {
         text nav_label_2 {
             text: "SETTINGS";
             font-size: 11;
-            color: #585878;
+            color: --text-muted;
             padding: 4 8 12 8;
             letter-spacing: 0.5;
             text-transform: uppercase;
+            font-weight: bold;
         }
 
         button nav_team {
@@ -156,9 +201,13 @@ panel root {
             corner-radius: 8;
             padding: 11 14;
             cursor: pointer;
+            tooltip: "Team members";
+            tab-index: 6;
             :hover {
                 background: #1a1a38;
-                color: #e2e2ff;
+                color: --text-primary;
+                transition-easing: spring;
+                transition-duration: 0.3s;
             }
         }
 
@@ -170,9 +219,13 @@ panel root {
             corner-radius: 8;
             padding: 11 14;
             cursor: pointer;
+            tooltip: "System configuration";
+            tab-index: 7;
             :hover {
                 background: #1a1a38;
-                color: #e2e2ff;
+                color: --text-primary;
+                transition-easing: spring;
+                transition-duration: 0.3s;
             }
         }
 
@@ -186,7 +239,7 @@ panel root {
             layout: row;
             align: center;
             gap: 10;
-            background: #12122a;
+            background: --bg-card;
             corner-radius: 8;
             padding: 12 14;
             border-color: #1e1e3e;
@@ -195,7 +248,7 @@ panel root {
             panel status_dot {
                 width: 8;
                 height: 8;
-                background: #22c55e;
+                background: --success;
                 corner-radius: 4;
                 shadow-color: #22c55e50;
                 shadow-blur: 6;
@@ -204,7 +257,7 @@ panel root {
             text status_text {
                 text: "All systems nominal";
                 font-size: 12;
-                color: #585878;
+                color: --text-muted;
             }
         }
     }
@@ -233,7 +286,8 @@ panel root {
                 text page_title {
                     text: "Overview";
                     font-size: 28;
-                    color: #e2e2ff;
+                    color: --text-primary;
+                    font-weight: bold;
                     text-shadow-color: #6366f140;
                     text-shadow-x: 0;
                     text-shadow-y: 0;
@@ -242,7 +296,7 @@ panel root {
                 text page_subtitle {
                     text: "Last updated 2 minutes ago";
                     font-size: 12;
-                    color: #585878;
+                    color: --text-muted;
                 }
             }
 
@@ -255,7 +309,7 @@ panel root {
                     text: "Refresh";
                     font-size: 13;
                     color: #9898b8;
-                    background: #12122a;
+                    background: --bg-card;
                     corner-radius: 8;
                     padding: 9 16;
                     border-color: #1e1e3e;
@@ -263,7 +317,7 @@ panel root {
                     cursor: pointer;
                     :hover {
                         background: #1a1a38;
-                        color: #e2e2ff;
+                        color: --text-primary;
                     }
                 }
 
@@ -271,13 +325,14 @@ panel root {
                     text: "Deploy";
                     font-size: 13;
                     color: #ffffff;
-                    background: #6366f1;
+                    background: --accent;
                     corner-radius: 8;
                     padding: 9 20;
                     shadow-color: #6366f140;
                     shadow-blur: 12;
                     shadow-y: 3;
                     cursor: pointer;
+                    font-weight: bold;
                     :hover {
                         background: #7577f5;
                         shadow-blur: 18;
@@ -306,7 +361,7 @@ panel root {
                 panel card_uptime {
                     layout: column;
                     flex-grow: 1;
-                    background: #12122a;
+                    background: --bg-card;
                     corner-radius: 12;
                     padding: 22 24;
                     gap: 10;
@@ -315,6 +370,7 @@ panel root {
                     shadow-color: #00000060;
                     shadow-blur: 20;
                     shadow-y: 8;
+                    shadow-inset: true;
 
                     panel uptime_header {
                         layout: row;
@@ -327,6 +383,7 @@ panel root {
                             color: #7878a0;
                             text-transform: uppercase;
                             letter-spacing: 1;
+                            font-weight: bold;
                         }
 
                         panel uptime_badge {
@@ -345,13 +402,14 @@ panel root {
                     text uptime_value {
                         text: "99.98%";
                         font-size: 32;
-                        color: #e2e2ff;
+                        color: --text-primary;
+                        font-weight: bold;
                     }
 
                     text uptime_detail {
                         text: "43d 7h since last incident";
                         font-size: 12;
-                        color: #585878;
+                        color: --text-muted;
                     }
                 }
 
@@ -359,7 +417,7 @@ panel root {
                 panel card_requests {
                     layout: column;
                     flex-grow: 1;
-                    background: #12122a;
+                    background: --bg-card;
                     corner-radius: 12;
                     padding: 22 24;
                     gap: 10;
@@ -368,6 +426,7 @@ panel root {
                     shadow-color: #00000060;
                     shadow-blur: 20;
                     shadow-y: 8;
+                    shadow-inset: true;
 
                     panel requests_header {
                         layout: row;
@@ -380,6 +439,7 @@ panel root {
                             color: #7878a0;
                             text-transform: uppercase;
                             letter-spacing: 1;
+                            font-weight: bold;
                         }
 
                         panel requests_badge {
@@ -390,7 +450,7 @@ panel root {
                             text requests_badge_text {
                                 text: "+14%";
                                 font-size: 11;
-                                color: #6366f1;
+                                color: --accent;
                             }
                         }
                     }
@@ -398,13 +458,14 @@ panel root {
                     text requests_value {
                         text: "12,847";
                         font-size: 32;
-                        color: #e2e2ff;
+                        color: --text-primary;
+                        font-weight: bold;
                     }
 
                     text requests_detail {
                         text: "Peak: 18,204 at 14:32 UTC";
                         font-size: 12;
-                        color: #585878;
+                        color: --text-muted;
                     }
                 }
 
@@ -412,7 +473,7 @@ panel root {
                 panel card_errors {
                     layout: column;
                     flex-grow: 1;
-                    background: #12122a;
+                    background: --bg-card;
                     corner-radius: 12;
                     padding: 22 24;
                     gap: 10;
@@ -421,6 +482,7 @@ panel root {
                     shadow-color: #00000060;
                     shadow-blur: 20;
                     shadow-y: 8;
+                    shadow-inset: true;
 
                     panel errors_header {
                         layout: row;
@@ -433,6 +495,7 @@ panel root {
                             color: #7878a0;
                             text-transform: uppercase;
                             letter-spacing: 1;
+                            font-weight: bold;
                         }
 
                         panel errors_badge {
@@ -443,7 +506,7 @@ panel root {
                             text errors_badge_text {
                                 text: "WARNING";
                                 font-size: 11;
-                                color: #f59e0b;
+                                color: --warning;
                             }
                         }
                     }
@@ -451,13 +514,14 @@ panel root {
                     text errors_value {
                         text: "0.42%";
                         font-size: 32;
-                        color: #e2e2ff;
+                        color: --text-primary;
+                        font-weight: bold;
                     }
 
                     text errors_detail {
                         text: "Threshold: 0.50%";
                         font-size: 12;
-                        color: #f59e0b;
+                        color: --warning;
                     }
                 }
             }
@@ -472,7 +536,7 @@ panel root {
                 panel activity_card {
                     layout: column;
                     flex-grow: 3;
-                    background: #12122a;
+                    background: --bg-card;
                     corner-radius: 12;
                     padding: 24;
                     gap: 14;
@@ -481,6 +545,7 @@ panel root {
                     shadow-color: #00000060;
                     shadow-blur: 20;
                     shadow-y: 8;
+                    shadow-inset: true;
 
                     panel activity_header {
                         layout: row;
@@ -492,12 +557,13 @@ panel root {
                             text: "Recent Deployments";
                             font-size: 16;
                             color: #9898b8;
+                            font-weight: bold;
                         }
 
                         button btn_view_all {
                             text: "View All";
                             font-size: 12;
-                            color: #6366f1;
+                            color: --accent;
                             background: transparent;
                             padding: 4 8;
                             cursor: pointer;
@@ -532,7 +598,7 @@ panel root {
                             text d1_name {
                                 text: "api-gateway v3.12.1";
                                 font-size: 14;
-                                color: #e2e2ff;
+                                color: --text-primary;
                             }
 
                             text d1_meta {
@@ -573,7 +639,7 @@ panel root {
                             text d2_name {
                                 text: "auth-service v2.8.0";
                                 font-size: 14;
-                                color: #e2e2ff;
+                                color: --text-primary;
                             }
 
                             text d2_meta {
@@ -602,7 +668,7 @@ panel root {
                         panel d3_status {
                             width: 8;
                             height: 8;
-                            background: #ef4444;
+                            background: --error;
                             corner-radius: 4;
                         }
 
@@ -614,7 +680,7 @@ panel root {
                             text d3_name {
                                 text: "worker-pool v1.4.3";
                                 font-size: 14;
-                                color: #e2e2ff;
+                                color: --text-primary;
                             }
 
                             text d3_meta {
@@ -627,7 +693,8 @@ panel root {
                         text d3_duration {
                             text: "FAILED";
                             font-size: 12;
-                            color: #ef4444;
+                            color: --error;
+                            font-weight: bold;
                         }
                     }
 
@@ -655,7 +722,7 @@ panel root {
                             text d4_name {
                                 text: "frontend v4.1.0";
                                 font-size: 14;
-                                color: #e2e2ff;
+                                color: --text-primary;
                             }
 
                             text d4_meta {
@@ -677,7 +744,7 @@ panel root {
                 panel alerts_card {
                     layout: column;
                     flex-grow: 2;
-                    background: #12122a;
+                    background: --bg-card;
                     corner-radius: 12;
                     padding: 24;
                     gap: 14;
@@ -686,12 +753,14 @@ panel root {
                     shadow-color: #00000060;
                     shadow-blur: 20;
                     shadow-y: 8;
+                    shadow-inset: true;
 
                     text alerts_title {
                         text: "Active Alerts";
                         font-size: 16;
                         color: #9898b8;
                         padding: 0 0 4 0;
+                        font-weight: bold;
                     }
 
                     // Critical alert
@@ -708,7 +777,7 @@ panel root {
                         panel a1_dot {
                             width: 8;
                             height: 8;
-                            background: #ef4444;
+                            background: --error;
                             corner-radius: 4;
                         }
 
@@ -720,7 +789,7 @@ panel root {
                             text a1_msg {
                                 text: "worker-pool crash loop";
                                 font-size: 14;
-                                color: #ef4444;
+                                color: --error;
                             }
 
                             text a1_time {
@@ -745,7 +814,7 @@ panel root {
                         panel a2_dot {
                             width: 8;
                             height: 8;
-                            background: #f59e0b;
+                            background: --warning;
                             corner-radius: 4;
                         }
 
@@ -757,7 +826,7 @@ panel root {
                             text a2_msg {
                                 text: "Error rate approaching threshold";
                                 font-size: 14;
-                                color: #f59e0b;
+                                color: --warning;
                             }
 
                             text a2_time {
@@ -782,7 +851,7 @@ panel root {
                         panel a3_dot {
                             width: 8;
                             height: 8;
-                            background: #6366f1;
+                            background: --accent;
                             corner-radius: 4;
                         }
 
@@ -822,7 +891,103 @@ panel root {
                         cursor: pointer;
                         :hover {
                             background: #1a1a38;
-                            color: #e2e2ff;
+                            color: --text-primary;
+                        }
+                    }
+                }
+            }
+
+            // Quick Actions
+            panel quick_actions_row {
+                layout: row;
+                gap: 16;
+
+                panel quick_actions_card {
+                    layout: column;
+                    flex-grow: 1;
+                    background: --bg-card;
+                    corner-radius: 12;
+                    padding: 24;
+                    gap: 18;
+                    border-color: #1e1e3e;
+                    border-width: 1;
+                    shadow-color: #00000060;
+                    shadow-blur: 20;
+                    shadow-y: 8;
+                    shadow-inset: true;
+
+                    text quick_actions_title {
+                        text: "Quick Actions";
+                        font-size: 16;
+                        color: #9898b8;
+                        font-weight: bold;
+                        padding: 0 0 4 0;
+                    }
+
+                    // Auto Deploy toggle
+                    panel auto_deploy_row {
+                        layout: row;
+                        justify: space-between;
+                        align: center;
+
+                        panel auto_deploy_info {
+                            layout: column;
+                            gap: 3;
+
+                            text auto_deploy_label {
+                                text: "Auto Deploy";
+                                font-size: 14;
+                                color: --text-primary;
+                                font-weight: bold;
+                            }
+
+                            text auto_deploy_desc {
+                                text: "Automatically deploy on push to main";
+                                font-size: 12;
+                                color: --text-muted;
+                            }
+                        }
+
+                        toggle auto_deploy_toggle {
+                            checked: true;
+                        }
+                    }
+
+                    // Environment dropdown
+                    panel env_row {
+                        layout: row;
+                        justify: space-between;
+                        align: center;
+
+                        panel env_info {
+                            layout: column;
+                            gap: 3;
+
+                            text env_label {
+                                text: "Environment";
+                                font-size: 14;
+                                color: --text-primary;
+                                font-weight: bold;
+                            }
+
+                            text env_desc {
+                                text: "Target deployment environment";
+                                font-size: 12;
+                                color: --text-muted;
+                            }
+                        }
+
+                        dropdown env_dropdown {
+                            background: #0e0e20;
+                            corner-radius: 8;
+                            border-color: #1e1e3e;
+                            border-width: 1;
+                            font-size: 13;
+                            color: --text-primary;
+
+                            option { text: "Production"; }
+                            option { text: "Staging"; }
+                            option { text: "Development"; }
                         }
                     }
                 }
