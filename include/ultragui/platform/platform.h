@@ -38,6 +38,10 @@ public:
     /// Set the mouse cursor style
     virtual void SetCursor(Cursor cursor) = 0;
 
+    /// Clipboard access
+    virtual const char* clipboard_text() const = 0;
+    virtual void set_clipboard_text(const char* text) = 0;
+
     /// Access the platform's input event queue.
     /// Filled during PollEvents(), consumed by InputRouter.
     virtual InputQueue& input_queue() = 0;

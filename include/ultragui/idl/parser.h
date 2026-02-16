@@ -44,6 +44,13 @@ struct UguiNode {
     };
     std::vector<KeyframeBlock> keyframe_blocks;
 
+    struct MediaQuery {
+        std::string condition; // e.g., "min-width", "max-width", "min-height", "max-height"
+        f32 value = 0.0f;     // e.g., 800
+        std::unordered_map<std::string, std::string> properties; // style overrides when condition matches
+    };
+    std::vector<MediaQuery> media_queries;
+
     std::vector<UguiNode> children;
 
     u32 source_line = 0;

@@ -1,6 +1,8 @@
 #include <ultragui/ui_context.h>
 #include <ultragui/scripting/lua_anim.h>
 #include <ultragui/scripting/lua_widgets.h>
+#include <ultragui/widgets/panel.h>
+#include <ultragui/widgets/text.h>
 
 #if ULTRAGUI_AUDIO
 #include <ultragui/scripting/lua_audio.h>
@@ -96,9 +98,11 @@ bool UIContext::Init(const UIConfig& config) {
     widget_ctx_.text_engine = &text_engine_;
     widget_ctx_.animator = &animator_;
     widget_ctx_.current_time = &last_time_;
+    widget_ctx_.platform = platform_;
 
     // Builder
     builder_.set_animator(&animator_);
+    builder_.set_viewport_size({static_cast<f32>(config.width), static_cast<f32>(config.height)});
 
     last_time_ = platform_->time();
     return true;
@@ -202,12 +206,18 @@ void UIContext::Update() {
     dt_ = now - last_time_;
     last_time_ = now;
 
+    // Update builder viewport size so media queries reflect current window dimensions
+    builder_.set_viewport_size(rhi_->display_size());
+
     // Poll input
     platform_->PollEvents();
 
     // Route input to widget tree
     if (root_)
         input_.Process(root_);
+
+    // Update tooltip display
+    UpdateTooltip();
 
     // Update animations
     if (root_) {
@@ -242,6 +252,10 @@ void UIContext::Update() {
     for (auto& pass : offscreen_queue_) {
         if (pass.root)
             MeasureWidgetTree(pass.root);
+    }
+    for (auto& overlay : overlays_) {
+        if (overlay.widget)
+            MeasureWidgetTree(overlay.widget);
     }
     text_engine_.FlushAtlas();
 
@@ -283,6 +297,15 @@ void UIContext::Update() {
         PaintWidgetTree(root_, renderer_);
     }
 
+    // Paint overlays on top of everything
+    for (auto& overlay : overlays_) {
+        if (overlay.widget) {
+            LayoutViewport ovp{rhi_->display_size().x, rhi_->display_size().y};
+            ComputeWidgetLayout(overlay.widget, ovp, layout_engine_, layout_nodes_);
+            PaintWidgetTree(overlay.widget, renderer_);
+        }
+    }
+
     // Flush any new glyphs from paint pass
     text_engine_.FlushAtlas();
 
@@ -290,7 +313,69 @@ void UIContext::Update() {
     rhi_->EndFrame();
 }
 
+void UIContext::UpdateTooltip() {
+    Widget* hovered = input_.hovered_widget();
+
+    // Find the nearest ancestor with a tooltip (walk up the tree)
+    Widget* tip_target = hovered;
+    while (tip_target && tip_target->tooltip().empty())
+        tip_target = tip_target->parent();
+
+    if (tip_target != tooltip_target_) {
+        // Target changed - hide existing tooltip
+        if (tooltip_widget_) {
+            HideOverlay(tooltip_widget_);
+            delete tooltip_widget_;
+            tooltip_widget_ = nullptr;
+        }
+        tooltip_target_ = tip_target;
+        tooltip_hover_start_ = last_time_;
+    }
+
+    // Show tooltip after delay
+    if (tooltip_target_ && !tooltip_widget_ &&
+        (last_time_ - tooltip_hover_start_) >= kTooltipDelay) {
+        // Create a simple text panel for the tooltip
+        auto* panel = new Panel(0);
+        panel->set_name("_tooltip");
+
+        // Position below the hovered widget
+        Rect r = tooltip_target_->rect();
+        f32 pos_x = r.x;
+        f32 pos_y = r.y + r.h + 4.0f;
+
+        Style ts;
+        ts.background = Color::FromHex(0x222222);
+        ts.text_color = Color::White();
+        ts.padding = EdgeInsets(6, 10);
+        ts.corner_radius = ts.corner_radius_tl = ts.corner_radius_tr =
+            ts.corner_radius_br = ts.corner_radius_bl = 4.0f;
+        ts.font_size = 13.0f;
+        ts.margin = EdgeInsets(pos_y, 0, 0, pos_x);
+        panel->set_style(ts);
+
+        auto* text = new Text(0);
+        text->set_text(tooltip_target_->tooltip());
+        Style txs;
+        txs.text_color = Color::White();
+        txs.font_size = 13.0f;
+        text->set_style(txs);
+        panel->AddChild(text);
+
+        tooltip_widget_ = panel;
+        ShowOverlay(tooltip_widget_, {pos_x, pos_y});
+    }
+}
+
 void UIContext::Shutdown() {
+    if (tooltip_widget_) {
+        HideOverlay(tooltip_widget_);
+        delete tooltip_widget_;
+        tooltip_widget_ = nullptr;
+        tooltip_target_ = nullptr;
+    }
+    overlays_.clear();
+
     if (owns_root_) {
         delete root_;
         root_ = nullptr;
@@ -360,8 +445,34 @@ void UIContext::QueueOffscreen(RHITextureHandle target, Widget* root, Color clea
     offscreen_queue_.push_back({target, root, clear_color});
 }
 
+void UIContext::ShowOverlay(Widget* widget, Vec2 position) {
+    // Remove if already shown
+    HideOverlay(widget);
+    widget->SetContext(&widget_ctx_);
+    overlays_.push_back({widget, position});
+}
+
+void UIContext::HideOverlay(Widget* widget) {
+    overlays_.erase(
+        std::remove_if(overlays_.begin(), overlays_.end(),
+                       [widget](const OverlayEntry& e) { return e.widget == widget; }),
+        overlays_.end());
+}
+
 void UIContext::SetOnPaint(PaintCallback cb) {
     on_paint_cb_ = std::move(cb);
+}
+
+void UIContext::SetTheme(const Theme& theme) {
+    current_theme_name_ = theme.name;
+
+    // Apply all theme tokens as CSS variables on the builder.
+    for (const auto& [name, value] : theme.tokens) {
+        builder_.SetVariable(name, value);
+    }
+
+    // Variables take effect on the next LoadUi/LoadUiString call.
+    // A full hot-reload would require re-parsing and rebuilding the tree.
 }
 
 Widget* UIContext::FindWidget(const char* name) const {

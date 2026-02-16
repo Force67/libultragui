@@ -138,4 +138,21 @@ bool Animator::IsAnimating(u32 widget_id) const {
     return false;
 }
 
+void Animator::AddScrollAnimation(const ScrollAnimation& anim) {
+    scroll_anims_.push_back(anim);
+}
+
+void Animator::EvaluateScrollAnimations(u32 scroll_widget_id, f32 scroll_y,
+                                         ApplyFn apply, void* user_data) {
+    for (auto& sa : scroll_anims_) {
+        if (sa.scroll_widget_id != scroll_widget_id)
+            continue;
+        f32 range = sa.scroll_end - sa.scroll_start;
+        f32 t = (range > 0.001f) ? (scroll_y - sa.scroll_start) / range : 0.0f;
+        t = (t < 0.0f) ? 0.0f : (t > 1.0f) ? 1.0f : t;
+        Style animated = Style::Lerp(sa.from, sa.to, t);
+        apply(sa.widget_id, animated, user_data);
+    }
+}
+
 } // namespace ugui

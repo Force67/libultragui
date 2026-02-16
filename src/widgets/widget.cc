@@ -143,20 +143,44 @@ void Widget::OnPaint(Renderer2D& renderer) {
     f32 alpha = s.opacity;
     u32 radii = style_corner_radii(s);
 
-    // Box shadow (drawn before background)
-    if (s.HasShadow()) {
+    // Outer box shadow (drawn before background)
+    if (s.HasShadow() && !s.shadow.inset) {
         Color sc = s.shadow.color.WithAlpha(s.shadow.color.a * alpha);
         renderer.DrawShadow(rect_, sc, s.shadow.blur, s.shadow.spread,
                              s.shadow.offset, radii);
     }
 
+    // Backdrop blur (frosted glass approximation - true Kawase blur requires a separate render pass)
+    if (s.backdrop_blur > 0.0f) {
+        f32 blur_alpha = Clamp(s.backdrop_blur / 40.0f, 0.1f, 0.6f);
+        Color frost = s.background.a > 0.0f ? s.background : Color{0.1f, 0.1f, 0.15f, 1.0f};
+        frost.a = Clamp(frost.a + blur_alpha, 0.0f, 0.95f) * alpha;
+        renderer.DrawRect(rect_, frost, radii);
+    }
+
     // Background (with optional gradient and border)
-    if (s.background.a > 0.0f || s.border_width > 0.0f) {
+    if (s.background.a > 0.0f || s.border_width > 0.0f || s.HasMultiStopGradient()) {
         Color bg = s.background.WithAlpha(s.background.a * alpha);
 
         if (s.border_width > 0.0f && s.border_color.a > 0.0f) {
             Color bc = s.border_color.WithAlpha(s.border_color.a * alpha);
-            if (s.HasGradient()) {
+            if (s.HasMultiStopGradient()) {
+                // Border with multi-stop gradient: draw border first, then gradient fill inset
+                renderer.DrawBorderedRect(rect_, Color::Transparent(), bc, s.border_width,
+                                            radii);
+                Rect inner = rect_.Shrunk(s.border_width);
+                f32 tl = (radii & 0xFFu);
+                f32 tr = ((radii >> 8) & 0xFFu);
+                f32 br = ((radii >> 16) & 0xFFu);
+                f32 bl = ((radii >> 24) & 0xFFu);
+                u32 inner_radii = Vertex2D::PackRadii(
+                    tl > s.border_width ? tl - s.border_width : 0.0f,
+                    tr > s.border_width ? tr - s.border_width : 0.0f,
+                    br > s.border_width ? br - s.border_width : 0.0f,
+                    bl > s.border_width ? bl - s.border_width : 0.0f);
+                renderer.DrawMultiStopGradient(inner, s.gradient_stops, s.gradient_stop_count,
+                                                s.gradient_type, s.gradient_angle, inner_radii);
+            } else if (s.HasGradient()) {
                 // Border with gradient: draw border first, then gradient fill inset
                 renderer.DrawBorderedRect(rect_, Color::Transparent(), bc, s.border_width,
                                             radii);
@@ -172,16 +196,46 @@ void Widget::OnPaint(Renderer2D& renderer) {
                     br > s.border_width ? br - s.border_width : 0.0f,
                     bl > s.border_width ? bl - s.border_width : 0.0f);
                 Color bg2 = s.background_end.WithAlpha(s.background_end.a * alpha);
-                renderer.DrawRectGradient(inner, bg, bg2, inner_radii);
+                if (s.gradient_type == GradientType::kRadial)
+                    renderer.DrawRadialGradient(inner, bg, bg2, inner_radii);
+                else
+                    renderer.DrawRectGradient(inner, bg, bg2, inner_radii, s.gradient_angle);
             } else {
                 renderer.DrawBorderedRect(rect_, bg, bc, s.border_width, radii);
             }
+        } else if (s.HasMultiStopGradient()) {
+            renderer.DrawMultiStopGradient(rect_, s.gradient_stops, s.gradient_stop_count,
+                                            s.gradient_type, s.gradient_angle, radii);
         } else if (s.HasGradient()) {
             Color bg2 = s.background_end.WithAlpha(s.background_end.a * alpha);
-            renderer.DrawRectGradient(rect_, bg, bg2, radii);
+            if (s.gradient_type == GradientType::kRadial)
+                renderer.DrawRadialGradient(rect_, bg, bg2, radii);
+            else
+                renderer.DrawRectGradient(rect_, bg, bg2, radii, s.gradient_angle);
         } else {
             renderer.DrawRect(rect_, bg, radii);
         }
+    }
+
+    // Inset shadow (drawn after background, on top of fill)
+    if (s.HasShadow() && s.shadow.inset) {
+        Color sc = s.shadow.color.WithAlpha(s.shadow.color.a * alpha);
+        renderer.PushScissor(rect_);
+        renderer.DrawInsetShadow(rect_, sc, s.shadow.blur, s.shadow.spread,
+                                  s.shadow.offset, radii);
+        renderer.PopScissor();
+    }
+
+    // Focus ring (only for tab-focusable widgets)
+    if (HasState(state_, WidgetState::kFocused) && tab_index_ >= 0) {
+        Rect focus_rect = {rect_.x - 2, rect_.y - 2, rect_.w + 4, rect_.h + 4};
+        // Use border color if set, otherwise text color, fallback to subtle white
+        Color base = s.border_color.a > 0.1f ? s.border_color
+                   : s.text_color.a > 0.1f   ? s.text_color
+                                              : Color{0.6f, 0.6f, 0.7f, 1.0f};
+        Color focus_color = base.WithAlpha(0.5f * alpha);
+        renderer.DrawBorderedRect(focus_rect, Color::Transparent(), focus_color,
+                                   2.0f, radii);
     }
 }
 

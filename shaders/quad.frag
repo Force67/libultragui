@@ -44,9 +44,16 @@ void main() {
         vec2 local = (frag_uv * 2.0 - 1.0) * frag_half_size;
         float d = sdf_rounded_rect_4(local, frag_half_size, frag_corner_radii);
 
-        // Anti-aliasing width - use softness for shadow blur, otherwise crisp
-        float aa = max(fwidth(d) * 0.75, frag_softness);
-        float alpha = 1.0 - smoothstep(-aa, aa, d);
+        // Softness: positive = outer blur/shadow, negative = inset shadow
+        float soft = abs(frag_softness);
+        float aa = max(fwidth(d) * 0.75, soft);
+        float alpha;
+        if (frag_softness < 0.0) {
+            // Inset shadow: fade from edge inward
+            alpha = smoothstep(-aa, 0.0, d);
+        } else {
+            alpha = 1.0 - smoothstep(-aa, aa, d);
+        }
         color.a *= alpha;
 
         // Border rendering: draw border as a ring using inner SDF

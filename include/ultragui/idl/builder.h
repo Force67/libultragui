@@ -22,6 +22,12 @@ public:
 
     void RegisterType(const std::string& type_name, WidgetFactory factory);
     void set_animator(Animator* a) { animator_ = a; }
+    void set_viewport_size(Vec2 size) { viewport_size_ = size; }
+
+    /// Set a CSS custom property (e.g. "--accent", "#4a4aff").
+    void SetVariable(const std::string& name, const std::string& value) {
+        variables_[name] = value;
+    }
 
     /// Build a widget tree from a document. Caller owns the returned widgets.
     Widget* Build(const UguiDocument& doc);
@@ -35,8 +41,13 @@ private:
     void ApplyProperties(Widget* widget, const UguiNode& node);
     Style ParseStyle(const std::unordered_map<std::string, std::string>& props);
 
+    void CollectVariables(const UguiNode& node);
+    std::string ResolveValue(const std::string& value) const;
+
     std::unordered_map<std::string, WidgetFactory> factories_;
+    std::unordered_map<std::string, std::string> variables_;
     Animator* animator_ = nullptr;
+    Vec2 viewport_size_ = {1280.0f, 720.0f};
 };
 
 } // namespace ugui

@@ -58,6 +58,9 @@ struct InputQueue {
     KeyEvent key_events[kMaxEvents];
     u32 key_count = 0;
 
+    CharEvent char_events[kMaxEvents];
+    u32 char_count = 0;
+
     Vec2 mouse_pos = {};
 
     void PushMove(Vec2 pos) {
@@ -81,8 +84,13 @@ struct InputQueue {
             key_events[key_count++] = {key, scancode, pressed, repeat, mods};
     }
 
+    void PushChar(u32 codepoint) {
+        if (char_count < kMaxEvents)
+            char_events[char_count++] = {codepoint};
+    }
+
     void clear() {
-        move_count = button_count = scroll_count = key_count = 0;
+        move_count = button_count = scroll_count = key_count = char_count = 0;
     }
 };
 

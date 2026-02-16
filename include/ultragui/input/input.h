@@ -35,12 +35,29 @@ public:
     void set_on_click(ClickHandler handler) { on_click_ = std::move(handler); }
     void set_on_hover(HoverHandler handler) { on_hover_ = std::move(handler); }
 
+    /// Register a global keyboard shortcut. Checked before dispatching to focused widget.
+    using ShortcutHandler = std::function<void()>;
+    void RegisterShortcut(i32 key, i32 mods, ShortcutHandler handler);
+    void ClearShortcuts();
+
 private:
     Platform* platform_ = nullptr;
     Widget* hovered_ = nullptr;
     Widget* focused_ = nullptr;
     Widget* pressed_ = nullptr;
     Vec2 mouse_pos_ = Vec2::Zero();
+    Vec2 drag_start_ = Vec2::Zero();
+    Vec2 drag_prev_ = Vec2::Zero();
+    bool dragging_ = false;
+
+    static constexpr f32 kDragThreshold = 4.0f;
+
+    struct Shortcut {
+        i32 key;
+        i32 mods;
+        ShortcutHandler handler;
+    };
+    std::vector<Shortcut> shortcuts_;
 
     ClickHandler on_click_;
     HoverHandler on_hover_;

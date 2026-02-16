@@ -22,6 +22,7 @@
 #include <ultragui/rhi/rhi.h>
 #include <ultragui/scripting/lua_runtime.h>
 #include <ultragui/text/text_engine.h>
+#include <ultragui/style/theme.h>
 #include <ultragui/svg/svg.h>
 #include <ultragui/widgets/widget.h>
 
@@ -142,10 +143,26 @@ public:
     /// next Update() call, before the main swapchain pass.
     void QueueOffscreen(RHITextureHandle target, Widget* root, Color clear_color);
 
+    // --- Overlay system ---
+
+    /// Show a widget as an overlay at the given screen position.
+    /// The widget floats above the normal widget tree.
+    void ShowOverlay(Widget* widget, Vec2 position);
+
+    /// Hide a previously shown overlay widget.
+    void HideOverlay(Widget* widget);
+
     /// Custom paint callback for the swapchain pass. When set, replaces the
     /// default compute_layout() + paint_tree() with the callback.
     using PaintCallback = std::function<void(Renderer2D&, RHI*)>;
     void SetOnPaint(PaintCallback cb);
+
+    /// Apply a theme -- sets all theme tokens as CSS variables on the builder.
+    /// Variables take effect on the next LoadUi/LoadUiString call.
+    void SetTheme(const Theme& theme);
+
+    /// Get the current theme name (empty if no theme has been applied).
+    const std::string& theme_name() const { return current_theme_name_; }
 
 private:
     Platform* platform_ = nullptr;
@@ -175,6 +192,7 @@ private:
 
     std::vector<LayoutNode> layout_nodes_;
     bool owns_root_ = false; // true if root was created by load_ui
+    std::string current_theme_name_;
 
     struct OffscreenPass {
         RHITextureHandle target;
@@ -183,6 +201,20 @@ private:
     };
     std::vector<OffscreenPass> offscreen_queue_;
     PaintCallback on_paint_cb_;
+
+    struct OverlayEntry {
+        Widget* widget = nullptr;
+        Vec2 position;
+    };
+    std::vector<OverlayEntry> overlays_;
+
+    // Tooltip state
+    Widget* tooltip_target_ = nullptr;
+    Widget* tooltip_widget_ = nullptr;  // The panel shown as overlay
+    f64 tooltip_hover_start_ = 0.0;
+    static constexpr f64 kTooltipDelay = 0.5;  // seconds before showing
+
+    void UpdateTooltip();
 };
 
 } // namespace ugui

@@ -92,6 +92,14 @@ public:
             glfwSetCursor(window_, nullptr); // default
     }
 
+    const char* clipboard_text() const override {
+        return glfwGetClipboardString(window_);
+    }
+
+    void set_clipboard_text(const char* text) override {
+        glfwSetClipboardString(window_, text);
+    }
+
     InputQueue& input_queue() override { return queue_; }
 
 private:
@@ -115,8 +123,9 @@ private:
         self->queue_.PushKey(key, scancode, action == GLFW_PRESS, action == GLFW_REPEAT, mods);
     }
 
-    static void glfw_char_cb(GLFWwindow*, unsigned int) {
-        // For future TextInput widget
+    static void glfw_char_cb(GLFWwindow* window, unsigned int codepoint) {
+        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
+        self->queue_.PushChar(codepoint);
     }
 
     GLFWwindow* window_ = nullptr;

@@ -315,9 +315,18 @@ private:
 
         while (current_.type != TokenType::kRBrace && current_.type != TokenType::kEof) {
             if (current_.type == TokenType::kAt) {
-                // @keyframes block
-                auto kb = parse_keyframe_block();
-                node.keyframe_blocks.push_back(std::move(kb));
+                // Peek at the next token to distinguish @media from @keyframes
+                Token at_tok = current_;
+                advance(); // skip '@'
+                if (current_.type == TokenType::kIdentifier && current_.value == "media") {
+                    auto mq = parse_media_query();
+                    node.media_queries.push_back(std::move(mq));
+                } else {
+                    // Put back: parse_keyframe_block expects current_ to be '@'
+                    // We already consumed '@', so call the inner keyframe logic directly
+                    auto kb = parse_keyframe_block_inner();
+                    node.keyframe_blocks.push_back(std::move(kb));
+                }
             } else if (current_.type == TokenType::kColon) {
                 // State block: :hover { ... }
                 auto sb = parse_state_block();
@@ -458,11 +467,11 @@ private:
     }
 
     // @keyframes name { properties; percent% { props } ... }
-    UguiNode::KeyframeBlock parse_keyframe_block() {
+    // Called when '@' has already been consumed by the caller.
+    UguiNode::KeyframeBlock parse_keyframe_block_inner() {
         UguiNode::KeyframeBlock kb;
-        advance(); // skip '@'
 
-        // Expect "keyframes" identifier
+        // Expect "keyframes" identifier (current_ should be it)
         if (current_.type != TokenType::kIdentifier || current_.value != "keyframes") {
             error("expected 'keyframes' after '@'");
             return kb;
@@ -521,6 +530,60 @@ private:
         if (current_.type == TokenType::kRBrace)
             advance();
         return kb;
+    }
+
+    // Legacy entry point: consumes '@' then delegates
+    UguiNode::KeyframeBlock parse_keyframe_block() {
+        advance(); // skip '@'
+        return parse_keyframe_block_inner();
+    }
+
+    // @media (condition: value) { property: value; ... }
+    // Called when '@' has already been consumed and current_ is "media".
+    UguiNode::MediaQuery parse_media_query() {
+        UguiNode::MediaQuery mq;
+        advance(); // skip "media"
+
+        // Parse tokens until '{', extracting the condition identifier and numeric value.
+        // Parentheses '(' and ')' are not lexer tokens - they appear as kError tokens;
+        // colons inside the condition also appear as kColon. Skip them gracefully.
+        while (current_.type != TokenType::kLBrace && current_.type != TokenType::kEof) {
+            if (current_.type == TokenType::kIdentifier) {
+                if (mq.condition.empty())
+                    mq.condition = current_.value;
+            } else if (current_.type == TokenType::kNumber) {
+                f32 v = 0;
+                std::from_chars(current_.value.data(),
+                                current_.value.data() + current_.value.size(), v);
+                mq.value = v;
+            }
+            // Skip kColon, kError ('(' and ')'), and anything else
+            advance();
+        }
+
+        // Parse property overrides inside braces
+        if (current_.type == TokenType::kLBrace) {
+            advance(); // skip '{'
+            while (current_.type != TokenType::kRBrace && current_.type != TokenType::kEof) {
+                if (current_.type == TokenType::kIdentifier) {
+                    std::string key = current_.value;
+                    advance();
+                    if (current_.type == TokenType::kColon) {
+                        advance(); // skip ':'
+                        std::string val = parse_value();
+                        if (current_.type == TokenType::kSemicolon)
+                            advance();
+                        mq.properties[key] = val;
+                    }
+                } else {
+                    advance();
+                }
+            }
+            if (current_.type == TokenType::kRBrace)
+                advance();
+        }
+
+        return mq;
     }
 
     // value = (identifier | string | number | hex_color)+

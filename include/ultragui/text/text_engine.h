@@ -79,6 +79,13 @@ public:
     /// Load a font from a file path. Returns a handle for use with shape/draw.
     FontHandle LoadFont(const char* path);
 
+    /// Load a font with explicit weight and style metadata.
+    FontHandle LoadFont(const char* path, FontWeight weight, FontStyle style);
+
+    /// Resolve the best font handle for the given weight and style.
+    /// Falls back to the closest available weight in the same family.
+    FontHandle ResolveFont(FontHandle base_font, FontWeight weight, FontStyle style) const;
+
     /// Shape a UTF-8 string into positioned glyphs.
     /// The returned TextRun is valid until the next call to Shape() or EndFrame().
     TextRun Shape(FontHandle font, const char* text, u32 text_len, f32 font_size,

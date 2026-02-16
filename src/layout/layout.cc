@@ -159,6 +159,11 @@ static YGPositionType map_position(Position p) {
         return YGPositionTypeRelative;
     case Position::kAbsolute:
         return YGPositionTypeAbsolute;
+    case Position::kSticky:
+        // Sticky participates in normal flow like relative; the clamping to
+        // the scroll parent's visible area is handled after layout in
+        // layout_tree.cc's apply_layout_results().
+        return YGPositionTypeRelative;
     }
     return YGPositionTypeRelative;
 }

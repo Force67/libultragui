@@ -101,8 +101,17 @@ set(ULTRAGUI_SOURCES
     src/widgets/widget.cc
     src/widgets/panel.cc
     src/widgets/text.cc
+    src/widgets/text_input.cc
+    src/widgets/checkbox.cc
+    src/widgets/radio.cc
+    src/widgets/toggle.cc
+    src/widgets/slider.cc
     src/widgets/button.cc
+    src/widgets/context_menu.cc
+    src/widgets/dropdown.cc
     src/widgets/image.cc
+    src/widgets/modal.cc
+    src/widgets/rich_text.cc
     src/widgets/scroll_view.cc
     src/widgets/widget_tree.cc
     src/idl/parser.cc

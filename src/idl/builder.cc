@@ -1,10 +1,19 @@
 #include <ultragui/animation/animator.h>
 #include <ultragui/idl/builder.h>
 #include <ultragui/widgets/button.h>
+#include <ultragui/widgets/checkbox.h>
+#include <ultragui/widgets/context_menu.h>
+#include <ultragui/widgets/dropdown.h>
 #include <ultragui/widgets/image.h>
+#include <ultragui/widgets/modal.h>
 #include <ultragui/widgets/panel.h>
+#include <ultragui/widgets/radio.h>
+#include <ultragui/widgets/rich_text.h>
 #include <ultragui/widgets/scroll_view.h>
+#include <ultragui/widgets/slider.h>
 #include <ultragui/widgets/text.h>
+#include <ultragui/widgets/text_input.h>
+#include <ultragui/widgets/toggle.h>
 
 #include <algorithm>
 #include <charconv>
@@ -163,6 +172,7 @@ static constexpr std::pair<std::string_view, EasingType> kEasingTable[] = {
     {"ease-in", EasingType::kEaseIn},
     {"ease-out", EasingType::kEaseOut},
     {"linear", EasingType::kLinear},
+    {"spring", EasingType::kSpring},
 };
 
 // Easing substring match - order matters (ease-in-out before ease-in)
@@ -234,8 +244,40 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     {"text-transform", [](Style& s, const std::string& v) {
         s.text_transform = LookupEnum(kTextTransformTable, v).value_or(TextTransform::kNone);
     }},
+    {"font-weight", [](Style& s, const std::string& v) {
+        static constexpr std::pair<std::string_view, FontWeight> kWeightTable[] = {
+            {"thin", FontWeight::kThin},
+            {"extra-light", FontWeight::kExtraLight},
+            {"light", FontWeight::kLight},
+            {"regular", FontWeight::kRegular},
+            {"normal", FontWeight::kRegular},
+            {"medium", FontWeight::kMedium},
+            {"semi-bold", FontWeight::kSemiBold},
+            {"semibold", FontWeight::kSemiBold},
+            {"bold", FontWeight::kBold},
+            {"extra-bold", FontWeight::kExtraBold},
+            {"black", FontWeight::kBlack},
+        };
+        for (auto& [name, weight] : kWeightTable) {
+            if (name == v) { s.font_weight = weight; return; }
+        }
+        // Try numeric
+        f32 num = 0;
+        std::from_chars(v.data(), v.data() + v.size(), num);
+        if (num >= 100 && num <= 900)
+            s.font_weight = static_cast<FontWeight>(static_cast<u16>(num));
+    }},
+    {"font-style", [](Style& s, const std::string& v) {
+        if (v == "italic") s.font_style = FontStyle::kItalic;
+        else s.font_style = FontStyle::kNormal;
+    }},
     {"cursor", [](Style& s, const std::string& v) {
         s.cursor = LookupEnum(kCursorTable, v).value_or(Cursor::kAuto);
+    }},
+    {"position", [](Style& s, const std::string& v) {
+        if (v == "relative") s.position = Position::kRelative;
+        else if (v == "absolute") s.position = Position::kAbsolute;
+        else if (v == "sticky") s.position = Position::kSticky;
     }},
 
     // Sizing
@@ -262,6 +304,47 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     {"border-color", [](Style& s, const std::string& v) { s.border_color = parse_color(v); }},
     {"background-end", [](Style& s, const std::string& v) { s.background_end = parse_color(v); }},
     {"gradient-end", [](Style& s, const std::string& v) { s.background_end = parse_color(v); }},
+    {"gradient-angle", [](Style& s, const std::string& v) { s.gradient_angle = parse_float(v); }},
+    {"gradient-type", [](Style& s, const std::string& v) {
+        if (v == "radial") s.gradient_type = GradientType::kRadial;
+        else s.gradient_type = GradientType::kLinear;
+    }},
+    {"gradient-stops", [](Style& s, const std::string& v) {
+        // Parse comma-separated "color position%" pairs
+        // e.g. "#ff0000 0%, #00ff00 50%, #0000ff 100%"
+        s.gradient_stop_count = 0;
+        std::string_view sv(v);
+        while (!sv.empty() && s.gradient_stop_count < Style::kMaxGradientStops) {
+            // Skip whitespace and commas
+            while (!sv.empty() && (sv[0] == ' ' || sv[0] == ','))
+                sv.remove_prefix(1);
+            if (sv.empty()) break;
+
+            // Find the color token (starts with # or is a name)
+            auto space = sv.find(' ');
+            if (space == std::string_view::npos) break;
+            std::string color_str(sv.substr(0, space));
+            sv.remove_prefix(space + 1);
+
+            // Skip whitespace
+            while (!sv.empty() && sv[0] == ' ')
+                sv.remove_prefix(1);
+
+            // Parse position (number followed by optional %)
+            f32 pos = 0;
+            auto end = std::from_chars(sv.data(), sv.data() + sv.size(), pos);
+            if (end.ptr == sv.data()) break;
+            sv.remove_prefix(static_cast<size_t>(end.ptr - sv.data()));
+            if (!sv.empty() && sv[0] == '%') {
+                pos /= 100.0f;
+                sv.remove_prefix(1);
+            }
+
+            auto& stop = s.gradient_stops[s.gradient_stop_count++];
+            stop.position = pos;
+            stop.color = parse_color(color_str);
+        }
+    }},
 
     // Border
     {"border-width", [](Style& s, const std::string& v) { s.border_width = parse_float(v); }},
@@ -283,6 +366,7 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     // Visual
     {"opacity", [](Style& s, const std::string& v) { s.opacity = parse_float(v); }},
     {"aspect-ratio", [](Style& s, const std::string& v) { s.aspect_ratio = parse_float(v); }},
+    {"backdrop-blur", [](Style& s, const std::string& v) { s.backdrop_blur = parse_float(v); }},
 
     // Text
     {"font-size", [](Style& s, const std::string& v) { s.font_size = parse_float(v); }},
@@ -295,10 +379,22 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     {"shadow-spread", [](Style& s, const std::string& v) { s.shadow.spread = parse_float(v); }},
     {"shadow-x", [](Style& s, const std::string& v) { s.shadow.offset.x = parse_float(v); }},
     {"shadow-y", [](Style& s, const std::string& v) { s.shadow.offset.y = parse_float(v); }},
+    {"shadow-inset", [](Style& s, const std::string& v) { s.shadow.inset = (v == "true"); }},
 
     // Text shadow
     {"text-shadow-color", [](Style& s, const std::string& v) { s.text_shadow_color = parse_color(v); }},
     {"text-shadow-blur", [](Style& s, const std::string& v) { s.text_shadow_blur = parse_float(v); }},
+    {"text-decoration", [](Style& s, const std::string& v) {
+        if (v == "underline")
+            s.text_decoration = TextDecoration::kUnderline;
+        else if (v == "line-through" || v == "strikethrough")
+            s.text_decoration = TextDecoration::kStrikethrough;
+        else if (v == "underline line-through" || v == "underline strikethrough")
+            s.text_decoration = TextDecoration::kUnderline | TextDecoration::kStrikethrough;
+        else
+            s.text_decoration = TextDecoration::kNone;
+    }},
+    {"text-decoration-color", [](Style& s, const std::string& v) { s.text_decoration_color = parse_color(v); }},
     {"text-shadow-x", [](Style& s, const std::string& v) { s.text_shadow_offset.x = parse_float(v); }},
     {"text-shadow-y", [](Style& s, const std::string& v) { s.text_shadow_offset.y = parse_float(v); }},
 };
@@ -333,11 +429,13 @@ static constexpr std::pair<std::string_view, u64> kStyleMaskTable[] = {
     {"height", StyleMask::kHeight},
     {"background-end", StyleMask::kBackgroundEnd},
     {"gradient-end", StyleMask::kBackgroundEnd},
+    {"gradient-angle", StyleMask::kGradientAngle},
     {"shadow-color", StyleMask::kShadow},
     {"shadow-blur", StyleMask::kShadow},
     {"shadow-spread", StyleMask::kShadow},
     {"shadow-x", StyleMask::kShadow},
     {"shadow-y", StyleMask::kShadow},
+    {"shadow-inset", StyleMask::kShadow},
 };
 
 static u64 LookupStyleMask(std::string_view key) {
@@ -375,8 +473,10 @@ static Transition parse_transition_shorthand(const std::string& val) {
 Style UguiBuilder::ParseStyle(const std::unordered_map<std::string, std::string>& props) {
     Style s;
     for (auto& [key, val] : props) {
-        if (auto setter = FindPropertySetter(key))
-            setter(s, val);
+        if (auto setter = FindPropertySetter(key)) {
+            std::string resolved = ResolveValue(val);
+            setter(s, resolved);
+        }
     }
     return s;
 }
@@ -390,12 +490,38 @@ void UguiBuilder::RegisterType(const std::string& type_name, WidgetFactory facto
 }
 
 // ---------------------------------------------------------------------------
+// CSS custom properties (--name: value)
+// ---------------------------------------------------------------------------
+
+void UguiBuilder::CollectVariables(const UguiNode& node) {
+    for (auto& [key, val] : node.properties) {
+        if (key.size() > 2 && key[0] == '-' && key[1] == '-')
+            variables_[key] = val;
+    }
+    for (auto& child : node.children)
+        CollectVariables(child);
+}
+
+std::string UguiBuilder::ResolveValue(const std::string& value) const {
+    if (value.size() > 2 && value[0] == '-' && value[1] == '-') {
+        auto it = variables_.find(value);
+        if (it != variables_.end())
+            return it->second;
+    }
+    return value;
+}
+
+// ---------------------------------------------------------------------------
 // Build
 // ---------------------------------------------------------------------------
 
 Widget* UguiBuilder::Build(const UguiDocument& doc) {
     if (doc.roots.empty())
         return nullptr;
+
+    // Collect CSS custom properties from all nodes
+    for (auto& root : doc.roots)
+        CollectVariables(root);
 
     u32 id_counter = 1;
     if (doc.roots.size() == 1)
@@ -437,10 +563,175 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
         if (text_it != node.properties.end())
             btn->set_label(text_it->second);
         widget = btn;
+    } else if (node.type == "modal" || node.type == "dialog") {
+        widget = new Modal(id);
     } else if (node.type == "image" || node.type == "img") {
         widget = new Image(id);
     } else if (node.type == "scroll" || node.type == "scroll-view") {
         widget = new ScrollView(id);
+    } else if (node.type == "text-input" || node.type == "input") {
+        auto* input = new TextInput(id);
+        auto text_it = node.properties.find("placeholder");
+        if (text_it != node.properties.end())
+            input->set_placeholder(text_it->second);
+        auto val_it = node.properties.find("value");
+        if (val_it != node.properties.end())
+            input->set_text(val_it->second);
+        widget = input;
+    } else if (node.type == "checkbox") {
+        auto* cb = new Checkbox(id);
+        auto text_it = node.properties.find("label");
+        if (text_it == node.properties.end())
+            text_it = node.properties.find("text");
+        if (text_it != node.properties.end())
+            cb->set_label(text_it->second);
+        auto checked_it = node.properties.find("checked");
+        if (checked_it != node.properties.end() && checked_it->second == "true")
+            cb->set_checked(true);
+        widget = cb;
+    } else if (node.type == "slider" || node.type == "range") {
+        auto* sl = new Slider(id);
+        auto min_it = node.properties.find("min");
+        if (min_it != node.properties.end())
+            sl->set_min(parse_float(min_it->second));
+        auto max_it = node.properties.find("max");
+        if (max_it != node.properties.end())
+            sl->set_max(parse_float(max_it->second));
+        auto val_it = node.properties.find("value");
+        if (val_it != node.properties.end())
+            sl->set_value(parse_float(val_it->second));
+        widget = sl;
+    } else if (node.type == "radio") {
+        auto* radio = new Radio(id);
+        auto text_it = node.properties.find("label");
+        if (text_it == node.properties.end())
+            text_it = node.properties.find("text");
+        if (text_it != node.properties.end())
+            radio->set_label(text_it->second);
+        auto group_it = node.properties.find("group");
+        if (group_it != node.properties.end())
+            radio->set_group(group_it->second);
+        auto checked_it = node.properties.find("checked");
+        if (checked_it != node.properties.end() && checked_it->second == "true")
+            radio->set_selected(true);
+        widget = radio;
+    } else if (node.type == "toggle" || node.type == "switch") {
+        auto* tog = new Toggle(id);
+        auto checked_it = node.properties.find("checked");
+        if (checked_it != node.properties.end() && checked_it->second == "true")
+            tog->set_on(true);
+        widget = tog;
+    } else if (node.type == "dropdown" || node.type == "select") {
+        auto* dd = new Dropdown(id);
+        std::vector<std::string> opts;
+        for (auto& child_node : node.children) {
+            auto text_it = child_node.properties.find("text");
+            if (text_it == child_node.properties.end())
+                text_it = child_node.properties.find("label");
+            if (text_it != child_node.properties.end())
+                opts.push_back(text_it->second);
+            else if (!child_node.name.empty())
+                opts.push_back(child_node.name);
+        }
+        dd->set_options(opts);
+        auto sel_it = node.properties.find("selected");
+        if (sel_it != node.properties.end())
+            dd->set_selected_index(static_cast<i32>(parse_float(sel_it->second)));
+        widget = dd;
+        // Return early - option children are data, not child widgets
+        widget->set_id(id);
+        widget->set_name(node.name);
+        ApplyProperties(widget, node);
+        return widget;
+    } else if (node.type == "context-menu") {
+        auto* menu = new ContextMenu(id);
+        for (auto& child_node : node.children) {
+            if (child_node.type == "separator") {
+                menu->AddSeparator();
+            } else {
+                auto text_it = child_node.properties.find("text");
+                if (text_it == child_node.properties.end())
+                    text_it = child_node.properties.find("label");
+                std::string label = text_it != child_node.properties.end()
+                                        ? text_it->second
+                                        : child_node.name;
+                menu->AddItem(label, nullptr);
+            }
+        }
+        widget = menu;
+        // Return early - item children are data, not child widgets
+        widget->set_id(id);
+        widget->set_name(node.name);
+        ApplyProperties(widget, node);
+        return widget;
+    } else if (node.type == "rich-text" || node.type == "richtext") {
+        auto* rt = new RichText(id);
+        // Parse child "span" elements as TextSpan data, not child widgets
+        for (const auto& child_node : node.children) {
+            if (child_node.type == "span") {
+                TextSpan span;
+                auto text_it = child_node.properties.find("text");
+                if (text_it == child_node.properties.end())
+                    text_it = child_node.properties.find("content");
+                if (text_it != child_node.properties.end())
+                    span.text = text_it->second;
+
+                auto color_it = child_node.properties.find("color");
+                if (color_it != child_node.properties.end())
+                    span.color = parse_color(color_it->second);
+
+                auto size_it = child_node.properties.find("font-size");
+                if (size_it != child_node.properties.end())
+                    span.font_size = parse_float(size_it->second);
+
+                auto weight_it = child_node.properties.find("font-weight");
+                if (weight_it != child_node.properties.end()) {
+                    static constexpr std::pair<std::string_view, FontWeight>
+                        kSpanWeightTable[] = {
+                            {"thin", FontWeight::kThin},
+                            {"extra-light", FontWeight::kExtraLight},
+                            {"light", FontWeight::kLight},
+                            {"regular", FontWeight::kRegular},
+                            {"normal", FontWeight::kRegular},
+                            {"medium", FontWeight::kMedium},
+                            {"semi-bold", FontWeight::kSemiBold},
+                            {"semibold", FontWeight::kSemiBold},
+                            {"bold", FontWeight::kBold},
+                            {"extra-bold", FontWeight::kExtraBold},
+                            {"black", FontWeight::kBlack},
+                        };
+                    if (auto w = LookupEnum(kSpanWeightTable, weight_it->second))
+                        span.font_weight = *w;
+                }
+
+                auto style_it = child_node.properties.find("font-style");
+                if (style_it != child_node.properties.end() &&
+                    style_it->second == "italic") {
+                    span.font_style = FontStyle::kItalic;
+                }
+
+                auto dec_it = child_node.properties.find("text-decoration");
+                if (dec_it != child_node.properties.end()) {
+                    if (dec_it->second == "underline")
+                        span.decoration = TextDecoration::kUnderline;
+                    else if (dec_it->second == "line-through" ||
+                             dec_it->second == "strikethrough")
+                        span.decoration = TextDecoration::kStrikethrough;
+                    else if (dec_it->second == "underline line-through" ||
+                             dec_it->second == "underline strikethrough")
+                        span.decoration = TextDecoration::kUnderline |
+                                          TextDecoration::kStrikethrough;
+                }
+
+                rt->AddSpan(span);
+            }
+        }
+        widget = rt;
+        // Return early - span children are data, not child widgets
+        widget->set_id(id);
+        widget->set_name(node.name);
+        ApplyProperties(widget, node);
+        return widget;
     } else {
         // Unknown type - treat as panel
         std::fprintf(stderr, "ultragui: unknown element type '%s' at line %u\n", node.type.c_str(),
@@ -463,6 +754,16 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
 
 void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
     widget->set_style(ParseStyle(node.properties));
+
+    // Tooltip
+    auto tooltip_it = node.properties.find("tooltip");
+    if (tooltip_it != node.properties.end())
+        widget->set_tooltip(tooltip_it->second);
+
+    // Tab navigation
+    auto tab_it = node.properties.find("tab-index");
+    if (tab_it != node.properties.end())
+        widget->set_tab_index(static_cast<i32>(parse_float(tab_it->second)));
 
     // State overrides
     for (auto& sb : node.state_blocks) {
@@ -496,9 +797,38 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
         if (auto tl_it = sb.properties.find("transition-delay"); tl_it != sb.properties.end()) {
             trans.delay = parse_duration(tl_it->second);
         }
+        if (auto ss_it = sb.properties.find("spring-stiffness"); ss_it != sb.properties.end())
+            trans.spring_stiffness = parse_float(ss_it->second);
+        if (auto sd_it = sb.properties.find("spring-damping"); sd_it != sb.properties.end())
+            trans.spring_damping = parse_float(sd_it->second);
+        if (auto sm_it = sb.properties.find("spring-mass"); sm_it != sb.properties.end())
+            trans.spring_mass = parse_float(sm_it->second);
 
         if (has_transition && state != WidgetState::kNone)
             widget->AddStateTransition(state, trans);
+    }
+
+    // Media query overrides - apply matching conditions on top of the base style
+    for (auto& mq : node.media_queries) {
+        bool matches = false;
+        if (mq.condition == "min-width")
+            matches = viewport_size_.x >= mq.value;
+        else if (mq.condition == "max-width")
+            matches = viewport_size_.x <= mq.value;
+        else if (mq.condition == "min-height")
+            matches = viewport_size_.y >= mq.value;
+        else if (mq.condition == "max-height")
+            matches = viewport_size_.y <= mq.value;
+
+        if (matches) {
+            Style& style = widget->style();
+            for (auto& [key, val] : mq.properties) {
+                if (auto setter = FindPropertySetter(key)) {
+                    std::string resolved = ResolveValue(val);
+                    setter(style, resolved);
+                }
+            }
+        }
     }
 
     // @keyframes blocks

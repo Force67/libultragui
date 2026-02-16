@@ -7,6 +7,7 @@
 namespace ugui {
 
 class Animator;
+class Platform;
 
 /// Shared context propagated through the widget tree.
 /// Provides widgets with access to subsystems they need (text shaping, etc.)
@@ -16,6 +17,7 @@ struct WidgetContext {
     FontHandle default_font = kInvalidFont;
     Animator* animator = nullptr;
     f64* current_time = nullptr;
+    Platform* platform = nullptr;
 };
 
 } // namespace ugui

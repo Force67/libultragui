@@ -75,7 +75,7 @@ public:
 
     // --- Hit testing ---
     bool contains(Vec2 point) const { return rect_.contains(point); }
-    Widget* HitTest(Vec2 point);
+    virtual Widget* HitTest(Vec2 point);
 
     // --- Context propagation ---
     void SetContext(const WidgetContext* ctx);
@@ -89,9 +89,24 @@ public:
     virtual void OnPaint(Renderer2D& renderer);
     virtual void Measure(f32& out_width, f32& out_height);
 
+    // --- Tooltip ---
+    void set_tooltip(const std::string& text) { tooltip_ = text; }
+    const std::string& tooltip() const { return tooltip_; }
+
+    // --- Tab navigation ---
+    void set_tab_index(i32 idx) { tab_index_ = idx; }
+    i32 tab_index() const { return tab_index_; }
+    bool focusable() const { return tab_index_ >= 0; }
+
     // --- Event dispatch (override in subclasses) ---
     virtual bool OnClick() { return false; }
     virtual bool OnScroll(Vec2 delta) { return false; }
+    virtual bool OnKeyDown(i32 key, i32 mods) { return false; }
+    virtual bool OnKeyUp(i32 key, i32 mods) { return false; }
+    virtual bool OnCharInput(u32 codepoint) { return false; }
+    virtual void OnDragStart(Vec2 pos) {}
+    virtual void OnDragMove(Vec2 pos, Vec2 delta) {}
+    virtual void OnDragEnd(Vec2 pos) {}
 
     // --- Layout integration ---
     void PopulateLayoutNode(LayoutNode& node) const;
@@ -100,6 +115,7 @@ public:
 protected:
     u32 id_ = 0;
     std::string name_;
+    std::string tooltip_;
     Widget* parent_ = nullptr;
     std::vector<Widget*> children_;
     const WidgetContext* context_ = nullptr;
@@ -119,6 +135,7 @@ protected:
     Rect rect_;
     Rect content_rect_;
     f32 intrinsic_w_ = 0, intrinsic_h_ = 0;
+    i32 tab_index_ = -1;  // -1 = not focusable via tab, 0+ = tab order
     bool layout_dirty_ = true;
     bool paint_dirty_ = true;
 };

@@ -26,6 +26,7 @@ static BoxShadow lerp_shadow(const BoxShadow& a, const BoxShadow& b, f32 t) {
         ugui::Lerp(a.blur, b.blur, t),
         ugui::Lerp(a.spread, b.spread, t),
         ugui::Lerp(a.offset, b.offset, t),
+        t < 0.5f ? a.inset : b.inset,
     };
 }
 
@@ -34,6 +35,7 @@ Style Style::Lerp(const Style& a, const Style& b, f32 t) {
 
     result.background = ugui::Lerp(a.background, b.background, t);
     result.background_end = ugui::Lerp(a.background_end, b.background_end, t);
+    result.gradient_angle = ugui::Lerp(a.gradient_angle, b.gradient_angle, t);
     result.border_color = ugui::Lerp(a.border_color, b.border_color, t);
     result.border_width = ugui::Lerp(a.border_width, b.border_width, t);
     result.corner_radius = ugui::Lerp(a.corner_radius, b.corner_radius, t);
@@ -42,6 +44,7 @@ Style Style::Lerp(const Style& a, const Style& b, f32 t) {
     result.corner_radius_br = ugui::Lerp(a.corner_radius_br, b.corner_radius_br, t);
     result.corner_radius_bl = ugui::Lerp(a.corner_radius_bl, b.corner_radius_bl, t);
     result.opacity = ugui::Lerp(a.opacity, b.opacity, t);
+    result.backdrop_blur = ugui::Lerp(a.backdrop_blur, b.backdrop_blur, t);
     result.aspect_ratio = ugui::Lerp(a.aspect_ratio, b.aspect_ratio, t);
     result.text_color = ugui::Lerp(a.text_color, b.text_color, t);
     result.font_size = ugui::Lerp(a.font_size, b.font_size, t);
@@ -51,8 +54,22 @@ Style Style::Lerp(const Style& a, const Style& b, f32 t) {
     result.text_shadow_color = ugui::Lerp(a.text_shadow_color, b.text_shadow_color, t);
     result.text_shadow_blur = ugui::Lerp(a.text_shadow_blur, b.text_shadow_blur, t);
     result.text_shadow_offset = ugui::Lerp(a.text_shadow_offset, b.text_shadow_offset, t);
+    result.text_decoration_color = ugui::Lerp(a.text_decoration_color, b.text_decoration_color, t);
 
     result.shadow = lerp_shadow(a.shadow, b.shadow, t);
+
+    // Gradient stops
+    result.gradient_stop_count = std::max(a.gradient_stop_count, b.gradient_stop_count);
+    for (u32 i = 0; i < result.gradient_stop_count; ++i) {
+        const auto& sa = (i < a.gradient_stop_count)
+                             ? a.gradient_stops[i]
+                             : a.gradient_stops[a.gradient_stop_count > 0 ? a.gradient_stop_count - 1 : 0];
+        const auto& sb = (i < b.gradient_stop_count)
+                             ? b.gradient_stops[i]
+                             : b.gradient_stops[b.gradient_stop_count > 0 ? b.gradient_stop_count - 1 : 0];
+        result.gradient_stops[i].position = ugui::Lerp(sa.position, sb.position, t);
+        result.gradient_stops[i].color = ugui::Lerp(sa.color, sb.color, t);
+    }
 
     result.width = lerp_length(a.width, b.width, t);
     result.height = lerp_length(a.height, b.height, t);
@@ -70,6 +87,9 @@ Style Style::Lerp(const Style& a, const Style& b, f32 t) {
         result.overflow = b.overflow;
         result.visibility = b.visibility;
         result.text_align = b.text_align;
+        result.font_weight = b.font_weight;
+        result.font_style = b.font_style;
+        result.gradient_type = b.gradient_type;
     }
 
     return result;
@@ -101,6 +121,7 @@ static const std::pair<u64, MaskApply> kMaskApplicators[] = {
     {StyleMask::kMargin, [](Style& r, const Style& s) { r.margin = s.margin; }},
     {StyleMask::kPadding, [](Style& r, const Style& s) { r.padding = s.padding; }},
     {StyleMask::kShadow, [](Style& r, const Style& s) { r.shadow = s.shadow; }},
+    {StyleMask::kGradientAngle, [](Style& r, const Style& s) { r.gradient_angle = s.gradient_angle; }},
 };
 
 static void ApplyMaskedOverride(Style& result, const StyleOverride& ov) {

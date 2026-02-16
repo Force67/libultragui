@@ -32,7 +32,7 @@ struct StyleTransition {
             return to;
         }
         done = false;
-        f32 eased = EvalEasing(transition.easing, t, transition.bezier);
+        f32 eased = EvalEasing(transition, t);
         return Style::Lerp(from, to, eased);
     }
 };
@@ -58,6 +58,16 @@ struct KeyframeAnimation {
     Style Evaluate(f64 current_time, bool& done) const;
 };
 
+/// Scroll-linked animation: style driven by scroll position instead of time.
+struct ScrollAnimation {
+    u32 widget_id = 0;        // Widget being animated
+    u32 scroll_widget_id = 0; // ScrollView driving the animation
+    f32 scroll_start = 0.0f;  // Scroll offset (px) where animation begins
+    f32 scroll_end = 0.0f;    // Scroll offset (px) where animation ends
+    Style from;
+    Style to;
+};
+
 /// Manages active transitions and animations for the UI.
 class Animator {
 public:
@@ -68,12 +78,20 @@ public:
     /// Start a keyframe animation
     void StartAnimation(const KeyframeAnimation& anim, f64 current_time);
 
+    /// Add a scroll-linked animation
+    void AddScrollAnimation(const ScrollAnimation& anim);
+
+    /// Evaluate scroll-linked animations for a given scroll widget and offset.
+    /// Calls apply for each affected widget.
+    using ApplyFn = void (*)(u32 widget_id, const Style& animated_style, void* user_data);
+    void EvaluateScrollAnimations(u32 scroll_widget_id, f32 scroll_y,
+                                   ApplyFn apply, void* user_data);
+
     /// Cancel all animations for a widget
     void Cancel(u32 widget_id);
 
     /// Tick all animations, apply to styles via the callback.
     /// Returns true if any animations are still active.
-    using ApplyFn = void (*)(u32 widget_id, const Style& animated_style, void* user_data);
     bool Update(f64 current_time, ApplyFn apply, void* user_data);
 
     /// Check if a widget has active animations
@@ -82,6 +100,7 @@ public:
 private:
     std::vector<StyleTransition> transitions_;
     std::vector<KeyframeAnimation> animations_;
+    std::vector<ScrollAnimation> scroll_anims_;
 };
 
 } // namespace ugui

@@ -8,6 +8,8 @@
 #include <cstring>
 #include <hb-ft.h>
 #include <hb.h>
+#include <cmath>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -48,9 +50,16 @@ struct FontSlot {
     bool in_use = false;
 };
 
+struct FontInfo {
+    std::string family_name;
+    FontWeight weight = FontWeight::kRegular;
+    FontStyle style = FontStyle::kNormal;
+};
+
 struct TextEngine::Impl {
     FT_Library ft_library = nullptr;
     FontSlot fonts[MAX_FONTS] = {};
+    FontInfo font_info_[MAX_FONTS] = {};
 
     // Glyph atlas
     u8 atlas_pixels[ATLAS_SIZE * ATLAS_SIZE] = {};
@@ -139,8 +148,67 @@ FontHandle TextEngine::LoadFont(const char* path) {
     slot.hb_font = hb_ft_font_create_referenced(slot.ft_face);
     slot.in_use = true;
 
+    // Store family metadata with default weight/style
+    auto& info = impl_->font_info_[handle];
+    info.family_name = slot.ft_face->family_name ? slot.ft_face->family_name : "";
+    info.weight = FontWeight::kRegular;
+    info.style = FontStyle::kNormal;
+
     std::printf("ultragui: loaded font '%s' (%s)\n", path, slot.ft_face->family_name);
     return handle;
+}
+
+FontHandle TextEngine::LoadFont(const char* path, FontWeight weight, FontStyle style) {
+    FontHandle handle = LoadFont(path);
+    if (handle == kInvalidFont)
+        return kInvalidFont;
+
+    // Override with caller-supplied weight and style
+    auto& info = impl_->font_info_[handle];
+    info.weight = weight;
+    info.style = style;
+    return handle;
+}
+
+FontHandle TextEngine::ResolveFont(FontHandle base_font, FontWeight weight, FontStyle style) const {
+    if (!impl_ || base_font >= MAX_FONTS || !impl_->fonts[base_font].in_use)
+        return base_font;
+
+    const auto& base_info = impl_->font_info_[base_font];
+    const std::string& family = base_info.family_name;
+    if (family.empty())
+        return base_font;
+
+    // Scan for the best match within the same font family.
+    // Prefer exact style match; break ties by closest weight.
+    FontHandle best = base_font;
+    i32 best_weight_dist = std::abs(static_cast<i32>(weight) -
+                                    static_cast<i32>(base_info.weight));
+    bool best_style_match = (base_info.style == style);
+
+    for (u32 i = 0; i < MAX_FONTS; ++i) {
+        if (!impl_->fonts[i].in_use)
+            continue;
+        const auto& info = impl_->font_info_[i];
+        if (info.family_name != family)
+            continue;
+
+        bool style_match = (info.style == style);
+        i32 weight_dist = std::abs(static_cast<i32>(weight) -
+                                   static_cast<i32>(info.weight));
+
+        // Prefer style match over weight proximity
+        if (style_match && !best_style_match) {
+            best = i;
+            best_weight_dist = weight_dist;
+            best_style_match = true;
+        } else if (style_match == best_style_match && weight_dist < best_weight_dist) {
+            best = i;
+            best_weight_dist = weight_dist;
+        }
+    }
+
+    return best;
 }
 
 // ---------------------------------------------------------------------------

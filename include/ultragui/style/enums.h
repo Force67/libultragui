@@ -82,6 +82,7 @@ enum class TextAlign : u8 {
 enum class Position : u8 {
     kRelative, // Normal flow, offsets are relative to natural position
     kAbsolute, // Removed from flow, positioned relative to parent
+    kSticky,   // Stays in flow but clamps to scroll parent's visible area
 };
 
 /// Flex wrapping
@@ -98,12 +99,51 @@ enum class Visibility : u8 {
     kCollapsed, // Hidden + does not take up space
 };
 
+/// Font weight (CSS font-weight numeric scale)
+enum class FontWeight : u16 {
+    kThin = 100,
+    kExtraLight = 200,
+    kLight = 300,
+    kRegular = 400,
+    kMedium = 500,
+    kSemiBold = 600,
+    kBold = 700,
+    kExtraBold = 800,
+    kBlack = 900,
+};
+
+/// Font style
+enum class FontStyle : u8 {
+    kNormal,
+    kItalic,
+};
+
 /// Text transform (CSS text-transform)
 enum class TextTransform : u8 {
     kNone,
     kUppercase,
     kLowercase,
     kCapitalize,
+};
+
+/// Text decoration (flags - can combine underline + strikethrough)
+enum class TextDecoration : u8 {
+    kNone = 0,
+    kUnderline = 1 << 0,
+    kStrikethrough = 1 << 1,
+};
+
+constexpr TextDecoration operator|(TextDecoration a, TextDecoration b) {
+    return static_cast<TextDecoration>(static_cast<u8>(a) | static_cast<u8>(b));
+}
+constexpr bool HasDecoration(TextDecoration flags, TextDecoration test) {
+    return (static_cast<u8>(flags) & static_cast<u8>(test)) != 0;
+}
+
+/// Gradient type
+enum class GradientType : u8 {
+    kLinear,
+    kRadial,
 };
 
 /// Cursor style

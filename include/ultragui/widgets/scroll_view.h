@@ -17,6 +17,12 @@ public:
 
     Vec2 content_size() const { return content_size_; }
 
+    /// Normalized scroll progress (0 = top, 1 = bottom)
+    f32 scroll_progress() const {
+        f32 max_y = content_size_.y - content_rect_.h;
+        return (max_y > 0.0f) ? scroll_offset_.y / max_y : 0.0f;
+    }
+
     bool OnScroll(Vec2 delta) override;
 
     void OnLayout(const Rect& rect, const Rect& content_rect) override;

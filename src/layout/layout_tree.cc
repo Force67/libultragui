@@ -1,5 +1,8 @@
 #include <ultragui/layout/layout_tree.h>
+#include <ultragui/widgets/scroll_view.h>
 #include <ultragui/widgets/widget.h>
+
+#include <algorithm>
 
 namespace ugui {
 
@@ -36,9 +39,37 @@ static void build_layout_nodes(Widget* widget, u32 parent_index,
     }
 }
 
+/// Walk up from `widget` to find the nearest ScrollView ancestor.
+static ScrollView* FindScrollParent(Widget* widget) {
+    Widget* p = widget->parent();
+    while (p) {
+        if (auto* sv = dynamic_cast<ScrollView*>(p))
+            return sv;
+        p = p->parent();
+    }
+    return nullptr;
+}
+
 static void apply_layout_results(Widget* widget, u32& node_index,
-                                 const std::vector<LayoutNode>& nodes) {
+                                 std::vector<LayoutNode>& nodes) {
     auto& node = nodes[node_index];
+
+    // Sticky positioning: clamp the widget's y so it stays pinned to the
+    // top of the scroll parent's visible region when scrolled past.
+    if (node.style.position == Position::kSticky) {
+        if (auto* sv = FindScrollParent(widget)) {
+            Rect visible = sv->rect();
+            Vec2 offset = sv->scroll_offset();
+            f32 sticky_min_y = visible.y + offset.y;
+            if (node.computed_rect.y < sticky_min_y) {
+                node.computed_rect.y = sticky_min_y;
+                // Clamp to bottom of scroll parent so it doesn't overflow
+                f32 max_y = visible.y + visible.h - node.computed_rect.h;
+                node.computed_rect.y = std::min(node.computed_rect.y, max_y);
+            }
+        }
+    }
+
     widget->ApplyLayoutResult(node);
     widget->OnLayout(node.computed_rect, node.content_rect);
 

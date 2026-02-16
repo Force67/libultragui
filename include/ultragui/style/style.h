@@ -9,12 +9,19 @@
 
 namespace ugui {
 
+/// A single color stop in a multi-stop gradient.
+struct GradientStop {
+    f32 position = 0.0f;  // 0.0 to 1.0
+    Color color;
+};
+
 /// Box shadow definition (CSS-like).
 struct BoxShadow {
     Color color = Color::Transparent();
     f32 blur = 0.0f;
     f32 spread = 0.0f;
     Vec2 offset = Vec2::Zero();
+    bool inset = false;
 };
 
 /// Complete visual style for a widget. Every widget has one of these.
@@ -55,6 +62,11 @@ struct Style {
     // --- Visual ---
     Color background = Color::Transparent();
     Color background_end = Color::Transparent(); // If != transparent, linear gradient top->bottom
+    f32 gradient_angle = 180.0f;                 // CSS degrees: 180 = top-to-bottom (default)
+    GradientType gradient_type = GradientType::kLinear;
+    static constexpr u32 kMaxGradientStops = 8;
+    GradientStop gradient_stops[kMaxGradientStops] = {};
+    u32 gradient_stop_count = 0;
     Color border_color = Color::Transparent();
     f32 border_width = 0.0f;
     f32 corner_radius = 0.0f;    // Convenience: sets all 4 corners
@@ -63,6 +75,7 @@ struct Style {
     f32 corner_radius_br = 0.0f; // Per-corner: bottom-right
     f32 corner_radius_bl = 0.0f; // Per-corner: bottom-left
     f32 opacity = 1.0f;
+    f32 backdrop_blur = 0.0f;    // Blur radius for frosted glass effect (0 = none)
     f32 aspect_ratio = 0.0f;     // 0 = none, positive = width/height
 
     // --- Box shadow ---
@@ -75,6 +88,10 @@ struct Style {
     f32 letter_spacing = 0.0f;         // Extra pixels between characters
     f32 line_height_multiplier = 1.0f; // Multiplier on default line height
     TextTransform text_transform = TextTransform::kNone;
+    FontWeight font_weight = FontWeight::kRegular;
+    FontStyle font_style = FontStyle::kNormal;
+    TextDecoration text_decoration = TextDecoration::kNone;
+    Color text_decoration_color = Color::Transparent(); // transparent = inherit text_color
 
     // --- Text shadow ---
     Color text_shadow_color = Color::Transparent();
@@ -93,6 +110,9 @@ struct Style {
     bool HasGradient() const {
         return background_end.a > 0.0f && background_end != background;
     }
+
+    /// Check if this style has a multi-stop gradient (3+ colors)
+    bool HasMultiStopGradient() const { return gradient_stop_count >= 2; }
 
     /// Check if this style has a box shadow
     bool HasShadow() const {
@@ -129,6 +149,7 @@ constexpr u64 kPadding = 1ull << 10;
 constexpr u64 kTransform = 1ull << 11;
 constexpr u64 kShadow = 1ull << 12;
 constexpr u64 kBackgroundEnd = 1ull << 13;
+constexpr u64 kGradientAngle = 1ull << 14;
 } // namespace StyleMask
 
 /// Resolve the effective style for a widget given its base style,
