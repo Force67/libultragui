@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_LOTTIE_LOTTIE_H_
+#define ULTRAGUI_LOTTIE_LOTTIE_H_
 
 #include <ultragui/core/types.h>
 #include <ultragui/rhi/rhi_types.h>
@@ -8,17 +9,17 @@ namespace ugui {
 class RHI;
 
 using LottieHandle = u32;
-static constexpr LottieHandle INVALID_LOTTIE = 0;
+static constexpr LottieHandle kInvalidLottie = 0;
 
 /// A Lottie animation backed by rlottie.
-/// Renders frames on-demand to a GPU texture each update().
+/// Renders frames on-demand to a GPU texture each Update().
 ///
 /// Usage:
 ///   LottieAnimation anim;
-///   anim.load(rhi, "spinner.json", 64, 64);
-///   anim.play();
+///   anim.Load(rhi, "spinner.json", 64, 64);
+///   anim.Play();
 ///   // each frame:
-///   anim.update(dt);
+///   anim.Update(dt);
 ///   // use anim.texture() on an Image widget
 class LottieAnimation {
 public:
@@ -31,18 +32,18 @@ public:
     LottieAnimation& operator=(const LottieAnimation&) = delete;
 
     /// Load a Lottie JSON file and create a GPU texture for rendering.
-    bool load(RHI* rhi, const char* path, u32 width, u32 height);
+    bool Load(RHI* rhi, const char* path, u32 width, u32 height);
 
     /// Load from a JSON string in memory.
-    bool load_data(RHI* rhi, const char* json_data, const char* key, u32 width, u32 height);
+    bool LoadData(RHI* rhi, const char* json_data, const char* key, u32 width, u32 height);
 
     /// Advance the animation by dt seconds and re-render if the frame changed.
-    void update(f64 dt);
+    void Update(f64 dt);
 
     /// Returns true if successfully loaded.
-    bool is_loaded() const;
+    bool IsLoaded() const;
 
-    /// The GPU texture containing the current frame. Updated by update().
+    /// The GPU texture containing the current frame. Updated by Update().
     RHITextureHandle texture() const;
 
     /// Rasterized dimensions.
@@ -51,15 +52,15 @@ public:
 
     // ----- Playback control -----
 
-    void play();
-    void pause();
-    void stop();          // resets to frame 0
+    void Play();
+    void Pause();
+    void Stop();          // resets to frame 0
     void set_loop(bool loop);
     void set_speed(f32 speed);  // 1.0 = normal, 2.0 = double speed
-    void seek(f32 progress);    // 0.0 - 1.0
+    void Seek(f32 progress);    // 0.0 - 1.0
 
-    bool is_playing() const;
-    bool is_looping() const;
+    bool IsPlaying() const;
+    bool IsLooping() const;
     f32 speed() const;
 
     /// Total duration in seconds at speed=1.
@@ -74,7 +75,7 @@ public:
     f64 frame_rate() const;
 
     /// Release GPU and CPU resources.
-    void unload();
+    void Unload();
 
 private:
     struct Impl;
@@ -82,3 +83,5 @@ private:
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_LOTTIE_LOTTIE_H_

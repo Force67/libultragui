@@ -1,4 +1,5 @@
-#pragma once
+#ifndef SRC_SVG_SVG_TYPES_H_
+#define SRC_SVG_SVG_TYPES_H_
 
 #include <ultragui/core/color.h>
 #include <ultragui/core/math.h>
@@ -16,13 +17,13 @@ namespace svg {
 struct Transform {
     f32 a = 1, b = 0, c = 0, d = 1, e = 0, f = 0;
 
-    static Transform identity() { return {1, 0, 0, 1, 0, 0}; }
+    static Transform Identity() { return {1, 0, 0, 1, 0, 0}; }
 
-    static Transform translate(f32 tx, f32 ty) { return {1, 0, 0, 1, tx, ty}; }
+    static Transform Translate(f32 tx, f32 ty) { return {1, 0, 0, 1, tx, ty}; }
 
-    static Transform scale(f32 sx, f32 sy) { return {sx, 0, 0, sy, 0, 0}; }
+    static Transform Scale(f32 sx, f32 sy) { return {sx, 0, 0, sy, 0, 0}; }
 
-    static Transform rotate(f32 degrees) {
+    static Transform Rotate(f32 degrees) {
         f32 rad = degrees * 3.14159265358979323846f / 180.0f;
         f32 cs = std::cos(rad);
         f32 sn = std::sin(rad);
@@ -40,16 +41,16 @@ struct Transform {
         };
     }
 
-    Vec2 apply(Vec2 p) const { return {a * p.x + c * p.y + e, b * p.x + d * p.y + f}; }
+    Vec2 Apply(Vec2 p) const { return {a * p.x + c * p.y + e, b * p.x + d * p.y + f}; }
 };
 
 // --- Path representation ---
 
 enum class PathCmd : u8 {
-    MoveTo,  // 1 point
-    LineTo,  // 1 point
-    CubicTo, // 3 points (c1, c2, end)
-    Close,   // 0 points
+    kMoveTo,  // 1 point
+    kLineTo,  // 1 point
+    kCubicTo, // 3 points (c1, c2, end)
+    kClose,   // 0 points
 };
 
 struct PathEntry {
@@ -60,40 +61,40 @@ struct PathEntry {
 struct Path {
     std::vector<PathEntry> entries;
 
-    void move_to(Vec2 p) { entries.push_back({PathCmd::MoveTo, {p, {}, {}}}); }
-    void line_to(Vec2 p) { entries.push_back({PathCmd::LineTo, {p, {}, {}}}); }
-    void cubic_to(Vec2 c1, Vec2 c2, Vec2 end) {
-        entries.push_back({PathCmd::CubicTo, {c1, c2, end}});
+    void MoveTo(Vec2 p) { entries.push_back({PathCmd::kMoveTo, {p, {}, {}}}); }
+    void LineTo(Vec2 p) { entries.push_back({PathCmd::kLineTo, {p, {}, {}}}); }
+    void CubicTo(Vec2 c1, Vec2 c2, Vec2 end) {
+        entries.push_back({PathCmd::kCubicTo, {c1, c2, end}});
     }
-    void close() { entries.push_back({PathCmd::Close, {{}, {}, {}}}); }
+    void Close() { entries.push_back({PathCmd::kClose, {{}, {}, {}}}); }
 };
 
 // --- Paint (fill/stroke) ---
 
-enum class FillRule : u8 { NonZero, EvenOdd };
+enum class FillRule : u8 { kNonZero, kEvenOdd };
 
 struct GradientStop {
     f32 offset;
     Color color;
 };
 
-enum class GradientType : u8 { Linear, Radial };
-enum class SpreadMethod : u8 { Pad, Reflect, Repeat };
+enum class GradientType : u8 { kLinear, kRadial };
+enum class SpreadMethod : u8 { kPad, kReflect, kRepeat };
 
 struct Gradient {
-    GradientType type = GradientType::Linear;
+    GradientType type = GradientType::kLinear;
     f32 x1 = 0, y1 = 0, x2 = 1, y2 = 0;           // linear
     f32 cx = 0.5f, cy = 0.5f, r = 0.5f;             // radial
     f32 fx = -1, fy = -1;                            // radial focus (-1 = use center)
     std::vector<GradientStop> stops;
-    Transform transform = Transform::identity();
+    Transform transform = Transform::Identity();
     bool user_space = false; // true = userSpaceOnUse
-    SpreadMethod spread = SpreadMethod::Pad;
+    SpreadMethod spread = SpreadMethod::kPad;
 };
 
 struct Paint {
-    enum Type : u8 { None, Solid, GradientRef };
-    Type type = None;
+    enum Type : u8 { kNone, kSolid, kGradientRef };
+    Type type = kNone;
     Color color;
     std::string gradient_id;
 };
@@ -108,8 +109,8 @@ struct Shape {
     f32 opacity = 1.0f;
     f32 fill_opacity = 1.0f;
     f32 stroke_opacity = 1.0f;
-    FillRule fill_rule = FillRule::NonZero;
-    Transform transform = Transform::identity();
+    FillRule fill_rule = FillRule::kNonZero;
+    Transform transform = Transform::Identity();
 };
 
 // --- Document ---
@@ -122,9 +123,11 @@ struct Document {
 };
 
 // Internal API
-bool parse_svg(const char* data, usize length, Document& out);
-void rasterize(const Document& doc, u8* pixels, u32 width, u32 height);
-void parse_path_data(const char* d, Path& path);
+bool ParseSvg(const char* data, usize length, Document& out);
+void Rasterize(const Document& doc, u8* pixels, u32 width, u32 height);
+void ParsePathData(const char* d, Path& path);
 
 } // namespace svg
 } // namespace ugui
+
+#endif  // SRC_SVG_SVG_TYPES_H_

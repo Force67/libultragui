@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_WIDGETS_WIDGET_TREE_H_
+#define ULTRAGUI_WIDGETS_WIDGET_TREE_H_
 
 #include <ultragui/core/types.h>
 
@@ -7,15 +8,17 @@ namespace ugui {
 class Widget;
 
 /// Find a widget by name in a tree. Returns nullptr if not found.
-Widget* find_widget(Widget* root, const char* name);
+Widget* FindWidget(Widget* root, const char* name);
 
 /// Find a widget by ID in a tree. Returns nullptr if not found.
-Widget* find_widget_by_id(Widget* root, u32 id);
+Widget* FindWidgetById(Widget* root, u32 id);
 
 /// Recursively update all widgets (scroll momentum, animations, etc.)
-void update_widget_tree(Widget* root, f64 dt);
+void UpdateWidgetTree(Widget* root, f64 dt);
 
 /// Bottom-up measure pass: measures all widgets and sets intrinsic sizes.
-void measure_widget_tree(Widget* root);
+void MeasureWidgetTree(Widget* root);
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_WIDGETS_WIDGET_TREE_H_

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_PIPELINE_H_
+#define ULTRAGUI_PIPELINE_H_
 
 /// Functional pipeline API for libultragui.
 ///
@@ -8,20 +9,22 @@
 ///
 /// Typical frame sequence:
 ///
-///   1. platform->poll_events()
-///   2. input_router.process(root)           // route input to widgets
-///   3. update_widget_tree(root, dt)          // tick scroll momentum etc.
-///   4. text_engine.begin_frame()
-///   5. measure_widget_tree(root)             // bottom-up text measurement
-///   6. text_engine.flush_atlas()             // upload glyphs to GPU
-///   7. rhi->begin_frame(clear_color)
-///   8. renderer.begin_frame()
-///   9. compute_widget_layout(root, vp, engine, scratch)
-///  10. paint_widget_tree(root, renderer)     // depth-first rendering
-///  11. text_engine.flush_atlas()             // catch late glyphs
-///  12. renderer.end_frame()
-///  13. rhi->end_frame()
+///   1. platform->PollEvents()
+///   2. input_router.Process(root)           // route input to widgets
+///   3. UpdateWidgetTree(root, dt)          // tick scroll momentum etc.
+///   4. text_engine.BeginFrame()
+///   5. MeasureWidgetTree(root)             // bottom-up text measurement
+///   6. text_engine.FlushAtlas()             // upload glyphs to GPU
+///   7. rhi->BeginFrame(clear_color)
+///   8. renderer.BeginFrame()
+///   9. ComputeWidgetLayout(root, vp, engine, scratch)
+///  10. PaintWidgetTree(root, renderer)     // depth-first rendering
+///  11. text_engine.FlushAtlas()             // catch late glyphs
+///  12. renderer.EndFrame()
+///  13. rhi->EndFrame()
 
 #include <ultragui/layout/layout_tree.h>
 #include <ultragui/render/paint.h>
 #include <ultragui/widgets/widget_tree.h>
+
+#endif  // ULTRAGUI_PIPELINE_H_

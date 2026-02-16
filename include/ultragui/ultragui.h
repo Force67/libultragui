@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_ULTRAGUI_H_
+#define ULTRAGUI_ULTRAGUI_H_
 
 /// libultragui - Lean GPU-accelerated game GUI library
 ///
@@ -15,3 +16,5 @@
 #include <ultragui/render/renderer2d.h>
 #include <ultragui/rhi/rhi.h>
 #include <ultragui/ui_context.h>
+
+#endif  // ULTRAGUI_ULTRAGUI_H_

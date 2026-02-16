@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_IDL_PARSER_H_
+#define ULTRAGUI_IDL_PARSER_H_
 
 #include <ultragui/core/types.h>
 
@@ -64,10 +65,12 @@ struct ParseError {
 
 /// Parse a .ugui file from source text.
 /// Returns true on success; on failure, errors are populated.
-bool parse_ugui(const char* source, usize source_len, const char* filename, UguiDocument& out_doc,
+bool ParseUgui(const char* source, usize source_len, const char* filename, UguiDocument& out_doc,
                 std::vector<ParseError>& out_errors);
 
 /// Parse from file path.
-bool parse_ugui_file(const char* path, UguiDocument& out_doc, std::vector<ParseError>& out_errors);
+bool ParseUguiFile(const char* path, UguiDocument& out_doc, std::vector<ParseError>& out_errors);
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_IDL_PARSER_H_

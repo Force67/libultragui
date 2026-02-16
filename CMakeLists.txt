@@ -89,51 +89,51 @@ add_custom_target(ultragui_shaders DEPENDS ${SHADER_OUTPUTS})
 
 # --- Core library ---
 set(ULTRAGUI_SOURCES
-    src/core/arena.cpp
-    src/core/string_utils.cpp
-    src/platform/platform_glfw.cpp
-    src/render/renderer2d.cpp
-    src/style/style.cpp
-    src/style/transition.cpp
-    src/text/text_engine.cpp
-    src/layout/layout.cpp
-    src/animation/animator.cpp
-    src/widgets/widget.cpp
-    src/widgets/panel.cpp
-    src/widgets/text.cpp
-    src/widgets/button.cpp
-    src/widgets/image.cpp
-    src/widgets/scroll_view.cpp
-    src/widgets/widget_tree.cpp
-    src/idl/parser.cpp
-    src/idl/builder.cpp
-    src/input/input.cpp
-    src/scripting/lua_runtime.cpp
-    src/scripting/lua_widgets.cpp
-    src/anim/json.cpp
-    src/anim/anim_parser.cpp
-    src/anim/anim_eval.cpp
-    src/anim/anim_render.cpp
-    src/anim/vector_animation.cpp
-    src/scripting/lua_anim.cpp
-    src/layout/layout_tree.cpp
-    src/render/paint.cpp
-    src/svg/svg.cpp
-    src/svg/svg_parser.cpp
-    src/svg/svg_rasterizer.cpp
-    src/ui_context.cpp
+    src/core/arena.cc
+    src/core/string_utils.cc
+    src/platform/platform_glfw.cc
+    src/render/renderer2d.cc
+    src/style/style.cc
+    src/style/transition.cc
+    src/text/text_engine.cc
+    src/layout/layout.cc
+    src/animation/animator.cc
+    src/widgets/widget.cc
+    src/widgets/panel.cc
+    src/widgets/text.cc
+    src/widgets/button.cc
+    src/widgets/image.cc
+    src/widgets/scroll_view.cc
+    src/widgets/widget_tree.cc
+    src/idl/parser.cc
+    src/idl/builder.cc
+    src/input/input.cc
+    src/scripting/lua_runtime.cc
+    src/scripting/lua_widgets.cc
+    src/anim/json.cc
+    src/anim/anim_parser.cc
+    src/anim/anim_eval.cc
+    src/anim/anim_render.cc
+    src/anim/vector_animation.cc
+    src/scripting/lua_anim.cc
+    src/layout/layout_tree.cc
+    src/render/paint.cc
+    src/svg/svg.cc
+    src/svg/svg_parser.cc
+    src/svg/svg_rasterizer.cc
+    src/ui_context.cc
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)
-    list(APPEND ULTRAGUI_SOURCES src/rhi/vulkan/vulkan_rhi.cpp)
+    list(APPEND ULTRAGUI_SOURCES src/rhi/vulkan/vulkan_rhi.cc)
 endif()
 
 if(ULTRAGUI_AUDIO)
-    list(APPEND ULTRAGUI_SOURCES src/audio/audio.cpp src/scripting/lua_audio.cpp)
+    list(APPEND ULTRAGUI_SOURCES src/audio/audio.cc src/scripting/lua_audio.cc)
 endif()
 
 if(ULTRAGUI_LOTTIE)
-    list(APPEND ULTRAGUI_SOURCES src/lottie/lottie.cpp src/scripting/lua_lottie.cpp)
+    list(APPEND ULTRAGUI_SOURCES src/lottie/lottie.cc src/scripting/lua_lottie.cc)
 endif()
 
 add_library(ultragui STATIC ${ULTRAGUI_SOURCES})

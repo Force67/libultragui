@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_LAYOUT_LAYOUT_H_
+#define ULTRAGUI_LAYOUT_LAYOUT_H_
 
 #include <ultragui/core/rect.h>
 #include <ultragui/core/types.h>
@@ -45,7 +46,9 @@ struct LayoutViewport {
 class LayoutEngine {
 public:
     /// Compute layout for all nodes. The root node fills the viewport.
-    void compute(LayoutNode* nodes, u32 node_count, const LayoutViewport& viewport);
+    void Compute(LayoutNode* nodes, u32 node_count, const LayoutViewport& viewport);
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_LAYOUT_LAYOUT_H_

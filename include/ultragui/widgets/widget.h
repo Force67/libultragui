@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_WIDGETS_WIDGET_H_
+#define ULTRAGUI_WIDGETS_WIDGET_H_
 
 #include <ultragui/core/rect.h>
 #include <ultragui/core/types.h>
@@ -22,9 +23,9 @@ public:
     virtual ~Widget();
 
     // --- Tree management ---
-    void add_child(Widget* child);
-    void remove_child(Widget* child);
-    Widget* child_at(u32 index) const;
+    void AddChild(Widget* child);
+    void RemoveChild(Widget* child);
+    Widget* ChildAt(u32 index) const;
     u32 child_count() const { return static_cast<u32>(children_.size()); }
     Widget* parent() const { return parent_; }
     const std::vector<Widget*>& children() const { return children_; }
@@ -40,20 +41,20 @@ public:
     const Style& style() const { return style_; }
     void set_style(const Style& s) {
         style_ = s;
-        mark_dirty();
+        MarkDirty();
     }
 
-    void add_state_override(WidgetState state, const Style& override_style, u64 mask);
-    void add_state_transition(WidgetState state, const Transition& transition);
+    void AddStateOverride(WidgetState state, const Style& override_style, u64 mask);
+    void AddStateTransition(WidgetState state, const Transition& transition);
     WidgetState widget_state() const { return state_; }
     void set_widget_state(WidgetState state);
 
     /// Get the effective style (base + active overrides + animation)
-    Style computed_style() const;
+    Style ComputedStyle() const;
 
     /// Set an animated style override (used by Animator callback)
-    void set_animation_style(const Style& s);
-    void clear_animation_style();
+    void SetAnimationStyle(const Style& s);
+    void ClearAnimationStyle();
 
     // --- Layout ---
     Rect rect() const { return rect_; }
@@ -66,34 +67,34 @@ public:
     }
 
     // --- Dirty flags ---
-    void mark_dirty();
-    void mark_paint_dirty() { paint_dirty_ = true; }
-    bool is_dirty() const { return layout_dirty_; }
-    bool is_paint_dirty() const { return paint_dirty_; }
+    void MarkDirty();
+    void MarkPaintDirty() { paint_dirty_ = true; }
+    bool IsDirty() const { return layout_dirty_; }
+    bool IsPaintDirty() const { return paint_dirty_; }
 
     // --- Hit testing ---
     bool contains(Vec2 point) const { return rect_.contains(point); }
-    Widget* hit_test(Vec2 point);
+    Widget* HitTest(Vec2 point);
 
     // --- Context propagation ---
-    void set_context(const WidgetContext* ctx);
+    void SetContext(const WidgetContext* ctx);
     const WidgetContext* context() const { return context_; }
 
     // --- Lifecycle (override in subclasses) ---
-    virtual void on_mount() {}
-    virtual void on_unmount() {}
-    virtual void on_update(f64 dt) {}
-    virtual void on_layout(const Rect& rect, const Rect& content_rect);
-    virtual void on_paint(Renderer2D& renderer);
-    virtual void measure(f32& out_width, f32& out_height);
+    virtual void OnMount() {}
+    virtual void OnUnmount() {}
+    virtual void OnUpdate(f64 dt) {}
+    virtual void OnLayout(const Rect& rect, const Rect& content_rect);
+    virtual void OnPaint(Renderer2D& renderer);
+    virtual void Measure(f32& out_width, f32& out_height);
 
     // --- Event dispatch (override in subclasses) ---
-    virtual bool on_click() { return false; }
-    virtual bool on_scroll(Vec2 delta) { return false; }
+    virtual bool OnClick() { return false; }
+    virtual bool OnScroll(Vec2 delta) { return false; }
 
     // --- Layout integration ---
-    void populate_layout_node(LayoutNode& node) const;
-    void apply_layout_result(const LayoutNode& node);
+    void PopulateLayoutNode(LayoutNode& node) const;
+    void ApplyLayoutResult(const LayoutNode& node);
 
 protected:
     u32 id_ = 0;
@@ -104,7 +105,7 @@ protected:
 
     Style style_;
     std::vector<StyleOverride> state_overrides_;
-    WidgetState state_ = WidgetState::None;
+    WidgetState state_ = WidgetState::kNone;
 
     struct StateTransitionConfig {
         WidgetState state;
@@ -123,3 +124,5 @@ protected:
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_WIDGETS_WIDGET_H_

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_RENDER_VERTEX_H_
+#define ULTRAGUI_RENDER_VERTEX_H_
 
 #include <ultragui/core/types.h>
 
@@ -19,21 +20,23 @@ struct Vertex2D {
     f32 border_width;  // Border thickness (0 = no border)
     u32 border_color;  // Packed ABGR8
 
-    static constexpr u32 pack_color(f32 r, f32 g, f32 b, f32 a) {
+    static constexpr u32 PackColor(f32 r, f32 g, f32 b, f32 a) {
         auto to_u8 = [](f32 v) -> u32 { return static_cast<u32>(v * 255.0f + 0.5f); };
         return to_u8(a) << 24 | to_u8(b) << 16 | to_u8(g) << 8 | to_u8(r);
     }
 
     /// Pack 4 per-corner radii (TL, TR, BR, BL) into a single u32.
-    static constexpr u32 pack_radii(f32 tl, f32 tr, f32 br, f32 bl) {
+    static constexpr u32 PackRadii(f32 tl, f32 tr, f32 br, f32 bl) {
         auto to_u8 = [](f32 v) -> u32 { return static_cast<u32>(v + 0.5f) & 0xFF; };
         return to_u8(tl) | (to_u8(tr) << 8) | (to_u8(br) << 16) | (to_u8(bl) << 24);
     }
 
     /// Convenience: pack a uniform radius for all 4 corners.
-    static constexpr u32 pack_radii(f32 r) { return pack_radii(r, r, r, r); }
+    static constexpr u32 PackRadii(f32 r) { return PackRadii(r, r, r, r); }
 };
 
 static_assert(sizeof(Vertex2D) == 48, "Vertex2D must be 48 bytes");
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_RENDER_VERTEX_H_

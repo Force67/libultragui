@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_CORE_ARENA_H_
+#define ULTRAGUI_CORE_ARENA_H_
 
 #include <ultragui/core/types.h>
 
@@ -21,17 +22,17 @@ public:
     Arena& operator=(Arena&& other) noexcept;
 
     /// Allocate `size` bytes with given alignment
-    void* alloc(usize size, usize alignment = alignof(std::max_align_t));
+    void* Alloc(usize size, usize alignment = alignof(std::max_align_t));
 
     /// Allocate and construct a T
     template <typename T, typename... Args> T* create(Args&&... args) {
-        void* mem = alloc(sizeof(T), alignof(T));
+        void* mem = Alloc(sizeof(T), alignof(T));
         return new (mem) T(std::forward<Args>(args)...);
     }
 
     /// Allocate an array of T (default-constructed)
-    template <typename T> T* alloc_array(usize count) {
-        void* mem = alloc(sizeof(T) * count, alignof(T));
+    template <typename T> T* AllocArray(usize count) {
+        void* mem = Alloc(sizeof(T) * count, alignof(T));
         T* arr = static_cast<T*>(mem);
         for (usize i = 0; i < count; ++i) {
             new (&arr[i]) T();
@@ -68,3 +69,5 @@ private:
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_CORE_ARENA_H_

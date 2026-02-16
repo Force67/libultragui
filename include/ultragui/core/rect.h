@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_CORE_RECT_H_
+#define ULTRAGUI_CORE_RECT_H_
 
 #include <ultragui/core/math.h>
 
@@ -32,11 +33,11 @@ struct Rect {
         return p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h;
     }
 
-    constexpr bool intersects(Rect other) const {
+    constexpr bool Intersects(Rect other) const {
         return x < other.x + other.w && x + w > other.x && y < other.y + other.h && y + h > other.y;
     }
 
-    constexpr Rect intersected(Rect other) const {
+    constexpr Rect Intersected(Rect other) const {
         f32 ix = x > other.x ? x : other.x;
         f32 iy = y > other.y ? y : other.y;
         f32 ir = (x + w < other.x + other.w) ? x + w : other.x + other.w;
@@ -49,14 +50,14 @@ struct Rect {
     }
 
     /// Expand rect by `amount` on each side
-    constexpr Rect expanded(f32 amount) const {
+    constexpr Rect Expanded(f32 amount) const {
         return {x - amount, y - amount, w + amount * 2, h + amount * 2};
     }
 
     /// Shrink rect by `amount` on each side
-    constexpr Rect shrunk(f32 amount) const { return expanded(-amount); }
+    constexpr Rect Shrunk(f32 amount) const { return Expanded(-amount); }
 
-    constexpr Rect translated(Vec2 offset) const { return {x + offset.x, y + offset.y, w, h}; }
+    constexpr Rect Translated(Vec2 offset) const { return {x + offset.x, y + offset.y, w, h}; }
 
     constexpr bool operator==(Rect rhs) const {
         return x == rhs.x && y == rhs.y && w == rhs.w && h == rhs.h;
@@ -87,3 +88,5 @@ struct EdgeInsets {
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_CORE_RECT_H_

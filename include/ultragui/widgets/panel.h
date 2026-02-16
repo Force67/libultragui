@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_WIDGETS_PANEL_H_
+#define ULTRAGUI_WIDGETS_PANEL_H_
 
 #include <ultragui/widgets/widget.h>
 
@@ -10,7 +11,9 @@ class Panel : public Widget {
 public:
     using Widget::Widget;
 
-    void on_paint(Renderer2D& renderer) override;
+    void OnPaint(Renderer2D& renderer) override;
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_WIDGETS_PANEL_H_

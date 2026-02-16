@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_PLATFORM_PLATFORM_H_
+#define ULTRAGUI_PLATFORM_PLATFORM_H_
 
 #include <ultragui/core/math.h>
 #include <ultragui/core/types.h>
@@ -21,11 +22,11 @@ public:
         bool vsync = true;
     };
 
-    virtual bool init(const WindowConfig& config) = 0;
-    virtual void shutdown() = 0;
+    virtual bool Init(const WindowConfig& config) = 0;
+    virtual void Shutdown() = 0;
 
-    virtual bool should_close() const = 0;
-    virtual void poll_events() = 0;
+    virtual bool ShouldClose() const = 0;
+    virtual void PollEvents() = 0;
     virtual Vec2 window_size() const = 0;
     virtual Vec2 framebuffer_size() const = 0;
     virtual f32 dpi_scale() const = 0;
@@ -35,14 +36,16 @@ public:
     virtual void* native_handle() const = 0;
 
     /// Set the mouse cursor style
-    virtual void set_cursor(Cursor cursor) = 0;
+    virtual void SetCursor(Cursor cursor) = 0;
 
     /// Access the platform's input event queue.
-    /// Filled during poll_events(), consumed by InputRouter.
+    /// Filled during PollEvents(), consumed by InputRouter.
     virtual InputQueue& input_queue() = 0;
 };
 
 /// Create the default GLFW-based platform
-Platform* create_glfw_platform();
+Platform* CreateGlfwPlatform();
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_PLATFORM_PLATFORM_H_

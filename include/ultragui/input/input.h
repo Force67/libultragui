@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_INPUT_INPUT_H_
+#define ULTRAGUI_INPUT_INPUT_H_
 
 #include <ultragui/core/math.h>
 #include <ultragui/core/types.h>
@@ -15,11 +16,11 @@ class Platform;
 /// Manages hover, press, and focus state. Platform-agnostic.
 class InputRouter {
 public:
-    void init(Platform* platform);
+    void Init(Platform* platform);
 
     /// Process all pending input from the queue. Call once per frame.
     /// Returns true if any input was consumed.
-    bool process(Widget* root);
+    bool Process(Widget* root);
 
     Widget* hovered_widget() const { return hovered_; }
     Widget* focused_widget() const { return focused_; }
@@ -39,10 +40,12 @@ private:
     Widget* hovered_ = nullptr;
     Widget* focused_ = nullptr;
     Widget* pressed_ = nullptr;
-    Vec2 mouse_pos_ = Vec2::zero();
+    Vec2 mouse_pos_ = Vec2::Zero();
 
     ClickHandler on_click_;
     HoverHandler on_hover_;
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_INPUT_INPUT_H_

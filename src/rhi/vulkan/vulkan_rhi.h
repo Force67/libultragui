@@ -1,4 +1,5 @@
-#pragma once
+#ifndef SRC_RHI_VULKAN_VULKAN_RHI_H_
+#define SRC_RHI_VULKAN_VULKAN_RHI_H_
 
 #include <ultragui/platform/platform.h>
 #include <ultragui/rhi/rhi.h>
@@ -12,26 +13,26 @@ namespace ugui {
 
 class VulkanRHI : public RHI {
 public:
-    bool init(const RHIConfig& config) override;
-    void shutdown() override;
-    bool begin_frame(Color clear_color) override;
-    void end_frame() override;
-    void set_scissor(Rect rect) override;
-    void reset_scissor() override;
-    void draw_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+    bool Init(const RHIConfig& config) override;
+    void Shutdown() override;
+    bool BeginFrame(Color clear_color) override;
+    void EndFrame() override;
+    void SetScissor(Rect rect) override;
+    void ResetScissor() override;
+    void DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
                         u32 index_count, RHITextureHandle texture) override;
-    void draw_text_triangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+    void DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
                              u32 index_count, RHITextureHandle atlas_texture) override;
-    RHITextureHandle create_texture(u32 width, u32 height, RHIFormat format,
+    RHITextureHandle CreateTexture(u32 width, u32 height, RHIFormat format,
                                     const void* pixels,
-                                    RHIFilter filter = RHIFilter::Linear) override;
-    void update_texture(RHITextureHandle handle, const void* pixels) override;
-    void destroy_texture(RHITextureHandle handle) override;
-    bool acquire_frame() override;
-    RHITextureHandle create_render_target(u32 width, u32 height) override;
-    void destroy_render_target(RHITextureHandle handle) override;
-    bool begin_offscreen(RHITextureHandle target, Color clear_color) override;
-    void end_offscreen(RHITextureHandle target) override;
+                                    RHIFilter filter = RHIFilter::kLinear) override;
+    void UpdateTexture(RHITextureHandle handle, const void* pixels) override;
+    void DestroyTexture(RHITextureHandle handle) override;
+    bool AcquireFrame() override;
+    RHITextureHandle CreateRenderTarget(u32 width, u32 height) override;
+    void DestroyRenderTarget(RHITextureHandle handle) override;
+    bool BeginOffscreen(RHITextureHandle target, Color clear_color) override;
+    void EndOffscreen(RHITextureHandle target) override;
     Vec2 display_size() const override;
     f32 dpi_scale() const override;
 
@@ -150,12 +151,12 @@ private:
     };
     static constexpr u32 MAX_TEXTURES = 256;
     TextureSlot textures_[MAX_TEXTURES] = {};
-    RHITextureHandle white_texture_ = INVALID_TEXTURE;
+    RHITextureHandle white_texture_ = kInvalidTexture;
 
     // Offscreen rendering state
     VkRenderPass offscreen_render_pass_ = VK_NULL_HANDLE;
     bool frame_acquired_ = false;
-    RHITextureHandle active_offscreen_target_ = INVALID_TEXTURE;
+    RHITextureHandle active_offscreen_target_ = kInvalidTexture;
     Vec2 offscreen_display_size_ = {};
 
     // Vertex dedup: avoid re-uploading the same data within a Renderer2D frame
@@ -168,3 +169,5 @@ private:
 };
 
 } // namespace ugui
+
+#endif  // SRC_RHI_VULKAN_VULKAN_RHI_H_

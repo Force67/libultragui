@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_UI_CONTEXT_H_
+#define ULTRAGUI_UI_CONTEXT_H_
 
 #include <ultragui/animation/animator.h>
 #include <ultragui/layout/layout_tree.h>
@@ -38,7 +39,7 @@ struct UIConfig {
     bool resizable = true;
     bool vsync = true;
     bool validation = true;
-    Color clear_color = Color::from_hex(0x0f0f1a);
+    Color clear_color = Color::FromHex(0x0f0f1a);
     const char* shader_dir = nullptr; // Falls back to ULTRAGUI_SHADER_DIR
 };
 
@@ -48,37 +49,37 @@ struct UIConfig {
 ///
 /// Usage:
 ///   UIContext ui;
-///   ui.init(config);
-///   ui.load_font("path/to/font.ttf");
-///   ui.load_ui("path/to/ui.ugui");
-///   ui.load_script("path/to/logic.lua");
-///   while (ui.running()) { ui.update(); }
-///   ui.shutdown();
+///   ui.Init(config);
+///   ui.LoadFont("path/to/font.ttf");
+///   ui.LoadUi("path/to/ui.ugui");
+///   ui.LoadScript("path/to/logic.lua");
+///   while (ui.Running()) { ui.Update(); }
+///   ui.Shutdown();
 class UIContext {
 public:
     UIContext() = default;
     ~UIContext();
 
     /// Initialize all subsystems. Returns false on failure.
-    bool init(const UIConfig& config = {});
+    bool Init(const UIConfig& config = {});
 
-    /// Load a TTF/OTF font. Returns a handle, or INVALID_FONT on failure.
-    FontHandle load_font(const char* path);
+    /// Load a TTF/OTF font. Returns a handle, or kInvalidFont on failure.
+    FontHandle LoadFont(const char* path);
 
     /// Set the default font used by the builder for text/button widgets.
     void set_default_font(FontHandle font);
 
     /// Load a .ugui layout file. Builds the widget tree. Returns the root widget.
-    Widget* load_ui(const char* path);
+    Widget* LoadUi(const char* path);
 
     /// Load a .ugui layout from a string.
-    Widget* load_ui_string(const char* source, const char* name = "inline");
+    Widget* LoadUiString(const char* source, const char* name = "inline");
 
     /// Load and execute a Lua script.
-    bool load_script(const char* path);
+    bool LoadScript(const char* path);
 
     /// Execute a Lua script string.
-    bool exec_script(const char* script, const char* name = "chunk");
+    bool ExecScript(const char* script, const char* name = "chunk");
 
     /// Set the root widget directly (takes ownership for painting, not deletion).
     void set_root(Widget* root);
@@ -87,13 +88,13 @@ public:
     Widget* root() const { return root_; }
 
     /// Returns true while the window is open.
-    bool running() const;
+    bool Running() const;
 
     /// Run one frame: poll input, update animations, compute layout, paint.
-    void update();
+    void Update();
 
     /// Clean up all subsystems.
-    void shutdown();
+    void Shutdown();
 
     // --- Access subsystems ---
     Platform* platform() { return platform_; }
@@ -118,33 +119,33 @@ public:
     void set_clear_color(Color color) { config_.clear_color = color; }
 
     /// Find a widget by name in the tree.
-    Widget* find_widget(const char* name) const;
+    Widget* FindWidget(const char* name) const;
 
     /// Load an SVG file and create a GPU texture.
     /// If width/height are 0, uses the SVG's native dimensions.
-    RHITextureHandle load_svg(const char* path, u32 width = 0, u32 height = 0);
+    RHITextureHandle LoadSvg(const char* path, u32 width = 0, u32 height = 0);
 
     /// Load a .uganim vector animation. The returned animation is owned by
     /// UIContext and automatically updated each frame. Returns nullptr on failure.
-    VectorAnimation* load_anim(const char* path, u32 width, u32 height);
+    VectorAnimation* LoadAnim(const char* path, u32 width, u32 height);
 
 #if ULTRAGUI_LOTTIE
     /// Load a Lottie animation. The returned animation is owned by UIContext
     /// and automatically updated each frame. Returns nullptr on failure.
-    LottieAnimation* load_lottie(const char* path, u32 width, u32 height);
+    LottieAnimation* LoadLottie(const char* path, u32 width, u32 height);
 #endif
 
     /// Create an offscreen render target (delegates to RHI).
-    RHITextureHandle create_render_target(u32 width, u32 height);
+    RHITextureHandle CreateRenderTarget(u32 width, u32 height);
 
     /// Queue a widget tree to be rendered to an offscreen target during the
-    /// next update() call, before the main swapchain pass.
-    void queue_offscreen(RHITextureHandle target, Widget* root, Color clear_color);
+    /// next Update() call, before the main swapchain pass.
+    void QueueOffscreen(RHITextureHandle target, Widget* root, Color clear_color);
 
     /// Custom paint callback for the swapchain pass. When set, replaces the
     /// default compute_layout() + paint_tree() with the callback.
     using PaintCallback = std::function<void(Renderer2D&, RHI*)>;
-    void set_on_paint(PaintCallback cb);
+    void SetOnPaint(PaintCallback cb);
 
 private:
     Platform* platform_ = nullptr;
@@ -165,7 +166,7 @@ private:
 #endif
 
     Widget* root_ = nullptr;
-    FontHandle default_font_ = INVALID_FONT;
+    FontHandle default_font_ = kInvalidFont;
     UIConfig config_;
     WidgetContext widget_ctx_;
 
@@ -185,3 +186,5 @@ private:
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_UI_CONTEXT_H_

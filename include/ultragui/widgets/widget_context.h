@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_WIDGETS_WIDGET_CONTEXT_H_
+#define ULTRAGUI_WIDGETS_WIDGET_CONTEXT_H_
 
 #include <ultragui/core/types.h>
 #include <ultragui/text/text_engine.h>
@@ -12,9 +13,11 @@ class Animator;
 /// without requiring manual per-widget injection.
 struct WidgetContext {
     TextEngine* text_engine = nullptr;
-    FontHandle default_font = INVALID_FONT;
+    FontHandle default_font = kInvalidFont;
     Animator* animator = nullptr;
     f64* current_time = nullptr;
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_WIDGETS_WIDGET_CONTEXT_H_

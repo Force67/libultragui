@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_ANIMATION_ANIMATOR_H_
+#define ULTRAGUI_ANIMATION_ANIMATOR_H_
 
 #include <ultragui/core/types.h>
 #include <ultragui/style/style.h>
@@ -18,7 +19,7 @@ struct StyleTransition {
     bool active = false;
 
     /// Returns interpolated style at current time. Sets `done` if finished.
-    Style evaluate(f64 current_time, bool& done) const {
+    Style Evaluate(f64 current_time, bool& done) const {
         f64 elapsed = current_time - start_time - transition.delay;
         if (elapsed < 0.0) {
             done = false;
@@ -31,8 +32,8 @@ struct StyleTransition {
             return to;
         }
         done = false;
-        f32 eased = eval_easing(transition.easing, t, transition.bezier);
-        return Style::lerp(from, to, eased);
+        f32 eased = EvalEasing(transition.easing, t, transition.bezier);
+        return Style::Lerp(from, to, eased);
     }
 };
 
@@ -48,35 +49,35 @@ struct KeyframeAnimation {
     std::vector<Keyframe> keyframes;
     f32 duration = 1.0f; // total seconds
     f32 delay = 0.0f;
-    EasingType easing = EasingType::Linear;
+    EasingType easing = EasingType::kLinear;
     i32 repeat_count = 1;   // -1 = infinite
     bool alternate = false; // ping-pong
     f64 start_time = 0.0;
     bool active = false;
 
-    Style evaluate(f64 current_time, bool& done) const;
+    Style Evaluate(f64 current_time, bool& done) const;
 };
 
 /// Manages active transitions and animations for the UI.
 class Animator {
 public:
     /// Start a property transition for a widget
-    void start_transition(u32 widget_id, const Style& from, const Style& to,
+    void StartTransition(u32 widget_id, const Style& from, const Style& to,
                           const Transition& transition, f64 current_time);
 
     /// Start a keyframe animation
-    void start_animation(const KeyframeAnimation& anim, f64 current_time);
+    void StartAnimation(const KeyframeAnimation& anim, f64 current_time);
 
     /// Cancel all animations for a widget
-    void cancel(u32 widget_id);
+    void Cancel(u32 widget_id);
 
     /// Tick all animations, apply to styles via the callback.
     /// Returns true if any animations are still active.
     using ApplyFn = void (*)(u32 widget_id, const Style& animated_style, void* user_data);
-    bool update(f64 current_time, ApplyFn apply, void* user_data);
+    bool Update(f64 current_time, ApplyFn apply, void* user_data);
 
     /// Check if a widget has active animations
-    bool is_animating(u32 widget_id) const;
+    bool IsAnimating(u32 widget_id) const;
 
 private:
     std::vector<StyleTransition> transitions_;
@@ -84,3 +85,5 @@ private:
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_ANIMATION_ANIMATOR_H_

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_ANIM_ANIM_TYPES_H_
+#define ULTRAGUI_ANIM_ANIM_TYPES_H_
 
 #include <ultragui/core/color.h>
 #include <ultragui/core/types.h>
@@ -19,11 +20,11 @@ namespace ugui {
 
 /// Property types that can be animated in a .uganim layer.
 enum class AnimProperty : u8 {
-    X, Y, W, H,
-    R, Cx, Cy, Rx, Ry,
-    Rotation, ScaleX, ScaleY,
-    Opacity, StrokeWidth, CornerRadius,
-    Fill, Stroke, // color properties
+    kX, kY, kW, kH,
+    kR, kCx, kCy, kRx, kRy,
+    kRotation, kScaleX, kScaleY,
+    kOpacity, kStrokeWidth, kCornerRadius,
+    kFill, kStroke, // color properties
 };
 
 /// A single keyframe: time + value + easing.
@@ -31,7 +32,7 @@ struct AnimKeyframe {
     f32 t = 0;      // normalized time (0.0-1.0 within duration)
     f32 value = 0;   // for scalar properties
     Color color;     // for color properties (Fill, Stroke)
-    EasingType easing = EasingType::Linear;
+    EasingType easing = EasingType::kLinear;
 };
 
 /// A track of keyframes for one property.
@@ -42,18 +43,18 @@ struct AnimPropertyTrack {
 
 /// Shape types supported in .uganim.
 enum class AnimShapeType : u8 {
-    Rect,
-    Circle,
-    Ellipse,
-    Path,
-    Group,
+    kRect,
+    kCircle,
+    kEllipse,
+    kPath,
+    kGroup,
 };
 
 /// A layer in the animation. Each layer has a shape, static defaults,
 /// keyframed property tracks, and optional children (for groups).
 struct AnimLayer {
     std::string name;
-    AnimShapeType shape_type = AnimShapeType::Rect;
+    AnimShapeType shape_type = AnimShapeType::kRect;
 
     // Static shape parameters (defaults, overridden by keyframes)
     f32 x = 0, y = 0, w = 0, h = 0;
@@ -105,3 +106,5 @@ struct AnimDocument {
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_ANIM_ANIM_TYPES_H_

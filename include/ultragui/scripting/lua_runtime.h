@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_SCRIPTING_LUA_RUNTIME_H_
+#define ULTRAGUI_SCRIPTING_LUA_RUNTIME_H_
 
 #include <ultragui/core/types.h>
 
@@ -17,43 +18,45 @@ class Widget;
 /// written in Lua.
 class LuaRuntime {
 public:
-    bool init();
-    void shutdown();
+    bool Init();
+    void Shutdown();
 
     /// Execute a Lua script string. Returns true on success.
-    bool exec(const char* script, const char* name = "chunk");
+    bool Exec(const char* script, const char* name = "chunk");
 
     /// Load and execute a Lua file.
-    bool exec_file(const char* path);
+    bool ExecFile(const char* path);
 
     /// Register a widget so Lua can access it via ugui.find("name").
-    void register_widget(Widget* widget);
-    void unregister_widget(Widget* widget);
+    void RegisterWidget(Widget* widget);
+    void UnregisterWidget(Widget* widget);
 
     /// Call a named Lua function (used for on_click, etc.)
-    bool call_handler(const char* func_name, Widget* widget);
+    bool CallHandler(const char* func_name, Widget* widget);
 
     /// Expose a C++ function to Lua under ugui.{name}
     using NativeFunction = std::function<int(lua_State*)>;
-    void register_function(const char* name, NativeFunction func);
+    void RegisterFunction(const char* name, NativeFunction func);
 
     lua_State* state() const { return L_; }
 
     /// Access the widget registry (for Lua callbacks)
-    Widget* find_registered_widget(const char* name) const;
+    Widget* FindRegisteredWidget(const char* name) const;
 
 private:
-    static int lua_ugui_find(lua_State* L);
-    static int lua_ugui_get_prop(lua_State* L);
-    static int lua_ugui_set_prop(lua_State* L);
-    static int lua_ugui_log(lua_State* L);
+    static int LuaUguiFind(lua_State* L);
+    static int LuaUguiGetProp(lua_State* L);
+    static int LuaUguiSetProp(lua_State* L);
+    static int LuaUguiLog(lua_State* L);
 
-    static LuaRuntime* from_state(lua_State* L);
+    static LuaRuntime* FromState(lua_State* L);
 
-    void register_api();
+    void RegisterApi();
 
     lua_State* L_ = nullptr;
     std::unordered_map<std::string, Widget*> widget_registry_;
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_SCRIPTING_LUA_RUNTIME_H_

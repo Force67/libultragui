@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_WIDGETS_TEXT_H_
+#define ULTRAGUI_WIDGETS_TEXT_H_
 
 #include <ultragui/widgets/widget.h>
 
@@ -13,27 +14,29 @@ public:
 
     void set_text(const std::string& text) {
         text_ = text;
-        mark_dirty();
+        MarkDirty();
     }
     const std::string& text() const { return text_; }
 
     void set_font(FontHandle font) { font_override_ = font; }
     FontHandle font() const { return font_override_; }
 
-    void measure(f32& out_width, f32& out_height) override;
-    void on_paint(Renderer2D& renderer) override;
+    void Measure(f32& out_width, f32& out_height) override;
+    void OnPaint(Renderer2D& renderer) override;
 
 private:
     TextEngine* text_engine() const {
         return context_ ? context_->text_engine : nullptr;
     }
     FontHandle effective_font() const {
-        if (font_override_ != INVALID_FONT) return font_override_;
-        return context_ ? context_->default_font : INVALID_FONT;
+        if (font_override_ != kInvalidFont) return font_override_;
+        return context_ ? context_->default_font : kInvalidFont;
     }
 
     std::string text_;
-    FontHandle font_override_ = INVALID_FONT;
+    FontHandle font_override_ = kInvalidFont;
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_WIDGETS_TEXT_H_

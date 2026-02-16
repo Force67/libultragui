@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_CORE_TYPES_H_
+#define ULTRAGUI_CORE_TYPES_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -18,3 +19,5 @@ using f64 = double;
 using usize = size_t;
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_CORE_TYPES_H_

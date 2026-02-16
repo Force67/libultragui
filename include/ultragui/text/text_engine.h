@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_TEXT_TEXT_ENGINE_H_
+#define ULTRAGUI_TEXT_TEXT_ENGINE_H_
 
 #include <ultragui/core/color.h>
 #include <ultragui/core/math.h>
@@ -13,7 +14,7 @@ class RHI;
 
 /// Opaque handle to a loaded font face
 using FontHandle = u32;
-constexpr FontHandle INVALID_FONT = ~0u;
+constexpr FontHandle kInvalidFont = ~0u;
 
 struct GlyphMetrics {
     f32 advance_x;
@@ -49,7 +50,7 @@ struct TextRun {
 /// Configuration for text layout
 struct TextLayoutConfig {
     f32 max_width = 1e6f;
-    TextAlign align = TextAlign::Left;
+    TextAlign align = TextAlign::kLeft;
     bool ellipsize = false;
 };
 
@@ -72,26 +73,26 @@ struct TextLayout {
 /// Wraps FreeType for rasterization and HarfBuzz for shaping.
 class TextEngine {
 public:
-    bool init(RHI* rhi);
-    void shutdown();
+    bool Init(RHI* rhi);
+    void Shutdown();
 
     /// Load a font from a file path. Returns a handle for use with shape/draw.
-    FontHandle load_font(const char* path);
+    FontHandle LoadFont(const char* path);
 
     /// Shape a UTF-8 string into positioned glyphs.
-    /// The returned TextRun is valid until the next call to shape() or end_frame().
-    TextRun shape(FontHandle font, const char* text, u32 text_len, f32 font_size,
+    /// The returned TextRun is valid until the next call to Shape() or EndFrame().
+    TextRun Shape(FontHandle font, const char* text, u32 text_len, f32 font_size,
                   f32 letter_spacing = 0.0f, f32 line_height_mult = 1.0f);
 
     /// Lay out a shaped run into wrapped, aligned lines.
-    TextLayout layout(const TextRun& run, const TextLayoutConfig& config);
+    TextLayout Layout(const TextRun& run, const TextLayoutConfig& config);
 
     /// Call at the start of each frame to reset internal scratch buffers.
     /// All previously returned TextRun/TextLayout pointers become invalid.
-    void begin_frame();
+    void BeginFrame();
 
     /// Must be called once per frame to upload any new glyphs to the GPU atlas.
-    void flush_atlas();
+    void FlushAtlas();
 
     /// Get the atlas texture handle for rendering.
     RHITextureHandle atlas_texture() const { return atlas_texture_; }
@@ -103,7 +104,9 @@ private:
     struct Impl;
     Impl* impl_ = nullptr;
     RHI* rhi_ = nullptr;
-    RHITextureHandle atlas_texture_ = INVALID_TEXTURE;
+    RHITextureHandle atlas_texture_ = kInvalidTexture;
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_TEXT_TEXT_ENGINE_H_

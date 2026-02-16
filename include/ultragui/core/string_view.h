@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_CORE_STRING_VIEW_H_
+#define ULTRAGUI_CORE_STRING_VIEW_H_
 
 #include <ultragui/core/types.h>
 
@@ -42,3 +43,5 @@ private:
 };
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_CORE_STRING_VIEW_H_

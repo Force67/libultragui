@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ULTRAGUI_CORE_MATH_H_
+#define ULTRAGUI_CORE_MATH_H_
 
 #include <ultragui/core/types.h>
 
@@ -35,11 +36,11 @@ struct Vec2 {
         return *this;
     }
 
-    constexpr f32 dot(Vec2 rhs) const { return x * rhs.x + y * rhs.y; }
+    constexpr f32 Dot(Vec2 rhs) const { return x * rhs.x + y * rhs.y; }
     f32 length() const { return std::sqrt(x * x + y * y); }
-    constexpr f32 length_sq() const { return x * x + y * y; }
+    constexpr f32 LengthSq() const { return x * x + y * y; }
 
-    Vec2 normalized() const {
+    Vec2 Normalized() const {
         f32 len = length();
         return len > 0.0f ? Vec2{x / len, y / len} : Vec2{0.0f, 0.0f};
     }
@@ -47,8 +48,8 @@ struct Vec2 {
     constexpr bool operator==(Vec2 rhs) const { return x == rhs.x && y == rhs.y; }
     constexpr bool operator!=(Vec2 rhs) const { return !(*this == rhs); }
 
-    static constexpr Vec2 zero() { return {0.0f, 0.0f}; }
-    static constexpr Vec2 one() { return {1.0f, 1.0f}; }
+    static constexpr Vec2 Zero() { return {0.0f, 0.0f}; }
+    static constexpr Vec2 One() { return {1.0f, 1.0f}; }
 };
 
 constexpr Vec2 operator*(f32 s, Vec2 v) {
@@ -79,20 +80,22 @@ struct Vec4 {
     constexpr bool operator!=(Vec4 rhs) const { return !(*this == rhs); }
 };
 
-constexpr f32 lerp(f32 a, f32 b, f32 t) {
+constexpr f32 Lerp(f32 a, f32 b, f32 t) {
     return a + (b - a) * t;
 }
 
-constexpr Vec2 lerp(Vec2 a, Vec2 b, f32 t) {
-    return {lerp(a.x, b.x, t), lerp(a.y, b.y, t)};
+constexpr Vec2 Lerp(Vec2 a, Vec2 b, f32 t) {
+    return {Lerp(a.x, b.x, t), Lerp(a.y, b.y, t)};
 }
 
-constexpr Vec4 lerp(Vec4 a, Vec4 b, f32 t) {
-    return {lerp(a.x, b.x, t), lerp(a.y, b.y, t), lerp(a.z, b.z, t), lerp(a.w, b.w, t)};
+constexpr Vec4 Lerp(Vec4 a, Vec4 b, f32 t) {
+    return {Lerp(a.x, b.x, t), Lerp(a.y, b.y, t), Lerp(a.z, b.z, t), Lerp(a.w, b.w, t)};
 }
 
-constexpr f32 clamp(f32 v, f32 lo, f32 hi) {
+constexpr f32 Clamp(f32 v, f32 lo, f32 hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
 } // namespace ugui
+
+#endif  // ULTRAGUI_CORE_MATH_H_
