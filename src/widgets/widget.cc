@@ -5,6 +5,7 @@
 #include <ultragui/widgets/widget.h>
 
 #include <algorithm>
+#include <ranges>
 
 namespace ugui {
 
@@ -94,18 +95,17 @@ void Widget::set_widget_state(WidgetState state) {
 
 void Widget::SetAnimationStyle(const Style& s) {
     animation_style_ = s;
-    has_animation_ = true;
     MarkPaintDirty();
 }
 
 void Widget::ClearAnimationStyle() {
-    has_animation_ = false;
+    animation_style_.reset();
     MarkPaintDirty();
 }
 
 Style Widget::ComputedStyle() const {
-    if (has_animation_)
-        return animation_style_;
+    if (animation_style_)
+        return *animation_style_;
     if (state_overrides_.empty())
         return style_;
     return ResolveStyle(style_, state_overrides_.data(), static_cast<u32>(state_overrides_.size()),
@@ -125,9 +125,8 @@ Widget* Widget::HitTest(Vec2 point) {
         return nullptr;
 
     // Check children in reverse (top-most first)
-    for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
-        Widget* hit = (*it)->HitTest(point);
-        if (hit)
+    for (auto* child : children_ | std::views::reverse) {
+        if (auto* hit = child->HitTest(point))
             return hit;
     }
     return this;

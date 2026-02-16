@@ -8,9 +8,8 @@ Widget* FindWidgetById(Widget* root, u32 id) {
         return nullptr;
     if (root->id() == id)
         return root;
-    for (u32 i = 0; i < root->child_count(); ++i) {
-        Widget* found = FindWidgetById(root->ChildAt(i), id);
-        if (found)
+    for (auto* child : root->children()) {
+        if (auto* found = FindWidgetById(child, id))
             return found;
     }
     return nullptr;
@@ -21,9 +20,8 @@ Widget* FindWidget(Widget* root, const char* name) {
         return nullptr;
     if (root->name() == name)
         return root;
-    for (u32 i = 0; i < root->child_count(); ++i) {
-        Widget* found = FindWidget(root->ChildAt(i), name);
-        if (found)
+    for (auto* child : root->children()) {
+        if (auto* found = FindWidget(child, name))
             return found;
     }
     return nullptr;
@@ -33,17 +31,15 @@ void UpdateWidgetTree(Widget* root, f64 dt) {
     if (!root)
         return;
     root->OnUpdate(dt);
-    for (u32 i = 0; i < root->child_count(); ++i) {
-        UpdateWidgetTree(root->ChildAt(i), dt);
-    }
+    for (auto* child : root->children())
+        UpdateWidgetTree(child, dt);
 }
 
 void MeasureWidgetTree(Widget* root) {
     if (!root)
         return;
-    for (u32 i = 0; i < root->child_count(); ++i) {
-        MeasureWidgetTree(root->ChildAt(i));
-    }
+    for (auto* child : root->children())
+        MeasureWidgetTree(child);
     f32 w = 0, h = 0;
     root->Measure(w, h);
     root->set_intrinsic_size(w, h);

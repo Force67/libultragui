@@ -7,6 +7,7 @@
 #include <ultragui/style/transition.h>
 #include <ultragui/widgets/widget_context.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -113,8 +114,7 @@ protected:
     };
     std::vector<StateTransitionConfig> state_transitions_;
 
-    Style animation_style_;
-    bool has_animation_ = false;
+    std::optional<Style> animation_style_;
 
     Rect rect_;
     Rect content_rect_;

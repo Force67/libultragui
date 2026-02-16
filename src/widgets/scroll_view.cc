@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 namespace ugui {
 
@@ -20,18 +21,14 @@ bool ScrollView::OnScroll(Vec2 delta) {
 void ScrollView::OnLayout(const Rect& rect, const Rect& content_rect) {
     Widget::OnLayout(rect, content_rect);
 
-    // Compute total content size from children
-    f32 max_x = 0, max_y = 0;
-    for (auto* child : children_) {
-        Rect cr = child->rect();
-        f32 r = cr.x + cr.w - content_rect.x;
-        f32 b = cr.y + cr.h - content_rect.y;
-        if (r > max_x)
-            max_x = r;
-        if (b > max_y)
-            max_y = b;
-    }
-    content_size_ = {max_x, max_y};
+    // Compute total content size from children (fold)
+    content_size_ = std::accumulate(
+        children_.begin(), children_.end(), Vec2{0, 0},
+        [&content_rect](Vec2 acc, const Widget* child) {
+            Rect cr = child->rect();
+            return Vec2{std::max(acc.x, cr.x + cr.w - content_rect.x),
+                        std::max(acc.y, cr.y + cr.h - content_rect.y)};
+        });
 
     // Clamp scroll offset
     f32 max_scroll_x = std::max(0.0f, content_size_.x - content_rect.w);

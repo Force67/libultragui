@@ -10,6 +10,7 @@
 #include <ultragui/scripting/lua_lottie.h>
 #endif
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -225,17 +226,13 @@ void UIContext::Update() {
     if (root_)
         UpdateWidgetTree(root_, dt_);
 
-    // Update vector animations
-    for (auto* anim : vector_anims_) {
-        if (anim)
-            anim->Update(dt_);
-    }
-
+    // Update all animations
+    auto update_anim = [dt = dt_](auto* anim) {
+        if (anim) anim->Update(dt);
+    };
+    std::for_each(vector_anims_.begin(), vector_anims_.end(), update_anim);
 #if ULTRAGUI_LOTTIE
-    for (auto* anim : lottie_anims_) {
-        if (anim)
-            anim->Update(dt_);
-    }
+    std::for_each(lottie_anims_.begin(), lottie_anims_.end(), update_anim);
 #endif
 
     // --- Text shaping and atlas management (BEFORE render pass) ---

@@ -1,6 +1,8 @@
 #include <ultragui/core/math.h>
 #include <ultragui/style/style.h>
 
+#include <span>
+
 namespace ugui {
 
 static Length lerp_length(const Length& a, const Length& b, f32 t) {
@@ -73,50 +75,51 @@ Style Style::Lerp(const Style& a, const Style& b, f32 t) {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Table-driven style override resolution
+// ---------------------------------------------------------------------------
+
+using MaskApply = void (*)(Style&, const Style&);
+
+static const std::pair<u64, MaskApply> kMaskApplicators[] = {
+    {StyleMask::kBackground, [](Style& r, const Style& s) { r.background = s.background; }},
+    {StyleMask::kBackgroundEnd, [](Style& r, const Style& s) { r.background_end = s.background_end; }},
+    {StyleMask::kBorderColor, [](Style& r, const Style& s) { r.border_color = s.border_color; }},
+    {StyleMask::kBorderWidth, [](Style& r, const Style& s) { r.border_width = s.border_width; }},
+    {StyleMask::kCornerRadius, [](Style& r, const Style& s) {
+        r.corner_radius = s.corner_radius;
+        r.corner_radius_tl = s.corner_radius_tl;
+        r.corner_radius_tr = s.corner_radius_tr;
+        r.corner_radius_br = s.corner_radius_br;
+        r.corner_radius_bl = s.corner_radius_bl;
+    }},
+    {StyleMask::kOpacity, [](Style& r, const Style& s) { r.opacity = s.opacity; }},
+    {StyleMask::kTextColor, [](Style& r, const Style& s) { r.text_color = s.text_color; }},
+    {StyleMask::kFontSize, [](Style& r, const Style& s) { r.font_size = s.font_size; }},
+    {StyleMask::kWidth, [](Style& r, const Style& s) { r.width = s.width; }},
+    {StyleMask::kHeight, [](Style& r, const Style& s) { r.height = s.height; }},
+    {StyleMask::kMargin, [](Style& r, const Style& s) { r.margin = s.margin; }},
+    {StyleMask::kPadding, [](Style& r, const Style& s) { r.padding = s.padding; }},
+    {StyleMask::kShadow, [](Style& r, const Style& s) { r.shadow = s.shadow; }},
+};
+
+static void ApplyMaskedOverride(Style& result, const StyleOverride& ov) {
+    for (auto& [mask, apply] : kMaskApplicators) {
+        if (ov.mask & mask)
+            apply(result, ov.style);
+    }
+}
+
 Style ResolveStyle(const Style& base, const StyleOverride* overrides, u32 override_count,
                     WidgetState current_state) {
     Style result = base;
-
-    for (u32 i = 0; i < override_count; ++i) {
-        const auto& ov = overrides[i];
-        // Check if the override's state is active
-        if (ov.state != WidgetState::kNone && !HasState(current_state, ov.state))
-            continue;
-
-        // Apply masked properties
-        if (ov.mask & StyleMask::kBackground)
-            result.background = ov.style.background;
-        if (ov.mask & StyleMask::kBackgroundEnd)
-            result.background_end = ov.style.background_end;
-        if (ov.mask & StyleMask::kBorderColor)
-            result.border_color = ov.style.border_color;
-        if (ov.mask & StyleMask::kBorderWidth)
-            result.border_width = ov.style.border_width;
-        if (ov.mask & StyleMask::kCornerRadius) {
-            result.corner_radius = ov.style.corner_radius;
-            result.corner_radius_tl = ov.style.corner_radius_tl;
-            result.corner_radius_tr = ov.style.corner_radius_tr;
-            result.corner_radius_br = ov.style.corner_radius_br;
-            result.corner_radius_bl = ov.style.corner_radius_bl;
-        }
-        if (ov.mask & StyleMask::kOpacity)
-            result.opacity = ov.style.opacity;
-        if (ov.mask & StyleMask::kTextColor)
-            result.text_color = ov.style.text_color;
-        if (ov.mask & StyleMask::kFontSize)
-            result.font_size = ov.style.font_size;
-        if (ov.mask & StyleMask::kWidth)
-            result.width = ov.style.width;
-        if (ov.mask & StyleMask::kHeight)
-            result.height = ov.style.height;
-        if (ov.mask & StyleMask::kMargin)
-            result.margin = ov.style.margin;
-        if (ov.mask & StyleMask::kPadding)
-            result.padding = ov.style.padding;
-        if (ov.mask & StyleMask::kShadow)
-            result.shadow = ov.style.shadow;
+    auto is_active = [current_state](const StyleOverride& ov) {
+        return ov.state == WidgetState::kNone || HasState(current_state, ov.state);
+    };
+    for (auto& ov : std::span(overrides, override_count)) {
+        if (is_active(ov))
+            ApplyMaskedOverride(result, ov);
     }
-
     return result;
 }
 
