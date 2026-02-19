@@ -270,7 +270,6 @@ void Renderer2D::DrawShadow(Rect rect, Color shadow_color, f32 blur, f32 spread,
     };
     u32 packed = Vertex2D::PackColor(shadow_color.r, shadow_color.g, shadow_color.b,
                                       shadow_color.a);
-    // Add spread to each corner radius
     u32 tl = (corner_radii & 0xFFu);
     u32 tr = ((corner_radii >> 8) & 0xFFu);
     u32 br = ((corner_radii >> 16) & 0xFFu);

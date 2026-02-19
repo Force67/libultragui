@@ -10,7 +10,7 @@ namespace ugui {
 
 void ScrollView::ScrollBy(Vec2 delta) {
     scroll_offset_ += delta;
-    MarkPaintDirty();
+    MarkDirty();
 }
 
 bool ScrollView::OnScroll(Vec2 delta) {

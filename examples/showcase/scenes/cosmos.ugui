@@ -1,0 +1,923 @@
+// Cosmos - Space Mission Control
+// Focused, clean layout. Dark blue-black, glass panels, glowing accents.
+
+panel root {
+    layout: column;
+    width: 100%;
+    height: 100%;
+    background: #06061a;
+    padding: 0;
+
+    // CSS Variables
+    --accent: #3b82f6;
+    --glow: #3b82f630;
+    --glass: #0d1230;
+    --glass-hi: #131940;
+    --border: #ffffff0a;
+    --green: #22c55e;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --dim: #334155;
+
+    // HEADER BAR
+    panel header {
+        layout: row;
+        align: center;
+        justify: space-between;
+        padding: 14 28;
+        min-height: 56;
+        gradient-stops: #0a1040 0%, #151a50 50%, #0a1040 100%;
+        gradient-angle: 90;
+        border-color: --border;
+        border-width: 0 0 1 0;
+
+        panel header_left {
+            layout: row;
+            align: center;
+            gap: 16;
+
+            // Logo orb
+            panel logo_orb {
+                width: 28;
+                height: 28;
+                background: --accent;
+                background-end: #8b5cf6;
+                gradient-type: radial;
+                corner-radius: 14;
+                shadow-color: --glow;
+                shadow-blur: 16;
+            }
+
+            text logo {
+                text: "COSMOS";
+                font-size: 18;
+                font-weight: bold;
+                color: --text;
+                letter-spacing: 6;
+            }
+
+            panel logo_sep {
+                width: 1;
+                height: 20;
+                background: #ffffff15;
+            }
+
+            text mission_name {
+                text: "ARTEMIS-VII";
+                font-size: 13;
+                color: --accent;
+                letter-spacing: 2;
+                font-weight: medium;
+            }
+        }
+
+        panel header_center {
+            layout: row;
+            align: center;
+            gap: 12;
+
+            text-input search {
+                placeholder: "Search systems...";
+                font-size: 12;
+                color: --muted;
+                background: #0a0f25;
+                corner-radius: 6;
+                padding: 8 14;
+                border-color: --border;
+                border-width: 1;
+                width: 200;
+                tab-index: 0;
+            }
+        }
+
+        panel header_right {
+            layout: row;
+            align: center;
+            gap: 20;
+
+            text mission_phase {
+                text: "ORBITAL INSERTION";
+                font-size: 11;
+                font-weight: bold;
+                color: --green;
+                letter-spacing: 2;
+            }
+
+            panel clock_box {
+                background: #0a0f25;
+                border-color: --accent;
+                border-width: 1;
+                corner-radius: 6;
+                padding: 6 14;
+
+                text clock {
+                    text: "T+ 04:17:32";
+                    font-size: 14;
+                    font-weight: bold;
+                    color: --text;
+                    letter-spacing: 1;
+                }
+            }
+        }
+    }
+
+    // MAIN BODY
+    panel body {
+        layout: row;
+        flex-grow: 1;
+        padding: 0;
+
+        // LEFT SIDEBAR
+        panel sidebar {
+            layout: column;
+            width: 220;
+            padding: 20 16;
+            gap: 4;
+            background: --glass;
+            border-color: --border;
+            border-width: 0 1 0 0;
+            shadow-color: #00000020;
+            shadow-blur: 4;
+            shadow-inset: true;
+
+            text nav_title {
+                text: "NAVIGATION";
+                font-size: 10;
+                font-weight: bold;
+                color: --dim;
+                letter-spacing: 3;
+                padding: 0 8 10 8;
+            }
+
+            button nav_mission {
+                text: "Mission";
+                font-size: 13;
+                color: --text;
+                background: #3b82f615;
+                corner-radius: 8;
+                padding: 10 12;
+                cursor: pointer;
+                tab-index: 1;
+                tooltip: "Mission overview";
+                :hover { background: #3b82f625; transition-duration: 0.3s; transition-easing: spring; }
+            }
+
+            button nav_telemetry {
+                text: "Telemetry";
+                font-size: 13;
+                color: --muted;
+                background: transparent;
+                corner-radius: 8;
+                padding: 10 12;
+                cursor: pointer;
+                tab-index: 2;
+                tooltip: "Vehicle telemetry data";
+                :hover { background: #ffffff08; color: --text; transition-duration: 0.3s; transition-easing: spring; }
+            }
+
+            button nav_comms {
+                text: "Communications";
+                font-size: 13;
+                color: --muted;
+                background: transparent;
+                corner-radius: 8;
+                padding: 10 12;
+                cursor: pointer;
+                tab-index: 3;
+                tooltip: "Communication channels";
+                :hover { background: #ffffff08; color: --text; transition-duration: 0.3s; transition-easing: spring; }
+            }
+
+            button nav_crew {
+                text: "Crew";
+                font-size: 13;
+                color: --muted;
+                background: transparent;
+                corner-radius: 8;
+                padding: 10 12;
+                cursor: pointer;
+                tab-index: 4;
+                tooltip: "Crew status and vitals";
+                :hover { background: #ffffff08; color: --text; transition-duration: 0.3s; transition-easing: spring; }
+            }
+
+            button nav_systems {
+                text: "Systems";
+                font-size: 13;
+                color: --muted;
+                background: transparent;
+                corner-radius: 8;
+                padding: 10 12;
+                cursor: pointer;
+                tab-index: 5;
+                tooltip: "Subsystem diagnostics";
+                :hover { background: #ffffff08; color: --text; transition-duration: 0.3s; transition-easing: spring; }
+            }
+
+            // Spacer
+            panel nav_spacer { flex-grow: 1; }
+
+            // Status badge at bottom
+            panel status_badge {
+                layout: row;
+                align: center;
+                gap: 8;
+                padding: 10 12;
+                background: #22c55e10;
+                corner-radius: 8;
+                border-color: #22c55e20;
+                border-width: 1;
+
+                panel status_dot {
+                    width: 8;
+                    height: 8;
+                    background: --green;
+                    corner-radius: 4;
+                    shadow-color: #22c55e60;
+                    shadow-blur: 6;
+                }
+
+                text status_text {
+                    text: "All systems nominal";
+                    font-size: 11;
+                    color: --green;
+                }
+            }
+        }
+
+        // MAIN CONTENT
+        panel content {
+            layout: column;
+            flex-grow: 1;
+            padding: 20;
+            gap: 16;
+            overflow: scroll;
+
+            // STATS ROW
+            panel stats_row {
+                layout: row;
+                gap: 12;
+
+                // Altitude
+                panel card_alt {
+                    layout: column;
+                    flex-grow: 1;
+                    background: --glass;
+                    border-color: --border;
+                    border-width: 1;
+                    corner-radius: 12;
+                    padding: 16 20;
+                    gap: 4;
+                    shadow-color: #00000018;
+                    shadow-blur: 4;
+                    shadow-inset: true;
+                    tooltip: "Current orbital altitude";
+
+                    text alt_label {
+                        text: "ALTITUDE";
+                        font-size: 10;
+                        font-weight: bold;
+                        color: --dim;
+                        letter-spacing: 2;
+                    }
+                    text alt_value {
+                        text: "110.4 km";
+                        font-size: 28;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text alt_delta {
+                        text: "+0.3 km/min";
+                        font-size: 11;
+                        color: --green;
+                    }
+                }
+
+                // Velocity
+                panel card_vel {
+                    layout: column;
+                    flex-grow: 1;
+                    background: --glass;
+                    border-color: --border;
+                    border-width: 1;
+                    corner-radius: 12;
+                    padding: 16 20;
+                    gap: 4;
+                    shadow-color: #00000018;
+                    shadow-blur: 4;
+                    shadow-inset: true;
+                    tooltip: "Orbital velocity";
+
+                    text vel_label {
+                        text: "VELOCITY";
+                        font-size: 10;
+                        font-weight: bold;
+                        color: --dim;
+                        letter-spacing: 2;
+                    }
+                    text vel_value {
+                        text: "1,633 m/s";
+                        font-size: 28;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text vel_delta {
+                        text: "Stable orbit";
+                        font-size: 11;
+                        color: --accent;
+                    }
+                }
+
+                // Fuel
+                panel card_fuel {
+                    layout: column;
+                    flex-grow: 1;
+                    background: --glass;
+                    border-color: --border;
+                    border-width: 1;
+                    corner-radius: 12;
+                    padding: 16 20;
+                    gap: 8;
+                    shadow-color: #00000018;
+                    shadow-blur: 4;
+                    shadow-inset: true;
+                    tooltip: "Remaining propellant";
+
+                    text fuel_label {
+                        text: "FUEL";
+                        font-size: 10;
+                        font-weight: bold;
+                        color: --dim;
+                        letter-spacing: 2;
+                    }
+                    text fuel_value {
+                        text: "73.2%";
+                        font-size: 28;
+                        font-weight: bold;
+                        color: --amber;
+                    }
+                    // Fuel bar
+                    panel fuel_bar_bg {
+                        width: 100%;
+                        height: 4;
+                        background: #ffffff08;
+                        corner-radius: 2;
+
+                        panel fuel_bar_fill {
+                            width: 73%;
+                            height: 100%;
+                            gradient-stops: #22c55e 0%, #f59e0b 60%, #ef4444 100%;
+                            gradient-angle: 90;
+                            corner-radius: 2;
+                        }
+                    }
+                }
+
+                // Signal
+                panel card_sig {
+                    layout: column;
+                    flex-grow: 1;
+                    background: --glass;
+                    border-color: --border;
+                    border-width: 1;
+                    corner-radius: 12;
+                    padding: 16 20;
+                    gap: 4;
+                    shadow-color: #00000018;
+                    shadow-blur: 4;
+                    shadow-inset: true;
+                    tooltip: "DSN signal strength";
+
+                    text sig_label {
+                        text: "SIGNAL";
+                        font-size: 10;
+                        font-weight: bold;
+                        color: --dim;
+                        letter-spacing: 2;
+                    }
+                    text sig_value {
+                        text: "-68 dBm";
+                        font-size: 28;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text sig_delta {
+                        text: "1.28s latency (DSN)";
+                        font-size: 11;
+                        color: --amber;
+                    }
+                }
+            }
+
+            // MIDDLE ROW: Telemetry + Controls
+            panel mid_row {
+                layout: row;
+                gap: 12;
+                flex-grow: 1;
+
+                // Telemetry panel
+                panel telemetry {
+                    layout: column;
+                    flex-grow: 1;
+                    background: --glass;
+                    border-color: --border;
+                    border-width: 1;
+                    corner-radius: 12;
+                    padding: 20;
+                    gap: 16;
+
+                    // Header
+                    panel telem_header {
+                        layout: row;
+                        justify: space-between;
+                        align: center;
+
+                        text telem_title {
+                            text: "Telemetry & Controls";
+                            font-size: 16;
+                            font-weight: bold;
+                            color: --text;
+                        }
+
+                        panel live_badge {
+                            layout: row;
+                            align: center;
+                            gap: 6;
+                            background: #22c55e15;
+                            corner-radius: 12;
+                            padding: 4 10;
+                            border-color: #22c55e30;
+                            border-width: 1;
+
+                            panel live_dot {
+                                width: 6;
+                                height: 6;
+                                background: --green;
+                                corner-radius: 3;
+                            }
+                            text live_text {
+                                text: "LIVE";
+                                font-size: 10;
+                                font-weight: bold;
+                                color: --green;
+                                letter-spacing: 1;
+                            }
+                        }
+                    }
+
+                    // Controls grid
+                    panel controls_row {
+                        layout: row;
+                        gap: 20;
+
+                        // Left: Sliders
+                        panel sliders_col {
+                            layout: column;
+                            flex-grow: 1;
+                            gap: 12;
+
+                            // Thrust
+                            panel thrust_row {
+                                layout: row;
+                                align: center;
+                                gap: 10;
+
+                                text thrust_label {
+                                    text: "Thrust";
+                                    font-size: 12;
+                                    color: --muted;
+                                    width: 50;
+                                }
+                                slider sld_thrust {
+                                    min: 0;
+                                    max: 100;
+                                    value: 0;
+                                    flex-grow: 1;
+                                    background: --accent;
+                                    border-color: --dim;
+                                    color: --text;
+                                    tab-index: 6;
+                                    tooltip: "Main engine thrust level";
+                                }
+                                text val_thrust {
+                                    text: "0%";
+                                    font-size: 12;
+                                    font-weight: bold;
+                                    color: --text;
+                                    width: 35;
+                                    text-align: right;
+                                }
+                            }
+
+                            // Pitch
+                            panel pitch_row {
+                                layout: row;
+                                align: center;
+                                gap: 10;
+
+                                text pitch_label {
+                                    text: "Pitch";
+                                    font-size: 12;
+                                    color: --muted;
+                                    width: 50;
+                                }
+                                slider sld_pitch {
+                                    min: -90;
+                                    max: 90;
+                                    value: -1;
+                                    flex-grow: 1;
+                                    background: --accent;
+                                    border-color: --dim;
+                                    color: --text;
+                                    tab-index: 7;
+                                    tooltip: "Vehicle pitch angle";
+                                }
+                                text val_pitch {
+                                    text: "-1";
+                                    font-size: 12;
+                                    font-weight: bold;
+                                    color: --text;
+                                    width: 35;
+                                    text-align: right;
+                                }
+                            }
+
+                            // Yaw
+                            panel yaw_row {
+                                layout: row;
+                                align: center;
+                                gap: 10;
+
+                                text yaw_label {
+                                    text: "Yaw";
+                                    font-size: 12;
+                                    color: --muted;
+                                    width: 50;
+                                }
+                                slider sld_yaw {
+                                    min: -180;
+                                    max: 180;
+                                    value: 88;
+                                    flex-grow: 1;
+                                    background: --accent;
+                                    border-color: --dim;
+                                    color: --text;
+                                    tab-index: 8;
+                                    tooltip: "Vehicle yaw angle";
+                                }
+                                text val_yaw {
+                                    text: "88";
+                                    font-size: 12;
+                                    font-weight: bold;
+                                    color: --text;
+                                    width: 35;
+                                    text-align: right;
+                                }
+                            }
+                        }
+
+                        // Right: Toggles
+                        panel toggles_col {
+                            layout: column;
+                            width: 200;
+                            gap: 10;
+
+                            text toggles_title {
+                                text: "SUBSYSTEMS";
+                                font-size: 10;
+                                font-weight: bold;
+                                color: --dim;
+                                letter-spacing: 2;
+                                padding: 0 0 4 0;
+                            }
+
+                            panel tog_autopilot {
+                                layout: row;
+                                justify: space-between;
+                                align: center;
+
+                                text lbl_autopilot {
+                                    text: "Auto-pilot";
+                                    font-size: 12;
+                                    color: --muted;
+                                }
+                                toggle tgl_autopilot {
+                                    checked: true;
+                                    tab-index: 9;
+                                    tooltip: "Autonomous guidance";
+                                    background: --dim;
+                                    background-end: --accent;
+                                }
+                            }
+
+                            panel tog_comms {
+                                layout: row;
+                                justify: space-between;
+                                align: center;
+
+                                text lbl_comms {
+                                    text: "Comms relay";
+                                    font-size: 12;
+                                    color: --muted;
+                                }
+                                toggle tgl_comms {
+                                    checked: true;
+                                    tab-index: 10;
+                                    tooltip: "Deep space relay link";
+                                    background: --dim;
+                                    background-end: --accent;
+                                }
+                            }
+
+                            panel tog_shield {
+                                layout: row;
+                                justify: space-between;
+                                align: center;
+
+                                text lbl_shield {
+                                    text: "Debris shield";
+                                    font-size: 12;
+                                    color: --muted;
+                                }
+                                toggle tgl_shield {
+                                    tab-index: 11;
+                                    tooltip: "Micrometeorite protection";
+                                    background: --dim;
+                                    background-end: --amber;
+                                }
+                            }
+
+                            panel checks_sep {
+                                width: 100%;
+                                height: 1;
+                                background: --border;
+                                margin: 4 0;
+                            }
+
+                            checkbox chk_record {
+                                label: "Record telemetry";
+                                checked: true;
+                                font-size: 12;
+                                color: --muted;
+                                background: --accent;
+                                border-color: --dim;
+                                tab-index: 12;
+                            }
+
+                            checkbox chk_broadcast {
+                                label: "Broadcast position";
+                                checked: true;
+                                font-size: 12;
+                                color: --muted;
+                                background: --accent;
+                                border-color: --dim;
+                                tab-index: 13;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // BOTTOM ROW: Comms + Actions
+            panel bottom_row {
+                layout: row;
+                gap: 12;
+                min-height: 200;
+
+                // Comms Log
+                panel comms_panel {
+                    layout: column;
+                    flex-grow: 1;
+                    background: --glass;
+                    border-color: --border;
+                    border-width: 1;
+                    corner-radius: 12;
+                    padding: 16 20;
+                    gap: 10;
+
+                    text comms_title {
+                        text: "Communications Log";
+                        font-size: 14;
+                        font-weight: bold;
+                        color: --text;
+                    }
+
+                    scroll comms_scroll {
+                        flex-grow: 1;
+                        overflow: scroll;
+                        layout: column;
+                        gap: 6;
+
+                        panel msg_1 {
+                            layout: row;
+                            gap: 8;
+                            align: center;
+                            padding: 6 8;
+                            background: #3b82f608;
+                            corner-radius: 6;
+
+                            panel msg1_dot { width: 6; height: 6; background: --accent; corner-radius: 3; }
+                            text msg1_text {
+                                text: "CAPCOM 04:15:22 - You are GO for orbital insertion burn.";
+                                font-size: 12;
+                                color: #94a3b8;
+                            }
+                        }
+
+                        panel msg_2 {
+                            layout: row;
+                            gap: 8;
+                            align: center;
+                            padding: 6 8;
+                            background: #22c55e08;
+                            corner-radius: 6;
+
+                            panel msg2_dot { width: 6; height: 6; background: --green; corner-radius: 3; }
+                            text msg2_text {
+                                text: "ARTEMIS 04:15:45 - Copy Houston. All systems nominal.";
+                                font-size: 12;
+                                color: #94a3b8;
+                            }
+                        }
+
+                        panel msg_3 {
+                            layout: row;
+                            gap: 8;
+                            align: center;
+                            padding: 6 8;
+                            background: #f59e0b08;
+                            corner-radius: 6;
+
+                            panel msg3_dot { width: 6; height: 6; background: --amber; corner-radius: 3; }
+                            text msg3_text {
+                                text: "FLIGHT 04:16:03 - Thermal reading on engine 2 trending high.";
+                                font-size: 12;
+                                color: #94a3b8;
+                            }
+                        }
+
+                        panel msg_4 {
+                            layout: row;
+                            gap: 8;
+                            align: center;
+                            padding: 6 8;
+                            corner-radius: 6;
+
+                            panel msg4_dot { width: 6; height: 6; background: --accent; corner-radius: 3; }
+                            text msg4_text {
+                                text: "CAPCOM 04:17:11 - Trajectory nominal. T-2 minute call.";
+                                font-size: 12;
+                                color: #94a3b8;
+                            }
+                        }
+                    }
+                }
+
+                // Quick Actions
+                panel actions_panel {
+                    layout: column;
+                    width: 300;
+                    background: --glass;
+                    border-color: --border;
+                    border-width: 1;
+                    corner-radius: 12;
+                    padding: 16 20;
+                    gap: 12;
+
+                    text actions_title {
+                        text: "Quick Actions";
+                        font-size: 14;
+                        font-weight: bold;
+                        color: --text;
+                    }
+
+                    // Orbit selector
+                    text orbit_label {
+                        text: "Target Orbit";
+                        font-size: 11;
+                        color: --muted;
+                    }
+                    dropdown dd_orbit {
+                        font-size: 12;
+                        color: --text;
+                        background: #0a0f25;
+                        border-color: --border;
+                        border-width: 1;
+                        corner-radius: 6;
+                        padding: 6 10;
+                        tab-index: 14;
+                        tooltip: "Select target orbital parameters";
+                        option { text: "LEO 200km"; }
+                        option { text: "LEO 400km (ISS)"; }
+                        option { text: "MEO 2000km"; }
+                        option { text: "GEO 35786km"; }
+                    }
+
+                    // Command input
+                    text cmd_label {
+                        text: "Command Override";
+                        font-size: 11;
+                        color: --muted;
+                    }
+                    text-input cmd_input {
+                        placeholder: "Enter command...";
+                        font-size: 12;
+                        color: --text;
+                        background: #0a0f25;
+                        corner-radius: 6;
+                        padding: 8 12;
+                        border-color: --border;
+                        border-width: 1;
+                        tab-index: 15;
+                    }
+
+                    // Action buttons
+                    panel action_buttons {
+                        layout: row;
+                        gap: 8;
+
+                        button btn_abort {
+                            text: "ABORT";
+                            font-size: 11;
+                            font-weight: bold;
+                            color: white;
+                            background: --red;
+                            corner-radius: 6;
+                            padding: 8 16;
+                            cursor: pointer;
+                            tab-index: 16;
+                            letter-spacing: 1;
+                            tooltip: "Emergency abort sequence";
+                            :hover { background: #dc2626; transition-duration: 0.2s; transition-easing: spring; }
+                        }
+
+                        button btn_execute_burn {
+                            text: "Execute Burn";
+                            font-size: 11;
+                            font-weight: bold;
+                            color: white;
+                            background: --accent;
+                            corner-radius: 6;
+                            padding: 8 16;
+                            flex-grow: 1;
+                            cursor: pointer;
+                            tab-index: 17;
+                            tooltip: "Initiate orbital insertion burn";
+                            :hover { background: #2563eb; transition-duration: 0.2s; transition-easing: spring; }
+                        }
+
+                        button btn_hold {
+                            text: "Hold";
+                            font-size: 11;
+                            color: --muted;
+                            background: --glass-hi;
+                            corner-radius: 6;
+                            padding: 8 16;
+                            border-color: --border;
+                            border-width: 1;
+                            cursor: pointer;
+                            tab-index: 18;
+                            tooltip: "Hold current state";
+                            :hover { background: #1e2550; color: --text; transition-duration: 0.2s; transition-easing: spring; }
+                        }
+                    }
+
+                    text auth_text {
+                        text: "Auth: CDR-HARRISON | Level 5";
+                        font-size: 10;
+                        color: --dim;
+                        font-style: italic;
+                    }
+                }
+            }
+        }
+    }
+
+    // FOOTER
+    panel footer {
+        layout: row;
+        justify: space-between;
+        align: center;
+        padding: 6 28;
+        min-height: 28;
+        gradient-stops: #0a1040 0%, #0f1545 50%, #0a1040 100%;
+        gradient-angle: 90;
+        border-color: --border;
+        border-width: 1 0 0 0;
+
+        text footer_left {
+            text: "DSN: Goldstone  |  Orbit #14  |  Uplink: 2.4 Mbps  |  Downlink: 150 Kbps";
+            font-size: 10;
+            color: --dim;
+        }
+
+        text footer_right {
+            text: "COSMOS v2.7.1-artemis";
+            font-size: 10;
+            color: --dim;
+            font-style: italic;
+        }
+    }
+}

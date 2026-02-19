@@ -1,0 +1,680 @@
+// Meridian - Developer Tools Landing Page
+// Clean, spacious, strong typographic hierarchy.
+
+panel root {
+    layout: column;
+    width: 100%;
+    height: 100%;
+    background: #09090b;
+    padding: 0;
+
+    --accent: #6366f1;
+    --text: #fafafa;
+    --muted: #a1a1aa;
+    --dim: #52525b;
+    --border: #27272a;
+
+    // NAV BAR (fixed at top)
+    panel nav {
+        layout: row;
+        align: center;
+        justify: space-between;
+        padding: 16 60;
+        min-height: 56;
+        border-color: #ffffff08;
+        border-width: 0 0 1 0;
+
+        panel nav_left {
+            layout: row;
+            align: center;
+            gap: 10;
+
+            panel nav_logo {
+                width: 24;
+                height: 24;
+                background: --accent;
+                corner-radius: 6;
+            }
+
+            text nav_title {
+                text: "Meridian";
+                font-size: 17;
+                font-weight: bold;
+                color: --text;
+            }
+        }
+
+        panel nav_links {
+            layout: row;
+            gap: 32;
+
+            button nav_features {
+                text: "Features";
+                font-size: 14;
+                color: --muted;
+                background: transparent;
+                padding: 6 0;
+                cursor: pointer;
+                tab-index: 0;
+                :hover { color: --text; transition-duration: 0.2s; transition-easing: spring; }
+            }
+            button nav_pricing {
+                text: "Pricing";
+                font-size: 14;
+                color: --muted;
+                background: transparent;
+                padding: 6 0;
+                cursor: pointer;
+                tab-index: 1;
+                :hover { color: --text; transition-duration: 0.2s; transition-easing: spring; }
+            }
+            button nav_docs {
+                text: "Docs";
+                font-size: 14;
+                color: --muted;
+                background: transparent;
+                padding: 6 0;
+                cursor: pointer;
+                tab-index: 2;
+                :hover { color: --text; transition-duration: 0.2s; transition-easing: spring; }
+            }
+        }
+
+        button nav_cta {
+            text: "Get Started";
+            font-size: 13;
+            font-weight: medium;
+            color: white;
+            background: --accent;
+            corner-radius: 8;
+            padding: 9 20;
+            cursor: pointer;
+            tab-index: 3;
+            tooltip: "Create your free account";
+            :hover { background: #818cf8; transition-duration: 0.2s; transition-easing: spring; }
+        }
+    }
+
+    // SCROLLABLE CONTENT
+    scroll page {
+        layout: column;
+        flex-grow: 1;
+        overflow: scroll;
+
+        // HERO
+        panel hero {
+            layout: column;
+            align: center;
+            padding: 100 80 80 80;
+            gap: 20;
+
+            text hero_title {
+                text: "Build faster.";
+                font-size: 56;
+                font-weight: bold;
+                color: --text;
+                text-align: center;
+            }
+
+            text hero_sub {
+                text: "The developer platform that gets out of your way.";
+                font-size: 20;
+                font-weight: light;
+                color: --muted;
+                text-align: center;
+            }
+
+            text hero_sub2 {
+                text: "Ship code, not config.";
+                font-size: 20;
+                font-weight: light;
+                color: --dim;
+                text-align: center;
+            }
+
+            // CTA buttons
+            panel hero_ctas {
+                layout: row;
+                gap: 12;
+                padding: 24 0 0 0;
+
+                button btn_start {
+                    text: "Start free";
+                    font-size: 15;
+                    font-weight: medium;
+                    color: white;
+                    background: --accent;
+                    corner-radius: 10;
+                    padding: 14 32;
+                    cursor: pointer;
+                    tab-index: 4;
+                    tooltip: "No credit card required";
+                    :hover { background: #818cf8; shadow-blur: 28; transition-duration: 0.3s; transition-easing: spring; }
+                }
+
+                button btn_docs {
+                    text: "View docs";
+                    font-size: 15;
+                    color: --muted;
+                    background: transparent;
+                    corner-radius: 10;
+                    padding: 14 32;
+                    border-color: --border;
+                    border-width: 1;
+                    cursor: pointer;
+                    tab-index: 5;
+                    :hover { color: --text; background: #ffffff06; transition-duration: 0.2s; transition-easing: spring; }
+                }
+            }
+
+            // Email signup
+            panel hero_email {
+                layout: row;
+                gap: 8;
+                padding: 20 0 0 0;
+
+                text-input email_input {
+                    placeholder: "you@company.com";
+                    font-size: 14;
+                    color: --muted;
+                    background: #18181b;
+                    corner-radius: 8;
+                    padding: 10 16;
+                    border-color: --border;
+                    border-width: 1;
+                    width: 260;
+                    tab-index: 6;
+                }
+
+                button btn_waitlist {
+                    text: "Join waitlist";
+                    font-size: 13;
+                    font-weight: medium;
+                    color: white;
+                    background: --accent;
+                    corner-radius: 8;
+                    padding: 10 20;
+                    cursor: pointer;
+                    tab-index: 7;
+                    :hover { background: #818cf8; transition-duration: 0.2s; transition-easing: spring; }
+                }
+            }
+        }
+
+        // Gradient separator
+        panel sep_1 {
+            width: 100%;
+            height: 1;
+            gradient-stops: #6366f100 0%, #6366f150 50%, #6366f100 100%;
+            gradient-angle: 90;
+        }
+
+        // FEATURES
+        panel features {
+            layout: column;
+            padding: 80 100;
+            gap: 60;
+            background: #0f0f13;
+
+            // Section header
+            panel features_header {
+                layout: column;
+                align: center;
+                gap: 8;
+
+                text features_title {
+                    text: "Why developers choose Meridian";
+                    font-size: 32;
+                    font-weight: bold;
+                    color: --text;
+                    text-align: center;
+                }
+                text features_sub {
+                    text: "We obsess over the details so you don't have to.";
+                    font-size: 16;
+                    color: --dim;
+                    text-align: center;
+                }
+            }
+
+            // Feature 1
+            panel feat_1 {
+                layout: row;
+                gap: 24;
+                align: center;
+
+                panel feat_1_icon {
+                    width: 40;
+                    height: 40;
+                    background: #22c55e;
+                    background-end: #15803d;
+                    corner-radius: 10;
+                    shadow-color: #22c55e20;
+                    shadow-blur: 12;
+                }
+
+                panel feat_1_text {
+                    layout: column;
+                    gap: 6;
+                    flex-grow: 1;
+
+                    text feat_1_title {
+                        text: "Lightning deploys";
+                        font-size: 20;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text feat_1_desc {
+                        text: "Push to deploy in under 3 seconds. Zero-config CI/CD that just works. Every commit triggers a preview deployment automatically.";
+                        font-size: 15;
+                        color: --muted;
+                        line-height: 1.5;
+                    }
+                }
+            }
+
+            // Feature 2
+            panel feat_2 {
+                layout: row;
+                gap: 24;
+                align: center;
+
+                panel feat_2_icon {
+                    width: 40;
+                    height: 40;
+                    background: #3b82f6;
+                    background-end: #1d4ed8;
+                    corner-radius: 10;
+                    shadow-color: #3b82f620;
+                    shadow-blur: 12;
+                }
+
+                panel feat_2_text {
+                    layout: column;
+                    gap: 6;
+                    flex-grow: 1;
+
+                    text feat_2_title {
+                        text: "Edge-first runtime";
+                        font-size: 20;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text feat_2_desc {
+                        text: "Your code runs at the edge by default. 200+ locations worldwide. Cold starts under 5ms. No regional configuration needed.";
+                        font-size: 15;
+                        color: --muted;
+                        line-height: 1.5;
+                    }
+                }
+            }
+
+            // Feature 3
+            panel feat_3 {
+                layout: row;
+                gap: 24;
+                align: center;
+
+                panel feat_3_icon {
+                    width: 40;
+                    height: 40;
+                    background: #f59e0b;
+                    background-end: #b45309;
+                    corner-radius: 10;
+                    shadow-color: #f59e0b20;
+                    shadow-blur: 12;
+                }
+
+                panel feat_3_text {
+                    layout: column;
+                    gap: 6;
+                    flex-grow: 1;
+
+                    text feat_3_title {
+                        text: "Built-in observability";
+                        font-size: 20;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text feat_3_desc {
+                        text: "Metrics, logs, and traces out of the box. No third-party APM required. See exactly what's happening in production, in real time.";
+                        font-size: 15;
+                        color: --muted;
+                        line-height: 1.5;
+                    }
+                }
+            }
+        }
+
+        // Gradient separator
+        panel sep_2 {
+            width: 100%;
+            height: 1;
+            gradient-stops: #6366f100 0%, #6366f140 50%, #6366f100 100%;
+            gradient-angle: 90;
+        }
+
+        // METRICS
+        panel metrics {
+            layout: column;
+            align: center;
+            padding: 60 80;
+            gap: 16;
+
+            text metrics_label {
+                text: "TRUSTED BY TEAMS EVERYWHERE";
+                font-size: 11;
+                font-weight: bold;
+                color: --dim;
+                letter-spacing: 3;
+                text-align: center;
+            }
+
+            panel metrics_row {
+                layout: row;
+                justify: center;
+                gap: 0;
+                padding: 10 0;
+
+                panel metric_1 {
+                    layout: column;
+                    align: center;
+                    padding: 0 48;
+
+                    text m1_value {
+                        text: "99.99%";
+                        font-size: 42;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text m1_label {
+                        text: "uptime SLA";
+                        font-size: 13;
+                        color: --dim;
+                    }
+                }
+
+                panel metric_sep_1 {
+                    width: 1;
+                    height: 50;
+                    background: --border;
+                }
+
+                panel metric_2 {
+                    layout: column;
+                    align: center;
+                    padding: 0 48;
+
+                    text m2_value {
+                        text: "2.3M";
+                        font-size: 42;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text m2_label {
+                        text: "developers";
+                        font-size: 13;
+                        color: --dim;
+                    }
+                }
+
+                panel metric_sep_2 {
+                    width: 1;
+                    height: 50;
+                    background: --border;
+                }
+
+                panel metric_3 {
+                    layout: column;
+                    align: center;
+                    padding: 0 48;
+
+                    text m3_value {
+                        text: "<50ms";
+                        font-size: 42;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text m3_label {
+                        text: "p99 latency";
+                        font-size: 13;
+                        color: --dim;
+                    }
+                }
+            }
+        }
+
+        // Gradient separator
+        panel sep_3 {
+            width: 100%;
+            height: 1;
+            gradient-stops: #6366f100 0%, #6366f140 50%, #6366f100 100%;
+            gradient-angle: 90;
+        }
+
+        // PRICING
+        panel pricing {
+            layout: column;
+            align: center;
+            padding: 80 100;
+            gap: 32;
+            background: #0f0f13;
+
+            text pricing_title {
+                text: "Simple, transparent pricing";
+                font-size: 32;
+                font-weight: bold;
+                color: --text;
+                text-align: center;
+            }
+
+            text pricing_sub {
+                text: "No surprises. Upgrade when you're ready.";
+                font-size: 16;
+                color: --dim;
+                text-align: center;
+            }
+
+            // Tiers
+            panel pricing_row {
+                layout: row;
+                gap: 16;
+                justify: center;
+
+                // Hobby
+                panel tier_hobby {
+                    layout: column;
+                    width: 280;
+                    padding: 32 28;
+                    gap: 16;
+                    background: #18181b;
+                    border-color: --border;
+                    border-width: 1;
+                    corner-radius: 12;
+
+                    text hobby_name {
+                        text: "Hobby";
+                        font-size: 14;
+                        font-weight: bold;
+                        color: --muted;
+                        letter-spacing: 1;
+                    }
+                    text hobby_price {
+                        text: "$0";
+                        font-size: 40;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text hobby_period {
+                        text: "Free forever";
+                        font-size: 13;
+                        color: --dim;
+                    }
+                    panel hobby_sep { width: 100%; height: 1; background: --border; }
+
+                    checkbox hobby_f1 { label: "3 projects"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: --border; }
+                    checkbox hobby_f2 { label: "1GB storage"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: --border; }
+                    checkbox hobby_f3 { label: "Community support"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: --border; }
+                    checkbox hobby_f4 { label: "Basic analytics"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: --border; }
+
+                    button hobby_cta {
+                        text: "Get started";
+                        font-size: 14;
+                        color: --muted;
+                        background: transparent;
+                        border-color: --border;
+                        border-width: 1;
+                        corner-radius: 8;
+                        padding: 10 0;
+                        cursor: pointer;
+                        tab-index: 8;
+                        :hover { color: --text; background: #ffffff06; transition-duration: 0.2s; transition-easing: spring; }
+                    }
+                }
+
+                // Pro
+                panel tier_pro {
+                    layout: column;
+                    width: 280;
+                    padding: 32 28;
+                    gap: 16;
+                    background: #18181b;
+                    border-color: --accent;
+                    border-width: 1;
+                    corner-radius: 12;
+
+                    panel pro_header {
+                        layout: row;
+                        justify: space-between;
+                        align: center;
+
+                        text pro_name {
+                            text: "Pro";
+                            font-size: 14;
+                            font-weight: bold;
+                            color: --accent;
+                            letter-spacing: 1;
+                        }
+                        panel pro_badge {
+                            background: --accent;
+                            corner-radius: 10;
+                            padding: 3 10;
+                            text pro_badge_text {
+                                text: "Popular";
+                                font-size: 10;
+                                font-weight: bold;
+                                color: white;
+                            }
+                        }
+                    }
+
+                    text pro_price {
+                        text: "$20";
+                        font-size: 40;
+                        font-weight: bold;
+                        color: --text;
+                    }
+                    text pro_period {
+                        text: "per month";
+                        font-size: 13;
+                        color: --dim;
+                    }
+                    panel pro_sep { width: 100%; height: 1; background: #6366f130; }
+
+                    checkbox pro_f1 { label: "Unlimited projects"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: #6366f140; }
+                    checkbox pro_f2 { label: "100GB storage"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: #6366f140; }
+                    checkbox pro_f3 { label: "Priority support"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: #6366f140; }
+                    checkbox pro_f4 { label: "Advanced analytics"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: #6366f140; }
+                    checkbox pro_f5 { label: "Custom domains"; checked: true; font-size: 13; color: --muted; background: --accent; border-color: #6366f140; }
+
+                    button pro_cta {
+                        text: "Start free trial";
+                        font-size: 14;
+                        font-weight: medium;
+                        color: white;
+                        background: --accent;
+                        corner-radius: 8;
+                        padding: 10 0;
+                        cursor: pointer;
+                        tab-index: 9;
+                        :hover { background: #818cf8; transition-duration: 0.2s; transition-easing: spring; }
+                    }
+                }
+            }
+        }
+
+        // Gradient separator
+        panel sep_4 {
+            width: 100%;
+            height: 1;
+            gradient-stops: #6366f100 0%, #6366f140 50%, #6366f100 100%;
+            gradient-angle: 90;
+        }
+
+        // FINAL CTA + FOOTER
+        panel footer_section {
+            layout: column;
+            align: center;
+            padding: 80 60 40 60;
+            gap: 16;
+
+            text cta_title {
+                text: "Ready to ship?";
+                font-size: 32;
+                font-weight: bold;
+                color: --text;
+                text-align: center;
+            }
+
+            text cta_sub {
+                text: "Join thousands of developers building with Meridian.";
+                font-size: 16;
+                color: --dim;
+                text-align: center;
+            }
+
+            panel cta_buttons {
+                layout: row;
+                gap: 12;
+                padding: 16 0;
+
+                button btn_final_start {
+                    text: "Start free";
+                    font-size: 15;
+                    font-weight: medium;
+                    color: white;
+                    background: --accent;
+                    corner-radius: 10;
+                    padding: 14 32;
+                    cursor: pointer;
+                    tab-index: 10;
+                    :hover { background: #818cf8; transition-duration: 0.3s; transition-easing: spring; }
+                }
+
+                button btn_final_sales {
+                    text: "Talk to sales";
+                    font-size: 15;
+                    color: --muted;
+                    background: transparent;
+                    corner-radius: 10;
+                    padding: 14 32;
+                    border-color: --border;
+                    border-width: 1;
+                    cursor: pointer;
+                    tab-index: 11;
+                    :hover { color: --text; background: #ffffff06; transition-duration: 0.2s; transition-easing: spring; }
+                }
+            }
+
+            // Footer line
+            panel footer_sep { width: 200; height: 1; background: --border; margin: 24 0; }
+
+            text footer_copy {
+                text: "2026 Meridian, Inc. All rights reserved.";
+                font-size: 12;
+                color: --dim;
+                text-align: center;
+            }
+        }
+    }
+}

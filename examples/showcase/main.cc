@@ -3,8 +3,8 @@
 /// Usage:
 ///   ./ultragui_showcase [scene] [font_path]
 ///
-/// Scenes: dashboard (default), neon, glass, terminal, rpg, nerv
-/// Press 1-6 to switch scenes at runtime.
+/// Scenes: dashboard (default), neon, glass, terminal, rpg, nerv, cosmos, meridian
+/// Press 1-8 to switch scenes at runtime.
 
 #include <ultragui/ultragui.h>
 #include <ultragui/widgets/button.h>
@@ -78,8 +78,12 @@ static const Scene scenes[] = {
      ugui::Color::FromHex(0x000000)},
     {"nerv", "scenes/nerv.ugui", "scenes/nerv.lua",
      ugui::Color::FromHex(0x050510)},
+    {"cosmos", "scenes/cosmos.ugui", "scenes/cosmos.lua",
+     ugui::Color::FromHex(0x06061a)},
+    {"meridian", "scenes/meridian.ugui", "scenes/meridian.lua",
+     ugui::Color::FromHex(0x09090b)},
 };
-static constexpr int SCENE_COUNT = 6;
+static constexpr int SCENE_COUNT = 8;
 static constexpr int NERV_SCENE = 5;
 
 static int current_scene = 0;
@@ -216,7 +220,7 @@ int main(int argc, char* argv[]) {
     if (!font_path) {
         std::fprintf(stderr,
                      "No font found. Set ULTRAGUI_FONT or pass a TTF path.\n"
-                     "  Usage: %s [dashboard|neon|glass|terminal|rpg|nerv] [font.ttf]\n",
+                     "  Usage: %s [dashboard|neon|glass|terminal|rpg|nerv|cosmos|meridian] [font.ttf]\n",
                      argv[0]);
         return 1;
     }
@@ -243,7 +247,7 @@ int main(int argc, char* argv[]) {
     ui.set_default_font(font);
 
     auto* window = static_cast<GLFWwindow*>(ui.platform()->native_handle());
-    std::printf("Press 1-6 to switch scenes: dashboard, neon, glass, terminal, rpg, nerv\n");
+    std::printf("Press 1-8 to switch scenes: dashboard, neon, glass, terminal, rpg, nerv, cosmos, meridian\n");
 
     while (ui.Running()) {
         // Poll scene-switch keys (1-6) without hijacking GLFW callbacks

@@ -210,11 +210,12 @@ private:
 
     // Tooltip state
     Widget* tooltip_target_ = nullptr;
-    Widget* tooltip_widget_ = nullptr;  // The panel shown as overlay
+    bool tooltip_visible_ = false;
     f64 tooltip_hover_start_ = 0.0;
-    static constexpr f64 kTooltipDelay = 0.5;  // seconds before showing
+    static constexpr f64 kTooltipDelay = 0.5;
 
     void UpdateTooltip();
+    void DrawTooltip();
 };
 
 } // namespace ugui

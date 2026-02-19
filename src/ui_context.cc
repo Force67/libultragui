@@ -309,6 +309,9 @@ void UIContext::Update() {
     // Flush any new glyphs from paint pass
     text_engine_.FlushAtlas();
 
+    // Tooltip (drawn last, on top of everything)
+    DrawTooltip();
+
     renderer_.EndFrame();
     rhi_->EndFrame();
 }
@@ -322,58 +325,61 @@ void UIContext::UpdateTooltip() {
         tip_target = tip_target->parent();
 
     if (tip_target != tooltip_target_) {
-        // Target changed - hide existing tooltip
-        if (tooltip_widget_) {
-            HideOverlay(tooltip_widget_);
-            delete tooltip_widget_;
-            tooltip_widget_ = nullptr;
-        }
         tooltip_target_ = tip_target;
+        tooltip_visible_ = false;
         tooltip_hover_start_ = last_time_;
     }
 
-    // Show tooltip after delay
-    if (tooltip_target_ && !tooltip_widget_ &&
+    // Show tooltip after delay - we set a flag; actual drawing happens in Update()
+    if (tooltip_target_ && !tooltip_visible_ &&
         (last_time_ - tooltip_hover_start_) >= kTooltipDelay) {
-        // Create a simple text panel for the tooltip
-        auto* panel = new Panel(0);
-        panel->set_name("_tooltip");
-
-        // Position below the hovered widget
-        Rect r = tooltip_target_->rect();
-        f32 pos_x = r.x;
-        f32 pos_y = r.y + r.h + 4.0f;
-
-        Style ts;
-        ts.background = Color::FromHex(0x222222);
-        ts.text_color = Color::White();
-        ts.padding = EdgeInsets(6, 10);
-        ts.corner_radius = ts.corner_radius_tl = ts.corner_radius_tr =
-            ts.corner_radius_br = ts.corner_radius_bl = 4.0f;
-        ts.font_size = 13.0f;
-        ts.margin = EdgeInsets(pos_y, 0, 0, pos_x);
-        panel->set_style(ts);
-
-        auto* text = new Text(0);
-        text->set_text(tooltip_target_->tooltip());
-        Style txs;
-        txs.text_color = Color::White();
-        txs.font_size = 13.0f;
-        text->set_style(txs);
-        panel->AddChild(text);
-
-        tooltip_widget_ = panel;
-        ShowOverlay(tooltip_widget_, {pos_x, pos_y});
+        tooltip_visible_ = true;
     }
 }
 
+void UIContext::DrawTooltip() {
+    if (!tooltip_visible_ || !tooltip_target_ || tooltip_target_->tooltip().empty())
+        return;
+
+    const auto& tip = tooltip_target_->tooltip();
+    FontHandle fh = default_font_;
+    if (fh == kInvalidFont)
+        return;
+
+    f32 font_size = 12.0f;
+    auto run = text_engine_.Shape(fh, tip.c_str(), static_cast<u32>(tip.size()),
+                                   font_size, 0.0f, 1.0f);
+
+    f32 pad_x = 10.0f, pad_y = 6.0f;
+    f32 w = run.total_advance + pad_x * 2.0f;
+    f32 h = run.line_height + pad_y * 2.0f;
+
+    Rect target_rect = tooltip_target_->rect();
+    f32 x = target_rect.x;
+    f32 y = target_rect.y + target_rect.h + 6.0f;
+
+    // Clamp to viewport
+    Vec2 vp = rhi_->display_size();
+    if (x + w > vp.x) x = vp.x - w - 4.0f;
+    if (y + h > vp.y) y = target_rect.y - h - 6.0f;
+
+    u32 radii = Vertex2D::PackRadii(6.0f);
+
+    // Shadow
+    renderer_.DrawShadow({x, y, w, h}, Color::FromHex(0x000000, 0.4f),
+                          6.0f, 0.0f, {0, 2}, radii);
+    // Background
+    renderer_.DrawBorderedRect({x, y, w, h}, Color::FromHex(0x181828, 0.95f),
+                                Color::FromHex(0xffffff, 0.08f), 1.0f, radii);
+    // Text
+    text_engine_.FlushAtlas();
+    renderer_.DrawText({x + pad_x, y + pad_y}, run,
+                        Color::FromHex(0xd0d0e0), text_engine_.atlas_texture());
+}
+
 void UIContext::Shutdown() {
-    if (tooltip_widget_) {
-        HideOverlay(tooltip_widget_);
-        delete tooltip_widget_;
-        tooltip_widget_ = nullptr;
-        tooltip_target_ = nullptr;
-    }
+    tooltip_target_ = nullptr;
+    tooltip_visible_ = false;
     overlays_.clear();
 
     if (owns_root_) {

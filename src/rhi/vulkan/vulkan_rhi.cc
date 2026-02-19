@@ -779,7 +779,7 @@ void VulkanRHI::ensure_vertex_capacity(u32 vertex_count) {
     }
 
     u32 new_cap = std::max(vertex_count, f.vertex_capacity * 2);
-    new_cap = std::max(new_cap, 4096u);
+    new_cap = std::max(new_cap, 16384u);
     create_buffer(new_cap * sizeof(Vertex2D), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                   f.vertex_buffer, f.vertex_memory);
@@ -797,7 +797,7 @@ void VulkanRHI::ensure_index_capacity(u32 index_count) {
     }
 
     u32 new_cap = std::max(index_count, f.index_capacity * 2);
-    new_cap = std::max(new_cap, 8192u);
+    new_cap = std::max(new_cap, 32768u);
     create_buffer(new_cap * sizeof(u32), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                   f.index_buffer, f.index_memory);
@@ -815,7 +815,7 @@ void VulkanRHI::ensure_text_vertex_capacity(u32 vertex_count) {
     }
 
     u32 new_cap = std::max(vertex_count, f.text_vertex_capacity * 2);
-    new_cap = std::max(new_cap, 4096u);
+    new_cap = std::max(new_cap, 16384u);
     create_buffer(new_cap * sizeof(Vertex2D), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                   f.text_vertex_buffer, f.text_vertex_memory);
@@ -833,7 +833,7 @@ void VulkanRHI::ensure_text_index_capacity(u32 index_count) {
     }
 
     u32 new_cap = std::max(index_count, f.text_index_capacity * 2);
-    new_cap = std::max(new_cap, 8192u);
+    new_cap = std::max(new_cap, 32768u);
     create_buffer(new_cap * sizeof(u32), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                   f.text_index_buffer, f.text_index_memory);
