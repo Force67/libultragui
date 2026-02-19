@@ -1,0 +1,442 @@
+// Game HUD overlay - all panels are semi-transparent so the 3D scene
+// shows through. This demonstrates libultragui as a game UI layer.
+
+panel hud_root {
+    width: 100vw;
+    height: 100vh;
+    layout: column;
+    justify: space-between;
+
+    // ===== TOP BAR =====
+    panel top_bar {
+        layout: row;
+        justify: space-between;
+        align: start;
+        padding: 16;
+        width: 100%;
+
+        // --- Player status (top-left) ---
+        panel player_status {
+            layout: column;
+            gap: 8;
+
+            // Player name + level
+            panel player_header {
+                layout: row;
+                gap: 10;
+                align: center;
+
+                panel avatar_frame {
+                    width: 44;
+                    height: 44;
+                    background: #2a2a50;
+                    border-color: #6a6aff60;
+                    border-width: 2;
+                    corner-radius: 22;
+                    layout: column;
+                    justify: center;
+                    align: center;
+
+                    text avatar_letter {
+                        text: "K";
+                        font-size: 20;
+                        color: #8a8aff;
+                        text-align: center;
+                    }
+                }
+
+                panel name_level {
+                    layout: column;
+                    gap: 2;
+
+                    text player_name {
+                        text: "Knight_Vince";
+                        font-size: 15;
+                        color: #e0e0ff;
+                        letter-spacing: 1;
+                    }
+                    text player_level {
+                        text: "Level 42  —  Archmage";
+                        font-size: 11;
+                        color: #8888aa;
+                    }
+                }
+            }
+
+            // HP bar
+            panel hp_row {
+                layout: row;
+                gap: 8;
+                align: center;
+
+                text hp_label {
+                    text: "HP";
+                    font-size: 11;
+                    color: #ff6666;
+                    letter-spacing: 2;
+                }
+                panel hp_bar_bg {
+                    width: 180;
+                    height: 8;
+                    background: #1a0a0a;
+                    corner-radius: 4;
+                    border-color: #ff444430;
+                    border-width: 1;
+
+                    panel hp_bar_fill {
+                        width: 75%;
+                        height: 100%;
+                        background: #cc3333;
+                        background-end: #ff5555;
+                        corner-radius: 4;
+                    }
+                }
+                text hp_text {
+                    text: "3750 / 5000";
+                    font-size: 10;
+                    color: #cc8888;
+                }
+            }
+
+            // MP bar
+            panel mp_row {
+                layout: row;
+                gap: 8;
+                align: center;
+
+                text mp_label {
+                    text: "MP";
+                    font-size: 11;
+                    color: #6688ff;
+                    letter-spacing: 2;
+                }
+                panel mp_bar_bg {
+                    width: 180;
+                    height: 8;
+                    background: #0a0a1a;
+                    corner-radius: 4;
+                    border-color: #4444ff30;
+                    border-width: 1;
+
+                    panel mp_bar_fill {
+                        width: 60%;
+                        height: 100%;
+                        background: #3344cc;
+                        background-end: #5566ff;
+                        corner-radius: 4;
+                    }
+                }
+                text mp_text {
+                    text: "1200 / 2000";
+                    font-size: 10;
+                    color: #8888cc;
+                }
+            }
+
+            // XP bar
+            panel xp_row {
+                layout: row;
+                gap: 8;
+                align: center;
+
+                text xp_label {
+                    text: "XP";
+                    font-size: 11;
+                    color: #88cc44;
+                    letter-spacing: 2;
+                }
+                panel xp_bar_bg {
+                    width: 180;
+                    height: 5;
+                    background: #0a1a0a;
+                    corner-radius: 3;
+                    border-color: #44cc4420;
+                    border-width: 1;
+
+                    panel xp_bar_fill {
+                        width: 45%;
+                        height: 100%;
+                        background: #448833;
+                        background-end: #66bb44;
+                        corner-radius: 3;
+                    }
+                }
+                text xp_text {
+                    text: "45%";
+                    font-size: 10;
+                    color: #88aa88;
+                }
+            }
+        }
+
+        // --- Score / objective (top-center) ---
+        panel objective_panel {
+            layout: column;
+            align: center;
+            gap: 4;
+            padding: 10 20;
+            background: #12122a90;
+            corner-radius: 8;
+            border-color: #3a3a6a40;
+            border-width: 1;
+
+            text objective_label {
+                text: "DUNGEON: CRYSTAL SPIRE";
+                font-size: 10;
+                color: #6a6a9a;
+                letter-spacing: 3;
+                text-transform: uppercase;
+            }
+            text score_text {
+                text: "Score: 84,250";
+                font-size: 18;
+                color: #ffffffdd;
+            }
+            text timer_text {
+                text: "12:45";
+                font-size: 13;
+                color: #aaaacc;
+            }
+        }
+
+        // --- Minimap (top-right) ---
+        panel minimap_container {
+            layout: column;
+            gap: 6;
+            align: end;
+
+            panel minimap_frame {
+                width: 140;
+                height: 140;
+                background: #0a0a2080;
+                corner-radius: 8;
+                border-color: #4a4a7a50;
+                border-width: 1;
+
+                // Simulated minimap content
+                panel map_dot_player {
+                    width: 6;
+                    height: 6;
+                    background: #44ff44;
+                    corner-radius: 3;
+                    margin: 64 0 0 64;
+                }
+            }
+
+            text minimap_label {
+                text: "Floor 7";
+                font-size: 10;
+                color: #6a6a8a;
+                text-align: right;
+            }
+
+            // FPS counter
+            panel fps_panel {
+                padding: 4 8;
+                background: #0a0a1a80;
+                corner-radius: 4;
+
+                text fps_text {
+                    text: "-- FPS";
+                    font-size: 11;
+                    color: #44aa44;
+                }
+            }
+        }
+    }
+
+    // ===== SPACER (middle area is transparent - shows the game) =====
+    panel middle_spacer {
+        flex-grow: 1;
+    }
+
+    // ===== BOTTOM BAR =====
+    panel bottom_bar {
+        layout: column;
+        align: center;
+        gap: 10;
+        padding: 0 16 20 16;
+        width: 100%;
+
+        // --- Notification area ---
+        panel notification {
+            padding: 6 16;
+            background: #1a1a3080;
+            corner-radius: 6;
+
+            text notify_text {
+                text: "Cube of Power resonates with arcane energy...";
+                font-size: 12;
+                color: #aa88dd;
+                text-align: center;
+            }
+        }
+
+        // --- Action bar ---
+        panel action_bar {
+            layout: row;
+            gap: 6;
+            padding: 8 12;
+            background: #10102080;
+            corner-radius: 10;
+            border-color: #2a2a5040;
+            border-width: 1;
+
+            button btn_ability_1 {
+                text: "Q";
+                width: 50;
+                height: 50;
+                background: #2a1a3a;
+                corner-radius: 8;
+                border-color: #6a3a8a60;
+                border-width: 1;
+                font-size: 18;
+                color: #cc88ff;
+                cursor: pointer;
+
+                :hover {
+                    background: #3a2a5a;
+                    border-color: #8a5aaa;
+                }
+            }
+
+            button btn_ability_2 {
+                text: "W";
+                width: 50;
+                height: 50;
+                background: #1a2a3a;
+                corner-radius: 8;
+                border-color: #3a6a8a60;
+                border-width: 1;
+                font-size: 18;
+                color: #88ccff;
+                cursor: pointer;
+
+                :hover {
+                    background: #2a3a5a;
+                    border-color: #5a8aaa;
+                }
+            }
+
+            button btn_ability_3 {
+                text: "E";
+                width: 50;
+                height: 50;
+                background: #1a3a2a;
+                corner-radius: 8;
+                border-color: #3a8a6a60;
+                border-width: 1;
+                font-size: 18;
+                color: #88ffcc;
+                cursor: pointer;
+
+                :hover {
+                    background: #2a5a3a;
+                    border-color: #5aaa8a;
+                }
+            }
+
+            button btn_ability_4 {
+                text: "R";
+                width: 50;
+                height: 50;
+                background: #3a1a1a;
+                corner-radius: 8;
+                border-color: #8a3a3a60;
+                border-width: 1;
+                font-size: 18;
+                color: #ff8888;
+                cursor: pointer;
+
+                :hover {
+                    background: #5a2a2a;
+                    border-color: #aa5a5a;
+                }
+            }
+
+            // Separator
+            panel ability_sep {
+                width: 1;
+                height: 36;
+                background: #ffffff10;
+                margin: 7 4;
+            }
+
+            button btn_item_1 {
+                text: "1";
+                width: 44;
+                height: 44;
+                background: #1a1a2a;
+                corner-radius: 6;
+                border-color: #3a3a5a40;
+                border-width: 1;
+                font-size: 14;
+                color: #aaaacc;
+                cursor: pointer;
+
+                :hover {
+                    background: #2a2a4a;
+                }
+            }
+
+            button btn_item_2 {
+                text: "2";
+                width: 44;
+                height: 44;
+                background: #1a1a2a;
+                corner-radius: 6;
+                border-color: #3a3a5a40;
+                border-width: 1;
+                font-size: 14;
+                color: #aaaacc;
+                cursor: pointer;
+
+                :hover {
+                    background: #2a2a4a;
+                }
+            }
+
+            button btn_item_3 {
+                text: "3";
+                width: 44;
+                height: 44;
+                background: #1a1a2a;
+                corner-radius: 6;
+                border-color: #3a3a5a40;
+                border-width: 1;
+                font-size: 14;
+                color: #aaaacc;
+                cursor: pointer;
+
+                :hover {
+                    background: #2a2a4a;
+                }
+            }
+
+            button btn_item_4 {
+                text: "4";
+                width: 44;
+                height: 44;
+                background: #1a1a2a;
+                corner-radius: 6;
+                border-color: #3a3a5a40;
+                border-width: 1;
+                font-size: 14;
+                color: #aaaacc;
+                cursor: pointer;
+
+                :hover {
+                    background: #2a2a4a;
+                }
+            }
+        }
+
+        // --- Keybind hints ---
+        text keybind_hint {
+            text: "Q/W/E/R  Abilities   |   1-4  Items   |   ESC  Menu";
+            font-size: 10;
+            color: #555577;
+            text-align: center;
+        }
+    }
+}
