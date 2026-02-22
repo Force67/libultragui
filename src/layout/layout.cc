@@ -12,12 +12,13 @@ namespace ugui {
 // ---------------------------------------------------------------------------
 
 static void set_yoga_length_w(YGNodeRef yg, const Length& len, f32 vw, f32 vh,
+                              f32 scale,
                               void (*set_px)(YGNodeRef, float),
                               void (*set_pct)(YGNodeRef, float),
                               void (*set_auto)(YGNodeRef) = nullptr) {
     switch (len.unit) {
     case Length::Unit::kPx:
-        set_px(yg, len.value);
+        set_px(yg, len.value * scale);
         break;
     case Length::Unit::kPercent:
         set_pct(yg, len.value);
@@ -39,12 +40,13 @@ static void set_yoga_length_w(YGNodeRef yg, const Length& len, f32 vw, f32 vh,
 }
 
 static void set_yoga_length_h(YGNodeRef yg, const Length& len, f32 vw, f32 vh,
+                              f32 scale,
                               void (*set_px)(YGNodeRef, float),
                               void (*set_pct)(YGNodeRef, float),
                               void (*set_auto)(YGNodeRef) = nullptr) {
     switch (len.unit) {
     case Length::Unit::kPx:
-        set_px(yg, len.value);
+        set_px(yg, len.value * scale);
         break;
     case Length::Unit::kPercent:
         set_pct(yg, len.value);
@@ -178,6 +180,7 @@ static YGSize yoga_measure_func(YGNodeConstRef node, float /*width*/,
 static void apply_style(YGNodeRef yg, const Style& s, const LayoutViewport& vp) {
     f32 vw = vp.width;
     f32 vh = vp.height;
+    f32 sc = vp.scale;
 
     YGNodeStyleSetFlexDirection(yg, map_flex_direction(s.flex_direction));
     YGNodeStyleSetJustifyContent(yg, map_justify(s.justify_content));
@@ -195,54 +198,54 @@ static void apply_style(YGNodeRef yg, const Style& s, const LayoutViewport& vp) 
     YGNodeStyleSetFlexShrink(yg, s.flex_shrink);
 
     // Sizing
-    set_yoga_length_w(yg, s.width, vw, vh, YGNodeStyleSetWidth, YGNodeStyleSetWidthPercent,
+    set_yoga_length_w(yg, s.width, vw, vh, sc, YGNodeStyleSetWidth, YGNodeStyleSetWidthPercent,
                       YGNodeStyleSetWidthAuto);
-    set_yoga_length_h(yg, s.height, vw, vh, YGNodeStyleSetHeight, YGNodeStyleSetHeightPercent,
+    set_yoga_length_h(yg, s.height, vw, vh, sc, YGNodeStyleSetHeight, YGNodeStyleSetHeightPercent,
                       YGNodeStyleSetHeightAuto);
 
     // Min/max - skip the default "unbounded" sentinel (1e6)
     if (s.min_width.value > 0.0f)
-        set_yoga_length_w(yg, s.min_width, vw, vh, YGNodeStyleSetMinWidth,
+        set_yoga_length_w(yg, s.min_width, vw, vh, sc, YGNodeStyleSetMinWidth,
                           YGNodeStyleSetMinWidthPercent);
     if (s.min_height.value > 0.0f)
-        set_yoga_length_h(yg, s.min_height, vw, vh, YGNodeStyleSetMinHeight,
+        set_yoga_length_h(yg, s.min_height, vw, vh, sc, YGNodeStyleSetMinHeight,
                           YGNodeStyleSetMinHeightPercent);
     if (s.max_width.value < 1e5f)
-        set_yoga_length_w(yg, s.max_width, vw, vh, YGNodeStyleSetMaxWidth,
+        set_yoga_length_w(yg, s.max_width, vw, vh, sc, YGNodeStyleSetMaxWidth,
                           YGNodeStyleSetMaxWidthPercent);
     if (s.max_height.value < 1e5f)
-        set_yoga_length_h(yg, s.max_height, vw, vh, YGNodeStyleSetMaxHeight,
+        set_yoga_length_h(yg, s.max_height, vw, vh, sc, YGNodeStyleSetMaxHeight,
                           YGNodeStyleSetMaxHeightPercent);
 
-    // Margin
-    YGNodeStyleSetMargin(yg, YGEdgeTop, s.margin.top);
-    YGNodeStyleSetMargin(yg, YGEdgeRight, s.margin.right);
-    YGNodeStyleSetMargin(yg, YGEdgeBottom, s.margin.bottom);
-    YGNodeStyleSetMargin(yg, YGEdgeLeft, s.margin.left);
+    // Margin (pixel values - scale them)
+    YGNodeStyleSetMargin(yg, YGEdgeTop, s.margin.top * sc);
+    YGNodeStyleSetMargin(yg, YGEdgeRight, s.margin.right * sc);
+    YGNodeStyleSetMargin(yg, YGEdgeBottom, s.margin.bottom * sc);
+    YGNodeStyleSetMargin(yg, YGEdgeLeft, s.margin.left * sc);
 
-    // Padding
-    YGNodeStyleSetPadding(yg, YGEdgeTop, s.padding.top);
-    YGNodeStyleSetPadding(yg, YGEdgeRight, s.padding.right);
-    YGNodeStyleSetPadding(yg, YGEdgeBottom, s.padding.bottom);
-    YGNodeStyleSetPadding(yg, YGEdgeLeft, s.padding.left);
+    // Padding (pixel values - scale them)
+    YGNodeStyleSetPadding(yg, YGEdgeTop, s.padding.top * sc);
+    YGNodeStyleSetPadding(yg, YGEdgeRight, s.padding.right * sc);
+    YGNodeStyleSetPadding(yg, YGEdgeBottom, s.padding.bottom * sc);
+    YGNodeStyleSetPadding(yg, YGEdgeLeft, s.padding.left * sc);
 
     // Gap
     if (s.gap > 0.0f)
-        YGNodeStyleSetGap(yg, YGGutterAll, s.gap);
+        YGNodeStyleSetGap(yg, YGGutterAll, s.gap * sc);
 
     // Aspect ratio
     if (s.aspect_ratio > 0.0f)
         YGNodeStyleSetAspectRatio(yg, s.aspect_ratio);
 
-    // Position offsets
+    // Position offsets (resolve, then scale the px result)
     if (!s.top.IsAuto())
-        YGNodeStyleSetPosition(yg, YGEdgeTop, s.top.Resolve(0, vw, vh, true));
+        YGNodeStyleSetPosition(yg, YGEdgeTop, s.top.Resolve(0, vw, vh, true) * sc);
     if (!s.right_offset.IsAuto())
-        YGNodeStyleSetPosition(yg, YGEdgeRight, s.right_offset.Resolve(0, vw, vh, false));
+        YGNodeStyleSetPosition(yg, YGEdgeRight, s.right_offset.Resolve(0, vw, vh, false) * sc);
     if (!s.bottom.IsAuto())
-        YGNodeStyleSetPosition(yg, YGEdgeBottom, s.bottom.Resolve(0, vw, vh, true));
+        YGNodeStyleSetPosition(yg, YGEdgeBottom, s.bottom.Resolve(0, vw, vh, true) * sc);
     if (!s.left_offset.IsAuto())
-        YGNodeStyleSetPosition(yg, YGEdgeLeft, s.left_offset.Resolve(0, vw, vh, false));
+        YGNodeStyleSetPosition(yg, YGEdgeLeft, s.left_offset.Resolve(0, vw, vh, false) * sc);
 }
 
 // ---------------------------------------------------------------------------

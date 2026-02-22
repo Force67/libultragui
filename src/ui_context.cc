@@ -13,10 +13,32 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
 namespace ugui {
+
+static f32 ComputeViewportScale(const UIConfig& cfg, Vec2 display) {
+    switch (cfg.scale_mode) {
+    case ViewportScaleMode::kWidth:
+        return (cfg.design_width > 0.0f) ? display.x / cfg.design_width : 1.0f;
+    case ViewportScaleMode::kHeight:
+        return (cfg.design_height > 0.0f) ? display.y / cfg.design_height : 1.0f;
+    case ViewportScaleMode::kContain: {
+        f32 sw = (cfg.design_width > 0.0f) ? display.x / cfg.design_width : 1.0f;
+        f32 sh = (cfg.design_height > 0.0f) ? display.y / cfg.design_height : 1.0f;
+        return std::fmin(sw, sh);
+    }
+    case ViewportScaleMode::kCover: {
+        f32 sw = (cfg.design_width > 0.0f) ? display.x / cfg.design_width : 1.0f;
+        f32 sh = (cfg.design_height > 0.0f) ? display.y / cfg.design_height : 1.0f;
+        return std::fmax(sw, sh);
+    }
+    default:
+        return 1.0f;
+    }
+}
 
 UIContext::~UIContext() {
     if (platform_)
@@ -103,6 +125,8 @@ bool UIContext::Init(const UIConfig& config) {
     widget_ctx_.animator = &animator_;
     widget_ctx_.current_time = &last_time_;
     widget_ctx_.platform = platform_;
+    widget_ctx_.ui_scale = ComputeViewportScale(
+        config_, {static_cast<f32>(config.width), static_cast<f32>(config.height)});
 
     // Builder
     builder_.set_animator(&animator_);
@@ -227,11 +251,18 @@ void UIContext::Update() {
     dt_ = now - last_time_;
     last_time_ = now;
 
-    // Update builder viewport size so media queries reflect current window dimensions
-    builder_.set_viewport_size(rhi_->display_size());
-
-    // Poll input
+    // Poll input (processes window resize events)
     platform_->PollEvents();
+
+    // Use platform window_size() for viewport - it reflects resizes immediately,
+    // unlike rhi_->display_size() which waits for swapchain recreation in BeginFrame.
+    Vec2 viewport = platform_->window_size();
+
+    // Update builder viewport size so media queries reflect current window dimensions
+    builder_.set_viewport_size(viewport);
+
+    // Recompute viewport scale factor each frame
+    widget_ctx_.ui_scale = ComputeViewportScale(config_, viewport);
 
     // Route input to widget tree
     if (root_)
@@ -287,7 +318,7 @@ void UIContext::Update() {
             return;
         }
 
-        LayoutViewport vp{rhi_->display_size().x, rhi_->display_size().y};
+        LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
         for (auto& pass : offscreen_queue_) {
             if (!rhi_->BeginOffscreen(pass.target, pass.clear_color))
                 continue;
@@ -313,7 +344,7 @@ void UIContext::Update() {
     if (on_paint_cb_) {
         on_paint_cb_(renderer_, rhi_);
     } else if (root_) {
-        LayoutViewport vp{rhi_->display_size().x, rhi_->display_size().y};
+        LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
         ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
         PaintWidgetTree(root_, renderer_);
     }
@@ -321,7 +352,7 @@ void UIContext::Update() {
     // Paint overlays on top of everything
     for (auto& overlay : overlays_) {
         if (overlay.widget) {
-            LayoutViewport ovp{rhi_->display_size().x, rhi_->display_size().y};
+            LayoutViewport ovp{viewport.x, viewport.y, widget_ctx_.ui_scale};
             ComputeWidgetLayout(overlay.widget, ovp, layout_engine_, layout_nodes_);
             PaintWidgetTree(overlay.widget, renderer_);
         }
@@ -367,11 +398,12 @@ void UIContext::DrawTooltip() {
     if (fh == kInvalidFont)
         return;
 
-    f32 font_size = 12.0f;
+    f32 sc = widget_ctx_.ui_scale;
+    f32 font_size = 12.0f * sc;
     auto run = text_engine_.Shape(fh, tip.c_str(), static_cast<u32>(tip.size()),
                                    font_size, 0.0f, 1.0f);
 
-    f32 pad_x = 10.0f, pad_y = 6.0f;
+    f32 pad_x = 10.0f * sc, pad_y = 6.0f * sc;
     f32 w = run.total_advance + pad_x * 2.0f;
     f32 h = run.line_height + pad_y * 2.0f;
 

@@ -86,7 +86,9 @@ bool ContextMenu::OnClick() {
 void ContextMenu::Measure(f32& out_width, f32& out_height) {
   auto* te = text_engine();
   FontHandle fh = effective_font();
-  f32 font_size = style_.font_size > 0.0f ? style_.font_size : 14.0f;
+  f32 sc = ui_scale();
+  f32 font_size = (style_.font_size > 0.0f ? style_.font_size : 14.0f) * sc;
+  f32 letter_sp = style_.letter_spacing * sc;
   f32 row_height = font_size * 1.8f;
   constexpr f32 kSeparatorHeight = 1.0f;
   constexpr f32 kSeparatorPad = 4.0f;
@@ -103,7 +105,7 @@ void ContextMenu::Measure(f32& out_width, f32& out_height) {
       if (te && fh != kInvalidFont && !item.label.empty()) {
         auto run = te->Shape(fh, item.label.c_str(),
                              static_cast<u32>(item.label.size()), font_size,
-                             style_.letter_spacing,
+                             letter_sp,
                              style_.line_height_multiplier);
         max_width = std::max(max_width, run.total_advance);
       }
@@ -123,6 +125,7 @@ void ContextMenu::OnPaint(Renderer2D& renderer) {
   if (!te || fh == kInvalidFont) return;
 
   auto s = ComputedStyle();
+  s.Scale(ui_scale());
   f32 alpha = s.opacity;
   f32 font_size = s.font_size > 0.0f ? s.font_size : 14.0f;
   f32 row_height = font_size * 1.8f;

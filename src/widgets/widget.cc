@@ -151,6 +151,7 @@ void Widget::OnLayout(const Rect& rect, const Rect& content_rect) {
 
 void Widget::OnPaint(Renderer2D& renderer) {
     auto s = ComputedStyle();
+    s.Scale(ui_scale());
     f32 alpha = s.opacity;
     u32 radii = style_corner_radii(s);
 
@@ -239,14 +240,15 @@ void Widget::OnPaint(Renderer2D& renderer) {
 
     // Focus ring (only for tab-focusable widgets)
     if (HasState(state_, WidgetState::kFocused) && tab_index_ >= 0) {
-        Rect focus_rect = {rect_.x - 2, rect_.y - 2, rect_.w + 4, rect_.h + 4};
+        f32 sc = ui_scale();
+        Rect focus_rect = {rect_.x - 2.0f * sc, rect_.y - 2.0f * sc, rect_.w + 4.0f * sc, rect_.h + 4.0f * sc};
         // Use border color if set, otherwise text color, fallback to subtle white
         Color base = s.border_color.a > 0.1f ? s.border_color
                    : s.text_color.a > 0.1f   ? s.text_color
                                               : Color{0.6f, 0.6f, 0.7f, 1.0f};
         Color focus_color = base.WithAlpha(0.5f * alpha);
         renderer.DrawBorderedRect(focus_rect, Color::Transparent(), focus_color,
-                                   2.0f, radii);
+                                   2.0f * sc, radii);
     }
 }
 

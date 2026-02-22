@@ -98,6 +98,9 @@ public:
     i32 tab_index() const { return tab_index_; }
     bool focusable() const { return tab_index_ >= 0; }
 
+    /// Viewport scale factor (1.0 at the design resolution).
+    f32 ui_scale() const { return context_ ? context_->ui_scale : 1.0f; }
+
     // --- Event dispatch (override in subclasses) ---
     virtual bool OnClick() { return false; }
     virtual bool OnScroll(Vec2 delta) { return false; }

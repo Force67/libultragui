@@ -18,6 +18,7 @@ struct WidgetContext {
     Animator* animator = nullptr;
     f64* current_time = nullptr;
     Platform* platform = nullptr;
+    f32 ui_scale = 1.0f; ///< Viewport scale factor (1.0 = design resolution)
 };
 
 } // namespace ugui

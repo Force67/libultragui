@@ -262,6 +262,7 @@ bool TextInput::OnClick() {
         return true;
 
     auto s = ComputedStyle();
+    s.Scale(ui_scale());
     auto run = te->Shape(fh, text_.c_str(), static_cast<u32>(text_.size()), s.font_size,
                          s.letter_spacing, s.line_height_multiplier);
 
@@ -290,9 +291,10 @@ void TextInput::Measure(f32& out_width, f32& out_height) {
         return;
     }
 
+    f32 sc = ui_scale();
     auto run = te->Shape(fh, text_.empty() ? "X" : text_.c_str(),
-                         text_.empty() ? 1 : static_cast<u32>(text_.size()), style_.font_size,
-                         style_.letter_spacing, style_.line_height_multiplier);
+                         text_.empty() ? 1 : static_cast<u32>(text_.size()), style_.font_size * sc,
+                         style_.letter_spacing * sc, style_.line_height_multiplier);
     out_width = run.total_advance + style_.padding.horizontal();
     out_height = run.line_height + style_.padding.vertical();
 }
@@ -317,6 +319,7 @@ void TextInput::OnPaint(Renderer2D& renderer) {
         return;
 
     auto s = ComputedStyle();
+    s.Scale(ui_scale());
     f32 alpha = s.opacity;
     bool focused = HasState(state_, WidgetState::kFocused);
     bool show_placeholder = text_.empty() && !placeholder_.empty();

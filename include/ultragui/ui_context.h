@@ -38,6 +38,15 @@ struct UIConfig {
     bool validation = true;
     Color clear_color = Color::FromHex(0x0f0f1a);
     const char* shader_dir = nullptr; // Falls back to ULTRAGUI_SHADER_DIR
+
+    /// Viewport scaling mode. When set to anything other than kNone, all pixel
+    /// sizes (font-size, border, corner-radius, shadow, padding, margin, gap,
+    /// and fixed-px dimensions) scale proportionally as the window is resized.
+    /// The design_width/design_height define the reference resolution at which
+    /// the scale factor is 1.0. Behaves like CSS rem-based responsive design.
+    ViewportScaleMode scale_mode = ViewportScaleMode::kNone;
+    f32 design_width = 1280.0f;
+    f32 design_height = 720.0f;
 };
 
 /// High-level framework context. Ties together all subsystems

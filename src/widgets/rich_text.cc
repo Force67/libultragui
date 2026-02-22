@@ -12,12 +12,13 @@ f32 RichText::LayoutSpans(Vector<ShapedSpan>& out, f32 max_width) const {
     if (!te || base_fh == kInvalidFont) return 0.0f;
 
     const auto& s = style_;
+    f32 sc = ui_scale();
     f32 line_x = 0.0f;
     f32 line_y = 0.0f;
     f32 line_height = 0.0f;
 
     for (const auto& span : spans_) {
-        f32 size = span.font_size > 0.0f ? span.font_size : s.font_size;
+        f32 size = (span.font_size > 0.0f ? span.font_size : s.font_size) * sc;
 
         FontHandle fh = base_fh;
         if (span.font_weight != FontWeight::kRegular ||
@@ -27,7 +28,7 @@ f32 RichText::LayoutSpans(Vector<ShapedSpan>& out, f32 max_width) const {
 
         auto run = te->Shape(fh, span.text.c_str(),
                              static_cast<u32>(span.text.size()), size,
-                             s.letter_spacing, s.line_height_multiplier);
+                             s.letter_spacing * sc, s.line_height_multiplier);
 
         // Wrap to next line if this span exceeds available width
         // (only when we are not at the start of a line)
@@ -75,6 +76,7 @@ void RichText::OnPaint(Renderer2D& renderer) {
     if (!te || spans_.empty()) return;
 
     auto s = ComputedStyle();
+    s.Scale(ui_scale());
     f32 alpha = s.opacity;
 
     Vector<ShapedSpan> shaped;

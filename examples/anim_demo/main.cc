@@ -172,6 +172,9 @@ int main(int argc, char* argv[]) {
     config.height = 520;
     config.clear_color = ugui::Color::FromHex(0x0f0f1a);
     config.shader_dir = ULTRAGUI_SHADER_DIR;
+    config.scale_mode = ugui::ViewportScaleMode::kContain;
+    config.design_width = 900.0f;
+    config.design_height = 520.0f;
 
     ugui::UIContext ui;
     if (!ui.Init(config))

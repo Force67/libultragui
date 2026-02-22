@@ -38,6 +38,7 @@ struct LayoutNode {
 struct LayoutViewport {
     f32 width = 1280.0f;
     f32 height = 720.0f;
+    f32 scale = 1.0f; ///< Viewport scale factor applied to all kPx values
 };
 
 /// Runs the Yoga layout algorithm on a tree of LayoutNodes.

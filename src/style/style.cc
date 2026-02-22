@@ -30,6 +30,26 @@ static BoxShadow lerp_shadow(const BoxShadow& a, const BoxShadow& b, f32 t) {
     };
 }
 
+void Style::Scale(f32 s) {
+    if (s == 1.0f) return;
+    font_size *= s;
+    letter_spacing *= s;
+    border_width *= s;
+    corner_radius *= s;
+    corner_radius_tl *= s;
+    corner_radius_tr *= s;
+    corner_radius_br *= s;
+    corner_radius_bl *= s;
+    shadow.blur *= s;
+    shadow.spread *= s;
+    shadow.offset.x *= s;
+    shadow.offset.y *= s;
+    text_shadow_blur *= s;
+    text_shadow_offset.x *= s;
+    text_shadow_offset.y *= s;
+    backdrop_blur *= s;
+}
+
 Style Style::Lerp(const Style& a, const Style& b, f32 t) {
     Style result = a; // Start with 'a', interpolate animatable fields
 

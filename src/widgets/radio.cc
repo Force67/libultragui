@@ -38,6 +38,7 @@ bool Radio::OnClick() {
 }
 
 void Radio::Measure(f32& out_width, f32& out_height) {
+  f32 sc = ui_scale();
   f32 circle_size = style_.font_size * 1.2f;
   constexpr f32 kGap = 8.0f;
 
@@ -45,7 +46,7 @@ void Radio::Measure(f32& out_width, f32& out_height) {
   FontHandle fh = effective_font();
   if (te && fh != kInvalidFont && !label_.empty()) {
     auto run = te->Shape(fh, label_.c_str(), static_cast<u32>(label_.size()),
-                         style_.font_size, style_.letter_spacing,
+                         style_.font_size * sc, style_.letter_spacing * sc,
                          style_.line_height_multiplier);
     out_width = circle_size + kGap + run.total_advance;
     out_height = std::max(circle_size, run.line_height);
@@ -60,6 +61,7 @@ void Radio::OnPaint(Renderer2D& renderer) {
   Widget::OnPaint(renderer);
 
   auto s = ComputedStyle();
+  s.Scale(ui_scale());
   f32 alpha = s.opacity;
   f32 circle_size = s.font_size * 1.0f;
   constexpr f32 kGap = 8.0f;

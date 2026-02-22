@@ -52,6 +52,7 @@ void Toggle::Measure(f32& out_width, f32& out_height) {
 void Toggle::OnPaint(Renderer2D& renderer) {
   // Skip Widget::OnPaint - we draw our own custom track background
   auto s = ComputedStyle();
+  s.Scale(ui_scale());
   f32 alpha = s.opacity;
 
   // Track dimensions (content area)

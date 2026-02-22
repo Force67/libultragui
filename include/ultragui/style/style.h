@@ -119,6 +119,13 @@ struct Style {
         return shadow.color.a > 0.0f && (shadow.blur > 0.0f || shadow.spread > 0.0f);
     }
 
+    /// Scale all pixel-valued visual properties by a factor.
+    /// Used for viewport-responsive scaling. Layout properties (padding, margin,
+    /// gap, dimensions) are NOT scaled here - the layout engine handles those.
+    /// This scales: font_size, letter_spacing, border_width, corner_radius,
+    /// shadow, text_shadow, and backdrop_blur.
+    void Scale(f32 s);
+
     /// Linearly interpolate between two styles for animation.
     /// Only interpolates animatable properties (colors, sizes, opacity, etc).
     static Style Lerp(const Style& a, const Style& b, f32 t);

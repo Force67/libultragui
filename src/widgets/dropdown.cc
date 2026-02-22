@@ -24,6 +24,7 @@ Widget* Dropdown::HitTest(Vec2 point) {
   // When open, expand hit area to include the option list below
   if (open_ && !options_.empty()) {
     auto s = ComputedStyle();
+    s.Scale(ui_scale());
     f32 row_height = s.font_size * 1.5f;
     f32 list_h = row_height * static_cast<f32>(options_.size());
     Rect expanded = {rect_.x, rect_.y, rect_.w, rect_.h + list_h};
@@ -58,6 +59,7 @@ void Dropdown::OnUpdate(f64) {
       continue;
 
     auto s = ComputedStyle();
+    s.Scale(ui_scale());
     f32 row_height = s.font_size * 1.5f;
     f32 list_top = rect_.y + rect_.h;
     f32 list_bottom = list_top + row_height * static_cast<f32>(options_.size());
@@ -82,7 +84,9 @@ void Dropdown::OnUpdate(f64) {
 void Dropdown::Measure(f32& out_width, f32& out_height) {
   auto* te = text_engine();
   FontHandle fh = effective_font();
-  f32 font_size = style_.font_size;
+  f32 sc = ui_scale();
+  f32 font_size = style_.font_size * sc;
+  f32 letter_sp = style_.letter_spacing * sc;
   constexpr f32 kChevronWidth = 24.0f;
   constexpr f32 kHPadding = 12.0f;
 
@@ -97,14 +101,14 @@ void Dropdown::Measure(f32& out_width, f32& out_height) {
   f32 max_width = 0.0f;
   for (auto& opt : options_) {
     auto run = te->Shape(fh, opt.c_str(), static_cast<u32>(opt.size()),
-                         font_size, style_.letter_spacing,
+                         font_size, letter_sp,
                          style_.line_height_multiplier);
     max_width = std::max(max_width, run.total_advance);
   }
 
   // Also measure placeholder in case no option is selected
   const char* placeholder = "Select...";
-  auto ph_run = te->Shape(fh, placeholder, 9, font_size, style_.letter_spacing,
+  auto ph_run = te->Shape(fh, placeholder, 9, font_size, letter_sp,
                           style_.line_height_multiplier);
   max_width = std::max(max_width, ph_run.total_advance);
 
@@ -122,6 +126,7 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
   if (!te || fh == kInvalidFont) return;
 
   auto s = ComputedStyle();
+  s.Scale(ui_scale());
   f32 alpha = s.opacity;
   f32 font_size = s.font_size;
   f32 row_height = font_size * 1.5f;

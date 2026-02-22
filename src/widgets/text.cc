@@ -40,9 +40,10 @@ void Text::Measure(f32& out_width, f32& out_height) {
         resolved = te->ResolveFont(fh, style_.font_weight, style_.font_style);
 
     String display_text = apply_transform(text_, style_.text_transform);
+    f32 sc = ui_scale();
     auto run =
         te->Shape(resolved, display_text.c_str(), static_cast<u32>(display_text.size()),
-                  style_.font_size, style_.letter_spacing, style_.line_height_multiplier);
+                  style_.font_size * sc, style_.letter_spacing * sc, style_.line_height_multiplier);
     out_width = run.total_advance;
     out_height = run.line_height;
 }
@@ -56,6 +57,7 @@ void Text::OnPaint(Renderer2D& renderer) {
         return;
 
     auto s = ComputedStyle();
+    s.Scale(ui_scale());
     f32 alpha = s.opacity;
 
     // Resolve font for weight/style

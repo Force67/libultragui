@@ -156,6 +156,18 @@ enum class Cursor : u8 {
     kNotAllowed,
 };
 
+/// Viewport scaling mode - controls how UI scales when the window is resized.
+/// Like CSS viewport-relative sizing applied globally. Requires a design
+/// (reference) resolution; the scale factor is the ratio of the current
+/// viewport dimension(s) to the design dimension(s).
+enum class ViewportScaleMode : u8 {
+    kNone,    // Fixed pixel sizes (default - no scaling)
+    kWidth,   // scale = viewport_width  / design_width
+    kHeight,  // scale = viewport_height / design_height
+    kContain, // scale = min(w_ratio, h_ratio) - fits inside viewport
+    kCover,   // scale = max(w_ratio, h_ratio) - fills viewport
+};
+
 } // namespace ugui
 
 #endif  // ULTRAGUI_STYLE_ENUMS_H_
