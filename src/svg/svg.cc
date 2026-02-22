@@ -23,7 +23,7 @@ bool LoadSvg(const char* path, SvgImage& out, u32 target_width, u32 target_heigh
         return false;
     }
 
-    std::vector<char> data(static_cast<usize>(size));
+    Vector<char> data(static_cast<usize>(size));
     usize read = std::fread(data.data(), 1, static_cast<usize>(size), f);
     (void)read;
     std::fclose(f);

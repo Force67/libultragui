@@ -1,24 +1,23 @@
 #ifndef ULTRAGUI_STYLE_THEME_H_
 #define ULTRAGUI_STYLE_THEME_H_
 
-#include <string>
-#include <unordered_map>
+#include <ultragui/core/types.h>
 
 namespace ugui {
 
 /// A theme is a named set of CSS custom properties (design tokens).
 struct Theme {
-  std::string name;
-  std::unordered_map<std::string, std::string> tokens;
+  String name;
+  HashMap<String, String> tokens;
 
   /// Set a token value (e.g., "--bg-primary", "#1a1a2e").
-  void Set(const std::string& token_name, const std::string& value) {
+  void Set(const String& token_name, const String& value) {
     tokens[token_name] = value;
   }
 
   /// Get a token value, or empty string if not found.
-  const std::string& Get(const std::string& token_name) const {
-    static const std::string empty;
+  const String& Get(const String& token_name) const {
+    static const String empty;
     auto it = tokens.find(token_name);
     return it != tokens.end() ? it->second : empty;
   }

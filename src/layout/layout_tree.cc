@@ -7,7 +7,7 @@
 namespace ugui {
 
 static void build_layout_nodes(Widget* widget, u32 parent_index,
-                               std::vector<LayoutNode>& nodes) {
+                               Vector<LayoutNode>& nodes) {
     u32 my_index = static_cast<u32>(nodes.size());
 
     LayoutNode node;
@@ -51,7 +51,7 @@ static ScrollView* FindScrollParent(Widget* widget) {
 }
 
 static void apply_layout_results(Widget* widget, u32& node_index,
-                                 std::vector<LayoutNode>& nodes) {
+                                 Vector<LayoutNode>& nodes) {
     auto& node = nodes[node_index];
 
     // Sticky positioning: clamp the widget's y so it stays pinned to the
@@ -80,7 +80,7 @@ static void apply_layout_results(Widget* widget, u32& node_index,
 }
 
 void ComputeWidgetLayout(Widget* root, const LayoutViewport& vp,
-                           LayoutEngine& engine, std::vector<LayoutNode>& scratch) {
+                           LayoutEngine& engine, Vector<LayoutNode>& scratch) {
     if (!root)
         return;
 

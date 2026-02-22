@@ -20,7 +20,7 @@ struct VectorAnimation::Impl {
     RHI* rhi = nullptr;
     RHITextureHandle texture_handle = kInvalidTexture;
     u32 w = 0, h = 0;
-    std::vector<u8> rgba_buf;
+    Vector<u8> rgba_buf;
 
     bool playing = false;
     f32 speed_val = 1.0f;

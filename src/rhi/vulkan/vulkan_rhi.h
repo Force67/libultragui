@@ -4,6 +4,8 @@
 #include <ultragui/platform/platform.h>
 #include <ultragui/rhi/rhi.h>
 
+#include <ultragui/core/config.h>
+
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <string>
@@ -62,7 +64,7 @@ private:
     void ensure_text_index_capacity(u32 index_count);
 
     GLFWwindow* window_ = nullptr;
-    std::string shader_dir_;
+    String shader_dir_;
     f32 dpi_scale_ = 1.0f;
 
     // Instance & device
@@ -81,9 +83,9 @@ private:
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkFormat swapchain_format_ = VK_FORMAT_UNDEFINED;
     VkExtent2D swapchain_extent_ = {};
-    std::vector<VkImage> swapchain_images_;
-    std::vector<VkImageView> swapchain_views_;
-    std::vector<VkFramebuffer> framebuffers_;
+    Vector<VkImage> swapchain_images_;
+    Vector<VkImageView> swapchain_views_;
+    Vector<VkFramebuffer> framebuffers_;
 
     // Pipeline
     VkRenderPass render_pass_ = VK_NULL_HANDLE;

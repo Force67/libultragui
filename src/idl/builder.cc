@@ -29,13 +29,13 @@ namespace ugui {
 // Pure parse helpers
 // ---------------------------------------------------------------------------
 
-static f32 parse_float(const std::string& s) {
+static f32 parse_float(const String& s) {
     f32 v = 0;
     std::from_chars(s.data(), s.data() + s.size(), v);
     return v;
 }
 
-static EdgeInsets parse_edge_insets(const std::string& s) {
+static EdgeInsets parse_edge_insets(const String& s) {
     // Parse 1, 2, or 4 values like CSS shorthand:
     // "10" -> all sides = 10
     // "10 20" -> vertical=10, horizontal=20
@@ -66,12 +66,12 @@ static EdgeInsets parse_edge_insets(const std::string& s) {
     return EdgeInsets(vals[0]);
 }
 
-static Length parse_length(const std::string& s) {
+static Length parse_length(const String& s) {
     if (s == "auto")
         return Length::Auto();
     f32 v = 0;
     auto end = std::from_chars(s.data(), s.data() + s.size(), v).ptr;
-    std::string unit(end, s.data() + s.size());
+    String unit(end, s.data() + s.size());
     if (unit == "%")
         return Length::Percent(v);
     if (unit == "vw")
@@ -81,15 +81,15 @@ static Length parse_length(const std::string& s) {
     if (unit == "fr" || unit == "frac")
         return Length::Frac(v);
     // Bare decimal 0.0-1.0 without unit -> treat as fractional
-    if (unit.empty() && v > 0.0f && v <= 1.0f && s.find('.') != std::string::npos)
+    if (unit.empty() && v > 0.0f && v <= 1.0f && s.find('.') != String::npos)
         return Length::Frac(v);
     return Length::Px(v);
 }
 
-static f32 parse_duration(const std::string& val) {
+static f32 parse_duration(const String& val) {
     f32 dur = 0;
     std::from_chars(val.data(), val.data() + val.size(), dur);
-    return val.find("ms") != std::string::npos ? dur / 1000.0f : dur;
+    return val.find("ms") != String::npos ? dur / 1000.0f : dur;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ static f32 parse_duration(const std::string& val) {
 // ---------------------------------------------------------------------------
 
 template <typename E, std::size_t N>
-static std::optional<E> LookupEnum(const std::pair<std::string_view, E> (&table)[N],
+static Optional<E> LookupEnum(const std::pair<std::string_view, E> (&table)[N],
                                    std::string_view key) {
     for (auto& [k, v] : table) {
         if (k == key)
@@ -176,7 +176,7 @@ static constexpr std::pair<std::string_view, EasingType> kEasingTable[] = {
 };
 
 // Easing substring match - order matters (ease-in-out before ease-in)
-static std::optional<EasingType> FindEasingSubstring(std::string_view text) {
+static Optional<EasingType> FindEasingSubstring(std::string_view text) {
     for (auto& [substr, easing] : kEasingTable) {
         if (text.find(substr) != std::string_view::npos)
             return easing;
@@ -194,7 +194,7 @@ static constexpr std::pair<std::string_view, Color> kNamedColors[] = {
     {"transparent", Color::Transparent()},
 };
 
-static Color parse_color(const std::string& s) {
+static Color parse_color(const String& s) {
     if (s.size() > 1 && s[0] == '#') {
         u32 hex = 0;
         std::from_chars(s.data() + 1, s.data() + s.size(), hex, 16);
@@ -213,38 +213,38 @@ static Color parse_color(const std::string& s) {
 // Property dispatch table - maps CSS property names to Style mutators
 // ---------------------------------------------------------------------------
 
-using StyleSetter = void (*)(Style&, const std::string&);
+using StyleSetter = void (*)(Style&, const String&);
 
 static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     // Layout enums
-    {"layout", [](Style& s, const std::string& v) {
+    {"layout", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kFlexDirectionTable, v)) s.flex_direction = *e;
     }},
-    {"flex-direction", [](Style& s, const std::string& v) {
+    {"flex-direction", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kFlexDirectionTable, v)) s.flex_direction = *e;
     }},
-    {"justify", [](Style& s, const std::string& v) {
+    {"justify", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kJustifyContentTable, v)) s.justify_content = *e;
     }},
-    {"justify-content", [](Style& s, const std::string& v) {
+    {"justify-content", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kJustifyContentTable, v)) s.justify_content = *e;
     }},
-    {"align", [](Style& s, const std::string& v) {
+    {"align", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kAlignItemsTable, v)) s.align_items = *e;
     }},
-    {"align-items", [](Style& s, const std::string& v) {
+    {"align-items", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kAlignItemsTable, v)) s.align_items = *e;
     }},
-    {"text-align", [](Style& s, const std::string& v) {
+    {"text-align", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kTextAlignTable, v)) s.text_align = *e;
     }},
-    {"overflow", [](Style& s, const std::string& v) {
+    {"overflow", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kOverflowTable, v)) s.overflow = *e;
     }},
-    {"text-transform", [](Style& s, const std::string& v) {
+    {"text-transform", [](Style& s, const String& v) {
         s.text_transform = LookupEnum(kTextTransformTable, v).value_or(TextTransform::kNone);
     }},
-    {"font-weight", [](Style& s, const std::string& v) {
+    {"font-weight", [](Style& s, const String& v) {
         static constexpr std::pair<std::string_view, FontWeight> kWeightTable[] = {
             {"thin", FontWeight::kThin},
             {"extra-light", FontWeight::kExtraLight},
@@ -267,49 +267,49 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
         if (num >= 100 && num <= 900)
             s.font_weight = static_cast<FontWeight>(static_cast<u16>(num));
     }},
-    {"font-style", [](Style& s, const std::string& v) {
+    {"font-style", [](Style& s, const String& v) {
         if (v == "italic") s.font_style = FontStyle::kItalic;
         else s.font_style = FontStyle::kNormal;
     }},
-    {"cursor", [](Style& s, const std::string& v) {
+    {"cursor", [](Style& s, const String& v) {
         s.cursor = LookupEnum(kCursorTable, v).value_or(Cursor::kAuto);
     }},
-    {"position", [](Style& s, const std::string& v) {
+    {"position", [](Style& s, const String& v) {
         if (v == "relative") s.position = Position::kRelative;
         else if (v == "absolute") s.position = Position::kAbsolute;
         else if (v == "sticky") s.position = Position::kSticky;
     }},
 
     // Sizing
-    {"width", [](Style& s, const std::string& v) { s.width = parse_length(v); }},
-    {"height", [](Style& s, const std::string& v) { s.height = parse_length(v); }},
-    {"min-width", [](Style& s, const std::string& v) { s.min_width = parse_length(v); }},
-    {"min-height", [](Style& s, const std::string& v) { s.min_height = parse_length(v); }},
-    {"max-width", [](Style& s, const std::string& v) { s.max_width = parse_length(v); }},
-    {"max-height", [](Style& s, const std::string& v) { s.max_height = parse_length(v); }},
+    {"width", [](Style& s, const String& v) { s.width = parse_length(v); }},
+    {"height", [](Style& s, const String& v) { s.height = parse_length(v); }},
+    {"min-width", [](Style& s, const String& v) { s.min_width = parse_length(v); }},
+    {"min-height", [](Style& s, const String& v) { s.min_height = parse_length(v); }},
+    {"max-width", [](Style& s, const String& v) { s.max_width = parse_length(v); }},
+    {"max-height", [](Style& s, const String& v) { s.max_height = parse_length(v); }},
 
     // Flex
-    {"flex-grow", [](Style& s, const std::string& v) { s.flex_grow = parse_float(v); }},
-    {"flex-shrink", [](Style& s, const std::string& v) { s.flex_shrink = parse_float(v); }},
+    {"flex-grow", [](Style& s, const String& v) { s.flex_grow = parse_float(v); }},
+    {"flex-shrink", [](Style& s, const String& v) { s.flex_shrink = parse_float(v); }},
 
     // Spacing
-    {"padding", [](Style& s, const std::string& v) { s.padding = parse_edge_insets(v); }},
-    {"margin", [](Style& s, const std::string& v) { s.margin = parse_edge_insets(v); }},
-    {"gap", [](Style& s, const std::string& v) { s.gap = parse_float(v); }},
+    {"padding", [](Style& s, const String& v) { s.padding = parse_edge_insets(v); }},
+    {"margin", [](Style& s, const String& v) { s.margin = parse_edge_insets(v); }},
+    {"gap", [](Style& s, const String& v) { s.gap = parse_float(v); }},
 
     // Colors
-    {"background", [](Style& s, const std::string& v) { s.background = parse_color(v); }},
-    {"color", [](Style& s, const std::string& v) { s.text_color = parse_color(v); }},
-    {"text-color", [](Style& s, const std::string& v) { s.text_color = parse_color(v); }},
-    {"border-color", [](Style& s, const std::string& v) { s.border_color = parse_color(v); }},
-    {"background-end", [](Style& s, const std::string& v) { s.background_end = parse_color(v); }},
-    {"gradient-end", [](Style& s, const std::string& v) { s.background_end = parse_color(v); }},
-    {"gradient-angle", [](Style& s, const std::string& v) { s.gradient_angle = parse_float(v); }},
-    {"gradient-type", [](Style& s, const std::string& v) {
+    {"background", [](Style& s, const String& v) { s.background = parse_color(v); }},
+    {"color", [](Style& s, const String& v) { s.text_color = parse_color(v); }},
+    {"text-color", [](Style& s, const String& v) { s.text_color = parse_color(v); }},
+    {"border-color", [](Style& s, const String& v) { s.border_color = parse_color(v); }},
+    {"background-end", [](Style& s, const String& v) { s.background_end = parse_color(v); }},
+    {"gradient-end", [](Style& s, const String& v) { s.background_end = parse_color(v); }},
+    {"gradient-angle", [](Style& s, const String& v) { s.gradient_angle = parse_float(v); }},
+    {"gradient-type", [](Style& s, const String& v) {
         if (v == "radial") s.gradient_type = GradientType::kRadial;
         else s.gradient_type = GradientType::kLinear;
     }},
-    {"gradient-stops", [](Style& s, const std::string& v) {
+    {"gradient-stops", [](Style& s, const String& v) {
         // Parse comma-separated "color position%" pairs
         // e.g. "#ff0000 0%, #00ff00 50%, #0000ff 100%"
         s.gradient_stop_count = 0;
@@ -323,7 +323,7 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
             // Find the color token (starts with # or is a name)
             auto space = sv.find(' ');
             if (space == std::string_view::npos) break;
-            std::string color_str(sv.substr(0, space));
+            String color_str(sv.substr(0, space));
             sv.remove_prefix(space + 1);
 
             // Skip whitespace
@@ -347,44 +347,44 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     }},
 
     // Border
-    {"border-width", [](Style& s, const std::string& v) { s.border_width = parse_float(v); }},
-    {"border-radius", [](Style& s, const std::string& v) {
+    {"border-width", [](Style& s, const String& v) { s.border_width = parse_float(v); }},
+    {"border-radius", [](Style& s, const String& v) {
         f32 r = parse_float(v);
         s.corner_radius = s.corner_radius_tl = s.corner_radius_tr =
             s.corner_radius_br = s.corner_radius_bl = r;
     }},
-    {"corner-radius", [](Style& s, const std::string& v) {
+    {"corner-radius", [](Style& s, const String& v) {
         f32 r = parse_float(v);
         s.corner_radius = s.corner_radius_tl = s.corner_radius_tr =
             s.corner_radius_br = s.corner_radius_bl = r;
     }},
-    {"corner-radius-tl", [](Style& s, const std::string& v) { s.corner_radius_tl = parse_float(v); }},
-    {"corner-radius-tr", [](Style& s, const std::string& v) { s.corner_radius_tr = parse_float(v); }},
-    {"corner-radius-br", [](Style& s, const std::string& v) { s.corner_radius_br = parse_float(v); }},
-    {"corner-radius-bl", [](Style& s, const std::string& v) { s.corner_radius_bl = parse_float(v); }},
+    {"corner-radius-tl", [](Style& s, const String& v) { s.corner_radius_tl = parse_float(v); }},
+    {"corner-radius-tr", [](Style& s, const String& v) { s.corner_radius_tr = parse_float(v); }},
+    {"corner-radius-br", [](Style& s, const String& v) { s.corner_radius_br = parse_float(v); }},
+    {"corner-radius-bl", [](Style& s, const String& v) { s.corner_radius_bl = parse_float(v); }},
 
     // Visual
-    {"opacity", [](Style& s, const std::string& v) { s.opacity = parse_float(v); }},
-    {"aspect-ratio", [](Style& s, const std::string& v) { s.aspect_ratio = parse_float(v); }},
-    {"backdrop-blur", [](Style& s, const std::string& v) { s.backdrop_blur = parse_float(v); }},
+    {"opacity", [](Style& s, const String& v) { s.opacity = parse_float(v); }},
+    {"aspect-ratio", [](Style& s, const String& v) { s.aspect_ratio = parse_float(v); }},
+    {"backdrop-blur", [](Style& s, const String& v) { s.backdrop_blur = parse_float(v); }},
 
     // Text
-    {"font-size", [](Style& s, const std::string& v) { s.font_size = parse_float(v); }},
-    {"letter-spacing", [](Style& s, const std::string& v) { s.letter_spacing = parse_float(v); }},
-    {"line-height", [](Style& s, const std::string& v) { s.line_height_multiplier = parse_float(v); }},
+    {"font-size", [](Style& s, const String& v) { s.font_size = parse_float(v); }},
+    {"letter-spacing", [](Style& s, const String& v) { s.letter_spacing = parse_float(v); }},
+    {"line-height", [](Style& s, const String& v) { s.line_height_multiplier = parse_float(v); }},
 
     // Box shadow
-    {"shadow-color", [](Style& s, const std::string& v) { s.shadow.color = parse_color(v); }},
-    {"shadow-blur", [](Style& s, const std::string& v) { s.shadow.blur = parse_float(v); }},
-    {"shadow-spread", [](Style& s, const std::string& v) { s.shadow.spread = parse_float(v); }},
-    {"shadow-x", [](Style& s, const std::string& v) { s.shadow.offset.x = parse_float(v); }},
-    {"shadow-y", [](Style& s, const std::string& v) { s.shadow.offset.y = parse_float(v); }},
-    {"shadow-inset", [](Style& s, const std::string& v) { s.shadow.inset = (v == "true"); }},
+    {"shadow-color", [](Style& s, const String& v) { s.shadow.color = parse_color(v); }},
+    {"shadow-blur", [](Style& s, const String& v) { s.shadow.blur = parse_float(v); }},
+    {"shadow-spread", [](Style& s, const String& v) { s.shadow.spread = parse_float(v); }},
+    {"shadow-x", [](Style& s, const String& v) { s.shadow.offset.x = parse_float(v); }},
+    {"shadow-y", [](Style& s, const String& v) { s.shadow.offset.y = parse_float(v); }},
+    {"shadow-inset", [](Style& s, const String& v) { s.shadow.inset = (v == "true"); }},
 
     // Text shadow
-    {"text-shadow-color", [](Style& s, const std::string& v) { s.text_shadow_color = parse_color(v); }},
-    {"text-shadow-blur", [](Style& s, const std::string& v) { s.text_shadow_blur = parse_float(v); }},
-    {"text-decoration", [](Style& s, const std::string& v) {
+    {"text-shadow-color", [](Style& s, const String& v) { s.text_shadow_color = parse_color(v); }},
+    {"text-shadow-blur", [](Style& s, const String& v) { s.text_shadow_blur = parse_float(v); }},
+    {"text-decoration", [](Style& s, const String& v) {
         if (v == "underline")
             s.text_decoration = TextDecoration::kUnderline;
         else if (v == "line-through" || v == "strikethrough")
@@ -394,9 +394,9 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
         else
             s.text_decoration = TextDecoration::kNone;
     }},
-    {"text-decoration-color", [](Style& s, const std::string& v) { s.text_decoration_color = parse_color(v); }},
-    {"text-shadow-x", [](Style& s, const std::string& v) { s.text_shadow_offset.x = parse_float(v); }},
-    {"text-shadow-y", [](Style& s, const std::string& v) { s.text_shadow_offset.y = parse_float(v); }},
+    {"text-decoration-color", [](Style& s, const String& v) { s.text_decoration_color = parse_color(v); }},
+    {"text-shadow-x", [](Style& s, const String& v) { s.text_shadow_offset.x = parse_float(v); }},
+    {"text-shadow-y", [](Style& s, const String& v) { s.text_shadow_offset.y = parse_float(v); }},
 };
 
 static StyleSetter FindPropertySetter(std::string_view key) {
@@ -450,7 +450,7 @@ static u64 LookupStyleMask(std::string_view key) {
 // Transition parsing (pure function)
 // ---------------------------------------------------------------------------
 
-static Transition parse_transition_shorthand(const std::string& val) {
+static Transition parse_transition_shorthand(const String& val) {
     Transition trans;
     f32 dur = 0;
     const char* p = val.c_str();
@@ -470,11 +470,11 @@ static Transition parse_transition_shorthand(const std::string& val) {
 // Style parsing - dispatch table driven
 // ---------------------------------------------------------------------------
 
-Style UguiBuilder::ParseStyle(const std::unordered_map<std::string, std::string>& props) {
+Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) {
     Style s;
     for (auto& [key, val] : props) {
         if (auto setter = FindPropertySetter(key)) {
-            std::string resolved = ResolveValue(val);
+            String resolved = ResolveValue(val);
             setter(s, resolved);
         }
     }
@@ -485,7 +485,7 @@ Style UguiBuilder::ParseStyle(const std::unordered_map<std::string, std::string>
 // Widget factory registration
 // ---------------------------------------------------------------------------
 
-void UguiBuilder::RegisterType(const std::string& type_name, WidgetFactory factory) {
+void UguiBuilder::RegisterType(const String& type_name, WidgetFactory factory) {
     factories_[type_name] = std::move(factory);
 }
 
@@ -502,7 +502,7 @@ void UguiBuilder::CollectVariables(const UguiNode& node) {
         CollectVariables(child);
 }
 
-std::string UguiBuilder::ResolveValue(const std::string& value) const {
+String UguiBuilder::ResolveValue(const String& value) const {
     if (value.size() > 2 && value[0] == '-' && value[1] == '-') {
         auto it = variables_.find(value);
         if (it != variables_.end())
@@ -623,7 +623,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
         widget = tog;
     } else if (node.type == "dropdown" || node.type == "select") {
         auto* dd = new Dropdown(id);
-        std::vector<std::string> opts;
+        Vector<String> opts;
         for (auto& child_node : node.children) {
             auto text_it = child_node.properties.find("text");
             if (text_it == child_node.properties.end())
@@ -652,7 +652,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
                 auto text_it = child_node.properties.find("text");
                 if (text_it == child_node.properties.end())
                     text_it = child_node.properties.find("label");
-                std::string label = text_it != child_node.properties.end()
+                String label = text_it != child_node.properties.end()
                                         ? text_it->second
                                         : child_node.name;
                 menu->AddItem(label, nullptr);
@@ -824,7 +824,7 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
             Style& style = widget->style();
             for (auto& [key, val] : mq.properties) {
                 if (auto setter = FindPropertySetter(key)) {
-                    std::string resolved = ResolveValue(val);
+                    String resolved = ResolveValue(val);
                     setter(style, resolved);
                 }
             }

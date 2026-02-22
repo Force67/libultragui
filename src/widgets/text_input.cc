@@ -95,7 +95,7 @@ void TextInput::ResetBlink() {
     cursor_visible_ = true;
 }
 
-void TextInput::set_text(const std::string& text) {
+void TextInput::set_text(const String& text) {
     text_ = text;
     cursor_ = static_cast<u32>(text_.size());
     sel_start_ = sel_end_ = cursor_;
@@ -213,7 +213,7 @@ bool TextInput::OnKeyDown(i32 key, i32 mods) {
         if (ctrl && sel_start_ != sel_end_ && context_ && context_->platform) {
             u32 lo = std::min(sel_start_, sel_end_);
             u32 hi = std::max(sel_start_, sel_end_);
-            std::string sel = text_.substr(lo, hi - lo);
+            String sel = text_.substr(lo, hi - lo);
             context_->platform->set_clipboard_text(sel.c_str());
             return true;
         }
@@ -223,7 +223,7 @@ bool TextInput::OnKeyDown(i32 key, i32 mods) {
         if (ctrl && sel_start_ != sel_end_ && context_ && context_->platform) {
             u32 lo = std::min(sel_start_, sel_end_);
             u32 hi = std::max(sel_start_, sel_end_);
-            std::string sel = text_.substr(lo, hi - lo);
+            String sel = text_.substr(lo, hi - lo);
             context_->platform->set_clipboard_text(sel.c_str());
             DeleteSelection();
             MarkDirty();
@@ -321,7 +321,7 @@ void TextInput::OnPaint(Renderer2D& renderer) {
     bool focused = HasState(state_, WidgetState::kFocused);
     bool show_placeholder = text_.empty() && !placeholder_.empty();
 
-    const std::string& display = show_placeholder ? placeholder_ : text_;
+    const String& display = show_placeholder ? placeholder_ : text_;
     auto run = te->Shape(fh, display.c_str(), static_cast<u32>(display.size()), s.font_size,
                          s.letter_spacing, s.line_height_multiplier);
 

@@ -3,8 +3,6 @@
 
 #include <ultragui/widgets/widget.h>
 
-#include <functional>
-
 namespace ugui {
 
 /// Horizontal slider widget for selecting a numeric value within a range.
@@ -22,7 +20,7 @@ class Slider : public Widget {
   f32 max() const { return max_; }
   void set_max(f32 v) { max_ = v; }
 
-  using ChangeHandler = std::function<void(f32)>;
+  using ChangeHandler = Function<void(f32)>;
   void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
 
   bool OnClick() override;

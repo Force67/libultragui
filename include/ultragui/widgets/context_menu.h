@@ -3,10 +3,6 @@
 
 #include <ultragui/widgets/widget.h>
 
-#include <functional>
-#include <string>
-#include <vector>
-
 namespace ugui {
 
 class UIContext;
@@ -18,12 +14,12 @@ class ContextMenu : public Widget {
   using Widget::Widget;
 
   struct MenuItem {
-    std::string label;
-    std::function<void()> action;
+    String label;
+    Function<void()> action;
     bool separator = false;
   };
 
-  void AddItem(const std::string& label, std::function<void()> action);
+  void AddItem(const String& label, Function<void()> action);
   void AddSeparator();
   void ClearItems();
 
@@ -31,7 +27,7 @@ class ContextMenu : public Widget {
   void Hide(UIContext* ctx);
   bool visible() const { return visible_; }
 
-  const std::vector<MenuItem>& items() const { return items_; }
+  const Vector<MenuItem>& items() const { return items_; }
 
   bool OnClick() override;
   void Measure(f32& out_width, f32& out_height) override;
@@ -45,7 +41,7 @@ class ContextMenu : public Widget {
     return context_ ? context_->default_font : kInvalidFont;
   }
 
-  std::vector<MenuItem> items_;
+  Vector<MenuItem> items_;
   bool visible_ = false;
   i32 hover_index_ = -1;
 };

@@ -4,14 +4,11 @@
 #include <ultragui/style/enums.h>
 #include <ultragui/widgets/widget.h>
 
-#include <string>
-#include <vector>
-
 namespace ugui {
 
 /// A styled inline text span within a RichText widget.
 struct TextSpan {
-    std::string text;
+    String text;
     Color color = Color::White();
     f32 font_size = 0.0f;  // 0 = inherit from widget style
     FontWeight font_weight = FontWeight::kRegular;
@@ -24,11 +21,11 @@ class RichText : public Widget {
 public:
     using Widget::Widget;
 
-    void set_spans(const std::vector<TextSpan>& spans) {
+    void set_spans(const Vector<TextSpan>& spans) {
         spans_ = spans;
         MarkDirty();
     }
-    const std::vector<TextSpan>& spans() const { return spans_; }
+    const Vector<TextSpan>& spans() const { return spans_; }
 
     void AddSpan(const TextSpan& span) {
         spans_.push_back(span);
@@ -65,9 +62,9 @@ private:
 
     /// Shape all spans and lay them out inline with wrapping.
     /// Returns total height of all lines.
-    f32 LayoutSpans(std::vector<ShapedSpan>& out, f32 max_width) const;
+    f32 LayoutSpans(Vector<ShapedSpan>& out, f32 max_width) const;
 
-    std::vector<TextSpan> spans_;
+    Vector<TextSpan> spans_;
     FontHandle font_override_ = kInvalidFont;
 };
 

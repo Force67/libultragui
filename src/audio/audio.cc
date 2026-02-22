@@ -2,6 +2,7 @@
 #include <miniaudio.h>
 
 #include <ultragui/audio/audio.h>
+#include <ultragui/core/config.h>
 
 #include <cstdio>
 #include <mutex>
@@ -20,7 +21,7 @@ struct SoundSlot {
     SoundHandle handle = kInvalidSound;
     bool active = false;
     bool preloaded = false; // true if loaded but not yet played
-    std::string path;       // for play_loaded cloning
+    String path;            // for play_loaded cloning
 };
 
 static constexpr u32 MAX_SOUNDS = 128;

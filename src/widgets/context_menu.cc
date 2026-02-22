@@ -8,8 +8,8 @@
 
 namespace ugui {
 
-void ContextMenu::AddItem(const std::string& label,
-                          std::function<void()> action) {
+void ContextMenu::AddItem(const String& label,
+                          Function<void()> action) {
   items_.push_back({label, std::move(action), false});
   MarkDirty();
 }

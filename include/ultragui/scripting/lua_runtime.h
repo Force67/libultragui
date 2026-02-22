@@ -3,11 +3,6 @@
 
 #include <ultragui/core/types.h>
 
-#include <functional>
-#include <string>
-#include <unordered_map>
-#include <vector>
-
 struct lua_State;
 
 namespace ugui {
@@ -37,7 +32,7 @@ public:
     bool CallHandler(const char* func_name, Widget* widget);
 
     /// Expose a C++ function to Lua under ugui.{name}
-    using NativeFunction = std::function<int(lua_State*)>;
+    using NativeFunction = Function<int(lua_State*)>;
     void RegisterFunction(const char* name, NativeFunction func);
 
     lua_State* state() const { return L_; }
@@ -56,8 +51,8 @@ private:
     void RegisterApi();
 
     lua_State* L_ = nullptr;
-    std::unordered_map<std::string, Widget*> widget_registry_;
-    std::vector<NativeFunction*> native_functions_;
+    HashMap<String, Widget*> widget_registry_;
+    Vector<NativeFunction*> native_functions_;
 };
 
 } // namespace ugui

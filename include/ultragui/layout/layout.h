@@ -5,8 +5,6 @@
 #include <ultragui/core/types.h>
 #include <ultragui/style/style.h>
 
-#include <vector>
-
 namespace ugui {
 
 /// A node in the layout tree. Each node has a Style and produces a computed Rect.

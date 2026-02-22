@@ -16,7 +16,7 @@ void evaluate_layer(const AnimLayer& layer, f32 normalized_t, EvaluatedLayer& ou
 // Color string -> svg::Paint
 // ---------------------------------------------------------------------------
 
-static svg::Paint make_paint(const std::string& str, Color animated_color, bool was_animated) {
+static svg::Paint make_paint(const String& str, Color animated_color, bool was_animated) {
     svg::Paint p;
     if (was_animated) {
         p.type = svg::Paint::kSolid;
@@ -92,7 +92,7 @@ static void build_rect_path(svg::Path& path, f32 x, f32 y, f32 w, f32 h, f32 cr)
 
 // Cache parsed paths to avoid re-parsing every frame.
 // Keyed by pointer to the layer's path_data string (stable for AnimDocument lifetime).
-static thread_local std::unordered_map<const std::string*, svg::Path> s_path_cache;
+static thread_local HashMap<const String*, svg::Path> s_path_cache;
 
 static const svg::Path& get_cached_path(const AnimLayer& layer) {
     auto it = s_path_cache.find(&layer.path_data);
@@ -148,7 +148,7 @@ static svg::Shape build_shape(const AnimLayer& layer, const EvaluatedLayer& eval
 // Render layers recursively
 // ---------------------------------------------------------------------------
 
-static void render_layers(const std::vector<AnimLayer>& layers, f32 normalized_t,
+static void render_layers(const Vector<AnimLayer>& layers, f32 normalized_t,
                           svg::Document& svg_doc, svg::Transform parent_xform) {
     for (auto& layer : layers) {
         EvaluatedLayer eval;

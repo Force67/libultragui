@@ -3,9 +3,6 @@
 
 #include <ultragui/widgets/widget.h>
 
-#include <functional>
-#include <string>
-
 namespace ugui {
 
 /// Interactive checkbox widget with optional text label.
@@ -16,16 +13,16 @@ class Checkbox : public Widget {
   bool checked() const { return HasState(state_, WidgetState::kChecked); }
   void set_checked(bool v);
 
-  void set_label(const std::string& label) {
+  void set_label(const String& label) {
     label_ = label;
     MarkDirty();
   }
-  const std::string& label() const { return label_; }
+  const String& label() const { return label_; }
 
   void set_font(FontHandle font) { font_override_ = font; }
   FontHandle font() const { return font_override_; }
 
-  using ChangeHandler = std::function<void(bool)>;
+  using ChangeHandler = Function<void(bool)>;
   void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
 
   bool OnClick() override;
@@ -41,7 +38,7 @@ class Checkbox : public Widget {
     return context_ ? context_->default_font : kInvalidFont;
   }
 
-  std::string label_;
+  String label_;
   FontHandle font_override_ = kInvalidFont;
   ChangeHandler on_change_;
 };

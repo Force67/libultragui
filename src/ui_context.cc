@@ -127,7 +127,7 @@ void UIContext::set_default_font(FontHandle font) {
 
 Widget* UIContext::LoadUi(const char* path) {
     UguiDocument doc;
-    std::vector<ParseError> errors;
+    Vector<ParseError> errors;
 
     if (!ParseUguiFile(path, doc, errors)) {
         for (auto& e : errors) {
@@ -159,7 +159,7 @@ Widget* UIContext::LoadUi(const char* path) {
 
 Widget* UIContext::LoadUiString(const char* source, const char* name) {
     UguiDocument doc;
-    std::vector<ParseError> errors;
+    Vector<ParseError> errors;
 
     if (!ParseUgui(source, std::strlen(source), name, doc, errors)) {
         for (auto& e : errors) {

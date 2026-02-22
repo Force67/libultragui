@@ -3,10 +3,6 @@
 
 #include <ultragui/widgets/widget.h>
 
-#include <functional>
-#include <string>
-#include <vector>
-
 namespace ugui {
 
 /// Interactive dropdown/select widget. Displays the currently selected option
@@ -15,16 +11,16 @@ class Dropdown : public Widget {
  public:
   using Widget::Widget;
 
-  void set_options(const std::vector<std::string>& opts) {
+  void set_options(const Vector<String>& opts) {
     options_ = opts;
     MarkDirty();
   }
-  const std::vector<std::string>& options() const { return options_; }
+  const Vector<String>& options() const { return options_; }
 
   i32 selected_index() const { return selected_; }
   void set_selected_index(i32 idx);
 
-  std::string selected_text() const {
+  String selected_text() const {
     return (selected_ >= 0 && selected_ < static_cast<i32>(options_.size()))
                ? options_[selected_]
                : "";
@@ -35,7 +31,7 @@ class Dropdown : public Widget {
   void set_font(FontHandle font) { font_override_ = font; }
   FontHandle font() const { return font_override_; }
 
-  using ChangeHandler = std::function<void(i32, const std::string&)>;
+  using ChangeHandler = Function<void(i32, const String&)>;
   void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
 
   bool OnClick() override;
@@ -53,7 +49,7 @@ class Dropdown : public Widget {
     return context_ ? context_->default_font : kInvalidFont;
   }
 
-  std::vector<std::string> options_;
+  Vector<String> options_;
   i32 selected_ = -1;
   bool open_ = false;
   i32 hover_index_ = -1;

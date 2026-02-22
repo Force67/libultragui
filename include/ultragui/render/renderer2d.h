@@ -8,9 +8,6 @@
 #include <ultragui/style/enums.h>
 #include <ultragui/text/text_engine.h>
 
-#include <unordered_map>
-#include <vector>
-
 namespace ugui {
 
 struct GradientStop;
@@ -87,22 +84,22 @@ private:
     };
 
     // Quad batching
-    std::vector<Vertex2D> vertices_;
-    std::vector<u32> indices_;
-    std::vector<DrawBatch> batches_;
+    Vector<Vertex2D> vertices_;
+    Vector<u32> indices_;
+    Vector<DrawBatch> batches_;
 
     // Text batching (separate pass with text pipeline)
-    std::vector<Vertex2D> text_vertices_;
-    std::vector<u32> text_indices_;
-    std::vector<DrawBatch> text_batches_;
+    Vector<Vertex2D> text_vertices_;
+    Vector<u32> text_indices_;
+    Vector<DrawBatch> text_batches_;
     RHITextureHandle current_text_atlas_ = kInvalidTexture;
 
     RHITextureHandle GetRadialGradientTexture(Color center, Color edge);
     RHITextureHandle GetMultiStopGradientTexture(const GradientStop* stops, u32 count,
                                                   GradientType type, f32 angle_deg);
 
-    std::vector<Rect> scissor_stack_;
-    std::unordered_map<u64, RHITextureHandle> gradient_cache_;
+    Vector<Rect> scissor_stack_;
+    HashMap<u64, RHITextureHandle> gradient_cache_;
     RHITextureHandle current_texture_ = kInvalidTexture;
     Rect current_scissor_ = {};
 };

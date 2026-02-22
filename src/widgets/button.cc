@@ -7,9 +7,9 @@
 
 namespace ugui {
 
-static std::string apply_transform(const std::string& s, TextTransform t) {
+static String apply_transform(const String& s, TextTransform t) {
     if (t == TextTransform::kNone) return s;
-    std::string out = s;
+    String out = s;
     if (t == TextTransform::kUppercase) {
         for (auto& c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     } else if (t == TextTransform::kLowercase) {
@@ -40,7 +40,7 @@ void Button::Measure(f32& out_width, f32& out_height) {
     if (style_.font_weight != FontWeight::kRegular || style_.font_style != FontStyle::kNormal)
         resolved = te->ResolveFont(fh, style_.font_weight, style_.font_style);
 
-    std::string display_label = apply_transform(label_, style_.text_transform);
+    String display_label = apply_transform(label_, style_.text_transform);
     auto run = te->Shape(resolved, display_label.c_str(),
                          static_cast<u32>(display_label.size()),
                          style_.font_size, style_.letter_spacing,
@@ -65,7 +65,7 @@ void Button::OnPaint(Renderer2D& renderer) {
         if (s.font_weight != FontWeight::kRegular || s.font_style != FontStyle::kNormal)
             resolved = te->ResolveFont(fh, s.font_weight, s.font_style);
 
-        std::string display_label = apply_transform(label_, s.text_transform);
+        String display_label = apply_transform(label_, s.text_transform);
         auto run = te->Shape(resolved, display_label.c_str(),
                              static_cast<u32>(display_label.size()),
                              s.font_size, s.letter_spacing,

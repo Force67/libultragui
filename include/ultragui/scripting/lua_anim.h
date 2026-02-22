@@ -1,7 +1,7 @@
 #ifndef ULTRAGUI_SCRIPTING_LUA_ANIM_H_
 #define ULTRAGUI_SCRIPTING_LUA_ANIM_H_
 
-#include <functional>
+#include <ultragui/core/types.h>
 
 namespace ugui {
 
@@ -12,8 +12,8 @@ class Widget;
 /// Register .uganim Lua bindings (ugui.load_anim, ugui.anim_play, etc.)
 void RegisterAnimLua(
     LuaRuntime& lua,
-    std::function<VectorAnimation*(const char*, unsigned, unsigned)> loader,
-    std::function<Widget*(const char*)> find_widget);
+    Function<VectorAnimation*(const char*, unsigned, unsigned)> loader,
+    Function<Widget*(const char*)> find_widget);
 
 } // namespace ugui
 

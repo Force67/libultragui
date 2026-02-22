@@ -307,7 +307,7 @@ void LayoutEngine::Compute(LayoutNode* nodes, u32 node_count, const LayoutViewpo
     YGConfigRef config = YGConfigNew();
 
     // Create Yoga nodes
-    std::vector<YGNodeRef> yg_nodes(node_count);
+    Vector<YGNodeRef> yg_nodes(node_count);
     for (u32 i = 0; i < node_count; ++i) {
         yg_nodes[i] = YGNodeNewWithConfig(config);
         YGNodeSetContext(yg_nodes[i], &nodes[i]);

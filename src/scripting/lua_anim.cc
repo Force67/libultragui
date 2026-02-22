@@ -13,8 +13,8 @@ namespace ugui {
 
 void RegisterAnimLua(
     LuaRuntime& lua,
-    std::function<VectorAnimation*(const char*, unsigned, unsigned)> loader,
-    std::function<Widget*(const char*)> find_widget) {
+    Function<VectorAnimation*(const char*, unsigned, unsigned)> loader,
+    Function<Widget*(const char*)> find_widget) {
 
     lua.RegisterFunction("load_anim", [loader](lua_State* L) -> int {
         const char* path = luaL_checkstring(L, 1);

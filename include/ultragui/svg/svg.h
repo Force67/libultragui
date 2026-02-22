@@ -4,8 +4,6 @@
 #include <ultragui/core/types.h>
 #include <ultragui/rhi/rhi_types.h>
 
-#include <vector>
-
 namespace ugui {
 
 class RHI;
@@ -14,7 +12,7 @@ class RHI;
 struct SvgImage {
     u32 width = 0;
     u32 height = 0;
-    std::vector<u8> pixels; // RGBA8, size = width * height * 4
+    Vector<u8> pixels; // RGBA8, size = width * height * 4
 };
 
 /// Load and rasterize an SVG file to RGBA pixels.

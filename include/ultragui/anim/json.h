@@ -3,9 +3,6 @@
 
 #include <ultragui/core/types.h>
 
-#include <string>
-#include <vector>
-
 namespace ugui {
 
 /// Minimal JSON value for .uganim parsing. Supports objects, arrays,
@@ -16,14 +13,14 @@ struct JsonValue {
     Type type = kNull;
     bool bool_val = false;
     f64 number_val = 0;
-    std::string string_val;
+    String string_val;
 
     // Array storage
-    std::vector<JsonValue> array_val;
+    Vector<JsonValue> array_val;
 
     // Object storage (parallel arrays to avoid std::pair<string, incomplete type>)
-    std::vector<std::string> object_keys;
-    std::vector<JsonValue> object_vals;
+    Vector<String> object_keys;
+    Vector<JsonValue> object_vals;
 
     const JsonValue* get(const char* key) const;
     const JsonValue* at(usize index) const;

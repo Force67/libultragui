@@ -32,18 +32,18 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
 // Helpers
 // ---------------------------------------------------------------------------
 
-static std::vector<char> read_file(const std::string& path) {
+static Vector<char> read_file(const String& path) {
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file.is_open())
         return {};
     auto size = static_cast<size_t>(file.tellg());
-    std::vector<char> buf(size);
+    Vector<char> buf(size);
     file.seekg(0);
     file.read(buf.data(), static_cast<std::streamsize>(size));
     return buf;
 }
 
-static VkSurfaceFormatKHR choose_surface_format(const std::vector<VkSurfaceFormatKHR>& formats) {
+static VkSurfaceFormatKHR choose_surface_format(const Vector<VkSurfaceFormatKHR>& formats) {
     // Prefer sRGB format - the GPU automatically converts linear framebuffer writes
     // to sRGB on output, giving correct gamma-space anti-aliasing and blending.
     for (auto& f : formats) {
@@ -60,7 +60,7 @@ static VkSurfaceFormatKHR choose_surface_format(const std::vector<VkSurfaceForma
     return formats[0];
 }
 
-static VkPresentModeKHR choose_present_mode(const std::vector<VkPresentModeKHR>& modes,
+static VkPresentModeKHR choose_present_mode(const Vector<VkPresentModeKHR>& modes,
                                             bool vsync) {
     if (vsync)
         return VK_PRESENT_MODE_FIFO_KHR;
@@ -152,9 +152,9 @@ bool VulkanRHI::create_instance() {
 
     u32 glfw_ext_count = 0;
     const char** glfw_exts = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
-    std::vector<const char*> extensions(glfw_exts, glfw_exts + glfw_ext_count);
+    Vector<const char*> extensions(glfw_exts, glfw_exts + glfw_ext_count);
 
-    std::vector<const char*> layers;
+    Vector<const char*> layers;
     if (validation_enabled_) {
         layers.push_back("VK_LAYER_KHRONOS_validation");
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -199,13 +199,13 @@ bool VulkanRHI::pick_physical_device() {
     vkEnumeratePhysicalDevices(instance_, &count, nullptr);
     if (count == 0)
         return false;
-    std::vector<VkPhysicalDevice> devices(count);
+    Vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance_, &count, devices.data());
 
     for (auto dev : devices) {
         u32 qcount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &qcount, nullptr);
-        std::vector<VkQueueFamilyProperties> qfamilies(qcount);
+        Vector<VkQueueFamilyProperties> qfamilies(qcount);
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &qcount, qfamilies.data());
 
         bool found_graphics = false, found_present = false;
@@ -238,7 +238,7 @@ bool VulkanRHI::pick_physical_device() {
 bool VulkanRHI::create_device() {
     std::set<u32> unique_families = {graphics_family_, present_family_};
     float priority = 1.0f;
-    std::vector<VkDeviceQueueCreateInfo> queue_cis;
+    Vector<VkDeviceQueueCreateInfo> queue_cis;
     for (u32 family : unique_families) {
         VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
         qci.queueFamilyIndex = family;
@@ -275,12 +275,12 @@ bool VulkanRHI::create_swapchain() {
 
     u32 fmt_count;
     vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device_, surface_, &fmt_count, nullptr);
-    std::vector<VkSurfaceFormatKHR> formats(fmt_count);
+    Vector<VkSurfaceFormatKHR> formats(fmt_count);
     vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device_, surface_, &fmt_count, formats.data());
 
     u32 pm_count;
     vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device_, surface_, &pm_count, nullptr);
-    std::vector<VkPresentModeKHR> modes(pm_count);
+    Vector<VkPresentModeKHR> modes(pm_count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device_, surface_, &pm_count, modes.data());
 
     auto surface_format = choose_surface_format(formats);

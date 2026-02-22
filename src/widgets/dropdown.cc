@@ -145,7 +145,7 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
   }
 
   // --- Draw current selection text (or placeholder) ---
-  std::string display_text =
+  String display_text =
       (selected_ >= 0 && selected_ < static_cast<i32>(options_.size()))
           ? options_[selected_]
           : "Select...";

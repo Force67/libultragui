@@ -5,9 +5,6 @@
 #include <ultragui/core/types.h>
 #include <ultragui/input/input_queue.h>
 
-#include <functional>
-#include <vector>
-
 namespace ugui {
 
 class Widget;
@@ -34,13 +31,13 @@ public:
     Vec2 mouse_position() const { return mouse_pos_; }
 
     // Event callbacks (optional, for the application layer)
-    using ClickHandler = std::function<void(Widget*, MouseButton)>;
-    using HoverHandler = std::function<void(Widget*, bool)>;
+    using ClickHandler = Function<void(Widget*, MouseButton)>;
+    using HoverHandler = Function<void(Widget*, bool)>;
     void set_on_click(ClickHandler handler) { on_click_ = std::move(handler); }
     void set_on_hover(HoverHandler handler) { on_hover_ = std::move(handler); }
 
     /// Register a global keyboard shortcut. Checked before dispatching to focused widget.
-    using ShortcutHandler = std::function<void()>;
+    using ShortcutHandler = Function<void()>;
     void RegisterShortcut(i32 key, i32 mods, ShortcutHandler handler);
     void ClearShortcuts();
 
@@ -61,7 +58,7 @@ private:
         i32 mods;
         ShortcutHandler handler;
     };
-    std::vector<Shortcut> shortcuts_;
+    Vector<Shortcut> shortcuts_;
 
     ClickHandler on_click_;
     HoverHandler on_hover_;

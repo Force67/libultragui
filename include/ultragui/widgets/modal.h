@@ -3,8 +3,6 @@
 
 #include <ultragui/widgets/widget.h>
 
-#include <functional>
-
 namespace ugui {
 
 class UIContext;
@@ -27,7 +25,7 @@ public:
     void set_backdrop_color(Color c) { backdrop_color_ = c; }
     Color backdrop_color() const { return backdrop_color_; }
 
-    using DismissHandler = std::function<void()>;
+    using DismissHandler = Function<void()>;
     void set_on_dismiss(DismissHandler handler) { on_dismiss_ = std::move(handler); }
 
     void OnPaint(Renderer2D& renderer) override;

@@ -3,8 +3,6 @@
 
 #include <ultragui/widgets/widget.h>
 
-#include <string>
-
 namespace ugui {
 
 /// Text display widget.
@@ -12,11 +10,11 @@ class Text : public Widget {
 public:
     using Widget::Widget;
 
-    void set_text(const std::string& text) {
+    void set_text(const String& text) {
         text_ = text;
         MarkDirty();
     }
-    const std::string& text() const { return text_; }
+    const String& text() const { return text_; }
 
     void set_font(FontHandle font) { font_override_ = font; }
     FontHandle font() const { return font_override_; }
@@ -33,7 +31,7 @@ private:
         return context_ ? context_->default_font : kInvalidFont;
     }
 
-    std::string text_;
+    String text_;
     FontHandle font_override_ = kInvalidFont;
 };
 

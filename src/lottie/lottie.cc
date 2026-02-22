@@ -1,3 +1,4 @@
+#include <ultragui/core/config.h>
 #include <ultragui/lottie/lottie.h>
 #include <ultragui/rhi/rhi.h>
 
@@ -18,8 +19,8 @@ struct LottieAnimation::Impl {
     u32 width = 0;
     u32 height = 0;
 
-    std::vector<u32> pixel_buf; // ARGB32 premultiplied (rlottie native format)
-    std::vector<u8> rgba_buf;   // RGBA8 straight alpha (for GPU upload)
+    Vector<u32> pixel_buf; // ARGB32 premultiplied (rlottie native format)
+    Vector<u8> rgba_buf;   // RGBA8 straight alpha (for GPU upload)
 
     // Playback state
     bool playing = false;
@@ -133,7 +134,7 @@ bool LottieAnimation::LoadData(RHI* rhi, const char* json_data, const char* key,
     if (impl_)
         Unload();
 
-    auto anim = rlottie::Animation::loadFromData(std::string(json_data), std::string(key));
+    auto anim = rlottie::Animation::loadFromData(String(json_data), String(key));
     if (!anim) {
         std::fprintf(stderr, "ultragui/lottie: failed to parse lottie data\n");
         return false;

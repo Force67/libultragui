@@ -26,10 +26,6 @@
 #include <ultragui/svg/svg.h>
 #include <ultragui/widgets/widget.h>
 
-#include <functional>
-#include <string>
-#include <vector>
-
 namespace ugui {
 
 /// Configuration for UIContext initialization.
@@ -154,7 +150,7 @@ public:
 
     /// Custom paint callback for the swapchain pass. When set, replaces the
     /// default compute_layout() + paint_tree() with the callback.
-    using PaintCallback = std::function<void(Renderer2D&, RHI*)>;
+    using PaintCallback = Function<void(Renderer2D&, RHI*)>;
     void SetOnPaint(PaintCallback cb);
 
     /// Apply a theme -- sets all theme tokens as CSS variables on the builder.
@@ -162,7 +158,7 @@ public:
     void SetTheme(const Theme& theme);
 
     /// Get the current theme name (empty if no theme has been applied).
-    const std::string& theme_name() const { return current_theme_name_; }
+    const String& theme_name() const { return current_theme_name_; }
 
 private:
     Platform* platform_ = nullptr;
@@ -177,9 +173,9 @@ private:
 #if ULTRAGUI_AUDIO
     AudioEngine audio_;
 #endif
-    std::vector<VectorAnimation*> vector_anims_;
+    Vector<VectorAnimation*> vector_anims_;
 #if ULTRAGUI_LOTTIE
-    std::vector<LottieAnimation*> lottie_anims_;
+    Vector<LottieAnimation*> lottie_anims_;
 #endif
 
     Widget* root_ = nullptr;
@@ -190,23 +186,23 @@ private:
     f64 last_time_ = 0.0;
     f64 dt_ = 0.0;
 
-    std::vector<LayoutNode> layout_nodes_;
+    Vector<LayoutNode> layout_nodes_;
     bool owns_root_ = false; // true if root was created by load_ui
-    std::string current_theme_name_;
+    String current_theme_name_;
 
     struct OffscreenPass {
         RHITextureHandle target;
         Widget* root;
         Color clear_color;
     };
-    std::vector<OffscreenPass> offscreen_queue_;
+    Vector<OffscreenPass> offscreen_queue_;
     PaintCallback on_paint_cb_;
 
     struct OverlayEntry {
         Widget* widget = nullptr;
         Vec2 position;
     };
-    std::vector<OverlayEntry> overlays_;
+    Vector<OverlayEntry> overlays_;
 
     // Tooltip state
     Widget* tooltip_target_ = nullptr;

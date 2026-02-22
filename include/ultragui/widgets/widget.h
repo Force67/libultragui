@@ -7,10 +7,6 @@
 #include <ultragui/style/transition.h>
 #include <ultragui/widgets/widget_context.h>
 
-#include <optional>
-#include <string>
-#include <vector>
-
 namespace ugui {
 
 class Renderer2D;
@@ -29,13 +25,13 @@ public:
     Widget* ChildAt(u32 index) const;
     u32 child_count() const { return static_cast<u32>(children_.size()); }
     Widget* parent() const { return parent_; }
-    const std::vector<Widget*>& children() const { return children_; }
+    const Vector<Widget*>& children() const { return children_; }
 
     // --- Identity ---
     u32 id() const { return id_; }
     void set_id(u32 id) { id_ = id; }
-    const std::string& name() const { return name_; }
-    void set_name(const std::string& name) { name_ = name; }
+    const String& name() const { return name_; }
+    void set_name(const String& name) { name_ = name; }
 
     // --- Style ---
     Style& style() { return style_; }
@@ -94,8 +90,8 @@ public:
     virtual void Measure(f32& out_width, f32& out_height);
 
     // --- Tooltip ---
-    void set_tooltip(const std::string& text) { tooltip_ = text; }
-    const std::string& tooltip() const { return tooltip_; }
+    void set_tooltip(const String& text) { tooltip_ = text; }
+    const String& tooltip() const { return tooltip_; }
 
     // --- Tab navigation ---
     void set_tab_index(i32 idx) { tab_index_ = idx; }
@@ -118,23 +114,23 @@ public:
 
 protected:
     u32 id_ = 0;
-    std::string name_;
-    std::string tooltip_;
+    String name_;
+    String tooltip_;
     Widget* parent_ = nullptr;
-    std::vector<Widget*> children_;
+    Vector<Widget*> children_;
     const WidgetContext* context_ = nullptr;
 
     Style style_;
-    std::vector<StyleOverride> state_overrides_;
+    Vector<StyleOverride> state_overrides_;
     WidgetState state_ = WidgetState::kNone;
 
     struct StateTransitionConfig {
         WidgetState state;
         Transition transition;
     };
-    std::vector<StateTransitionConfig> state_transitions_;
+    Vector<StateTransitionConfig> state_transitions_;
 
-    std::optional<Style> animation_style_;
+    Optional<Style> animation_style_;
 
     Rect rect_;
     Rect content_rect_;

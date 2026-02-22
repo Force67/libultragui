@@ -13,8 +13,8 @@ namespace ugui {
 
 void RegisterLottieLua(
     LuaRuntime& lua,
-    std::function<LottieAnimation*(const char*, unsigned, unsigned)> loader,
-    std::function<Widget*(const char*)> find_widget) {
+    Function<LottieAnimation*(const char*, unsigned, unsigned)> loader,
+    Function<Widget*(const char*)> find_widget) {
 
     // ugui.LoadLottie(path, width, height) -> anim lightuserdata
     lua.RegisterFunction("load_lottie", [loader](lua_State* L) -> int {

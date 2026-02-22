@@ -5,8 +5,6 @@
 #include <ultragui/style/style.h>
 #include <ultragui/style/transition.h>
 
-#include <vector>
-
 namespace ugui {
 
 /// Animates a single style property transition between two Style states.
@@ -46,7 +44,7 @@ struct Keyframe {
 /// Multi-keyframe animation sequence
 struct KeyframeAnimation {
     u32 widget_id = 0;
-    std::vector<Keyframe> keyframes;
+    Vector<Keyframe> keyframes;
     f32 duration = 1.0f; // total seconds
     f32 delay = 0.0f;
     EasingType easing = EasingType::kLinear;
@@ -98,9 +96,9 @@ public:
     bool IsAnimating(u32 widget_id) const;
 
 private:
-    std::vector<StyleTransition> transitions_;
-    std::vector<KeyframeAnimation> animations_;
-    std::vector<ScrollAnimation> scroll_anims_;
+    Vector<StyleTransition> transitions_;
+    Vector<KeyframeAnimation> animations_;
+    Vector<ScrollAnimation> scroll_anims_;
 };
 
 } // namespace ugui

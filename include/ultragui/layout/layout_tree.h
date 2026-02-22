@@ -3,8 +3,6 @@
 
 #include <ultragui/layout/layout.h>
 
-#include <vector>
-
 namespace ugui {
 
 class Widget;
@@ -13,7 +11,7 @@ class Widget;
 /// results back to widgets. The scratch buffer is reused across frames to
 /// avoid per-frame allocation.
 void ComputeWidgetLayout(Widget* root, const LayoutViewport& vp,
-                           LayoutEngine& engine, std::vector<LayoutNode>& scratch);
+                           LayoutEngine& engine, Vector<LayoutNode>& scratch);
 
 } // namespace ugui
 

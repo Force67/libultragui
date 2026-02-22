@@ -3,9 +3,6 @@
 
 #include <ultragui/widgets/widget.h>
 
-#include <functional>
-#include <string>
-
 namespace ugui {
 
 /// Interactive button widget with text label.
@@ -13,16 +10,16 @@ class Button : public Widget {
 public:
     using Widget::Widget;
 
-    void set_label(const std::string& label) {
+    void set_label(const String& label) {
         label_ = label;
         MarkDirty();
     }
-    const std::string& label() const { return label_; }
+    const String& label() const { return label_; }
 
     void set_font(FontHandle font) { font_override_ = font; }
     FontHandle font() const { return font_override_; }
 
-    using ClickHandler = std::function<void()>;
+    using ClickHandler = Function<void()>;
     void set_on_click(ClickHandler handler) { on_click_handler_ = std::move(handler); }
 
     void Click() {
@@ -50,7 +47,7 @@ private:
         return context_ ? context_->default_font : kInvalidFont;
     }
 
-    std::string label_;
+    String label_;
     FontHandle font_override_ = kInvalidFont;
     ClickHandler on_click_handler_;
 };

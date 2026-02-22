@@ -29,7 +29,7 @@ enum class TokenType : u8 {
 
 struct Token {
     TokenType type;
-    std::string value;
+    String value;
     u32 line;
     u32 col;
 };
@@ -83,7 +83,7 @@ public:
             return lex_identifier(tok_line, tok_col);
 
         advance();
-        return {TokenType::kError, std::string(1, c), tok_line, tok_col};
+        return {TokenType::kError, String(1, c), tok_line, tok_col};
     }
 
 private:
@@ -123,7 +123,7 @@ private:
 
     Token lex_string(u32 line, u32 col) {
         advance(); // skip opening "
-        std::string val;
+        String val;
         while (pos_ < len_ && src_[pos_] != '"') {
             if (src_[pos_] == '\\' && pos_ + 1 < len_) {
                 advance();
@@ -156,7 +156,7 @@ private:
 
     Token lex_hex_color(u32 line, u32 col) {
         advance(); // skip #
-        std::string val = "#";
+        String val = "#";
         while (pos_ < len_ && std::isxdigit(src_[pos_])) {
             val += src_[pos_];
             advance();
@@ -165,7 +165,7 @@ private:
     }
 
     Token lex_number(u32 line, u32 col) {
-        std::string val;
+        String val;
         if (src_[pos_] == '-') {
             val += '-';
             advance();
@@ -208,7 +208,7 @@ private:
     }
 
     Token lex_identifier(u32 line, u32 col) {
-        std::string val;
+        String val;
         while (pos_ < len_ &&
                (std::isalnum(src_[pos_]) || src_[pos_] == '_' || src_[pos_] == '-')) {
             val += src_[pos_];
@@ -235,7 +235,7 @@ public:
         advance();
     }
 
-    bool parse(UguiDocument& doc, std::vector<ParseError>& errors) {
+    bool parse(UguiDocument& doc, Vector<ParseError>& errors) {
         errors_ = &errors;
         doc.source_path = file_;
 
@@ -262,14 +262,14 @@ private:
         return tok;
     }
 
-    void error(const std::string& msg) {
+    void error(const String& msg) {
         errors_->push_back({msg, file_, current_.line, current_.col});
         // Recovery: skip to next '}' or EOF
         while (current_.type != TokenType::kRBrace && current_.type != TokenType::kEof)
             advance();
     }
 
-    static std::string token_name(TokenType type) {
+    static String token_name(TokenType type) {
         switch (type) {
         case TokenType::kIdentifier:
             return "identifier";
@@ -338,7 +338,7 @@ private:
                 if (current_.type == TokenType::kColon) {
                     // Property
                     advance(); // skip ':'
-                    std::string value = parse_value();
+                    String value = parse_value();
                     if (current_.type == TokenType::kSemicolon)
                         advance();
                     node.properties[id.value] = value;
@@ -362,7 +362,7 @@ private:
                             advance();
                             if (current_.type == TokenType::kColon) {
                                 advance();
-                                std::string val = parse_value();
+                                String val = parse_value();
                                 if (current_.type == TokenType::kSemicolon)
                                     advance();
                                 child.properties[cid.value] = val;
@@ -413,7 +413,7 @@ private:
                 advance();
                 if (current_.type == TokenType::kColon) {
                     advance();
-                    std::string val = parse_value();
+                    String val = parse_value();
                     if (current_.type == TokenType::kSemicolon)
                         advance();
                     node.properties[id.value] = val;
@@ -450,10 +450,10 @@ private:
 
         while (current_.type != TokenType::kRBrace && current_.type != TokenType::kEof) {
             if (current_.type == TokenType::kIdentifier) {
-                std::string key = current_.value;
+                String key = current_.value;
                 advance();
                 expect(TokenType::kColon);
-                std::string val = parse_value();
+                String val = parse_value();
                 if (current_.type == TokenType::kSemicolon)
                     advance();
                 sb.properties[key] = val;
@@ -490,7 +490,7 @@ private:
             if (current_.type == TokenType::kNumber && current_.value.back() == '%') {
                 // Percentage keyframe stop: e.g. 50% { opacity: 0.6; }
                 UguiNode::KeyframeBlock::Stop stop;
-                std::string pval = current_.value;
+                String pval = current_.value;
                 pval.pop_back(); // remove '%'
                 stop.percent = 0;
                 std::from_chars(pval.data(), pval.data() + pval.size(), stop.percent);
@@ -500,10 +500,10 @@ private:
 
                 while (current_.type != TokenType::kRBrace && current_.type != TokenType::kEof) {
                     if (current_.type == TokenType::kIdentifier) {
-                        std::string key = current_.value;
+                        String key = current_.value;
                         advance();
                         expect(TokenType::kColon);
-                        std::string val = parse_value();
+                        String val = parse_value();
                         if (current_.type == TokenType::kSemicolon)
                             advance();
                         stop.properties[key] = val;
@@ -516,10 +516,10 @@ private:
                 kb.stops.push_back(std::move(stop));
             } else if (current_.type == TokenType::kIdentifier) {
                 // Top-level property: duration, loop, alternate, easing
-                std::string key = current_.value;
+                String key = current_.value;
                 advance();
                 expect(TokenType::kColon);
-                std::string val = parse_value();
+                String val = parse_value();
                 if (current_.type == TokenType::kSemicolon)
                     advance();
                 kb.properties[key] = val;
@@ -566,11 +566,11 @@ private:
             advance(); // skip '{'
             while (current_.type != TokenType::kRBrace && current_.type != TokenType::kEof) {
                 if (current_.type == TokenType::kIdentifier) {
-                    std::string key = current_.value;
+                    String key = current_.value;
                     advance();
                     if (current_.type == TokenType::kColon) {
                         advance(); // skip ':'
-                        std::string val = parse_value();
+                        String val = parse_value();
                         if (current_.type == TokenType::kSemicolon)
                             advance();
                         mq.properties[key] = val;
@@ -587,8 +587,8 @@ private:
     }
 
     // value = (identifier | string | number | hex_color)+
-    std::string parse_value() {
-        std::string val;
+    String parse_value() {
+        String val;
         while (current_.type != TokenType::kSemicolon && current_.type != TokenType::kRBrace &&
                current_.type != TokenType::kEof) {
             if (!val.empty())
@@ -602,7 +602,7 @@ private:
     Lexer lexer_;
     Token current_;
     const char* file_;
-    std::vector<ParseError>* errors_ = nullptr;
+    Vector<ParseError>* errors_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -610,12 +610,12 @@ private:
 // ---------------------------------------------------------------------------
 
 bool ParseUgui(const char* source, usize source_len, const char* filename, UguiDocument& out_doc,
-                std::vector<ParseError>& out_errors) {
+                Vector<ParseError>& out_errors) {
     Parser parser(source, source_len, filename);
     return parser.parse(out_doc, out_errors);
 }
 
-bool ParseUguiFile(const char* path, UguiDocument& out_doc, std::vector<ParseError>& out_errors) {
+bool ParseUguiFile(const char* path, UguiDocument& out_doc, Vector<ParseError>& out_errors) {
     std::ifstream file(path, std::ios::ate);
     if (!file.is_open()) {
         out_errors.push_back({"failed to open file", path, 0, 0});
@@ -623,7 +623,7 @@ bool ParseUguiFile(const char* path, UguiDocument& out_doc, std::vector<ParseErr
     }
 
     auto size = static_cast<usize>(file.tellg());
-    std::string buffer(size, '\0');
+    String buffer(size, '\0');
     file.seekg(0);
     file.read(buffer.data(), static_cast<std::streamsize>(size));
 

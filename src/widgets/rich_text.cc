@@ -6,7 +6,7 @@
 
 namespace ugui {
 
-f32 RichText::LayoutSpans(std::vector<ShapedSpan>& out, f32 max_width) const {
+f32 RichText::LayoutSpans(Vector<ShapedSpan>& out, f32 max_width) const {
     auto* te = text_engine();
     FontHandle base_fh = effective_font();
     if (!te || base_fh == kInvalidFont) return 0.0f;
@@ -57,7 +57,7 @@ void RichText::Measure(f32& out_width, f32& out_height) {
         return;
     }
 
-    std::vector<ShapedSpan> shaped;
+    Vector<ShapedSpan> shaped;
     f32 total_h = LayoutSpans(shaped, 1e6f);  // Measure without wrapping
 
     f32 max_w = 0;
@@ -77,7 +77,7 @@ void RichText::OnPaint(Renderer2D& renderer) {
     auto s = ComputedStyle();
     f32 alpha = s.opacity;
 
-    std::vector<ShapedSpan> shaped;
+    Vector<ShapedSpan> shaped;
     LayoutSpans(shaped, content_rect_.w);
 
     for (const auto& ss : shaped) {

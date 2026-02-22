@@ -29,7 +29,7 @@ struct Edge {
 // Path flattening: convert cubics to line segments
 // ============================================================================
 
-static void flatten_cubic(std::vector<Vec2>& out, Vec2 p0, Vec2 c1, Vec2 c2, Vec2 p3, f32 tol) {
+static void flatten_cubic(Vector<Vec2>& out, Vec2 p0, Vec2 c1, Vec2 c2, Vec2 p3, f32 tol) {
     // Adaptive subdivision based on flatness
     f32 dx = p3.x - p0.x;
     f32 dy = p3.y - p0.y;
@@ -57,8 +57,8 @@ static void flatten_cubic(std::vector<Vec2>& out, Vec2 p0, Vec2 c1, Vec2 c2, Vec
     flatten_cubic(out, mid, m123, m23, p3, tol);
 }
 
-static void flatten_path(const Path& path, const Transform& xform, std::vector<Vec2>& points,
-                         std::vector<u32>& subpath_starts) {
+static void flatten_path(const Path& path, const Transform& xform, Vector<Vec2>& points,
+                         Vector<u32>& subpath_starts) {
     Vec2 cur = {0, 0};
     Vec2 subpath_start = {0, 0};
 
@@ -100,8 +100,8 @@ static void flatten_path(const Path& path, const Transform& xform, std::vector<V
 // Build edge list from flattened points
 // ============================================================================
 
-static void build_edges(const std::vector<Vec2>& points, const std::vector<u32>& subpath_starts,
-                        std::vector<Edge>& edges) {
+static void build_edges(const Vector<Vec2>& points, const Vector<u32>& subpath_starts,
+                        Vector<Edge>& edges) {
     for (usize s = 0; s < subpath_starts.size(); ++s) {
         u32 start = subpath_starts[s];
         u32 end = (s + 1 < subpath_starts.size()) ? subpath_starts[s + 1]
@@ -130,9 +130,9 @@ static void build_edges(const std::vector<Vec2>& points, const std::vector<u32>&
 // Stroke expansion: convert stroke to fill outline
 // ============================================================================
 
-static void stroke_to_fill(const std::vector<Vec2>& points, const std::vector<u32>& subpath_starts,
-                           f32 width, std::vector<Vec2>& out_points,
-                           std::vector<u32>& out_starts) {
+static void stroke_to_fill(const Vector<Vec2>& points, const Vector<u32>& subpath_starts,
+                           f32 width, Vector<Vec2>& out_points,
+                           Vector<u32>& out_starts) {
     f32 half_w = width * 0.5f;
 
     for (usize s = 0; s < subpath_starts.size(); ++s) {
@@ -151,7 +151,7 @@ static void stroke_to_fill(const std::vector<Vec2>& points, const std::vector<u3
         struct SegNorm {
             Vec2 n; // left normal
         };
-        std::vector<SegNorm> norms(seg_count);
+        Vector<SegNorm> norms(seg_count);
         for (u32 i = 0; i < seg_count; ++i) {
             Vec2 d = points[start + i + 1] - points[start + i];
             f32 len = d.length();
@@ -162,7 +162,7 @@ static void stroke_to_fill(const std::vector<Vec2>& points, const std::vector<u3
         }
 
         // Build left and right offset polylines
-        std::vector<Vec2> left, right;
+        Vector<Vec2> left, right;
 
         auto avg_normal = [&](u32 seg_a, u32 seg_b) -> Vec2 {
             Vec2 n = (norms[seg_a].n + norms[seg_b].n);
@@ -324,7 +324,7 @@ struct BBox {
     f32 height() const { return y1 - y0; }
 };
 
-static BBox compute_bbox(const std::vector<Edge>& edges) {
+static BBox compute_bbox(const Vector<Edge>& edges) {
     BBox bb;
     for (auto& e : edges) {
         bb.add(e.x0, e.y0);
@@ -399,7 +399,7 @@ struct ActiveEdge {
     i32 dir;  // winding direction
 };
 
-static void rasterize_edges(const std::vector<Edge>& edges, FillRule rule, u8* pixels, u32 width,
+static void rasterize_edges(const Vector<Edge>& edges, FillRule rule, u8* pixels, u32 width,
                             u32 height, const Paint& paint, f32 opacity, const Document& doc) {
     if (edges.empty())
         return;
@@ -407,7 +407,7 @@ static void rasterize_edges(const std::vector<Edge>& edges, FillRule rule, u8* p
     BBox bbox = compute_bbox(edges);
 
     // Sort edges by min-Y (reuse scratch to avoid per-call allocation)
-    static thread_local std::vector<usize> sorted;
+    static thread_local Vector<usize> sorted;
     sorted.resize(edges.size());
     for (usize i = 0; i < edges.size(); ++i)
         sorted[i] = i;
@@ -415,9 +415,9 @@ static void rasterize_edges(const std::vector<Edge>& edges, FillRule rule, u8* p
               [&](usize a, usize b) { return edges[a].y0 < edges[b].y0; });
 
     // Coverage buffer for one pixel row
-    static thread_local std::vector<f32> coverage;
+    static thread_local Vector<f32> coverage;
     coverage.assign(width, 0.0f);
-    static thread_local std::vector<ActiveEdge> active;
+    static thread_local Vector<ActiveEdge> active;
     active.clear();
 
     usize edge_idx = 0; // next edge to activate
@@ -547,11 +547,11 @@ void Rasterize(const Document& doc, u8* pixels, u32 width, u32 height) {
     }
 
     // Scratch buffers - reused across shapes (clear preserves capacity)
-    std::vector<Vec2> points;
-    std::vector<u32> subpath_starts;
-    std::vector<Edge> edges;
-    std::vector<Vec2> stroke_points;
-    std::vector<u32> stroke_starts;
+    Vector<Vec2> points;
+    Vector<u32> subpath_starts;
+    Vector<Edge> edges;
+    Vector<Vec2> stroke_points;
+    Vector<u32> stroke_starts;
 
     for (auto& shape : doc.shapes) {
         Transform xform = view_xform * shape.transform;

@@ -5,10 +5,6 @@
 #include <ultragui/core/types.h>
 #include <ultragui/style/transition.h>
 
-#include <string>
-#include <unordered_map>
-#include <vector>
-
 // Forward declarations for SVG types used by the renderer
 namespace ugui { namespace svg {
 struct Path;
@@ -38,7 +34,7 @@ struct AnimKeyframe {
 /// A track of keyframes for one property.
 struct AnimPropertyTrack {
     AnimProperty property;
-    std::vector<AnimKeyframe> keyframes;
+    Vector<AnimKeyframe> keyframes;
 };
 
 /// Shape types supported in .uganim.
@@ -53,7 +49,7 @@ enum class AnimShapeType : u8 {
 /// A layer in the animation. Each layer has a shape, static defaults,
 /// keyframed property tracks, and optional children (for groups).
 struct AnimLayer {
-    std::string name;
+    String name;
     AnimShapeType shape_type = AnimShapeType::kRect;
 
     // Static shape parameters (defaults, overridden by keyframes)
@@ -65,20 +61,20 @@ struct AnimLayer {
     f32 stroke_width = 1;
 
     // Path data (for shape_type == Path)
-    std::string path_data; // SVG path "d" attribute string
+    String path_data; // SVG path "d" attribute string
 
     // Fill and stroke (as color strings or "$gradient_name")
-    std::string fill_str = "none";
-    std::string stroke_str = "none";
+    String fill_str = "none";
+    String stroke_str = "none";
 
     // Mask: name of another layer to clip by
-    std::string mask_layer;
+    String mask_layer;
 
     // Animated property tracks
-    std::vector<AnimPropertyTrack> tracks;
+    Vector<AnimPropertyTrack> tracks;
 
     // Children (for groups)
-    std::vector<AnimLayer> children;
+    Vector<AnimLayer> children;
 };
 
 /// Evaluated layer state at a specific point in time.
@@ -101,8 +97,8 @@ struct AnimDocument {
     f32 duration = 1.0f;
     bool loop = false;
 
-    std::unordered_map<std::string, std::string> gradients_json; // raw gradient data for svg
-    std::vector<AnimLayer> layers;
+    HashMap<String, String> gradients_json; // raw gradient data for svg
+    Vector<AnimLayer> layers;
 };
 
 } // namespace ugui

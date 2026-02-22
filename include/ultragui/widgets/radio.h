@@ -3,9 +3,6 @@
 
 #include <ultragui/widgets/widget.h>
 
-#include <functional>
-#include <string>
-
 namespace ugui {
 
 /// Interactive radio button widget with group-based mutual exclusion.
@@ -16,19 +13,19 @@ class Radio : public Widget {
   bool selected() const { return HasState(state_, WidgetState::kChecked); }
   void set_selected(bool v);
 
-  void set_group(const std::string& g) { group_ = g; }
-  const std::string& group() const { return group_; }
+  void set_group(const String& g) { group_ = g; }
+  const String& group() const { return group_; }
 
-  void set_label(const std::string& label) {
+  void set_label(const String& label) {
     label_ = label;
     MarkDirty();
   }
-  const std::string& label() const { return label_; }
+  const String& label() const { return label_; }
 
   void set_font(FontHandle font) { font_override_ = font; }
   FontHandle font() const { return font_override_; }
 
-  using ChangeHandler = std::function<void(bool)>;
+  using ChangeHandler = Function<void(bool)>;
   void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
 
   bool OnClick() override;
@@ -45,8 +42,8 @@ class Radio : public Widget {
   }
   void DeselectSiblings();
 
-  std::string group_;
-  std::string label_;
+  String group_;
+  String label_;
   FontHandle font_override_ = kInvalidFont;
   ChangeHandler on_change_;
 };

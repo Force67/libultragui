@@ -1,7 +1,7 @@
 #ifndef ULTRAGUI_SCRIPTING_LUA_LOTTIE_H_
 #define ULTRAGUI_SCRIPTING_LUA_LOTTIE_H_
 
-#include <functional>
+#include <ultragui/core/types.h>
 
 namespace ugui {
 
@@ -14,8 +14,8 @@ class Widget;
 /// The find_widget function locates widgets by name for lottie_attach.
 void RegisterLottieLua(
     LuaRuntime& lua,
-    std::function<LottieAnimation*(const char*, unsigned, unsigned)> loader,
-    std::function<Widget*(const char*)> find_widget);
+    Function<LottieAnimation*(const char*, unsigned, unsigned)> loader,
+    Function<Widget*(const char*)> find_widget);
 
 } // namespace ugui
 

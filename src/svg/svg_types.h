@@ -2,6 +2,7 @@
 #define SRC_SVG_SVG_TYPES_H_
 
 #include <ultragui/core/color.h>
+#include <ultragui/core/config.h>
 #include <ultragui/core/math.h>
 #include <ultragui/core/types.h>
 
@@ -59,7 +60,7 @@ struct PathEntry {
 };
 
 struct Path {
-    std::vector<PathEntry> entries;
+    Vector<PathEntry> entries;
 
     void MoveTo(Vec2 p) { entries.push_back({PathCmd::kMoveTo, {p, {}, {}}}); }
     void LineTo(Vec2 p) { entries.push_back({PathCmd::kLineTo, {p, {}, {}}}); }
@@ -86,7 +87,7 @@ struct Gradient {
     f32 x1 = 0, y1 = 0, x2 = 1, y2 = 0;           // linear
     f32 cx = 0.5f, cy = 0.5f, r = 0.5f;             // radial
     f32 fx = -1, fy = -1;                            // radial focus (-1 = use center)
-    std::vector<GradientStop> stops;
+    Vector<GradientStop> stops;
     Transform transform = Transform::Identity();
     bool user_space = false; // true = userSpaceOnUse
     SpreadMethod spread = SpreadMethod::kPad;
@@ -96,7 +97,7 @@ struct Paint {
     enum Type : u8 { kNone, kSolid, kGradientRef };
     Type type = kNone;
     Color color;
-    std::string gradient_id;
+    String gradient_id;
 };
 
 // --- Shape ---
@@ -118,8 +119,8 @@ struct Shape {
 struct Document {
     f32 width = 0, height = 0;
     f32 view_x = 0, view_y = 0, view_w = 0, view_h = 0;
-    std::vector<Shape> shapes;
-    std::unordered_map<std::string, Gradient> gradients;
+    Vector<Shape> shapes;
+    HashMap<String, Gradient> gradients;
 };
 
 // Internal API

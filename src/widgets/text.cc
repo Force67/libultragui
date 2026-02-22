@@ -6,9 +6,9 @@
 
 namespace ugui {
 
-static std::string apply_transform(const std::string& s, TextTransform t) {
+static String apply_transform(const String& s, TextTransform t) {
     if (t == TextTransform::kNone) return s;
-    std::string out = s;
+    String out = s;
     if (t == TextTransform::kUppercase) {
         for (auto& c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     } else if (t == TextTransform::kLowercase) {
@@ -39,7 +39,7 @@ void Text::Measure(f32& out_width, f32& out_height) {
     if (style_.font_weight != FontWeight::kRegular || style_.font_style != FontStyle::kNormal)
         resolved = te->ResolveFont(fh, style_.font_weight, style_.font_style);
 
-    std::string display_text = apply_transform(text_, style_.text_transform);
+    String display_text = apply_transform(text_, style_.text_transform);
     auto run =
         te->Shape(resolved, display_text.c_str(), static_cast<u32>(display_text.size()),
                   style_.font_size, style_.letter_spacing, style_.line_height_multiplier);
@@ -64,7 +64,7 @@ void Text::OnPaint(Renderer2D& renderer) {
         resolved = te->ResolveFont(fh, s.font_weight, s.font_style);
 
     // Apply text transform
-    std::string display_text = apply_transform(text_, s.text_transform);
+    String display_text = apply_transform(text_, s.text_transform);
 
     // Always shape fresh - the scratch buffer pointer from measure may be stale
     auto run =

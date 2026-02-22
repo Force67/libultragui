@@ -1,6 +1,8 @@
 #ifndef ULTRAGUI_CORE_TYPES_H_
 #define ULTRAGUI_CORE_TYPES_H_
 
+#include <ultragui/core/config.h>
+
 #include <cstddef>
 #include <cstdint>
 

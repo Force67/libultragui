@@ -51,7 +51,7 @@ struct FontSlot {
 };
 
 struct FontInfo {
-    std::string family_name;
+    String family_name;
     FontWeight weight = FontWeight::kRegular;
     FontStyle style = FontStyle::kNormal;
 };
@@ -73,8 +73,8 @@ struct TextEngine::Impl {
     // Per-shape glyph buffers. Each Shape() call gets its own vector.
     // Moving inner vectors (when the outer vector grows) doesn't move heap data,
     // so TextRun::glyphs pointers into inner vectors remain valid for the frame.
-    std::vector<std::vector<TextRun::Glyph>> glyph_runs;
-    std::vector<TextLayout::Line> scratch_lines;
+    Vector<Vector<TextRun::Glyph>> glyph_runs;
+    Vector<TextLayout::Line> scratch_lines;
 
     CachedGlyph* rasterize_glyph(FontHandle font, u32 glyph_id, u32 pixel_size);
 };
@@ -175,7 +175,7 @@ FontHandle TextEngine::ResolveFont(FontHandle base_font, FontWeight weight, Font
         return base_font;
 
     const auto& base_info = impl_->font_info_[base_font];
-    const std::string& family = base_info.family_name;
+    const String& family = base_info.family_name;
     if (family.empty())
         return base_font;
 

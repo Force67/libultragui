@@ -15,14 +15,14 @@ namespace svg {
 // ============================================================================
 
 struct XmlAttr {
-    std::string name;
-    std::string value;
+    String name;
+    String value;
 };
 
 struct XmlNode {
-    std::string tag;
-    std::vector<XmlAttr> attrs;
-    std::vector<XmlNode> children;
+    String tag;
+    Vector<XmlAttr> attrs;
+    Vector<XmlNode> children;
 
     const char* attr(const char* name) const {
         for (auto& a : attrs)
@@ -68,20 +68,20 @@ struct XmlParser {
         }
     }
 
-    std::string read_name() {
+    String read_name() {
         const char* start = p;
         while (!eof() && (std::isalnum(static_cast<u8>(*p)) || *p == '-' || *p == '_' ||
                           *p == ':' || *p == '.'))
             ++p;
-        return std::string(start, p);
+        return String(start, p);
     }
 
-    std::string read_quoted() {
+    String read_quoted() {
         char q = next(); // consume opening quote
         const char* start = p;
         while (!eof() && *p != q)
             ++p;
-        std::string result(start, p);
+        String result(start, p);
         if (!eof())
             ++p; // consume closing quote
         return result;
@@ -372,7 +372,7 @@ static Paint parse_paint(const char* s) {
         const char* end = std::strchr(start, ')');
         if (end) {
             paint.type = Paint::kGradientRef;
-            paint.gradient_id = std::string(start, end);
+            paint.gradient_id = String(start, end);
         }
         return paint;
     }
@@ -870,7 +870,7 @@ struct StyleAttrs {
     const char* transform = nullptr;
 
     // Temp storage for parsed style attribute values
-    std::vector<std::string> storage;
+    Vector<String> storage;
 };
 
 static void parse_style_attr(const char* style_str, StyleAttrs& out) {
@@ -889,7 +889,7 @@ static void parse_style_attr(const char* style_str, StyleAttrs& out) {
                 ++p;
             continue;
         }
-        std::string key(key_start, p);
+        String key(key_start, p);
         ++p; // skip ':'
         while (*p && std::isspace(static_cast<u8>(*p)))
             ++p;

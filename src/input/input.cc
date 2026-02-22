@@ -155,8 +155,8 @@ bool InputRouter::Process(Widget* root) {
         if (evt.pressed && evt.key == 258 /* GLFW_KEY_TAB */) {
             bool reverse = (evt.mods & 0x0001 /* GLFW_MOD_SHIFT */) != 0;
             // Collect focusable widgets
-            std::vector<Widget*> focusable;
-            std::function<void(Widget*)> collect = [&](Widget* w) {
+            Vector<Widget*> focusable;
+            Function<void(Widget*)> collect = [&](Widget* w) {
                 if (w->focusable())
                     focusable.push_back(w);
                 for (auto* child : w->children())

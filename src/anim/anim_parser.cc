@@ -181,7 +181,7 @@ bool parse_anim_file(const char* path, AnimDocument& out) {
     }
     auto size = file.tellg();
     file.seekg(0);
-    std::string data(static_cast<usize>(size), '\0');
+    String data(static_cast<usize>(size), '\0');
     file.read(data.data(), size);
 
     JsonValue root;
