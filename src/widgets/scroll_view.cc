@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <ranges>
 
 namespace ugui {
 
@@ -35,6 +36,22 @@ void ScrollView::OnLayout(const Rect& rect, const Rect& content_rect) {
     f32 max_scroll_y = std::max(0.0f, content_size_.y - content_rect.h);
     scroll_offset_.x = std::clamp(scroll_offset_.x, 0.0f, max_scroll_x);
     scroll_offset_.y = std::clamp(scroll_offset_.y, 0.0f, max_scroll_y);
+}
+
+Widget* ScrollView::HitTest(Vec2 point) {
+    if (!rect_.contains(point))
+        return nullptr;
+
+    // Children are visually translated by scroll_offset_ in the paint pass.
+    // Translate input coordinates back into the children's layout space.
+    if (content_rect_.contains(point)) {
+        Vec2 child_point = point + scroll_offset_;
+        for (auto* child : children_ | std::views::reverse) {
+            if (auto* hit = child->HitTest(child_point))
+                return hit;
+        }
+    }
+    return this;
 }
 
 void ScrollView::OnUpdate(f64 dt) {

@@ -62,9 +62,10 @@ void Dropdown::OnUpdate(f64) {
     f32 list_top = rect_.y + rect_.h;
     f32 list_bottom = list_top + row_height * static_cast<f32>(options_.size());
 
-    if (evt.position.y >= list_top && evt.position.y < list_bottom &&
-        evt.position.x >= rect_.x && evt.position.x <= rect_.x + rect_.w) {
-      i32 idx = static_cast<i32>((evt.position.y - list_top) / row_height);
+    Vec2 pos = InputToLayoutPoint(evt.position);
+    if (pos.y >= list_top && pos.y < list_bottom &&
+        pos.x >= rect_.x && pos.x <= rect_.x + rect_.w) {
+      i32 idx = static_cast<i32>((pos.y - list_top) / row_height);
       if (idx >= 0 && idx < static_cast<i32>(options_.size())) {
         selected_ = idx;
         if (on_change_)
@@ -129,7 +130,7 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
 
   // Determine hover index from mouse position when open
   if (open_ && context_ && context_->platform) {
-    Vec2 mouse = context_->platform->input_queue().mouse_pos;
+    Vec2 mouse = InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
     f32 list_top = rect_.y + rect_.h;
     f32 list_bottom =
         list_top + row_height * static_cast<f32>(options_.size());

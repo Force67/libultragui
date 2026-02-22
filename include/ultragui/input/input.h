@@ -6,6 +6,7 @@
 #include <ultragui/input/input_queue.h>
 
 #include <functional>
+#include <vector>
 
 namespace ugui {
 
@@ -21,6 +22,9 @@ public:
     /// Process all pending input from the queue. Call once per frame.
     /// Returns true if any input was consumed.
     bool Process(Widget* root);
+
+    /// Clear cached hover/press/focus state. Call when replacing the widget tree.
+    void ResetState();
 
     Widget* hovered_widget() const { return hovered_; }
     Widget* focused_widget() const { return focused_; }

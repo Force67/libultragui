@@ -77,6 +77,10 @@ public:
     bool contains(Vec2 point) const { return rect_.contains(point); }
     virtual Widget* HitTest(Vec2 point);
 
+    /// Convert a screen/input point into this widget's layout space by
+    /// accounting for ancestor scroll offsets.
+    Vec2 InputToLayoutPoint(Vec2 point) const;
+
     // --- Context propagation ---
     void SetContext(const WidgetContext* ctx);
     const WidgetContext* context() const { return context_; }

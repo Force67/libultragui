@@ -37,6 +37,8 @@ bool UIContext::Init(const UIConfig& config) {
 
     if (!platform_->Init(wcfg)) {
         std::fprintf(stderr, "ultragui: failed to initialize platform\n");
+        delete platform_;
+        platform_ = nullptr;
         return false;
     }
 
@@ -50,6 +52,8 @@ bool UIContext::Init(const UIConfig& config) {
 
     if (!rhi_->Init(rcfg)) {
         std::fprintf(stderr, "ultragui: failed to initialize Vulkan RHI\n");
+        delete rhi_;
+        rhi_ = nullptr;
         platform_->Shutdown();
         delete platform_;
         platform_ = nullptr;
@@ -133,8 +137,14 @@ Widget* UIContext::LoadUi(const char* path) {
         return nullptr;
     }
 
-    if (owns_root_)
-        delete root_;
+    if (root_) {
+        input_.ResetState();
+        tooltip_target_ = nullptr;
+        tooltip_visible_ = false;
+        lua_.ClearWidgetRegistry();
+        if (owns_root_)
+            delete root_;
+    }
 
     root_ = builder_.Build(doc);
     owns_root_ = true;
@@ -159,8 +169,14 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
         return nullptr;
     }
 
-    if (owns_root_)
-        delete root_;
+    if (root_) {
+        input_.ResetState();
+        tooltip_target_ = nullptr;
+        tooltip_visible_ = false;
+        lua_.ClearWidgetRegistry();
+        if (owns_root_)
+            delete root_;
+    }
 
     root_ = builder_.Build(doc);
     owns_root_ = true;
@@ -182,6 +198,11 @@ bool UIContext::ExecScript(const char* script, const char* name) {
 }
 
 void UIContext::set_root(Widget* root) {
+    input_.ResetState();
+    tooltip_target_ = nullptr;
+    tooltip_visible_ = false;
+    lua_.ClearWidgetRegistry();
+
     if (owns_root_)
         delete root_;
     root_ = root;
@@ -378,9 +399,11 @@ void UIContext::DrawTooltip() {
 }
 
 void UIContext::Shutdown() {
+    input_.ResetState();
     tooltip_target_ = nullptr;
     tooltip_visible_ = false;
     overlays_.clear();
+    lua_.ClearWidgetRegistry();
 
     if (owns_root_) {
         delete root_;

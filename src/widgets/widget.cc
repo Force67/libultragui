@@ -2,6 +2,7 @@
 #include <ultragui/layout/layout.h>
 #include <ultragui/render/renderer2d.h>
 #include <ultragui/render/vertex.h>
+#include <ultragui/widgets/scroll_view.h>
 #include <ultragui/widgets/widget.h>
 
 #include <algorithm>
@@ -130,6 +131,16 @@ Widget* Widget::HitTest(Vec2 point) {
             return hit;
     }
     return this;
+}
+
+Vec2 Widget::InputToLayoutPoint(Vec2 point) const {
+    const Widget* p = parent_;
+    while (p) {
+        if (auto* sv = dynamic_cast<const ScrollView*>(p))
+            point += sv->scroll_offset();
+        p = p->parent();
+    }
+    return point;
 }
 
 void Widget::OnLayout(const Rect& rect, const Rect& content_rect) {

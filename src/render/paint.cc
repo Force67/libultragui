@@ -32,9 +32,11 @@ static void PaintWidgetTreeImpl(Widget* widget, Renderer2D& renderer, Vec2 scrol
         widget->ApplyLayoutResult(tmp);
     }
 
-    bool clip = s.overflow == Overflow::kHidden || s.overflow == Overflow::kScroll;
+    bool is_scroll_view = dynamic_cast<ScrollView*>(widget) != nullptr;
+    bool clip = is_scroll_view || s.overflow == Overflow::kHidden || s.overflow == Overflow::kScroll;
+    Rect clip_rect = is_scroll_view ? widget->content_rect() : widget->rect();
     if (clip)
-        renderer.PushScissor(widget->rect());
+        renderer.PushScissor(clip_rect);
 
     widget->OnPaint(renderer);
 

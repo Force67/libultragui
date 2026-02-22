@@ -14,7 +14,7 @@ bool Slider::OnClick() {
   dragging_ = true;
 
   if (context_ && context_->platform) {
-    f32 mouse_x = context_->platform->input_queue().mouse_pos.x;
+    f32 mouse_x = InputToLayoutPoint(context_->platform->input_queue().mouse_pos).x;
     f32 track_x = content_rect_.x;
     f32 track_w = content_rect_.w;
 
@@ -35,7 +35,7 @@ bool Slider::OnClick() {
 
 void Slider::OnUpdate(f64 dt) {
   if (HasState(state_, WidgetState::kPressed) && context_ && context_->platform) {
-    f32 mouse_x = context_->platform->input_queue().mouse_pos.x;
+    f32 mouse_x = InputToLayoutPoint(context_->platform->input_queue().mouse_pos).x;
     f32 track_x = content_rect_.x;
     f32 track_w = content_rect_.w;
 

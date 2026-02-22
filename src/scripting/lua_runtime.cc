@@ -53,6 +53,10 @@ void LuaRuntime::Shutdown() {
         lua_close(L_);
         L_ = nullptr;
     }
+    for (auto* fn : native_functions_) {
+        delete fn;
+    }
+    native_functions_.clear();
     widget_registry_.clear();
 }
 
@@ -96,6 +100,10 @@ void LuaRuntime::UnregisterWidget(Widget* widget) {
     }
 }
 
+void LuaRuntime::ClearWidgetRegistry() {
+    widget_registry_.clear();
+}
+
 Widget* LuaRuntime::FindRegisteredWidget(const char* name) const {
     auto it = widget_registry_.find(name);
     return it != widget_registry_.end() ? it->second : nullptr;
@@ -132,6 +140,7 @@ void LuaRuntime::RegisterFunction(const char* name, NativeFunction func) {
     }
 
     auto* fn = new NativeFunction(std::move(func));
+    native_functions_.push_back(fn);
     lua_pushlightuserdata(L_, fn);
     lua_pushcclosure(
         L_,

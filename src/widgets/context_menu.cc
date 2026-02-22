@@ -55,7 +55,7 @@ void ContextMenu::Hide(UIContext* ctx) {
 bool ContextMenu::OnClick() {
   if (!context_ || !context_->platform || items_.empty()) return false;
 
-  Vec2 mouse = context_->platform->input_queue().mouse_pos;
+  Vec2 mouse = InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
 
   auto s = ComputedStyle();
   f32 font_size = s.font_size > 0.0f ? s.font_size : 14.0f;
@@ -133,7 +133,7 @@ void ContextMenu::OnPaint(Renderer2D& renderer) {
   // Determine hover index from mouse position
   hover_index_ = -1;
   if (context_ && context_->platform) {
-    Vec2 mouse = context_->platform->input_queue().mouse_pos;
+    Vec2 mouse = InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
     f32 y = content_rect_.y;
     for (i32 i = 0; i < static_cast<i32>(items_.size()); ++i) {
       f32 item_h =

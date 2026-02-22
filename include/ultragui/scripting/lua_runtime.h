@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 struct lua_State;
 
@@ -30,6 +31,7 @@ public:
     /// Register a widget so Lua can access it via ugui.find("name").
     void RegisterWidget(Widget* widget);
     void UnregisterWidget(Widget* widget);
+    void ClearWidgetRegistry();
 
     /// Call a named Lua function (used for on_click, etc.)
     bool CallHandler(const char* func_name, Widget* widget);
@@ -55,6 +57,7 @@ private:
 
     lua_State* L_ = nullptr;
     std::unordered_map<std::string, Widget*> widget_registry_;
+    std::vector<NativeFunction*> native_functions_;
 };
 
 } // namespace ugui

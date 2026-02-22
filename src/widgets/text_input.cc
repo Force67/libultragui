@@ -267,7 +267,7 @@ bool TextInput::OnClick() {
 
     // Mouse position relative to text origin
     Vec2 mp = context_ && context_->platform
-                  ? context_->platform->input_queue().mouse_pos
+                  ? InputToLayoutPoint(context_->platform->input_queue().mouse_pos)
                   : Vec2{0, 0};
     f32 local_x = mp.x - content_rect_.x + scroll_x_;
     cursor_ = PosFromX(local_x, run);

@@ -16,3 +16,8 @@ if(ULTRAGUI_LOTTIE)
     target_link_libraries(test_lottie ultragui rlottie)
     add_test(NAME lottie COMMAND test_lottie)
 endif()
+
+# Runtime safety regression tests
+add_executable(test_runtime_safety test_runtime_safety.cc)
+target_link_libraries(test_runtime_safety ultragui)
+add_test(NAME runtime_safety COMMAND test_runtime_safety)

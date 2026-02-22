@@ -9,6 +9,18 @@
 
 namespace ugui {
 
+static bool IsInWidgetTree(const Widget* root, const Widget* target) {
+    if (!root || !target)
+        return false;
+    if (root == target)
+        return true;
+    for (auto* child : root->children()) {
+        if (IsInWidgetTree(child, target))
+            return true;
+    }
+    return false;
+}
+
 void InputRouter::Init(Platform* platform) {
     platform_ = platform;
 }
@@ -19,6 +31,20 @@ bool InputRouter::Process(Widget* root) {
 
     auto& queue = platform_->input_queue();
     bool consumed = false;
+
+    // Root may be replaced between frames. Drop stale cached pointers before
+    // any dereference.
+    if (hovered_ && !IsInWidgetTree(root, hovered_)) {
+        hovered_ = nullptr;
+        platform_->SetCursor(Cursor::kAuto);
+    }
+    if (pressed_ && !IsInWidgetTree(root, pressed_)) {
+        pressed_ = nullptr;
+        dragging_ = false;
+    }
+    if (focused_ && !IsInWidgetTree(root, focused_)) {
+        focused_ = nullptr;
+    }
 
     // Process mouse movement -> hover detection
     if (queue.move_count > 0) {
@@ -206,6 +232,35 @@ void InputRouter::set_focus(Widget* widget) {
     if (focused_) {
         focused_->set_widget_state(focused_->widget_state() | WidgetState::kFocused);
     }
+}
+
+void InputRouter::ResetState() {
+    if (hovered_) {
+        auto state = hovered_->widget_state();
+        hovered_->set_widget_state(static_cast<WidgetState>(
+            static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kHovered)));
+    }
+    if (pressed_) {
+        auto state = pressed_->widget_state();
+        pressed_->set_widget_state(static_cast<WidgetState>(
+            static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kPressed)));
+    }
+    if (focused_) {
+        auto state = focused_->widget_state();
+        focused_->set_widget_state(static_cast<WidgetState>(
+            static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kFocused)));
+    }
+
+    hovered_ = nullptr;
+    focused_ = nullptr;
+    pressed_ = nullptr;
+    dragging_ = false;
+    mouse_pos_ = Vec2::Zero();
+    drag_start_ = Vec2::Zero();
+    drag_prev_ = Vec2::Zero();
+
+    if (platform_)
+        platform_->SetCursor(Cursor::kAuto);
 }
 
 void InputRouter::RegisterShortcut(i32 key, i32 mods, ShortcutHandler handler) {
