@@ -17,6 +17,7 @@ option(ULTRAGUI_BACKEND_VULKAN "Enable Vulkan backend" ON)
 option(ULTRAGUI_BACKEND_D3D12 "Enable D3D12 backend" OFF)
 option(ULTRAGUI_AUDIO "Enable audio engine (miniaudio)" ON)
 option(ULTRAGUI_LOTTIE "Enable Lottie animation support (rlottie)" ON)
+option(ULTRAGUI_LUA "Enable built-in Lua scripting runtime" ON)
 
 # Compiler warnings
 add_library(ultragui_warnings INTERFACE)
@@ -41,7 +42,9 @@ endif()
 
 pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
 pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
-pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
+if(ULTRAGUI_LUA)
+    pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
+endif()
 
 # GLFW (for examples/platform)
 find_package(glfw3 3.3 REQUIRED)
@@ -117,14 +120,12 @@ set(ULTRAGUI_SOURCES
     src/idl/parser.cc
     src/idl/builder.cc
     src/input/input.cc
-    src/scripting/lua_runtime.cc
     src/scripting/lua_widgets.cc
     src/anim/json.cc
     src/anim/anim_parser.cc
     src/anim/anim_eval.cc
     src/anim/anim_render.cc
     src/anim/vector_animation.cc
-    src/scripting/lua_anim.cc
     src/layout/layout_tree.cc
     src/render/paint.cc
     src/svg/svg.cc
@@ -137,12 +138,25 @@ if(ULTRAGUI_BACKEND_VULKAN)
     list(APPEND ULTRAGUI_SOURCES src/rhi/vulkan/vulkan_rhi.cc)
 endif()
 
+if(ULTRAGUI_LUA)
+    list(APPEND ULTRAGUI_SOURCES
+        src/scripting/lua_runtime.cc
+        src/scripting/lua_anim.cc
+    )
+endif()
+
 if(ULTRAGUI_AUDIO)
-    list(APPEND ULTRAGUI_SOURCES src/audio/audio.cc src/scripting/lua_audio.cc)
+    list(APPEND ULTRAGUI_SOURCES src/audio/audio.cc)
+    if(ULTRAGUI_LUA)
+        list(APPEND ULTRAGUI_SOURCES src/scripting/lua_audio.cc)
+    endif()
 endif()
 
 if(ULTRAGUI_LOTTIE)
-    list(APPEND ULTRAGUI_SOURCES src/lottie/lottie.cc src/scripting/lua_lottie.cc)
+    list(APPEND ULTRAGUI_SOURCES src/lottie/lottie.cc)
+    if(ULTRAGUI_LUA)
+        list(APPEND ULTRAGUI_SOURCES src/scripting/lua_lottie.cc)
+    endif()
 endif()
 
 add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
@@ -167,7 +181,7 @@ target_link_libraries(ultragui
     PRIVATE
         PkgConfig::FREETYPE
         PkgConfig::HARFBUZZ
-        PkgConfig::LUA
+        $<$<BOOL:${ULTRAGUI_LUA}>:PkgConfig::LUA>
         glfw
         yogacore
 )
@@ -175,6 +189,10 @@ target_link_libraries(ultragui
 if(ULTRAGUI_BACKEND_VULKAN)
     target_link_libraries(ultragui PRIVATE Vulkan::Vulkan)
     target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_VULKAN=1)
+endif()
+
+if(ULTRAGUI_LUA)
+    target_compile_definitions(ultragui PUBLIC ULTRAGUI_LUA=1)
 endif()
 
 if(ULTRAGUI_LOTTIE)

@@ -1,16 +1,17 @@
 #include <ultragui/ui_context.h>
-#include <ultragui/scripting/lua_anim.h>
 #include <ultragui/scripting/lua_widgets.h>
 #include <ultragui/widgets/panel.h>
 #include <ultragui/widgets/text.h>
 
+#if ULTRAGUI_LUA
+#include <ultragui/scripting/lua_anim.h>
 #if ULTRAGUI_AUDIO
 #include <ultragui/scripting/lua_audio.h>
 #endif
-
 #if ULTRAGUI_LOTTIE
 #include <ultragui/scripting/lua_lottie.h>
 #endif
+#endif // ULTRAGUI_LUA
 
 #include <algorithm>
 #include <cmath>
@@ -93,32 +94,39 @@ bool UIContext::Init(const UIConfig& config) {
     // Input
     input_.Init(platform_);
 
-    // Lua
-    lua_.Init();
+    // Scripting runtime (Lua by default, or user-supplied via SetScriptRuntime)
+#if ULTRAGUI_LUA
+    if (!script_) {
+        auto* lua = new LuaRuntime();
+        lua->Init();
+        script_ = lua;
+        owns_script_ = true;
+
+#if ULTRAGUI_AUDIO
+        RegisterAudioLua(*lua, audio_);
+#endif
+#if ULTRAGUI_LOTTIE
+        RegisterLottieLua(
+            *lua,
+            [this](const char* path, unsigned w, unsigned h) -> LottieAnimation* {
+                return LoadLottie(path, w, h);
+            },
+            [this](const char* name) -> Widget* { return FindWidget(name); });
+#endif
+        RegisterAnimLua(
+            *lua,
+            [this](const char* path, unsigned w, unsigned h) -> VectorAnimation* {
+                return LoadAnim(path, w, h);
+            },
+            [this](const char* name) -> Widget* { return FindWidget(name); });
+    }
+#endif
 
 #if ULTRAGUI_AUDIO
     if (!audio_.Init()) {
         std::fprintf(stderr, "ultragui: audio init failed (non-fatal)\n");
     }
-    RegisterAudioLua(lua_, audio_);
 #endif
-
-#if ULTRAGUI_LOTTIE
-    RegisterLottieLua(
-        lua_,
-        [this](const char* path, unsigned w, unsigned h) -> LottieAnimation* {
-            return LoadLottie(path, w, h);
-        },
-        [this](const char* name) -> Widget* { return FindWidget(name); });
-#endif
-
-    // Vector animations lua bindings (always available - zero deps)
-    RegisterAnimLua(
-        lua_,
-        [this](const char* path, unsigned w, unsigned h) -> VectorAnimation* {
-            return LoadAnim(path, w, h);
-        },
-        [this](const char* name) -> Widget* { return FindWidget(name); });
 
     // Widget context
     widget_ctx_.text_engine = &text_engine_;
@@ -165,7 +173,7 @@ Widget* UIContext::LoadUi(const char* path) {
         input_.ResetState();
         tooltip_target_ = nullptr;
         tooltip_visible_ = false;
-        lua_.ClearWidgetRegistry();
+        if (script_) script_->ClearWidgetRegistry();
         if (owns_root_)
             delete root_;
     }
@@ -175,7 +183,7 @@ Widget* UIContext::LoadUi(const char* path) {
 
     if (root_) {
         root_->SetContext(&widget_ctx_);
-        RegisterWidgetTreeLua(lua_, root_);
+        if (script_) RegisterWidgetTree(*script_, root_);
     }
 
     return root_;
@@ -197,7 +205,7 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
         input_.ResetState();
         tooltip_target_ = nullptr;
         tooltip_visible_ = false;
-        lua_.ClearWidgetRegistry();
+        if (script_) script_->ClearWidgetRegistry();
         if (owns_root_)
             delete root_;
     }
@@ -207,25 +215,25 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
 
     if (root_) {
         root_->SetContext(&widget_ctx_);
-        RegisterWidgetTreeLua(lua_, root_);
+        if (script_) RegisterWidgetTree(*script_, root_);
     }
 
     return root_;
 }
 
 bool UIContext::LoadScript(const char* path) {
-    return lua_.ExecFile(path);
+    return script_ ? script_->ExecFile(path) : false;
 }
 
 bool UIContext::ExecScript(const char* script, const char* name) {
-    return lua_.Exec(script, name);
+    return script_ ? script_->Exec(script, name) : false;
 }
 
 void UIContext::set_root(Widget* root) {
     input_.ResetState();
     tooltip_target_ = nullptr;
     tooltip_visible_ = false;
-    lua_.ClearWidgetRegistry();
+    if (script_) script_->ClearWidgetRegistry();
 
     if (owns_root_)
         delete root_;
@@ -233,7 +241,7 @@ void UIContext::set_root(Widget* root) {
     owns_root_ = false;
     if (root_) {
         root_->SetContext(&widget_ctx_);
-        RegisterWidgetTreeLua(lua_, root_);
+        if (script_) RegisterWidgetTree(*script_, root_);
     }
 }
 
@@ -435,7 +443,7 @@ void UIContext::Shutdown() {
     tooltip_target_ = nullptr;
     tooltip_visible_ = false;
     overlays_.clear();
-    lua_.ClearWidgetRegistry();
+    if (script_) script_->ClearWidgetRegistry();
 
     if (owns_root_) {
         delete root_;
@@ -455,7 +463,12 @@ void UIContext::Shutdown() {
 #if ULTRAGUI_AUDIO
     audio_.Shutdown();
 #endif
-    lua_.Shutdown();
+    if (script_) {
+        script_->Shutdown();
+        if (owns_script_) delete script_;
+        script_ = nullptr;
+        owns_script_ = false;
+    }
     renderer_.Shutdown();
     text_engine_.Shutdown();
 
@@ -539,5 +552,20 @@ void UIContext::SetTheme(const Theme& theme) {
 Widget* UIContext::FindWidget(const char* name) const {
     return ugui::FindWidget(root_, name);
 }
+
+void UIContext::SetScriptRuntime(ScriptRuntime* rt) {
+    if (script_ && owns_script_) {
+        script_->Shutdown();
+        delete script_;
+    }
+    script_ = rt;
+    owns_script_ = false;
+}
+
+#if ULTRAGUI_LUA
+LuaRuntime* UIContext::lua() {
+    return dynamic_cast<LuaRuntime*>(script_);
+}
+#endif
 
 } // namespace ugui

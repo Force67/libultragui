@@ -20,7 +20,10 @@
 #include <ultragui/platform/platform.h>
 #include <ultragui/render/renderer2d.h>
 #include <ultragui/rhi/rhi.h>
+#include <ultragui/scripting/script_runtime.h>
+#if ULTRAGUI_LUA
 #include <ultragui/scripting/lua_runtime.h>
+#endif
 #include <ultragui/text/text_engine.h>
 #include <ultragui/style/theme.h>
 #include <ultragui/svg/svg.h>
@@ -81,11 +84,19 @@ public:
     /// Load a .ugui layout from a string.
     Widget* LoadUiString(const char* source, const char* name = "inline");
 
-    /// Load and execute a Lua script.
+    /// Load and execute a script file. No-op if no scripting runtime is set.
     bool LoadScript(const char* path);
 
-    /// Execute a Lua script string.
+    /// Execute a script string. No-op if no scripting runtime is set.
     bool ExecScript(const char* script, const char* name = "chunk");
+
+    /// Set a custom scripting runtime. UIContext does NOT take ownership.
+    /// Pass nullptr to disable scripting. When ULTRAGUI_LUA is enabled and
+    /// no custom runtime is set, a LuaRuntime is created automatically.
+    void SetScriptRuntime(ScriptRuntime* rt);
+
+    /// Get the current scripting runtime (may be nullptr).
+    ScriptRuntime* script() { return script_; }
 
     /// Set the root widget directly (takes ownership for painting, not deletion).
     void set_root(Widget* root);
@@ -109,8 +120,12 @@ public:
     TextEngine& text_engine() { return text_engine_; }
     InputRouter& input() { return input_; }
     Animator& animator() { return animator_; }
-    LuaRuntime& lua() { return lua_; }
     UguiBuilder& builder() { return builder_; }
+#if ULTRAGUI_LUA
+    /// Access the Lua runtime directly. Only available when ULTRAGUI_LUA=1.
+    /// Prefer script() for runtime-agnostic code.
+    LuaRuntime* lua();
+#endif
 #if ULTRAGUI_AUDIO
     AudioEngine& audio() { return audio_; }
 #endif
@@ -177,7 +192,8 @@ private:
     LayoutEngine layout_engine_;
     InputRouter input_;
     Animator animator_;
-    LuaRuntime lua_;
+    ScriptRuntime* script_ = nullptr;
+    bool owns_script_ = false;
     UguiBuilder builder_;
 #if ULTRAGUI_AUDIO
     AudioEngine audio_;

@@ -2,43 +2,31 @@
 #define ULTRAGUI_SCRIPTING_LUA_RUNTIME_H_
 
 #include <ultragui/core/types.h>
+#include <ultragui/scripting/script_runtime.h>
 
 struct lua_State;
 
 namespace ugui {
 
-class Widget;
-
-/// Embedded Lua scripting runtime for UI logic.
-/// Provides bindings to the widget tree so .ugui event handlers can be
-/// written in Lua.
-class LuaRuntime {
+/// Lua 5.4 implementation of ScriptRuntime. Default scripting backend.
+/// Built when ULTRAGUI_LUA is enabled (the default).
+class LuaRuntime : public ScriptRuntime {
 public:
-    bool Init();
-    void Shutdown();
+    bool Init() override;
+    void Shutdown() override;
+    bool Exec(const char* script, const char* name = "chunk") override;
+    bool ExecFile(const char* path) override;
+    void RegisterWidget(Widget* widget) override;
+    void UnregisterWidget(Widget* widget) override;
+    void ClearWidgetRegistry() override;
+    bool CallHandler(const char* func_name, Widget* widget) override;
+    Widget* FindRegisteredWidget(const char* name) const override;
 
-    /// Execute a Lua script string. Returns true on success.
-    bool Exec(const char* script, const char* name = "chunk");
-
-    /// Load and execute a Lua file.
-    bool ExecFile(const char* path);
-
-    /// Register a widget so Lua can access it via ugui.find("name").
-    void RegisterWidget(Widget* widget);
-    void UnregisterWidget(Widget* widget);
-    void ClearWidgetRegistry();
-
-    /// Call a named Lua function (used for on_click, etc.)
-    bool CallHandler(const char* func_name, Widget* widget);
-
-    /// Expose a C++ function to Lua under ugui.{name}
+    /// Expose a C++ function to Lua under ugui.{name}. Lua-specific.
     using NativeFunction = Function<int(lua_State*)>;
     void RegisterFunction(const char* name, NativeFunction func);
 
     lua_State* state() const { return L_; }
-
-    /// Access the widget registry (for Lua callbacks)
-    Widget* FindRegisteredWidget(const char* name) const;
 
 private:
     static int LuaUguiFind(lua_State* L);

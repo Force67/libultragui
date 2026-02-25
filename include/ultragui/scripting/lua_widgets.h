@@ -3,12 +3,12 @@
 
 namespace ugui {
 
-class LuaRuntime;
+class ScriptRuntime;
 class Widget;
 
-/// Register all named widgets in a tree with the Lua runtime.
-void RegisterWidgetTreeLua(LuaRuntime& lua, Widget* root);
+/// Register all named widgets in a tree with a scripting runtime.
+void RegisterWidgetTree(ScriptRuntime& rt, Widget* root);
 
 } // namespace ugui
 
-#endif  // ULTRAGUI_SCRIPTING_LUA_WIDGETS_H_
+#endif // ULTRAGUI_SCRIPTING_LUA_WIDGETS_H_

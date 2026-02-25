@@ -8,6 +8,7 @@
 #include <ultragui/ultragui.h>
 #include <ultragui/layout/layout_tree.h>
 #include <ultragui/render/paint.h>
+#include <ultragui/widgets/text.h>
 #include <ultragui/widgets/widget.h>
 
 #include <algorithm>
@@ -333,7 +334,8 @@ int main(int argc, char* argv[]) {
         if (btn != ugui::MouseButton::kLeft || widget->name().empty())
             return;
         std::string handler = "on_" + widget->name();
-        ui.lua().CallHandler(handler.c_str(), widget);
+        if (ui.script())
+            ui.script()->CallHandler(handler.c_str(), widget);
     });
 
     // Our own layout engine + scratch for painting the widget tree inside the
@@ -384,8 +386,10 @@ int main(int argc, char* argv[]) {
             last_fps_update = now;
 
             std::string fps_str = std::to_string(fps) + " FPS";
-            ui.lua().Exec(
-                ("ugui.set('fps_text', 'text', '" + fps_str + "')").c_str(), "fps");
+            if (auto* s = ui.script())
+                s->Exec(("ugui.set('fps_text', 'text', '" + fps_str + "')").c_str(), "fps");
+            else if (auto* w = ui.FindWidget("fps_text"))
+                dynamic_cast<ugui::Text*>(w)->set_text(fps_str.c_str());
         }
 
         ui.Update();
