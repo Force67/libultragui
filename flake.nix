@@ -10,6 +10,14 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+
+        # DXVK-native rebuilt with GLFW WSI (default nixpkgs build uses SDL3)
+        dxvk-glfw = pkgs.dxvk_2.overrideAttrs (old: {
+          mesonFlags = (old.mesonFlags or []) ++ [
+            "-Dnative_glfw=enabled"
+          ];
+          buildInputs = (old.buildInputs or []) ++ [ pkgs.glfw ];
+        });
       in
       {
         devShells.default = pkgs.mkShell {
@@ -29,7 +37,7 @@
             # Shader compilation
             shaderc
             glslang
-            directx-shader-compiler  # HLSL → DXIL (D3D12 shaders)
+            directx-shader-compiler  # HLSL -> DXIL (D3D12 shaders)
           ];
 
           buildInputs = with pkgs; [
@@ -41,6 +49,9 @@
 
             # D3D12 via vkd3d (Linux testing)
             vkd3d
+
+            # D3D11 via DXVK-native with GLFW WSI (Linux testing)
+            dxvk-glfw
 
             # Windowing
             glfw

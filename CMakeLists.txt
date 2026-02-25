@@ -15,6 +15,7 @@ option(ULTRAGUI_BUILD_EXAMPLES "Build example applications" ON)
 option(ULTRAGUI_BUILD_TESTS "Build tests" ON)
 option(ULTRAGUI_BACKEND_VULKAN "Enable Vulkan backend" ON)
 option(ULTRAGUI_BACKEND_D3D12 "Enable D3D12 backend" OFF)
+option(ULTRAGUI_BACKEND_D3D11 "Enable D3D11 backend (DXVK-native)" OFF)
 option(ULTRAGUI_AUDIO "Enable audio engine (miniaudio)" ON)
 option(ULTRAGUI_LOTTIE "Enable Lottie animation support (rlottie)" ON)
 option(ULTRAGUI_VIDEO "Enable MPEG-1 video playback (pl_mpeg)" ON)
@@ -258,6 +259,14 @@ if(ULTRAGUI_BACKEND_D3D12)
     target_compile_definitions(ultragui PRIVATE
         ULTRAGUI_HLSL_SHADER_DIR="${HLSL_OUT_DIR}"
     )
+endif()
+
+if(ULTRAGUI_BACKEND_D3D11)
+    pkg_check_modules(DXVK_D3D11 REQUIRED IMPORTED_TARGET dxvk-d3d11)
+    pkg_check_modules(DXVK_DXGI REQUIRED IMPORTED_TARGET dxvk-dxgi)
+    pkg_check_modules(VKD3D_UTILS_D3D11 REQUIRED IMPORTED_TARGET libvkd3d-utils)
+    target_link_libraries(ultragui PRIVATE PkgConfig::DXVK_D3D11 PkgConfig::DXVK_DXGI PkgConfig::VKD3D_UTILS_D3D11)
+    target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_D3D11=1)
 endif()
 
 if(ULTRAGUI_LUA)
