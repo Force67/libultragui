@@ -24,9 +24,6 @@
 #include <ultragui/render/renderer2d.h>
 #include <ultragui/rhi/rhi.h>
 #include <ultragui/scripting/script_runtime.h>
-#if ULTRAGUI_LUA
-#include <ultragui/scripting/lua_runtime.h>
-#endif
 #include <ultragui/text/text_engine.h>
 #include <ultragui/style/theme.h>
 #include <ultragui/svg/svg.h>
@@ -93,13 +90,8 @@ public:
     /// Execute a script string. No-op if no scripting runtime is set.
     bool ExecScript(const char* script, const char* name = "chunk");
 
-    /// Set a custom scripting runtime. UIContext does NOT take ownership.
-    /// Pass nullptr to disable scripting. When ULTRAGUI_LUA is enabled and
-    /// no custom runtime is set, a LuaRuntime is created automatically.
-    void SetScriptRuntime(ScriptRuntime* rt);
-
-    /// Get the current scripting runtime (may be nullptr).
-    ScriptRuntime* script() { return script_; }
+    /// Get the scripting runtime.
+    ScriptRuntime& script() { return script_; }
 
     /// Set the root widget directly (takes ownership for painting, not deletion).
     void set_root(Widget* root);
@@ -117,18 +109,13 @@ public:
     void Shutdown();
 
     // --- Access subsystems ---
-    Platform* platform() { return platform_; }
-    RHI* rhi() { return rhi_; }
+    Platform* platform() { return &platform_; }
+    RHI* rhi() { return &rhi_; }
     Renderer2D& renderer() { return renderer_; }
     TextEngine& text_engine() { return text_engine_; }
     InputRouter& input() { return input_; }
     Animator& animator() { return animator_; }
     UguiBuilder& builder() { return builder_; }
-#if ULTRAGUI_LUA
-    /// Access the Lua runtime directly. Only available when ULTRAGUI_LUA=1.
-    /// Prefer script() for runtime-agnostic code.
-    LuaRuntime* lua();
-#endif
 #if ULTRAGUI_AUDIO
     AudioEngine& audio() { return audio_; }
 #endif
@@ -196,15 +183,14 @@ public:
     const String& theme_name() const { return current_theme_name_; }
 
 private:
-    Platform* platform_ = nullptr;
-    RHI* rhi_ = nullptr;
+    Platform platform_;
+    RHI rhi_;
     Renderer2D renderer_;
     TextEngine text_engine_;
     LayoutEngine layout_engine_;
     InputRouter input_;
     Animator animator_;
-    ScriptRuntime* script_ = nullptr;
-    bool owns_script_ = false;
+    ScriptRuntime script_;
     UguiBuilder builder_;
 #if ULTRAGUI_AUDIO
     AudioEngine audio_;
@@ -227,6 +213,7 @@ private:
 
     Vector<LayoutNode> layout_nodes_;
     bool owns_root_ = false; // true if root was created by load_ui
+    bool initialized_ = false;
     String current_theme_name_;
 
     struct OffscreenPass {

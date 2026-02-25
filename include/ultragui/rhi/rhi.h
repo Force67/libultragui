@@ -18,72 +18,78 @@ struct RHIConfig {
     const char* shader_dir = nullptr;
 };
 
-/// Minimal GPU abstraction for 2D UI rendering.
-/// Not a general-purpose GPU API - purpose-built for batched quad drawing.
+/// Concrete GPU abstraction with link-time swappable implementation.
+/// The default implementation uses Vulkan; swap the .cc file via CMake
+/// (ULTRAGUI_RHI_SOURCE) to provide your own backend.
 class RHI {
 public:
-    virtual ~RHI() = default;
+    RHI();
+    ~RHI();
+    RHI(const RHI&) = delete;
+    RHI& operator=(const RHI&) = delete;
 
-    virtual bool Init(const RHIConfig& config) = 0;
-    virtual void Shutdown() = 0;
+    bool Init(const RHIConfig& config);
+    void Shutdown();
 
-    virtual bool BeginFrame(Color clear_color) = 0;
-    virtual void EndFrame() = 0;
+    bool BeginFrame(Color clear_color);
+    void EndFrame();
 
-    virtual void SetScissor(Rect rect) = 0;
-    virtual void ResetScissor() = 0;
+    void SetScissor(Rect rect);
+    void ResetScissor();
 
     /// Upload and draw a batch of 2D vertices.
     /// If texture is kInvalidTexture, the white fallback texture is used.
-    virtual void DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
-                                u32 index_count, RHITextureHandle texture = kInvalidTexture) = 0;
+    void DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+                        u32 index_count, RHITextureHandle texture = kInvalidTexture);
 
     /// Draw text glyphs using the R8 alpha-only pipeline.
-    virtual void DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
-                                     u32 index_count, RHITextureHandle atlas_texture) = 0;
+    void DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+                             u32 index_count, RHITextureHandle atlas_texture);
 
-    virtual RHITextureHandle CreateTexture(u32 width, u32 height, RHIFormat format,
-                                            const void* pixels,
-                                            RHIFilter filter = RHIFilter::kLinear) = 0;
-    virtual void UpdateTexture(RHITextureHandle handle, const void* pixels) = 0;
-    virtual void DestroyTexture(RHITextureHandle handle) = 0;
+    RHITextureHandle CreateTexture(u32 width, u32 height, RHIFormat format,
+                                    const void* pixels,
+                                    RHIFilter filter = RHIFilter::kLinear);
+    void UpdateTexture(RHITextureHandle handle, const void* pixels);
+    void DestroyTexture(RHITextureHandle handle);
 
     /// Acquire the next frame (fence wait, swapchain image, command buffer begin)
     /// without starting a render pass. Call this before BeginOffscreen() if you
     /// need offscreen passes before the swapchain pass. If not called explicitly,
     /// BeginFrame() will call it internally.
-    virtual bool AcquireFrame() = 0;
+    bool AcquireFrame();
 
     /// Create an offscreen render target that can be drawn into and sampled as a texture.
     /// Returns a texture handle usable with both BeginOffscreen() and DrawTexturedRect().
-    virtual RHITextureHandle CreateRenderTarget(u32 width, u32 height) = 0;
+    RHITextureHandle CreateRenderTarget(u32 width, u32 height);
 
     /// Destroy a render target and release all associated GPU resources.
-    virtual void DestroyRenderTarget(RHITextureHandle handle) = 0;
+    void DestroyRenderTarget(RHITextureHandle handle);
 
     /// Begin rendering to an offscreen target. Must be called after AcquireFrame()
     /// and outside any other render pass.
-    virtual bool BeginOffscreen(RHITextureHandle target, Color clear_color) = 0;
+    bool BeginOffscreen(RHITextureHandle target, Color clear_color);
 
     /// End the offscreen render pass and transition the image to shader-readable layout.
-    virtual void EndOffscreen(RHITextureHandle target) = 0;
+    void EndOffscreen(RHITextureHandle target);
 
     /// Convert YCbCr planes to RGBA by rendering a fullscreen pass with the video
     /// shader into an offscreen render target. The target must be a render target
     /// created with CreateRenderTarget(). y/cb/cr are R8 textures for the three
     /// planes. Must be called after AcquireFrame(), outside any other render pass.
-    virtual void ConvertVideoFrame(RHITextureHandle target,
-                                    RHITextureHandle y, RHITextureHandle cb,
-                                    RHITextureHandle cr) = 0;
+    void ConvertVideoFrame(RHITextureHandle target,
+                            RHITextureHandle y, RHITextureHandle cb,
+                            RHITextureHandle cr);
 
-    virtual Vec2 display_size() const = 0;
+    Vec2 display_size() const;
 
     /// Ratio of framebuffer pixels to window coordinates.
     /// 1.0 on standard displays, 2.0 on typical HiDPI/Retina displays.
-    virtual f32 dpi_scale() const = 0;
-};
+    f32 dpi_scale() const;
 
-RHI* CreateVulkanRhi();
+    struct Impl;
+private:
+    Impl* impl_;
+};
 
 } // namespace ugui
 

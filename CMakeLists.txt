@@ -93,11 +93,24 @@ endforeach()
 
 add_custom_target(ultragui_shaders DEPENDS ${SHADER_OUTPUTS})
 
+# --- Swappable implementation sources ---
+# Point these at your own .cc file to provide a custom backend.
+set(ULTRAGUI_PLATFORM_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/platform_glfw.cc"
+    CACHE FILEPATH "Platform implementation source file")
+set(ULTRAGUI_RHI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/rhi/vulkan/vulkan_rhi.cc"
+    CACHE FILEPATH "RHI implementation source file")
+if(ULTRAGUI_LUA)
+    set(_default_script_src "${CMAKE_CURRENT_SOURCE_DIR}/src/scripting/lua_runtime.cc")
+else()
+    set(_default_script_src "${CMAKE_CURRENT_SOURCE_DIR}/src/scripting/script_runtime_none.cc")
+endif()
+set(ULTRAGUI_SCRIPT_SOURCE "${_default_script_src}"
+    CACHE FILEPATH "Script runtime implementation source file")
+
 # --- Core library ---
 set(ULTRAGUI_SOURCES
     src/core/arena.cc
     src/core/string_utils.cc
-    src/platform/platform_glfw.cc
     src/render/renderer2d.cc
     src/style/style.cc
     src/style/transition.cc
@@ -137,13 +150,12 @@ set(ULTRAGUI_SOURCES
     src/ui_context.cc
 )
 
-if(ULTRAGUI_BACKEND_VULKAN)
-    list(APPEND ULTRAGUI_SOURCES src/rhi/vulkan/vulkan_rhi.cc)
-endif()
+list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_PLATFORM_SOURCE})
+list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_RHI_SOURCE})
+list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_SCRIPT_SOURCE})
 
 if(ULTRAGUI_LUA)
     list(APPEND ULTRAGUI_SOURCES
-        src/scripting/lua_runtime.cc
         src/scripting/lua_anim.cc
     )
 endif()

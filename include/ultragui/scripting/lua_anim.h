@@ -5,13 +5,13 @@
 
 namespace ugui {
 
-class LuaRuntime;
+class ScriptRuntime;
 class VectorAnimation;
 class Widget;
 
 /// Register .uganim Lua bindings (ugui.load_anim, ugui.anim_play, etc.)
 void RegisterAnimLua(
-    LuaRuntime& lua,
+    ScriptRuntime& rt,
     Function<VectorAnimation*(const char*, unsigned, unsigned)> loader,
     Function<Widget*(const char*)> find_widget);
 

@@ -13,35 +13,33 @@
 
 namespace ugui {
 
-class VulkanRHI : public RHI {
-public:
-    bool Init(const RHIConfig& config) override;
-    void Shutdown() override;
-    bool BeginFrame(Color clear_color) override;
-    void EndFrame() override;
-    void SetScissor(Rect rect) override;
-    void ResetScissor() override;
+struct RHI::Impl {
+    bool Init(const RHIConfig& config);
+    void Shutdown();
+    bool BeginFrame(Color clear_color);
+    void EndFrame();
+    void SetScissor(Rect rect);
+    void ResetScissor();
     void DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
-                        u32 index_count, RHITextureHandle texture) override;
+                        u32 index_count, RHITextureHandle texture);
     void DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
-                             u32 index_count, RHITextureHandle atlas_texture) override;
+                             u32 index_count, RHITextureHandle atlas_texture);
     RHITextureHandle CreateTexture(u32 width, u32 height, RHIFormat format,
                                     const void* pixels,
-                                    RHIFilter filter = RHIFilter::kLinear) override;
-    void UpdateTexture(RHITextureHandle handle, const void* pixels) override;
-    void DestroyTexture(RHITextureHandle handle) override;
-    bool AcquireFrame() override;
-    RHITextureHandle CreateRenderTarget(u32 width, u32 height) override;
-    void DestroyRenderTarget(RHITextureHandle handle) override;
-    bool BeginOffscreen(RHITextureHandle target, Color clear_color) override;
-    void EndOffscreen(RHITextureHandle target) override;
+                                    RHIFilter filter = RHIFilter::kLinear);
+    void UpdateTexture(RHITextureHandle handle, const void* pixels);
+    void DestroyTexture(RHITextureHandle handle);
+    bool AcquireFrame();
+    RHITextureHandle CreateRenderTarget(u32 width, u32 height);
+    void DestroyRenderTarget(RHITextureHandle handle);
+    bool BeginOffscreen(RHITextureHandle target, Color clear_color);
+    void EndOffscreen(RHITextureHandle target);
     void ConvertVideoFrame(RHITextureHandle target,
                             RHITextureHandle y, RHITextureHandle cb,
-                            RHITextureHandle cr) override;
-    Vec2 display_size() const override;
-    f32 dpi_scale() const override;
+                            RHITextureHandle cr);
+    Vec2 display_size() const;
+    f32 dpi_scale() const;
 
-private:
     bool create_instance();
     bool create_surface();
     bool pick_physical_device();

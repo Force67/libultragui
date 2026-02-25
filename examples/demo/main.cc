@@ -6,46 +6,45 @@
 #include <cstdio>
 
 int main() {
-    auto* platform = ugui::CreateGlfwPlatform();
+    ugui::Platform platform;
 
     ugui::Platform::WindowConfig wcfg;
     wcfg.width = 1280;
     wcfg.height = 720;
     wcfg.title = "libultragui demo";
 
-    if (!platform->Init(wcfg)) {
+    if (!platform.Init(wcfg)) {
         std::fprintf(stderr, "Failed to initialize platform\n");
         return 1;
     }
 
-    auto* rhi = ugui::CreateVulkanRhi();
+    ugui::RHI rhi;
     ugui::RHIConfig rcfg;
-    rcfg.platform = platform;
+    rcfg.platform = &platform;
     rcfg.validation = true;
     rcfg.shader_dir = ULTRAGUI_SHADER_DIR;
 
-    if (!rhi->Init(rcfg)) {
+    if (!rhi.Init(rcfg)) {
         std::fprintf(stderr, "Failed to initialize Vulkan RHI\n");
-        platform->Shutdown();
-        delete platform;
+        platform.Shutdown();
         return 1;
     }
 
     ugui::Renderer2D renderer;
-    renderer.Init(rhi);
+    renderer.Init(&rhi);
 
-    std::printf("libultragui demo — rendering (%.0fx%.0f)\n", rhi->display_size().x,
-                rhi->display_size().y);
+    std::printf("libultragui demo — rendering (%.0fx%.0f)\n", rhi.display_size().x,
+                rhi.display_size().y);
 
-    while (!platform->ShouldClose()) {
-        platform->PollEvents();
+    while (!platform.ShouldClose()) {
+        platform.PollEvents();
 
-        if (!rhi->BeginFrame(ugui::Color::FromHex(0x1a1a2e)))
+        if (!rhi.BeginFrame(ugui::Color::FromHex(0x1a1a2e)))
             continue;
 
         renderer.BeginFrame();
 
-        ugui::f32 t = static_cast<ugui::f32>(platform->time());
+        ugui::f32 t = static_cast<ugui::f32>(platform.time());
 
         // Background panel
         renderer.DrawRect({40, 40, 400, 640}, ugui::Color::FromHex(0x16213e, 0.9f), 16.0f);
@@ -76,13 +75,11 @@ int main() {
                            8.0f);
 
         renderer.EndFrame();
-        rhi->EndFrame();
+        rhi.EndFrame();
     }
 
     renderer.Shutdown();
-    rhi->Shutdown();
-    delete rhi;
-    platform->Shutdown();
-    delete platform;
+    rhi.Shutdown();
+    platform.Shutdown();
     return 0;
 }

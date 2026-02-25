@@ -13,7 +13,7 @@
 
 namespace ugui {
 
-static VulkanRHI* s_rhi_instance = nullptr;
+static RHI::Impl* s_rhi_instance = nullptr;
 
 // ---------------------------------------------------------------------------
 // Debug callback
@@ -86,7 +86,7 @@ static VkExtent2D choose_extent(const VkSurfaceCapabilitiesKHR& caps, GLFWwindow
 // Initialization
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::Init(const RHIConfig& config) {
+bool RHI::Impl::Init(const RHIConfig& config) {
     window_ = static_cast<GLFWwindow*>(config.platform->native_handle());
     validation_enabled_ = config.validation;
     shader_dir_ = config.shader_dir ? config.shader_dir : "shaders";
@@ -142,7 +142,7 @@ bool VulkanRHI::Init(const RHIConfig& config) {
     return true;
 }
 
-bool VulkanRHI::create_instance() {
+bool RHI::Impl::create_instance() {
     VkApplicationInfo app_info{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app_info.pApplicationName = "ultragui";
     app_info.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
@@ -190,11 +190,11 @@ bool VulkanRHI::create_instance() {
     return true;
 }
 
-bool VulkanRHI::create_surface() {
+bool RHI::Impl::create_surface() {
     return glfwCreateWindowSurface(instance_, window_, nullptr, &surface_) == VK_SUCCESS;
 }
 
-bool VulkanRHI::pick_physical_device() {
+bool RHI::Impl::pick_physical_device() {
     u32 count = 0;
     vkEnumeratePhysicalDevices(instance_, &count, nullptr);
     if (count == 0)
@@ -235,7 +235,7 @@ bool VulkanRHI::pick_physical_device() {
     return false;
 }
 
-bool VulkanRHI::create_device() {
+bool RHI::Impl::create_device() {
     std::set<u32> unique_families = {graphics_family_, present_family_};
     float priority = 1.0f;
     Vector<VkDeviceQueueCreateInfo> queue_cis;
@@ -269,7 +269,7 @@ bool VulkanRHI::create_device() {
 // Swapchain
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::create_swapchain() {
+bool RHI::Impl::create_swapchain() {
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device_, surface_, &caps);
 
@@ -338,7 +338,7 @@ bool VulkanRHI::create_swapchain() {
     return true;
 }
 
-void VulkanRHI::cleanup_swapchain() {
+void RHI::Impl::cleanup_swapchain() {
     for (auto fb : framebuffers_)
         vkDestroyFramebuffer(device_, fb, nullptr);
     framebuffers_.clear();
@@ -349,7 +349,7 @@ void VulkanRHI::cleanup_swapchain() {
     swapchain_ = VK_NULL_HANDLE;
 }
 
-bool VulkanRHI::recreate_swapchain() {
+bool RHI::Impl::recreate_swapchain() {
     int w = 0, h = 0;
     glfwGetFramebufferSize(window_, &w, &h);
     while (w == 0 || h == 0) {
@@ -369,7 +369,7 @@ bool VulkanRHI::recreate_swapchain() {
 // Render pass & pipeline
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::create_render_pass() {
+bool RHI::Impl::create_render_pass() {
     VkAttachmentDescription color_att{};
     color_att.format = swapchain_format_;
     color_att.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -405,7 +405,7 @@ bool VulkanRHI::create_render_pass() {
     return vkCreateRenderPass(device_, &ci, nullptr, &render_pass_) == VK_SUCCESS;
 }
 
-bool VulkanRHI::create_descriptor_layout() {
+bool RHI::Impl::create_descriptor_layout() {
     VkDescriptorSetLayoutBinding binding{};
     binding.binding = 0;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -428,7 +428,7 @@ bool VulkanRHI::create_descriptor_layout() {
     return vkCreateDescriptorPool(device_, &pci, nullptr, &desc_pool_) == VK_SUCCESS;
 }
 
-VkShaderModule VulkanRHI::load_shader(const char* filename) {
+VkShaderModule RHI::Impl::load_shader(const char* filename) {
     auto code = read_file(shader_dir_ + "/" + filename);
     if (code.empty()) {
         std::fprintf(stderr, "ultragui: failed to load shader '%s/%s'\n", shader_dir_.c_str(),
@@ -446,7 +446,7 @@ VkShaderModule VulkanRHI::load_shader(const char* filename) {
     return mod;
 }
 
-bool VulkanRHI::create_pipeline() {
+bool RHI::Impl::create_pipeline() {
     auto vert_mod = load_shader("quad.vert.spv");
     auto frag_mod = load_shader("quad.frag.spv");
     if (!vert_mod || !frag_mod)
@@ -569,7 +569,7 @@ bool VulkanRHI::create_pipeline() {
     return result == VK_SUCCESS;
 }
 
-bool VulkanRHI::create_text_pipeline() {
+bool RHI::Impl::create_text_pipeline() {
     auto vert_mod = load_shader("text.vert.spv");
     auto frag_mod = load_shader("text.frag.spv");
     if (!vert_mod || !frag_mod)
@@ -673,7 +673,7 @@ bool VulkanRHI::create_text_pipeline() {
     return result == VK_SUCCESS;
 }
 
-bool VulkanRHI::create_framebuffers() {
+bool RHI::Impl::create_framebuffers() {
     framebuffers_.resize(swapchain_views_.size());
     for (size_t i = 0; i < swapchain_views_.size(); ++i) {
         VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -693,7 +693,7 @@ bool VulkanRHI::create_framebuffers() {
 // Command & sync resources
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::create_command_resources() {
+bool RHI::Impl::create_command_resources() {
     for (u32 i = 0; i < MAX_FRAMES; ++i) {
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -711,7 +711,7 @@ bool VulkanRHI::create_command_resources() {
     return true;
 }
 
-bool VulkanRHI::create_sync_objects() {
+bool RHI::Impl::create_sync_objects() {
     VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -737,7 +737,7 @@ bool VulkanRHI::create_sync_objects() {
 // Buffer helpers
 // ---------------------------------------------------------------------------
 
-u32 VulkanRHI::find_memory_type(u32 type_filter, VkMemoryPropertyFlags properties) {
+u32 RHI::Impl::find_memory_type(u32 type_filter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(physical_device_, &mem_props);
     for (u32 i = 0; i < mem_props.memoryTypeCount; ++i) {
@@ -749,7 +749,7 @@ u32 VulkanRHI::find_memory_type(u32 type_filter, VkMemoryPropertyFlags propertie
     return 0;
 }
 
-void VulkanRHI::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
+void RHI::Impl::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
                               VkMemoryPropertyFlags properties, VkBuffer& buffer,
                               VkDeviceMemory& memory) {
     VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -768,7 +768,7 @@ void VulkanRHI::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
     vkBindBufferMemory(device_, buffer, memory, 0);
 }
 
-void VulkanRHI::ensure_vertex_capacity(u32 vertex_count) {
+void RHI::Impl::ensure_vertex_capacity(u32 vertex_count) {
     auto& f = frames_[current_frame_];
     if (f.vertex_capacity >= vertex_count)
         return;
@@ -786,7 +786,7 @@ void VulkanRHI::ensure_vertex_capacity(u32 vertex_count) {
     f.vertex_capacity = new_cap;
 }
 
-void VulkanRHI::ensure_index_capacity(u32 index_count) {
+void RHI::Impl::ensure_index_capacity(u32 index_count) {
     auto& f = frames_[current_frame_];
     if (f.index_capacity >= index_count)
         return;
@@ -804,7 +804,7 @@ void VulkanRHI::ensure_index_capacity(u32 index_count) {
     f.index_capacity = new_cap;
 }
 
-void VulkanRHI::ensure_text_vertex_capacity(u32 vertex_count) {
+void RHI::Impl::ensure_text_vertex_capacity(u32 vertex_count) {
     auto& f = frames_[current_frame_];
     if (f.text_vertex_capacity >= vertex_count)
         return;
@@ -822,7 +822,7 @@ void VulkanRHI::ensure_text_vertex_capacity(u32 vertex_count) {
     f.text_vertex_capacity = new_cap;
 }
 
-void VulkanRHI::ensure_text_index_capacity(u32 index_count) {
+void RHI::Impl::ensure_text_index_capacity(u32 index_count) {
     auto& f = frames_[current_frame_];
     if (f.text_index_capacity >= index_count)
         return;
@@ -844,7 +844,7 @@ void VulkanRHI::ensure_text_index_capacity(u32 index_count) {
 // Default resources (white texture + sampler)
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::create_default_resources() {
+bool RHI::Impl::create_default_resources() {
     // Linear sampler (images, general textures)
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = VK_FILTER_LINEAR;
@@ -875,7 +875,7 @@ bool VulkanRHI::create_default_resources() {
 // Texture management
 // ---------------------------------------------------------------------------
 
-RHITextureHandle VulkanRHI::CreateTexture(u32 width, u32 height, RHIFormat format,
+RHITextureHandle RHI::Impl::CreateTexture(u32 width, u32 height, RHIFormat format,
                                            const void* pixels, RHIFilter filter) {
     // Find a free slot
     RHITextureHandle handle = kInvalidTexture;
@@ -1028,7 +1028,7 @@ RHITextureHandle VulkanRHI::CreateTexture(u32 width, u32 height, RHIFormat forma
     return handle;
 }
 
-void VulkanRHI::UpdateTexture(RHITextureHandle handle, const void* pixels) {
+void RHI::Impl::UpdateTexture(RHITextureHandle handle, const void* pixels) {
     if (handle >= MAX_TEXTURES || !textures_[handle].in_use)
         return;
 
@@ -1099,7 +1099,7 @@ void VulkanRHI::UpdateTexture(RHITextureHandle handle, const void* pixels) {
     vkFreeMemory(device_, staging_mem, nullptr);
 }
 
-void VulkanRHI::DestroyTexture(RHITextureHandle handle) {
+void RHI::Impl::DestroyTexture(RHITextureHandle handle) {
     if (handle >= MAX_TEXTURES || !textures_[handle].in_use)
         return;
     if (textures_[handle].is_render_target) {
@@ -1118,7 +1118,7 @@ void VulkanRHI::DestroyTexture(RHITextureHandle handle) {
 // Frame lifecycle
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::AcquireFrame() {
+bool RHI::Impl::AcquireFrame() {
     if (frame_acquired_)
         return true;
 
@@ -1156,7 +1156,7 @@ bool VulkanRHI::AcquireFrame() {
     return true;
 }
 
-bool VulkanRHI::BeginFrame(Color clear_color) {
+bool RHI::Impl::BeginFrame(Color clear_color) {
     if (!AcquireFrame())
         return false;
 
@@ -1200,7 +1200,7 @@ bool VulkanRHI::BeginFrame(Color clear_color) {
     return true;
 }
 
-void VulkanRHI::EndFrame() {
+void RHI::Impl::EndFrame() {
     auto& f = frames_[current_frame_];
     vkCmdEndRenderPass(f.cmd_buffer);
     vkEndCommandBuffer(f.cmd_buffer);
@@ -1239,7 +1239,7 @@ void VulkanRHI::EndFrame() {
 // Drawing
 // ---------------------------------------------------------------------------
 
-void VulkanRHI::SetScissor(Rect rect) {
+void RHI::Impl::SetScissor(Rect rect) {
     auto& f = frames_[current_frame_];
     // Offscreen targets are pixel-exact (no DPI scaling)
     f32 scale = (active_offscreen_target_ != kInvalidTexture) ? 1.0f : dpi_scale_;
@@ -1251,7 +1251,7 @@ void VulkanRHI::SetScissor(Rect rect) {
     vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
 }
 
-void VulkanRHI::ResetScissor() {
+void RHI::Impl::ResetScissor() {
     auto& f = frames_[current_frame_];
     if (active_offscreen_target_ != kInvalidTexture) {
         auto& slot = textures_[active_offscreen_target_];
@@ -1263,7 +1263,7 @@ void VulkanRHI::ResetScissor() {
     }
 }
 
-void VulkanRHI::DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
                                u32 index_count, RHITextureHandle texture) {
     if (vertex_count == 0 || index_count == 0)
         return;
@@ -1311,7 +1311,7 @@ void VulkanRHI::DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const 
     vkCmdDrawIndexed(f.cmd_buffer, index_count, 1, 0, 0, 0);
 }
 
-void VulkanRHI::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
                                     u32 index_count, RHITextureHandle atlas_texture) {
     if (vertex_count == 0 || index_count == 0)
         return;
@@ -1380,7 +1380,7 @@ void VulkanRHI::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, co
                        push);
 }
 
-Vec2 VulkanRHI::display_size() const {
+Vec2 RHI::Impl::display_size() const {
     if (active_offscreen_target_ != kInvalidTexture)
         return offscreen_display_size_;
     // Return window/screen coordinates (UI coordinate space), not framebuffer pixels
@@ -1388,7 +1388,7 @@ Vec2 VulkanRHI::display_size() const {
             static_cast<f32>(swapchain_extent_.height) / dpi_scale_};
 }
 
-f32 VulkanRHI::dpi_scale() const {
+f32 RHI::Impl::dpi_scale() const {
     return dpi_scale_;
 }
 
@@ -1396,7 +1396,7 @@ f32 VulkanRHI::dpi_scale() const {
 // Offscreen rendering
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::create_offscreen_render_pass() {
+bool RHI::Impl::create_offscreen_render_pass() {
     if (offscreen_render_pass_)
         return true;
 
@@ -1435,7 +1435,7 @@ bool VulkanRHI::create_offscreen_render_pass() {
     return vkCreateRenderPass(device_, &ci, nullptr, &offscreen_render_pass_) == VK_SUCCESS;
 }
 
-RHITextureHandle VulkanRHI::CreateRenderTarget(u32 width, u32 height) {
+RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
     if (!create_offscreen_render_pass())
         return kInvalidTexture;
 
@@ -1559,7 +1559,7 @@ RHITextureHandle VulkanRHI::CreateRenderTarget(u32 width, u32 height) {
     return handle;
 }
 
-void VulkanRHI::DestroyRenderTarget(RHITextureHandle handle) {
+void RHI::Impl::DestroyRenderTarget(RHITextureHandle handle) {
     if (handle >= MAX_TEXTURES || !textures_[handle].in_use || !textures_[handle].is_render_target)
         return;
     vkDeviceWaitIdle(device_);
@@ -1572,7 +1572,7 @@ void VulkanRHI::DestroyRenderTarget(RHITextureHandle handle) {
     slot = {};
 }
 
-bool VulkanRHI::BeginOffscreen(RHITextureHandle target, Color clear_color) {
+bool RHI::Impl::BeginOffscreen(RHITextureHandle target, Color clear_color) {
     if (target >= MAX_TEXTURES || !textures_[target].in_use || !textures_[target].is_render_target)
         return false;
 
@@ -1617,7 +1617,7 @@ bool VulkanRHI::BeginOffscreen(RHITextureHandle target, Color clear_color) {
     return true;
 }
 
-void VulkanRHI::EndOffscreen(RHITextureHandle target) {
+void RHI::Impl::EndOffscreen(RHITextureHandle target) {
     if (active_offscreen_target_ == kInvalidTexture)
         return;
 
@@ -1647,7 +1647,7 @@ void VulkanRHI::EndOffscreen(RHITextureHandle target) {
 // Video pipeline (YCbCr -> RGBA)
 // ---------------------------------------------------------------------------
 
-bool VulkanRHI::ensure_video_pipeline() {
+bool RHI::Impl::ensure_video_pipeline() {
     if (video_pipeline_ready_)
         return true;
 
@@ -1780,7 +1780,7 @@ bool VulkanRHI::ensure_video_pipeline() {
     return true;
 }
 
-void VulkanRHI::ConvertVideoFrame(RHITextureHandle target,
+void RHI::Impl::ConvertVideoFrame(RHITextureHandle target,
                                    RHITextureHandle y, RHITextureHandle cb,
                                    RHITextureHandle cr) {
     if (!ensure_video_pipeline())
@@ -1866,7 +1866,7 @@ void VulkanRHI::ConvertVideoFrame(RHITextureHandle target,
 // Shutdown
 // ---------------------------------------------------------------------------
 
-void VulkanRHI::Shutdown() {
+void RHI::Impl::Shutdown() {
     s_rhi_instance = nullptr;
 
     if (device_)
@@ -1959,12 +1959,43 @@ void VulkanRHI::Shutdown() {
 }
 
 // ---------------------------------------------------------------------------
-// Factory
+// RHI forwarding methods (PIMPL)
 // ---------------------------------------------------------------------------
 
-RHI* CreateVulkanRhi() {
-    return new VulkanRHI();
+RHI::RHI() : impl_(new Impl()) {}
+RHI::~RHI() { delete impl_; }
+
+bool RHI::Init(const RHIConfig& config) { return impl_->Init(config); }
+void RHI::Shutdown() { impl_->Shutdown(); }
+bool RHI::BeginFrame(Color clear_color) { return impl_->BeginFrame(clear_color); }
+void RHI::EndFrame() { impl_->EndFrame(); }
+void RHI::SetScissor(Rect rect) { impl_->SetScissor(rect); }
+void RHI::ResetScissor() { impl_->ResetScissor(); }
+void RHI::DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+                         u32 index_count, RHITextureHandle texture) {
+    impl_->DrawTriangles(vertices, vertex_count, indices, index_count, texture);
 }
+void RHI::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, const u32* indices,
+                              u32 index_count, RHITextureHandle atlas_texture) {
+    impl_->DrawTextTriangles(vertices, vertex_count, indices, index_count, atlas_texture);
+}
+RHITextureHandle RHI::CreateTexture(u32 width, u32 height, RHIFormat format,
+                                     const void* pixels, RHIFilter filter) {
+    return impl_->CreateTexture(width, height, format, pixels, filter);
+}
+void RHI::UpdateTexture(RHITextureHandle handle, const void* pixels) { impl_->UpdateTexture(handle, pixels); }
+void RHI::DestroyTexture(RHITextureHandle handle) { impl_->DestroyTexture(handle); }
+bool RHI::AcquireFrame() { return impl_->AcquireFrame(); }
+RHITextureHandle RHI::CreateRenderTarget(u32 width, u32 height) { return impl_->CreateRenderTarget(width, height); }
+void RHI::DestroyRenderTarget(RHITextureHandle handle) { impl_->DestroyRenderTarget(handle); }
+bool RHI::BeginOffscreen(RHITextureHandle target, Color clear_color) { return impl_->BeginOffscreen(target, clear_color); }
+void RHI::EndOffscreen(RHITextureHandle target) { impl_->EndOffscreen(target); }
+void RHI::ConvertVideoFrame(RHITextureHandle target, RHITextureHandle y,
+                              RHITextureHandle cb, RHITextureHandle cr) {
+    impl_->ConvertVideoFrame(target, y, cb, cr);
+}
+Vec2 RHI::display_size() const { return impl_->display_size(); }
+f32 RHI::dpi_scale() const { return impl_->dpi_scale(); }
 
 #pragma clang diagnostic pop
 

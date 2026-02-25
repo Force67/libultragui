@@ -3,11 +3,11 @@
 
 namespace ugui {
 
-class LuaRuntime;
+class ScriptRuntime;
 class AudioEngine;
 
 /// Register audio Lua bindings (ugui.play_sound, ugui.stop_sound, etc.)
-void RegisterAudioLua(LuaRuntime& lua, AudioEngine& audio);
+void RegisterAudioLua(ScriptRuntime& rt, AudioEngine& audio);
 
 } // namespace ugui
 

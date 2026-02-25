@@ -1,6 +1,6 @@
 #include <ultragui/scripting/lua_video.h>
 #include <ultragui/video/video.h>
-#include <ultragui/scripting/lua_runtime.h>
+#include <ultragui/scripting/script_runtime.h>
 #include <ultragui/widgets/image.h>
 #include <ultragui/widgets/widget.h>
 
@@ -12,7 +12,7 @@ extern "C" {
 namespace ugui {
 
 void RegisterVideoLua(
-    LuaRuntime& lua,
+    ScriptRuntime& lua,
     Function<VideoPlayer*(const char*)> loader,
     Function<Widget*(const char*)> find_widget) {
 

@@ -1,6 +1,6 @@
 #include <ultragui/scripting/lua_audio.h>
 #include <ultragui/audio/audio.h>
-#include <ultragui/scripting/lua_runtime.h>
+#include <ultragui/scripting/script_runtime.h>
 
 extern "C" {
 #include <lauxlib.h>
@@ -9,7 +9,7 @@ extern "C" {
 
 namespace ugui {
 
-void RegisterAudioLua(LuaRuntime& lua, AudioEngine& audio) {
+void RegisterAudioLua(ScriptRuntime& lua, AudioEngine& audio) {
     // ugui.play_sound(path [, volume [, loop]]) -> handle
     lua.RegisterFunction("play_sound", [&audio](lua_State* L) -> int {
         const char* path = luaL_checkstring(L, 1);

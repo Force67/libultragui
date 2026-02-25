@@ -7,133 +7,130 @@
 
 namespace ugui {
 
-class GlfwPlatform : public Platform {
-public:
-    bool Init(const WindowConfig& config) override {
-        if (!glfwInit()) {
-            std::fprintf(stderr, "ultragui: glfwInit() failed\n");
-            return false;
-        }
+struct Platform::Impl {
+    GLFWwindow* window = nullptr;
+    InputQueue queue;
 
-        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, config.resizable ? GLFW_TRUE : GLFW_FALSE);
-
-        window_ = glfwCreateWindow(config.width, config.height, config.title, nullptr, nullptr);
-        if (!window_) {
-            std::fprintf(stderr, "ultragui: glfwCreateWindow() failed\n");
-            glfwTerminate();
-            return false;
-        }
-
-        // Install input callbacks
-        glfwSetWindowUserPointer(window_, this);
-        glfwSetCursorPosCallback(window_, glfw_mouse_pos_cb);
-        glfwSetMouseButtonCallback(window_, glfw_mouse_button_cb);
-        glfwSetScrollCallback(window_, glfw_scroll_cb);
-        glfwSetKeyCallback(window_, glfw_key_cb);
-        glfwSetCharCallback(window_, glfw_char_cb);
-
-        return true;
-    }
-
-    void Shutdown() override {
-        if (window_) {
-            glfwDestroyWindow(window_);
-            window_ = nullptr;
-        }
-        glfwTerminate();
-    }
-
-    bool ShouldClose() const override { return glfwWindowShouldClose(window_); }
-
-    void PollEvents() override {
-        queue_.clear();
-        glfwPollEvents();
-    }
-
-    Vec2 window_size() const override {
-        int w, h;
-        glfwGetWindowSize(window_, &w, &h);
-        return {static_cast<f32>(w), static_cast<f32>(h)};
-    }
-
-    Vec2 framebuffer_size() const override {
-        int w, h;
-        glfwGetFramebufferSize(window_, &w, &h);
-        return {static_cast<f32>(w), static_cast<f32>(h)};
-    }
-
-    f32 dpi_scale() const override {
-        float xscale, yscale;
-        glfwGetWindowContentScale(window_, &xscale, &yscale);
-        return xscale;
-    }
-
-    f64 time() const override { return glfwGetTime(); }
-
-    void* native_handle() const override { return window_; }
-
-    void SetCursor(Cursor cursor) override {
-        // Create cursors on first use
-        static GLFWcursor* cursors[6] = {};
-        static bool init = false;
-        if (!init) {
-            cursors[1] = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
-            cursors[2] = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
-            cursors[3] = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
-            cursors[4] = glfwCreateStandardCursor(GLFW_CROSSHAIR_CURSOR);
-            cursors[5] = glfwCreateStandardCursor(GLFW_NOT_ALLOWED_CURSOR);
-            init = true;
-        }
-        int idx = static_cast<int>(cursor);
-        if (idx > 0 && idx < 6 && cursors[idx])
-            glfwSetCursor(window_, cursors[idx]);
-        else
-            glfwSetCursor(window_, nullptr); // default
-    }
-
-    const char* clipboard_text() const override {
-        return glfwGetClipboardString(window_);
-    }
-
-    void set_clipboard_text(const char* text) override {
-        glfwSetClipboardString(window_, text);
-    }
-
-    InputQueue& input_queue() override { return queue_; }
-
-private:
     static void glfw_mouse_pos_cb(GLFWwindow* window, double x, double y) {
-        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
-        self->queue_.PushMove({static_cast<f32>(x), static_cast<f32>(y)});
+        auto* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        self->queue.PushMove({static_cast<f32>(x), static_cast<f32>(y)});
     }
 
     static void glfw_mouse_button_cb(GLFWwindow* window, int button, int action, int) {
-        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
-        self->queue_.PushButton(static_cast<MouseButton>(button), action == GLFW_PRESS);
+        auto* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        self->queue.PushButton(static_cast<MouseButton>(button), action == GLFW_PRESS);
     }
 
     static void glfw_scroll_cb(GLFWwindow* window, double x, double y) {
-        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
-        self->queue_.PushScroll({static_cast<f32>(x), static_cast<f32>(y)});
+        auto* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        self->queue.PushScroll({static_cast<f32>(x), static_cast<f32>(y)});
     }
 
     static void glfw_key_cb(GLFWwindow* window, int key, int scancode, int action, int mods) {
-        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
-        self->queue_.PushKey(key, scancode, action == GLFW_PRESS, action == GLFW_REPEAT, mods);
+        auto* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        self->queue.PushKey(key, scancode, action == GLFW_PRESS, action == GLFW_REPEAT, mods);
     }
 
     static void glfw_char_cb(GLFWwindow* window, unsigned int codepoint) {
-        auto* self = static_cast<GlfwPlatform*>(glfwGetWindowUserPointer(window));
-        self->queue_.PushChar(codepoint);
+        auto* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
+        self->queue.PushChar(codepoint);
     }
-
-    GLFWwindow* window_ = nullptr;
-    InputQueue queue_;
 };
 
-Platform* CreateGlfwPlatform() {
-    return new GlfwPlatform();
+Platform::Platform() : impl_(new Impl()) {}
+Platform::~Platform() { delete impl_; }
+
+bool Platform::Init(const WindowConfig& config) {
+    if (!glfwInit()) {
+        std::fprintf(stderr, "ultragui: glfwInit() failed\n");
+        return false;
+    }
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, config.resizable ? GLFW_TRUE : GLFW_FALSE);
+
+    impl_->window = glfwCreateWindow(config.width, config.height, config.title, nullptr, nullptr);
+    if (!impl_->window) {
+        std::fprintf(stderr, "ultragui: glfwCreateWindow() failed\n");
+        glfwTerminate();
+        return false;
+    }
+
+    // Install input callbacks
+    glfwSetWindowUserPointer(impl_->window, impl_);
+    glfwSetCursorPosCallback(impl_->window, Impl::glfw_mouse_pos_cb);
+    glfwSetMouseButtonCallback(impl_->window, Impl::glfw_mouse_button_cb);
+    glfwSetScrollCallback(impl_->window, Impl::glfw_scroll_cb);
+    glfwSetKeyCallback(impl_->window, Impl::glfw_key_cb);
+    glfwSetCharCallback(impl_->window, Impl::glfw_char_cb);
+
+    return true;
 }
+
+void Platform::Shutdown() {
+    if (impl_->window) {
+        glfwDestroyWindow(impl_->window);
+        impl_->window = nullptr;
+    }
+    glfwTerminate();
+}
+
+bool Platform::ShouldClose() const { return glfwWindowShouldClose(impl_->window); }
+
+void Platform::PollEvents() {
+    impl_->queue.clear();
+    glfwPollEvents();
+}
+
+Vec2 Platform::window_size() const {
+    int w, h;
+    glfwGetWindowSize(impl_->window, &w, &h);
+    return {static_cast<f32>(w), static_cast<f32>(h)};
+}
+
+Vec2 Platform::framebuffer_size() const {
+    int w, h;
+    glfwGetFramebufferSize(impl_->window, &w, &h);
+    return {static_cast<f32>(w), static_cast<f32>(h)};
+}
+
+f32 Platform::dpi_scale() const {
+    float xscale, yscale;
+    glfwGetWindowContentScale(impl_->window, &xscale, &yscale);
+    return xscale;
+}
+
+f64 Platform::time() const { return glfwGetTime(); }
+
+void* Platform::native_handle() const { return impl_->window; }
+
+void Platform::SetCursor(Cursor cursor) {
+    // Create cursors on first use
+    static GLFWcursor* cursors[6] = {};
+    static bool init = false;
+    if (!init) {
+        cursors[1] = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+        cursors[2] = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
+        cursors[3] = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
+        cursors[4] = glfwCreateStandardCursor(GLFW_CROSSHAIR_CURSOR);
+        cursors[5] = glfwCreateStandardCursor(GLFW_NOT_ALLOWED_CURSOR);
+        init = true;
+    }
+    int idx = static_cast<int>(cursor);
+    if (idx > 0 && idx < 6 && cursors[idx])
+        glfwSetCursor(impl_->window, cursors[idx]);
+    else
+        glfwSetCursor(impl_->window, nullptr); // default
+}
+
+const char* Platform::clipboard_text() const {
+    return glfwGetClipboardString(impl_->window);
+}
+
+void Platform::set_clipboard_text(const char* text) {
+    glfwSetClipboardString(impl_->window, text);
+}
+
+InputQueue& Platform::input_queue() { return impl_->queue; }
 
 } // namespace ugui

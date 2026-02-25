@@ -1,41 +1,59 @@
 #ifndef ULTRAGUI_SCRIPTING_SCRIPT_RUNTIME_H_
 #define ULTRAGUI_SCRIPTING_SCRIPT_RUNTIME_H_
 
+#if ULTRAGUI_LUA
+#include <ultragui/core/types.h>
+struct lua_State;
+#endif
+
 namespace ugui {
 
 class Widget;
 
-/// Abstract scripting runtime interface. Implement this to plug in any
-/// scripting language (Lua, Python, Wren, ...) or use it as the C++ callback
-/// dispatch point in engines that don't want a scripting layer at all.
-///
-/// The built-in LuaRuntime is the default implementation when ULTRAGUI_LUA
-/// is enabled. When disabled, UIContext operates without a script runtime
-/// and all scripting entry points become no-ops.
+/// Concrete scripting runtime with link-time swappable implementation.
+/// The default implementation uses Lua 5.4 (when ULTRAGUI_LUA=1);
+/// a no-op stub is used when scripting is disabled.
+/// Swap the .cc file via CMake (ULTRAGUI_SCRIPT_SOURCE) to provide
+/// your own scripting backend.
 class ScriptRuntime {
 public:
-    virtual ~ScriptRuntime() = default;
+    ScriptRuntime();
+    ~ScriptRuntime();
+    ScriptRuntime(const ScriptRuntime&) = delete;
+    ScriptRuntime& operator=(const ScriptRuntime&) = delete;
 
-    virtual bool Init() = 0;
-    virtual void Shutdown() = 0;
+    bool Init();
+    void Shutdown();
 
     /// Execute a script from a string.
-    virtual bool Exec(const char* script, const char* name = "chunk") = 0;
+    bool Exec(const char* script, const char* name = "chunk");
 
     /// Execute a script from a file path.
-    virtual bool ExecFile(const char* path) = 0;
+    bool ExecFile(const char* path);
 
     /// Register a widget so the scripting layer can find it by name.
-    virtual void RegisterWidget(Widget* widget) = 0;
-    virtual void UnregisterWidget(Widget* widget) = 0;
-    virtual void ClearWidgetRegistry() = 0;
+    void RegisterWidget(Widget* widget);
+    void UnregisterWidget(Widget* widget);
+    void ClearWidgetRegistry();
 
     /// Call a named handler function, passing the widget as context.
     /// Returns true if the handler existed and ran successfully.
-    virtual bool CallHandler(const char* func_name, Widget* widget) = 0;
+    bool CallHandler(const char* func_name, Widget* widget);
 
     /// Look up a registered widget by name.
-    virtual Widget* FindRegisteredWidget(const char* name) const = 0;
+    Widget* FindRegisteredWidget(const char* name) const;
+
+#if ULTRAGUI_LUA
+    /// Expose a C++ function to Lua under ugui.{name}. Lua-specific.
+    using NativeFunction = Function<int(lua_State*)>;
+    void RegisterFunction(const char* name, NativeFunction func);
+
+    lua_State* state() const;
+#endif
+
+    struct Impl;
+private:
+    Impl* impl_;
 };
 
 } // namespace ugui

@@ -5,7 +5,7 @@
 
 namespace ugui {
 
-class LuaRuntime;
+class ScriptRuntime;
 class VideoPlayer;
 class Widget;
 
@@ -13,7 +13,7 @@ class Widget;
 /// The loader function creates and returns a VideoPlayer*.
 /// The find_widget function locates widgets by name for video_attach.
 void RegisterVideoLua(
-    LuaRuntime& lua,
+    ScriptRuntime& rt,
     Function<VideoPlayer*(const char*)> loader,
     Function<Widget*(const char*)> find_widget);
 

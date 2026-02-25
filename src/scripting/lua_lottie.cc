@@ -1,6 +1,6 @@
 #include <ultragui/scripting/lua_lottie.h>
 #include <ultragui/lottie/lottie.h>
-#include <ultragui/scripting/lua_runtime.h>
+#include <ultragui/scripting/script_runtime.h>
 #include <ultragui/widgets/image.h>
 #include <ultragui/widgets/widget.h>
 
@@ -12,7 +12,7 @@ extern "C" {
 namespace ugui {
 
 void RegisterLottieLua(
-    LuaRuntime& lua,
+    ScriptRuntime& lua,
     Function<LottieAnimation*(const char*, unsigned, unsigned)> loader,
     Function<Widget*(const char*)> find_widget) {
 

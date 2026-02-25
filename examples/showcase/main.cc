@@ -189,8 +189,7 @@ static void load_scene(ugui::UIContext& ui, int idx) {
         if (btn != ugui::MouseButton::kLeft || widget->name().empty())
             return;
         std::string handler = "on_" + widget->name();
-        if (ui.script())
-            ui.script()->CallHandler(handler.c_str(), widget);
+        ui.script().CallHandler(handler.c_str(), widget);
     });
 
     // Set up NERV render-to-texture if this is the NERV scene

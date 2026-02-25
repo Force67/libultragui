@@ -1,6 +1,6 @@
 #include <ultragui/scripting/lua_anim.h>
 #include <ultragui/anim/vector_animation.h>
-#include <ultragui/scripting/lua_runtime.h>
+#include <ultragui/scripting/script_runtime.h>
 #include <ultragui/widgets/image.h>
 #include <ultragui/widgets/widget.h>
 
@@ -12,7 +12,7 @@ extern "C" {
 namespace ugui {
 
 void RegisterAnimLua(
-    LuaRuntime& lua,
+    ScriptRuntime& lua,
     Function<VectorAnimation*(const char*, unsigned, unsigned)> loader,
     Function<Widget*(const char*)> find_widget) {
 

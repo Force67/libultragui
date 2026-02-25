@@ -5,7 +5,7 @@
 
 namespace ugui {
 
-class LuaRuntime;
+class ScriptRuntime;
 class LottieAnimation;
 class Widget;
 
@@ -13,7 +13,7 @@ class Widget;
 /// The loader function creates and returns a LottieAnimation*.
 /// The find_widget function locates widgets by name for lottie_attach.
 void RegisterLottieLua(
-    LuaRuntime& lua,
+    ScriptRuntime& rt,
     Function<LottieAnimation*(const char*, unsigned, unsigned)> loader,
     Function<Widget*(const char*)> find_widget);
 

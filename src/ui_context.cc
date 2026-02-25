@@ -45,7 +45,7 @@ static f32 ComputeViewportScale(const UIConfig& cfg, Vec2 display) {
 }
 
 UIContext::~UIContext() {
-    if (platform_)
+    if (initialized_)
         Shutdown();
 }
 
@@ -53,7 +53,6 @@ bool UIContext::Init(const UIConfig& config) {
     config_ = config;
 
     // Platform
-    platform_ = CreateGlfwPlatform();
     Platform::WindowConfig wcfg;
     wcfg.width = config.width;
     wcfg.height = config.height;
@@ -61,70 +60,60 @@ bool UIContext::Init(const UIConfig& config) {
     wcfg.resizable = config.resizable;
     wcfg.vsync = config.vsync;
 
-    if (!platform_->Init(wcfg)) {
+    if (!platform_.Init(wcfg)) {
         std::fprintf(stderr, "ultragui: failed to initialize platform\n");
-        delete platform_;
-        platform_ = nullptr;
         return false;
     }
 
     // RHI
-    rhi_ = CreateVulkanRhi();
     RHIConfig rcfg;
-    rcfg.platform = platform_;
+    rcfg.platform = &platform_;
     rcfg.validation = config.validation;
     rcfg.vsync = config.vsync;
     rcfg.shader_dir = config.shader_dir;
 
-    if (!rhi_->Init(rcfg)) {
+    if (!rhi_.Init(rcfg)) {
         std::fprintf(stderr, "ultragui: failed to initialize Vulkan RHI\n");
-        delete rhi_;
-        rhi_ = nullptr;
-        platform_->Shutdown();
-        delete platform_;
-        platform_ = nullptr;
+        platform_.Shutdown();
         return false;
     }
 
     // Renderer
-    renderer_.Init(rhi_);
+    renderer_.Init(&rhi_);
 
     // Text engine
-    if (!text_engine_.Init(rhi_)) {
+    if (!text_engine_.Init(&rhi_)) {
         std::fprintf(stderr, "ultragui: failed to initialize text engine\n");
     }
 
     // Input
-    input_.Init(platform_);
+    input_.Init(&platform_);
 
-    // Scripting runtime (Lua by default, or user-supplied via SetScriptRuntime)
+    // Scripting runtime
+    script_.Init();
+
 #if ULTRAGUI_LUA
-    if (!script_) {
-        auto* lua = new LuaRuntime();
-        lua->Init();
-        script_ = lua;
-        owns_script_ = true;
-
+    {
 #if ULTRAGUI_AUDIO
-        RegisterAudioLua(*lua, audio_);
+        RegisterAudioLua(script_, audio_);
 #endif
 #if ULTRAGUI_LOTTIE
         RegisterLottieLua(
-            *lua,
+            script_,
             [this](const char* path, unsigned w, unsigned h) -> LottieAnimation* {
                 return LoadLottie(path, w, h);
             },
             [this](const char* name) -> Widget* { return FindWidget(name); });
 #endif
         RegisterAnimLua(
-            *lua,
+            script_,
             [this](const char* path, unsigned w, unsigned h) -> VectorAnimation* {
                 return LoadAnim(path, w, h);
             },
             [this](const char* name) -> Widget* { return FindWidget(name); });
 #if ULTRAGUI_VIDEO
         RegisterVideoLua(
-            *lua,
+            script_,
             [this](const char* path) -> VideoPlayer* {
                 return LoadVideo(path);
             },
@@ -143,7 +132,7 @@ bool UIContext::Init(const UIConfig& config) {
     widget_ctx_.text_engine = &text_engine_;
     widget_ctx_.animator = &animator_;
     widget_ctx_.current_time = &last_time_;
-    widget_ctx_.platform = platform_;
+    widget_ctx_.platform = &platform_;
     widget_ctx_.ui_scale = ComputeViewportScale(
         config_, {static_cast<f32>(config.width), static_cast<f32>(config.height)});
 
@@ -151,7 +140,8 @@ bool UIContext::Init(const UIConfig& config) {
     builder_.set_animator(&animator_);
     builder_.set_viewport_size({static_cast<f32>(config.width), static_cast<f32>(config.height)});
 
-    last_time_ = platform_->time();
+    last_time_ = platform_.time();
+    initialized_ = true;
     return true;
 }
 
@@ -184,7 +174,7 @@ Widget* UIContext::LoadUi(const char* path) {
         input_.ResetState();
         tooltip_target_ = nullptr;
         tooltip_visible_ = false;
-        if (script_) script_->ClearWidgetRegistry();
+        script_.ClearWidgetRegistry();
         if (owns_root_)
             delete root_;
     }
@@ -194,7 +184,7 @@ Widget* UIContext::LoadUi(const char* path) {
 
     if (root_) {
         root_->SetContext(&widget_ctx_);
-        if (script_) RegisterWidgetTree(*script_, root_);
+        RegisterWidgetTree(script_, root_);
     }
 
     return root_;
@@ -216,7 +206,7 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
         input_.ResetState();
         tooltip_target_ = nullptr;
         tooltip_visible_ = false;
-        if (script_) script_->ClearWidgetRegistry();
+        script_.ClearWidgetRegistry();
         if (owns_root_)
             delete root_;
     }
@@ -226,25 +216,25 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
 
     if (root_) {
         root_->SetContext(&widget_ctx_);
-        if (script_) RegisterWidgetTree(*script_, root_);
+        RegisterWidgetTree(script_, root_);
     }
 
     return root_;
 }
 
 bool UIContext::LoadScript(const char* path) {
-    return script_ ? script_->ExecFile(path) : false;
+    return script_.ExecFile(path);
 }
 
 bool UIContext::ExecScript(const char* script, const char* name) {
-    return script_ ? script_->Exec(script, name) : false;
+    return script_.Exec(script, name);
 }
 
 void UIContext::set_root(Widget* root) {
     input_.ResetState();
     tooltip_target_ = nullptr;
     tooltip_visible_ = false;
-    if (script_) script_->ClearWidgetRegistry();
+    script_.ClearWidgetRegistry();
 
     if (owns_root_)
         delete root_;
@@ -252,30 +242,30 @@ void UIContext::set_root(Widget* root) {
     owns_root_ = false;
     if (root_) {
         root_->SetContext(&widget_ctx_);
-        if (script_) RegisterWidgetTree(*script_, root_);
+        RegisterWidgetTree(script_, root_);
     }
 }
 
 bool UIContext::Running() const {
-    return platform_ && !platform_->ShouldClose();
+    return initialized_ && !platform_.ShouldClose();
 }
 
 f64 UIContext::time() const {
-    return platform_ ? platform_->time() : 0.0;
+    return initialized_ ? platform_.time() : 0.0;
 }
 
 void UIContext::Update() {
     // Timing
-    f64 now = platform_->time();
+    f64 now = platform_.time();
     dt_ = now - last_time_;
     last_time_ = now;
 
     // Poll input (processes window resize events)
-    platform_->PollEvents();
+    platform_.PollEvents();
 
     // Use platform window_size() for viewport - it reflects resizes immediately,
     // unlike rhi_->display_size() which waits for swapchain recreation in BeginFrame.
-    Vec2 viewport = platform_->window_size();
+    Vec2 viewport = platform_.window_size();
 
     // Update builder viewport size so media queries reflect current window dimensions
     builder_.set_viewport_size(viewport);
@@ -331,7 +321,7 @@ void UIContext::Update() {
                 break;
             }
         }
-        if (need_convert && rhi_->AcquireFrame()) {
+        if (need_convert && rhi_.AcquireFrame()) {
             for (auto* vid : video_players_) {
                 if (vid && vid->NeedsConvert())
                     vid->ConvertFrame();
@@ -356,14 +346,14 @@ void UIContext::Update() {
 
     // --- Offscreen render passes ---
     if (!offscreen_queue_.empty()) {
-        if (!rhi_->AcquireFrame()) {
+        if (!rhi_.AcquireFrame()) {
             offscreen_queue_.clear();
             return;
         }
 
         LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
         for (auto& pass : offscreen_queue_) {
-            if (!rhi_->BeginOffscreen(pass.target, pass.clear_color))
+            if (!rhi_.BeginOffscreen(pass.target, pass.clear_color))
                 continue;
 
             renderer_.BeginFrame();
@@ -373,19 +363,19 @@ void UIContext::Update() {
             }
             text_engine_.FlushAtlas();
             renderer_.EndFrame();
-            rhi_->EndOffscreen(pass.target);
+            rhi_.EndOffscreen(pass.target);
         }
         offscreen_queue_.clear();
     }
 
     // --- Main swapchain render pass ---
-    if (!rhi_->BeginFrame(config_.clear_color))
+    if (!rhi_.BeginFrame(config_.clear_color))
         return;
 
     renderer_.BeginFrame();
 
     if (on_paint_cb_) {
-        on_paint_cb_(renderer_, rhi_);
+        on_paint_cb_(renderer_, &rhi_);
     } else if (root_) {
         LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
         ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
@@ -408,7 +398,7 @@ void UIContext::Update() {
     DrawTooltip();
 
     renderer_.EndFrame();
-    rhi_->EndFrame();
+    rhi_.EndFrame();
 }
 
 void UIContext::UpdateTooltip() {
@@ -455,7 +445,7 @@ void UIContext::DrawTooltip() {
     f32 y = target_rect.y + target_rect.h + 6.0f;
 
     // Clamp to viewport
-    Vec2 vp = rhi_->display_size();
+    Vec2 vp = rhi_.display_size();
     if (x + w > vp.x) x = vp.x - w - 4.0f;
     if (y + h > vp.y) y = target_rect.y - h - 6.0f;
 
@@ -474,11 +464,14 @@ void UIContext::DrawTooltip() {
 }
 
 void UIContext::Shutdown() {
+    if (!initialized_)
+        return;
+
     input_.ResetState();
     tooltip_target_ = nullptr;
     tooltip_visible_ = false;
     overlays_.clear();
-    if (script_) script_->ClearWidgetRegistry();
+    script_.ClearWidgetRegistry();
 
     if (owns_root_) {
         delete root_;
@@ -503,35 +496,22 @@ void UIContext::Shutdown() {
 #if ULTRAGUI_AUDIO
     audio_.Shutdown();
 #endif
-    if (script_) {
-        script_->Shutdown();
-        if (owns_script_) delete script_;
-        script_ = nullptr;
-        owns_script_ = false;
-    }
+    script_.Shutdown();
     renderer_.Shutdown();
     text_engine_.Shutdown();
+    rhi_.Shutdown();
+    platform_.Shutdown();
 
-    if (rhi_) {
-        rhi_->Shutdown();
-        delete rhi_;
-        rhi_ = nullptr;
-    }
-
-    if (platform_) {
-        platform_->Shutdown();
-        delete platform_;
-        platform_ = nullptr;
-    }
+    initialized_ = false;
 }
 
 RHITextureHandle UIContext::LoadSvg(const char* path, u32 width, u32 height) {
-    return LoadSvgTexture(rhi_, path, width, height);
+    return LoadSvgTexture(&rhi_, path, width, height);
 }
 
 VectorAnimation* UIContext::LoadAnim(const char* path, u32 width, u32 height) {
     auto* anim = new VectorAnimation();
-    if (!anim->Load(rhi_, path, width, height)) {
+    if (!anim->Load(&rhi_, path, width, height)) {
         delete anim;
         return nullptr;
     }
@@ -542,7 +522,7 @@ VectorAnimation* UIContext::LoadAnim(const char* path, u32 width, u32 height) {
 #if ULTRAGUI_LOTTIE
 LottieAnimation* UIContext::LoadLottie(const char* path, u32 width, u32 height) {
     auto* anim = new LottieAnimation();
-    if (!anim->Load(rhi_, path, width, height)) {
+    if (!anim->Load(&rhi_, path, width, height)) {
         delete anim;
         return nullptr;
     }
@@ -558,7 +538,7 @@ VideoPlayer* UIContext::LoadVideo(const char* path) {
 #if ULTRAGUI_AUDIO
     audio_ptr = &audio_;
 #endif
-    if (!vid->Load(rhi_, path, audio_ptr)) {
+    if (!vid->Load(&rhi_, path, audio_ptr)) {
         delete vid;
         return nullptr;
     }
@@ -568,7 +548,7 @@ VideoPlayer* UIContext::LoadVideo(const char* path) {
 #endif
 
 RHITextureHandle UIContext::CreateRenderTarget(u32 width, u32 height) {
-    return rhi_ ? rhi_->CreateRenderTarget(width, height) : kInvalidTexture;
+    return rhi_.CreateRenderTarget(width, height);
 }
 
 void UIContext::QueueOffscreen(RHITextureHandle target, Widget* root, Color clear_color) {
@@ -608,20 +588,5 @@ void UIContext::SetTheme(const Theme& theme) {
 Widget* UIContext::FindWidget(const char* name) const {
     return ugui::FindWidget(root_, name);
 }
-
-void UIContext::SetScriptRuntime(ScriptRuntime* rt) {
-    if (script_ && owns_script_) {
-        script_->Shutdown();
-        delete script_;
-    }
-    script_ = rt;
-    owns_script_ = false;
-}
-
-#if ULTRAGUI_LUA
-LuaRuntime* UIContext::lua() {
-    return dynamic_cast<LuaRuntime*>(script_);
-}
-#endif
 
 } // namespace ugui

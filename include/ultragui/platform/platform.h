@@ -8,11 +8,15 @@
 
 namespace ugui {
 
-/// Abstract window/platform interface.
-/// The GLFW implementation is the default; engines will provide their own.
+/// Concrete platform class with link-time swappable implementation.
+/// The default implementation uses GLFW; swap the .cc file via CMake
+/// (ULTRAGUI_PLATFORM_SOURCE) to provide your own backend.
 class Platform {
 public:
-    virtual ~Platform() = default;
+    Platform();
+    ~Platform();
+    Platform(const Platform&) = delete;
+    Platform& operator=(const Platform&) = delete;
 
     struct WindowConfig {
         i32 width = 1280;
@@ -22,33 +26,34 @@ public:
         bool vsync = true;
     };
 
-    virtual bool Init(const WindowConfig& config) = 0;
-    virtual void Shutdown() = 0;
+    bool Init(const WindowConfig& config);
+    void Shutdown();
 
-    virtual bool ShouldClose() const = 0;
-    virtual void PollEvents() = 0;
-    virtual Vec2 window_size() const = 0;
-    virtual Vec2 framebuffer_size() const = 0;
-    virtual f32 dpi_scale() const = 0;
-    virtual f64 time() const = 0;
+    bool ShouldClose() const;
+    void PollEvents();
+    Vec2 window_size() const;
+    Vec2 framebuffer_size() const;
+    f32 dpi_scale() const;
+    f64 time() const;
 
     /// Returns native window handle for RHI backend initialization
-    virtual void* native_handle() const = 0;
+    void* native_handle() const;
 
     /// Set the mouse cursor style
-    virtual void SetCursor(Cursor cursor) = 0;
+    void SetCursor(Cursor cursor);
 
     /// Clipboard access
-    virtual const char* clipboard_text() const = 0;
-    virtual void set_clipboard_text(const char* text) = 0;
+    const char* clipboard_text() const;
+    void set_clipboard_text(const char* text);
 
     /// Access the platform's input event queue.
     /// Filled during PollEvents(), consumed by InputRouter.
-    virtual InputQueue& input_queue() = 0;
-};
+    InputQueue& input_queue();
 
-/// Create the default GLFW-based platform
-Platform* CreateGlfwPlatform();
+    struct Impl;
+private:
+    Impl* impl_;
+};
 
 } // namespace ugui
 
