@@ -37,7 +37,7 @@ target_compile_options(ultragui_warnings INTERFACE
 # --- Dependencies ---
 find_package(PkgConfig REQUIRED)
 
-if(ULTRAGUI_BACKEND_VULKAN)
+if(ULTRAGUI_BACKEND_VULKAN OR ULTRAGUI_BACKEND_D3D12)
     find_package(Vulkan REQUIRED)
 endif()
 
@@ -92,6 +92,39 @@ foreach(SHADER ${SHADER_SOURCES})
 endforeach()
 
 add_custom_target(ultragui_shaders DEPENDS ${SHADER_OUTPUTS})
+
+# --- HLSL shader compilation (D3D12) ---
+if(ULTRAGUI_BACKEND_D3D12)
+    find_program(DXC dxc REQUIRED)
+    set(HLSL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders/hlsl)
+    set(HLSL_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders/hlsl)
+    file(MAKE_DIRECTORY ${HLSL_OUT_DIR})
+
+    set(HLSL_SHADERS
+        quad text video
+    )
+    set(HLSL_OUTPUTS)
+    foreach(HLSL_NAME ${HLSL_SHADERS})
+        set(HLSL_FILE ${HLSL_DIR}/${HLSL_NAME}.hlsl)
+        set(VS_OUTPUT ${HLSL_OUT_DIR}/${HLSL_NAME}_vs.cso)
+        set(PS_OUTPUT ${HLSL_OUT_DIR}/${HLSL_NAME}_ps.cso)
+        add_custom_command(
+            OUTPUT ${VS_OUTPUT}
+            COMMAND ${DXC} -T vs_6_0 -E VSMain -Fo ${VS_OUTPUT} ${HLSL_FILE}
+            DEPENDS ${HLSL_FILE}
+            COMMENT "Compiling HLSL VS: ${HLSL_NAME}"
+        )
+        add_custom_command(
+            OUTPUT ${PS_OUTPUT}
+            COMMAND ${DXC} -T ps_6_0 -E PSMain -Fo ${PS_OUTPUT} ${HLSL_FILE}
+            DEPENDS ${HLSL_FILE}
+            COMMENT "Compiling HLSL PS: ${HLSL_NAME}"
+        )
+        list(APPEND HLSL_OUTPUTS ${VS_OUTPUT} ${PS_OUTPUT})
+    endforeach()
+
+    add_custom_target(ultragui_hlsl_shaders DEPENDS ${HLSL_OUTPUTS})
+endif()
 
 # --- Swappable implementation sources ---
 # Point these at your own .cc file to provide a custom backend.
@@ -183,6 +216,9 @@ endif()
 
 add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
 add_dependencies(ultragui ultragui_shaders)
+if(ULTRAGUI_BACKEND_D3D12)
+    add_dependencies(ultragui ultragui_hlsl_shaders)
+endif()
 
 target_include_directories(ultragui
     PUBLIC
@@ -212,6 +248,16 @@ target_link_libraries(ultragui
 if(ULTRAGUI_BACKEND_VULKAN)
     target_link_libraries(ultragui PRIVATE Vulkan::Vulkan)
     target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_VULKAN=1)
+endif()
+
+if(ULTRAGUI_BACKEND_D3D12)
+    pkg_check_modules(VKD3D REQUIRED IMPORTED_TARGET libvkd3d)
+    pkg_check_modules(VKD3D_UTILS REQUIRED IMPORTED_TARGET libvkd3d-utils)
+    target_link_libraries(ultragui PRIVATE PkgConfig::VKD3D PkgConfig::VKD3D_UTILS Vulkan::Vulkan)
+    target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_D3D12=1)
+    target_compile_definitions(ultragui PRIVATE
+        ULTRAGUI_HLSL_SHADER_DIR="${HLSL_OUT_DIR}"
+    )
 endif()
 
 if(ULTRAGUI_LUA)

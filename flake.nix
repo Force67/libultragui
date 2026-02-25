@@ -29,6 +29,7 @@
             # Shader compilation
             shaderc
             glslang
+            directx-shader-compiler  # HLSL → DXIL (D3D12 shaders)
           ];
 
           buildInputs = with pkgs; [
@@ -37,6 +38,9 @@
             vulkan-loader
             vulkan-validation-layers
             vulkan-tools
+
+            # D3D12 via vkd3d (Linux testing)
+            vkd3d
 
             # Windowing
             glfw
