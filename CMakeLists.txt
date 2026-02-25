@@ -17,6 +17,7 @@ option(ULTRAGUI_BACKEND_VULKAN "Enable Vulkan backend" ON)
 option(ULTRAGUI_BACKEND_D3D12 "Enable D3D12 backend" OFF)
 option(ULTRAGUI_AUDIO "Enable audio engine (miniaudio)" ON)
 option(ULTRAGUI_LOTTIE "Enable Lottie animation support (rlottie)" ON)
+option(ULTRAGUI_VIDEO "Enable MPEG-1 video playback (pl_mpeg)" ON)
 option(ULTRAGUI_LUA "Enable built-in Lua scripting runtime" ON)
 
 # Compiler warnings
@@ -73,6 +74,8 @@ set(SHADER_SOURCES
     ${SHADER_DIR}/quad.frag
     ${SHADER_DIR}/text.vert
     ${SHADER_DIR}/text.frag
+    ${SHADER_DIR}/video.vert
+    ${SHADER_DIR}/video.frag
 )
 
 set(SHADER_OUTPUTS)
@@ -159,6 +162,13 @@ if(ULTRAGUI_LOTTIE)
     endif()
 endif()
 
+if(ULTRAGUI_VIDEO)
+    list(APPEND ULTRAGUI_SOURCES src/video/video.cc)
+    if(ULTRAGUI_LUA)
+        list(APPEND ULTRAGUI_SOURCES src/scripting/lua_video.cc)
+    endif()
+endif()
+
 add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
 add_dependencies(ultragui ultragui_shaders)
 
@@ -169,6 +179,7 @@ target_include_directories(ultragui
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         $<$<BOOL:${ULTRAGUI_AUDIO}>:${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio>
+        $<$<BOOL:${ULTRAGUI_VIDEO}>:${CMAKE_CURRENT_SOURCE_DIR}/third_party/pl_mpeg>
 )
 
 target_compile_definitions(ultragui PRIVATE
@@ -198,6 +209,14 @@ endif()
 if(ULTRAGUI_LOTTIE)
     target_link_libraries(ultragui PRIVATE rlottie)
     target_compile_definitions(ultragui PUBLIC ULTRAGUI_LOTTIE=1)
+endif()
+
+if(ULTRAGUI_VIDEO)
+    target_compile_definitions(ultragui PUBLIC ULTRAGUI_VIDEO=1)
+    # pl_mpeg is header-only, no linking needed.
+    # When ULTRAGUI_AUDIO is also ON, video.cc includes miniaudio.h for audio
+    # bridge -- the include path is already provided by the AUDIO block below.
+    # When AUDIO is OFF, video plays silently (no audio deps).
 endif()
 
 if(ULTRAGUI_AUDIO)

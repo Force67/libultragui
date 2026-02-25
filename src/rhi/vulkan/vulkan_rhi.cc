@@ -1644,6 +1644,225 @@ void VulkanRHI::EndOffscreen(RHITextureHandle target) {
 }
 
 // ---------------------------------------------------------------------------
+// Video pipeline (YCbCr -> RGBA)
+// ---------------------------------------------------------------------------
+
+bool VulkanRHI::ensure_video_pipeline() {
+    if (video_pipeline_ready_)
+        return true;
+
+    if (!create_offscreen_render_pass())
+        return false;
+
+    // Descriptor set layout: 3 combined image samplers (Y, Cb, Cr)
+    VkDescriptorSetLayoutBinding bindings[3] = {};
+    for (u32 i = 0; i < 3; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+
+    VkDescriptorSetLayoutCreateInfo dsl_ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dsl_ci.bindingCount = 3;
+    dsl_ci.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(device_, &dsl_ci, nullptr, &video_desc_set_layout_) != VK_SUCCESS)
+        return false;
+
+    // Descriptor pool: one set per in-flight frame, 3 samplers each
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES * 3};
+    VkDescriptorPoolCreateInfo dpc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpc.poolSizeCount = 1;
+    dpc.pPoolSizes = &pool_size;
+    dpc.maxSets = MAX_FRAMES;
+    if (vkCreateDescriptorPool(device_, &dpc, nullptr, &video_desc_pool_) != VK_SUCCESS)
+        return false;
+
+    // Allocate per-frame descriptor sets
+    for (u32 i = 0; i < MAX_FRAMES; ++i) {
+        VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dai.descriptorPool = video_desc_pool_;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &video_desc_set_layout_;
+        if (vkAllocateDescriptorSets(device_, &dai, &video_desc_sets_[i]) != VK_SUCCESS)
+            return false;
+    }
+
+    // Pipeline layout (no push constants - fullscreen pass from gl_VertexIndex)
+    VkPipelineLayoutCreateInfo plc{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plc.setLayoutCount = 1;
+    plc.pSetLayouts = &video_desc_set_layout_;
+    if (vkCreatePipelineLayout(device_, &plc, nullptr, &video_pipeline_layout_) != VK_SUCCESS)
+        return false;
+
+    // Shaders
+    auto vert_mod = load_shader("video.vert.spv");
+    auto frag_mod = load_shader("video.frag.spv");
+    if (!vert_mod || !frag_mod) {
+        if (vert_mod) vkDestroyShaderModule(device_, vert_mod, nullptr);
+        if (frag_mod) vkDestroyShaderModule(device_, frag_mod, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2] = {};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert_mod;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag_mod;
+    stages[1].pName = "main";
+
+    // No vertex input - vertices generated in shader from gl_VertexIndex
+    VkPipelineVertexInputStateCreateInfo vertex_input{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewport_state{
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport_state.viewportCount = 1;
+    viewport_state.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo raster{
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.lineWidth = 1.0f;
+    raster.cullMode = VK_CULL_MODE_NONE;
+
+    VkPipelineMultisampleStateCreateInfo multisample{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // No blending - opaque video frame
+    VkPipelineColorBlendAttachmentState blend_att{};
+    blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo color_blend{
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    color_blend.attachmentCount = 1;
+    color_blend.pAttachments = &blend_att;
+
+    VkDynamicState dyn_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic_state{
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic_state.dynamicStateCount = 2;
+    dynamic_state.pDynamicStates = dyn_states;
+
+    VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pi.stageCount = 2;
+    pi.pStages = stages;
+    pi.pVertexInputState = &vertex_input;
+    pi.pInputAssemblyState = &input_assembly;
+    pi.pViewportState = &viewport_state;
+    pi.pRasterizationState = &raster;
+    pi.pMultisampleState = &multisample;
+    pi.pColorBlendState = &color_blend;
+    pi.pDynamicState = &dynamic_state;
+    pi.layout = video_pipeline_layout_;
+    pi.renderPass = offscreen_render_pass_;
+    pi.subpass = 0;
+
+    VkResult result =
+        vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pi, nullptr, &video_pipeline_);
+
+    vkDestroyShaderModule(device_, vert_mod, nullptr);
+    vkDestroyShaderModule(device_, frag_mod, nullptr);
+
+    if (result != VK_SUCCESS)
+        return false;
+
+    video_pipeline_ready_ = true;
+    return true;
+}
+
+void VulkanRHI::ConvertVideoFrame(RHITextureHandle target,
+                                   RHITextureHandle y, RHITextureHandle cb,
+                                   RHITextureHandle cr) {
+    if (!ensure_video_pipeline())
+        return;
+    if (target >= MAX_TEXTURES || !textures_[target].in_use || !textures_[target].is_render_target)
+        return;
+    if (y >= MAX_TEXTURES || !textures_[y].in_use)
+        return;
+    if (cb >= MAX_TEXTURES || !textures_[cb].in_use)
+        return;
+    if (cr >= MAX_TEXTURES || !textures_[cr].in_use)
+        return;
+
+    auto& slot = textures_[target];
+    auto& f = frames_[current_frame_];
+
+    // Update the per-frame descriptor set with the 3 plane textures
+    VkDescriptorImageInfo img_infos[3] = {};
+    RHITextureHandle planes[3] = {y, cb, cr};
+    for (u32 i = 0; i < 3; ++i) {
+        img_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        img_infos[i].imageView = textures_[planes[i]].view;
+        img_infos[i].sampler = default_sampler_;
+    }
+
+    VkWriteDescriptorSet writes[3] = {};
+    for (u32 i = 0; i < 3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = video_desc_sets_[current_frame_];
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &img_infos[i];
+    }
+    vkUpdateDescriptorSets(device_, 3, writes, 0, nullptr);
+
+    // Begin offscreen render pass
+    VkClearValue clear = {};
+    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rbi.renderPass = offscreen_render_pass_;
+    rbi.framebuffer = slot.framebuffer;
+    rbi.renderArea = {{0, 0}, {slot.width, slot.height}};
+    rbi.clearValueCount = 1;
+    rbi.pClearValues = &clear;
+    vkCmdBeginRenderPass(f.cmd_buffer, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    // Bind video pipeline and descriptor set
+    vkCmdBindPipeline(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, video_pipeline_);
+    vkCmdBindDescriptorSets(f.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            video_pipeline_layout_, 0, 1,
+                            &video_desc_sets_[current_frame_], 0, nullptr);
+
+    VkViewport viewport{};
+    viewport.width = static_cast<f32>(slot.width);
+    viewport.height = static_cast<f32>(slot.height);
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(f.cmd_buffer, 0, 1, &viewport);
+
+    VkRect2D scissor{{0, 0}, {slot.width, slot.height}};
+    vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
+
+    // Draw fullscreen triangle (3 vertices, no vertex buffer)
+    vkCmdDraw(f.cmd_buffer, 3, 1, 0, 0);
+
+    vkCmdEndRenderPass(f.cmd_buffer);
+
+    // Pipeline barrier: ensure the conversion is complete before sampling
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = slot.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(f.cmd_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &barrier);
+}
+
+// ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
 
@@ -1696,6 +1915,15 @@ void VulkanRHI::Shutdown() {
         if (f.cmd_pool)
             vkDestroyCommandPool(device_, f.cmd_pool, nullptr);
     }
+
+    if (video_pipeline_)
+        vkDestroyPipeline(device_, video_pipeline_, nullptr);
+    if (video_pipeline_layout_)
+        vkDestroyPipelineLayout(device_, video_pipeline_layout_, nullptr);
+    if (video_desc_pool_)
+        vkDestroyDescriptorPool(device_, video_desc_pool_, nullptr);
+    if (video_desc_set_layout_)
+        vkDestroyDescriptorSetLayout(device_, video_desc_set_layout_, nullptr);
 
     if (desc_pool_)
         vkDestroyDescriptorPool(device_, desc_pool_, nullptr);

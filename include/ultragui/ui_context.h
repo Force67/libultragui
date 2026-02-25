@@ -12,6 +12,9 @@
 #if ULTRAGUI_LOTTIE
 #include <ultragui/lottie/lottie.h>
 #endif
+#if ULTRAGUI_VIDEO
+#include <ultragui/video/video.h>
+#endif
 #include <ultragui/core/color.h>
 #include <ultragui/idl/builder.h>
 #include <ultragui/idl/parser.h>
@@ -156,6 +159,14 @@ public:
     LottieAnimation* LoadLottie(const char* path, u32 width, u32 height);
 #endif
 
+#if ULTRAGUI_VIDEO
+    /// Load an MPEG-1 video. The returned player is owned by UIContext and
+    /// automatically updated each frame. Returns nullptr on failure.
+    /// If ULTRAGUI_AUDIO is enabled, audio from the video will play through
+    /// a dedicated miniaudio device.
+    VideoPlayer* LoadVideo(const char* path);
+#endif
+
     /// Create an offscreen render target (delegates to RHI).
     RHITextureHandle CreateRenderTarget(u32 width, u32 height);
 
@@ -201,6 +212,9 @@ private:
     Vector<VectorAnimation*> vector_anims_;
 #if ULTRAGUI_LOTTIE
     Vector<LottieAnimation*> lottie_anims_;
+#endif
+#if ULTRAGUI_VIDEO
+    Vector<VideoPlayer*> video_players_;
 #endif
 
     Widget* root_ = nullptr;

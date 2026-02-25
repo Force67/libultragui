@@ -29,6 +29,16 @@ target_compile_definitions(ultragui_game_overlay PRIVATE
 )
 add_dependencies(ultragui_game_overlay ultragui_shaders)
 
+if(ULTRAGUI_VIDEO)
+    add_executable(ultragui_video_demo video_demo/main.cc)
+    target_link_libraries(ultragui_video_demo PRIVATE ultragui glfw)
+    target_compile_definitions(ultragui_video_demo PRIVATE
+        ULTRAGUI_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders"
+        ULTRAGUI_VIDEO_DEMO_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    add_dependencies(ultragui_video_demo ultragui_shaders)
+endif()
+
 if(ULTRAGUI_LOTTIE)
     add_executable(ultragui_lottie_demo lottie_demo/main.cc)
     target_link_libraries(ultragui_lottie_demo PRIVATE ultragui glfw rlottie)

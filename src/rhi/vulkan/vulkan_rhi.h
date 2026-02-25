@@ -35,6 +35,9 @@ public:
     void DestroyRenderTarget(RHITextureHandle handle) override;
     bool BeginOffscreen(RHITextureHandle target, Color clear_color) override;
     void EndOffscreen(RHITextureHandle target) override;
+    void ConvertVideoFrame(RHITextureHandle target,
+                            RHITextureHandle y, RHITextureHandle cb,
+                            RHITextureHandle cr) override;
     Vec2 display_size() const override;
     f32 dpi_scale() const override;
 
@@ -138,6 +141,7 @@ private:
     VkSampler nearest_sampler_ = VK_NULL_HANDLE; // NEAREST (for text atlases)
 
     bool create_offscreen_render_pass();
+    bool ensure_video_pipeline();
 
     struct TextureSlot {
         VkImage image = VK_NULL_HANDLE;
@@ -160,6 +164,14 @@ private:
     bool frame_acquired_ = false;
     RHITextureHandle active_offscreen_target_ = kInvalidTexture;
     Vec2 offscreen_display_size_ = {};
+
+    // Video pipeline (YCbCr -> RGBA conversion)
+    VkDescriptorSetLayout video_desc_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool video_desc_pool_ = VK_NULL_HANDLE;
+    VkPipelineLayout video_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline video_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorSet video_desc_sets_[MAX_FRAMES] = {};
+    bool video_pipeline_ready_ = false;
 
     // Vertex dedup: avoid re-uploading the same data within a Renderer2D frame
     const Vertex2D* last_quad_verts_ = nullptr;

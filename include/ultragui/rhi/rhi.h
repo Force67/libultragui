@@ -68,6 +68,14 @@ public:
     /// End the offscreen render pass and transition the image to shader-readable layout.
     virtual void EndOffscreen(RHITextureHandle target) = 0;
 
+    /// Convert YCbCr planes to RGBA by rendering a fullscreen pass with the video
+    /// shader into an offscreen render target. The target must be a render target
+    /// created with CreateRenderTarget(). y/cb/cr are R8 textures for the three
+    /// planes. Must be called after AcquireFrame(), outside any other render pass.
+    virtual void ConvertVideoFrame(RHITextureHandle target,
+                                    RHITextureHandle y, RHITextureHandle cb,
+                                    RHITextureHandle cr) = 0;
+
     virtual Vec2 display_size() const = 0;
 
     /// Ratio of framebuffer pixels to window coordinates.

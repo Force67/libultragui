@@ -11,6 +11,9 @@
 #if ULTRAGUI_LOTTIE
 #include <ultragui/scripting/lua_lottie.h>
 #endif
+#if ULTRAGUI_VIDEO
+#include <ultragui/scripting/lua_video.h>
+#endif
 #endif // ULTRAGUI_LUA
 
 #include <algorithm>
@@ -119,6 +122,14 @@ bool UIContext::Init(const UIConfig& config) {
                 return LoadAnim(path, w, h);
             },
             [this](const char* name) -> Widget* { return FindWidget(name); });
+#if ULTRAGUI_VIDEO
+        RegisterVideoLua(
+            *lua,
+            [this](const char* path) -> VideoPlayer* {
+                return LoadVideo(path);
+            },
+            [this](const char* name) -> Widget* { return FindWidget(name); });
+#endif
     }
 #endif
 
@@ -304,6 +315,30 @@ void UIContext::Update() {
 #if ULTRAGUI_LOTTIE
     std::for_each(lottie_anims_.begin(), lottie_anims_.end(), update_anim);
 #endif
+#if ULTRAGUI_VIDEO
+    std::for_each(video_players_.begin(), video_players_.end(), update_anim);
+#endif
+
+#if ULTRAGUI_VIDEO
+    // GPU YCbCr -> RGBA conversion for videos with new frames.
+    // Must happen after AcquireFrame (need a command buffer) and before
+    // the main render pass (so texture() returns the converted RGBA).
+    {
+        bool need_convert = false;
+        for (auto* vid : video_players_) {
+            if (vid && vid->NeedsConvert()) {
+                need_convert = true;
+                break;
+            }
+        }
+        if (need_convert && rhi_->AcquireFrame()) {
+            for (auto* vid : video_players_) {
+                if (vid && vid->NeedsConvert())
+                    vid->ConvertFrame();
+            }
+        }
+    }
+#endif
 
     // --- Text shaping and atlas management (BEFORE render pass) ---
     text_engine_.BeginFrame();
@@ -460,6 +495,11 @@ void UIContext::Shutdown() {
         delete anim;
     lottie_anims_.clear();
 #endif
+#if ULTRAGUI_VIDEO
+    for (auto* vid : video_players_)
+        delete vid;
+    video_players_.clear();
+#endif
 #if ULTRAGUI_AUDIO
     audio_.Shutdown();
 #endif
@@ -508,6 +548,22 @@ LottieAnimation* UIContext::LoadLottie(const char* path, u32 width, u32 height) 
     }
     lottie_anims_.push_back(anim);
     return anim;
+}
+#endif
+
+#if ULTRAGUI_VIDEO
+VideoPlayer* UIContext::LoadVideo(const char* path) {
+    auto* vid = new VideoPlayer();
+    AudioEngine* audio_ptr = nullptr;
+#if ULTRAGUI_AUDIO
+    audio_ptr = &audio_;
+#endif
+    if (!vid->Load(rhi_, path, audio_ptr)) {
+        delete vid;
+        return nullptr;
+    }
+    video_players_.push_back(vid);
+    return vid;
 }
 #endif
 
