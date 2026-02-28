@@ -12,6 +12,9 @@ int main() {
     wcfg.width = 1280;
     wcfg.height = 720;
     wcfg.title = "libultragui demo";
+#if ULTRAGUI_BACKEND_OPENGL
+    wcfg.opengl = true;
+#endif
 
     if (!platform.Init(wcfg)) {
         std::fprintf(stderr, "Failed to initialize platform\n");

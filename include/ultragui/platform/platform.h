@@ -24,6 +24,7 @@ public:
         const char* title = "ultragui";
         bool resizable = true;
         bool vsync = true;
+        bool opengl = false; ///< Create OpenGL 3.3 core context instead of no-API window
     };
 
     bool Init(const WindowConfig& config);

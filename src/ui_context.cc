@@ -59,6 +59,9 @@ bool UIContext::Init(const UIConfig& config) {
     wcfg.title = config.title;
     wcfg.resizable = config.resizable;
     wcfg.vsync = config.vsync;
+#if ULTRAGUI_BACKEND_OPENGL
+    wcfg.opengl = true;
+#endif
 
     if (!platform_.Init(wcfg)) {
         std::fprintf(stderr, "ultragui: failed to initialize platform\n");
