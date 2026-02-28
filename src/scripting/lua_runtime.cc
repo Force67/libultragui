@@ -285,6 +285,30 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
             std::from_chars(val + 1, val + 7, hex, 16);
             s.background = Color::FromHex(hex);
         }
+    } else if (strcmp(prop, "width") == 0) {
+        if (lua_type(L, 3) == LUA_TSTRING) {
+            const char* val = lua_tostring(L, 3);
+            size_t len = strlen(val);
+            if (len > 1 && val[len - 1] == '%') {
+                s.width = Length::Percent(static_cast<f32>(atof(val)));
+            } else {
+                s.width = Length::Px(static_cast<f32>(atof(val)));
+            }
+        } else {
+            s.width = Length::Px(static_cast<f32>(luaL_checknumber(L, 3)));
+        }
+    } else if (strcmp(prop, "height") == 0) {
+        if (lua_type(L, 3) == LUA_TSTRING) {
+            const char* val = lua_tostring(L, 3);
+            size_t len = strlen(val);
+            if (len > 1 && val[len - 1] == '%') {
+                s.height = Length::Percent(static_cast<f32>(atof(val)));
+            } else {
+                s.height = Length::Px(static_cast<f32>(atof(val)));
+            }
+        } else {
+            s.height = Length::Px(static_cast<f32>(luaL_checknumber(L, 3)));
+        }
     } else if (strcmp(prop, "text") == 0) {
         if (auto* text = dynamic_cast<Text*>(w)) {
             text->set_text(luaL_checkstring(L, 3));

@@ -39,3 +39,4 @@ tests/Makefile
 tests/cmake_install.cmake
 /_deps
 /build_verify
+*.log
