@@ -16,7 +16,13 @@ struct LayoutNode;
 /// hit-testing, and dirty-flag propagation.
 class Widget {
 public:
-    explicit Widget(u32 id = 0) : id_(id) {}
+    explicit Widget(u32 id = 0) : id_(id == 0 ? NextAutoId() : id) {}
+
+    /// Generate a unique widget ID (thread-local counter).
+    static u32 NextAutoId() {
+        static u32 s_counter = 1;  // 0 is reserved / sentinel
+        return s_counter++;
+    }
     virtual ~Widget();
 
     // --- Tree management ---

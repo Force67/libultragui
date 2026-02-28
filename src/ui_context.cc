@@ -293,7 +293,13 @@ void UIContext::Update() {
                 if (w)
                     w->SetAnimationStyle(animated_style);
             },
-            root_);
+            root_,
+            [](u32 widget_id, void* user_data) {
+                auto* root = static_cast<Widget*>(user_data);
+                Widget* w = FindWidgetById(root, widget_id);
+                if (w)
+                    w->ClearAnimationStyle();
+            });
     }
 
     // Update widgets (scroll momentum, etc.)

@@ -88,7 +88,8 @@ void Animator::Cancel(u32 widget_id) {
     }
 }
 
-bool Animator::Update(f64 current_time, ApplyFn apply, void* user_data) {
+bool Animator::Update(f64 current_time, ApplyFn apply, void* user_data,
+                      DoneFn on_done) {
     bool any_active = false;
 
     for (auto& t : transitions_) {
@@ -97,10 +98,15 @@ bool Animator::Update(f64 current_time, ApplyFn apply, void* user_data) {
         bool done = false;
         Style s = t.Evaluate(current_time, done);
         apply(t.widget_id, s, user_data);
-        if (done)
+        if (done) {
             t.active = false;
-        else
+            // Let the widget clear animation_style_ so ComputedStyle()
+            // falls back to live ResolveStyle() for future state changes.
+            if (on_done)
+                on_done(t.widget_id, user_data);
+        } else {
             any_active = true;
+        }
     }
 
     for (auto& a : animations_) {

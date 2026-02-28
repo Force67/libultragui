@@ -82,6 +82,10 @@ public:
     /// Evaluate scroll-linked animations for a given scroll widget and offset.
     /// Calls apply for each affected widget.
     using ApplyFn = void (*)(u32 widget_id, const Style& animated_style, void* user_data);
+    /// Called when a transition finishes so the widget can clear its
+    /// animation_style_ and fall back to live ResolveStyle().
+    using DoneFn = void (*)(u32 widget_id, void* user_data);
+
     void EvaluateScrollAnimations(u32 scroll_widget_id, f32 scroll_y,
                                    ApplyFn apply, void* user_data);
 
@@ -90,7 +94,8 @@ public:
 
     /// Tick all animations, apply to styles via the callback.
     /// Returns true if any animations are still active.
-    bool Update(f64 current_time, ApplyFn apply, void* user_data);
+    bool Update(f64 current_time, ApplyFn apply, void* user_data,
+                DoneFn on_done = nullptr);
 
     /// Check if a widget has active animations
     bool IsAnimating(u32 widget_id) const;
