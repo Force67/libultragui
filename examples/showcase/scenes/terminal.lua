@@ -1,9 +1,9 @@
--- Terminal - network operations center logic
+-- Terminal: network operations center logic
 -- Log feed rotation, stat updates, alert counting, tab switching
 
 ugui.log("NOC terminal loaded")
 
--- Tab state
+-- -- Tab state --
 
 local tabs = { "tab_overview", "tab_processes", "tab_network", "tab_logs", "tab_alerts" }
 local active_tab = "tab_overview"
@@ -28,7 +28,7 @@ function on_tab_network(w)   switch_tab("tab_network") end
 function on_tab_logs(w)      switch_tab("tab_logs") end
 function on_tab_alerts(w)    switch_tab("tab_alerts") end
 
--- Log feed rotation
+-- -- Log feed rotation --
 -- Simulates new log entries by shifting text down through the 12 log rows
 
 local log_sources = { "nginx", "postgres", "worker", "redis", "sshd", "prom", "kernel", "cron", "containerd", "grafana" }
@@ -80,7 +80,7 @@ function push_log_entry()
     ugui.set("clock_value", "text", timestamp .. " UTC")
 end
 
--- Stat simulation
+-- -- Stat simulation --
 
 function update_cpu()
     local usage = 25 + math.random(0, 20)
@@ -133,7 +133,7 @@ function update_disk_iops()
         math.floor(w / 1000), w % 1000))
 end
 
--- Alert management
+-- -- Alert management --
 
 function add_alert()
     alert_count = alert_count + 1
@@ -147,7 +147,7 @@ function clear_alerts()
     ugui.log("All alerts cleared")
 end
 
--- Button handlers
+-- -- Button handlers --
 
 function on_btn_clear_log(w)
     -- Reset log entries to blank
@@ -161,7 +161,7 @@ function on_btn_clear_log(w)
     ugui.log("Log cleared")
 end
 
--- Simulated tick
+-- -- Simulated tick --
 -- Call this periodically to simulate live data
 
 function tick()
@@ -184,7 +184,7 @@ function tick()
     -- Update process counts
     local running = 55 + math.random(0, 12)
     local sleeping = 247 - running
-    ugui.set("proc_total", "text", "247 processes  ·  " .. sleeping .. " sleeping  ·  " .. running .. " running  ·  0 zombie")
+    ugui.set("proc_total", "text", "247 processes | " .. sleeping .. " sleeping | " .. running .. " running | 0 zombie")
 
     -- Update process CPU values for top processes
     ugui.set("p1_cpu", "text", string.format("%.1f", 8 + math.random() * 8))
@@ -199,7 +199,7 @@ function tick()
     ugui.set("log_rate", "text", "~" .. rate .. "/sec")
 end
 
--- Initialize
+-- -- Initialize --
 
 switch_tab("tab_overview")
-ugui.log("NOC ready — " .. log_entry_count .. " log entries, " .. alert_count .. " alerts")
+ugui.log("NOC ready: " .. log_entry_count .. " log entries, " .. alert_count .. " alerts")

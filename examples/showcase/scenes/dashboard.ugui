@@ -1,4 +1,4 @@
-// Mission Control - DevOps monitoring dashboard
+// Mission Control: DevOps monitoring dashboard
 // Deep indigo palette, card-based layout, sidebar navigation
 
 panel root {
@@ -8,7 +8,7 @@ panel root {
     height: 100%;
     padding: 0;
 
-    // CSS custom properties - color palette
+    // CSS custom properties: color palette
     --accent: #6366f1;
     --bg-primary: #0a0a1a;
     --bg-card: #12122a;
@@ -18,7 +18,7 @@ panel root {
     --warning: #f59e0b;
     --error: #ef4444;
 
-    // Sidebar: 260px fixed navigation
+    // -- Sidebar: 260px fixed navigation --
     panel sidebar {
         layout: column;
         width: 260;
@@ -262,7 +262,7 @@ panel root {
         }
     }
 
-    // Main content
+    // -- Main content --
     panel main {
         layout: column;
         flex-grow: 1;
@@ -352,7 +352,7 @@ panel root {
             gap: 20;
             overflow: scroll;
 
-            // Stat cards row
+            // -- Stat cards row --
             panel stats_row {
                 layout: row;
                 gap: 16;
@@ -526,7 +526,7 @@ panel root {
                 }
             }
 
-            // Bottom section: Activity + Alerts
+            // -- Bottom section: Activity + Alerts --
             panel bottom_row {
                 layout: row;
                 flex-grow: 1;
@@ -602,7 +602,7 @@ panel root {
                             }
 
                             text d1_meta {
-                                text: "production  ·  2 min ago  ·  by ops-bot";
+                                text: "production | 2 min ago | by ops-bot";
                                 font-size: 12;
                                 color: #585878;
                             }
@@ -643,7 +643,7 @@ panel root {
                             }
 
                             text d2_meta {
-                                text: "production  ·  18 min ago  ·  by jchen";
+                                text: "production | 18 min ago | by jchen";
                                 font-size: 12;
                                 color: #585878;
                             }
@@ -684,7 +684,7 @@ panel root {
                             }
 
                             text d3_meta {
-                                text: "staging  ·  47 min ago  ·  by deploy-ci";
+                                text: "staging | 47 min ago | by deploy-ci";
                                 font-size: 12;
                                 color: #585878;
                             }
@@ -726,7 +726,7 @@ panel root {
                             }
 
                             text d4_meta {
-                                text: "production  ·  1h ago  ·  by mwatson";
+                                text: "production | 1h ago | by mwatson";
                                 font-size: 12;
                                 color: #585878;
                             }
@@ -897,7 +897,7 @@ panel root {
                 }
             }
 
-            // Quick Actions
+            // -- Quick Actions --
             panel quick_actions_row {
                 layout: row;
                 gap: 16;

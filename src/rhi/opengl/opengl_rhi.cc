@@ -5,7 +5,7 @@
 #include <GLFW/glfw3.h>
 
 // GL 3.3 core types and constants from Khronos header.
-// GL_GLEXT_PROTOTYPES is intentionally NOT defined - we load all extension
+// GL_GLEXT_PROTOTYPES is intentionally NOT defined: we load all extension
 // and core-profile function pointers manually via glfwGetProcAddress so
 // that the binary does not depend on the system libGL exporting them.
 #include <GL/glcorearb.h>
@@ -442,7 +442,7 @@ static GLuint compile_program(const char* vs_src, const char* fs_src) {
 }
 
 // ---------------------------------------------------------------------------
-// sRGB helper - glClearColor bypasses GL_FRAMEBUFFER_SRGB conversion,
+// sRGB helper: glClearColor bypasses GL_FRAMEBUFFER_SRGB conversion,
 // so we manually apply the sRGB transfer function to the clear color.
 // ---------------------------------------------------------------------------
 
@@ -466,17 +466,17 @@ struct RHI::Impl {
     GLuint text_program_ = 0;
     GLuint video_program_ = 0; // lazy-created
 
-    // Uniform locations - quad program
+    // Uniform locations: quad program
     GLint quad_u_scale_ = -1;
     GLint quad_u_translate_ = -1;
     GLint quad_u_tex_ = -1;
 
-    // Uniform locations - text program
+    // Uniform locations: text program
     GLint text_u_scale_ = -1;
     GLint text_u_translate_ = -1;
     GLint text_u_tex_ = -1;
 
-    // Uniform locations - video program
+    // Uniform locations: video program
     GLint video_u_y_ = -1;
     GLint video_u_cb_ = -1;
     GLint video_u_cr_ = -1;
@@ -484,7 +484,7 @@ struct RHI::Impl {
     // Shared VAO (vertex format is identical for quad and text)
     GLuint vao_ = 0;
 
-    // Video VAO (empty - vertices generated from gl_VertexID)
+    // Video VAO (empty: vertices generated from gl_VertexID)
     GLuint video_vao_ = 0;
 
     // Quad pipeline dynamic vertex/index buffers
@@ -610,7 +610,7 @@ void RHI::Impl::bind_vertex_format(GLuint vbo, GLuint ibo) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
                           reinterpret_cast<void*>(offsetof(Vertex2D, uv)));
-    // 2: color (1xuint, offset 16) - integer attribute
+    // 2: color (1xuint, offset 16): integer attribute
     glEnableVertexAttribArray(2);
     glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(Vertex2D),
                            reinterpret_cast<void*>(offsetof(Vertex2D, color)));
@@ -919,7 +919,7 @@ bool RHI::Impl::BeginFrame(Color clear_color) {
     glScissor(0, 0, static_cast<GLsizei>(swapchain_width_),
               static_cast<GLsizei>(swapchain_height_));
 
-    // Clear - glClearColor is NOT affected by GL_FRAMEBUFFER_SRGB, so we
+    // Clear: glClearColor is NOT affected by GL_FRAMEBUFFER_SRGB, so we
     // must manually encode the linear clear color into sRGB for correct output.
     glClearColor(linear_to_srgb(clear_color.r),
                  linear_to_srgb(clear_color.g),
@@ -1003,7 +1003,7 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const 
         vertex_write_pos_ += vertex_count;
     }
 
-    // Indices are always different per batch - always append
+    // Indices are always different per batch: always append
     ensure_index_capacity(index_write_pos_ + index_count);
     u32 ib_byte_offset = index_write_pos_ * static_cast<u32>(sizeof(u32));
 
@@ -1324,7 +1324,7 @@ bool RHI::Impl::ensure_video_program() {
     glUniform1i(video_u_cb_, 1);
     glUniform1i(video_u_cr_, 2);
 
-    // Create empty VAO for video (no vertex attributes - gl_VertexID only)
+    // Create empty VAO for video (no vertex attributes: gl_VertexID only)
     glGenVertexArrays(1, &video_vao_);
 
     return true;

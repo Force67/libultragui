@@ -1,9 +1,9 @@
--- Mission Control - dashboard logic
+-- Mission Control: dashboard logic
 -- Nav highlighting, stat updates per page, alert management
 
 ugui.log("Mission Control loaded")
 
--- Navigation state
+-- -- Navigation state --
 
 local active_nav = "nav_overview"
 
@@ -28,7 +28,7 @@ function highlight_nav(name)
     active_nav = name
 end
 
--- Page data per section
+-- -- Page data per section --
 
 local pages = {
     nav_overview = {
@@ -121,7 +121,7 @@ function navigate(nav_name)
     highlight_nav(nav_name)
 end
 
--- Click handlers
+-- -- Click handlers --
 
 function on_nav_overview(w)    navigate("nav_overview") end
 function on_nav_deployments(w) navigate("nav_deployments") end
@@ -134,7 +134,7 @@ function on_nav_config(w)      navigate("nav_config") end
 function on_btn_deploy(w)
     ugui.log("Deploying to production...")
     ugui.set("d1_name", "text", "manual-deploy v0.0.0")
-    ugui.set("d1_meta", "text", "production  ·  just now  ·  by operator")
+    ugui.set("d1_meta", "text", "production | just now | by operator")
     ugui.set("d1_duration", "text", "...")
 end
 
@@ -159,6 +159,6 @@ function on_btn_view_all(w)
     navigate("nav_deployments")
 end
 
--- Initialize
+-- -- Initialize --
 
 highlight_nav("nav_overview")

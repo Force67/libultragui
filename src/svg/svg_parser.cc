@@ -108,7 +108,7 @@ struct XmlParser {
             return false;
         }
         if (peek() == '/') {
-            // Close tag - caller handles this
+            // Close tag: caller handles this
             return false;
         }
 
@@ -169,7 +169,7 @@ struct XmlParser {
                 if (parse_node(child) && !child.tag.empty())
                     node.children.push_back(std::move(child));
             } else {
-                // Text content - skip for SVG
+                // Text content: skip for SVG
                 while (!eof() && peek() != '<')
                     ++p;
             }
@@ -1161,7 +1161,7 @@ static void parse_element(const XmlNode& node, Document& doc, ParseCtx parent_ct
         if (!path.entries.empty())
             add_shape(doc, std::move(path), ctx);
     } else if (node.tag == "g" || node.tag == "svg" || node.tag == "symbol" || node.tag == "use") {
-        // Group - recurse with inherited context
+        // Group: recurse with inherited context
         for (auto& child : node.children)
             parse_element(child, doc, ctx);
         return;

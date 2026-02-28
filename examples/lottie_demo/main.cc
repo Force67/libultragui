@@ -1,4 +1,4 @@
-/// Lottie animation demo - shows four Lottie animations side by side.
+/// Lottie animation demo: shows four Lottie animations side by side.
 ///
 /// Usage: ./lottie_demo [font_path]
 
@@ -169,7 +169,7 @@ int main(int argc, char* argv[]) {
     }
 
     ugui::UIConfig config;
-    config.title = "ultragui — Lottie Demo";
+    config.title = "ultragui: Lottie Demo";
     config.width = 900;
     config.height = 520;
     config.clear_color = ugui::Color::FromHex(0x0f0f1a);
@@ -212,7 +212,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Main loop - UIContext auto-updates all Lottie animations
+    // Main loop: UIContext auto-updates all Lottie animations
     while (ui.Running()) {
         // Re-attach textures each frame since the pixel data updates in-place
         // (the texture handle is stable, but the Image widget needs to know)

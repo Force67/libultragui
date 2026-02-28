@@ -934,7 +934,7 @@ bool RHI::Impl::create_descriptor_heaps() {
 // ---------------------------------------------------------------------------
 
 bool RHI::Impl::create_root_signature() {
-    // param[0]: 4 root constants (b0) - VS visibility
+    // param[0]: 4 root constants (b0): VS visibility
     D3D12_ROOT_PARAMETER params[2] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.ShaderRegister = 0;
@@ -942,7 +942,7 @@ bool RHI::Impl::create_root_signature() {
     params[0].Constants.Num32BitValues = 4;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
-    // param[1]: descriptor table with 1 SRV (t0) - PS visibility
+    // param[1]: descriptor table with 1 SRV (t0): PS visibility
     D3D12_DESCRIPTOR_RANGE srv_range = {};
     srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     srv_range.NumDescriptors = 1;

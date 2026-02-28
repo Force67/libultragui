@@ -40,7 +40,7 @@ public:
         return arr;
     }
 
-    /// Reset allocator - all prior allocations become invalid
+    /// Reset allocator: all prior allocations become invalid
     void reset();
 
     usize used() const { return offset_; }

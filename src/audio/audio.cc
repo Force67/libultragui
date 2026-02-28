@@ -13,7 +13,7 @@
 namespace ugui {
 
 // ============================================================================
-// Sound slot - wraps a single ma_sound
+// Sound slot: wraps a single ma_sound
 // ============================================================================
 
 struct SoundSlot {

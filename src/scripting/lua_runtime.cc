@@ -248,7 +248,7 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
     auto it = rt->widget_registry.find(name);
     Widget* w = (it != rt->widget_registry.end()) ? it->second : nullptr;
     if (!w) {
-        std::fprintf(stderr, "ultragui/lua: ugui.set — widget '%s' not found\n", name);
+        std::fprintf(stderr, "ultragui/lua: ugui.set: widget '%s' not found\n", name);
         return 0;
     }
 

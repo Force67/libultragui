@@ -3,7 +3,7 @@
 
 ugui.log("RPG menu loaded")
 
--- Tab state
+-- -- Tab state --
 local active_tab = "tab_system"
 local tabs = { "tab_quests", "tab_stats", "tab_system" }
 
@@ -18,7 +18,7 @@ function set_active_tab(name)
     end
 end
 
--- Menu items per tab
+-- -- Menu items per tab --
 local tab_menus = {
     tab_system = {
         items = { "QUICKSAVE", "SAVE", "LOAD", "MODS", "SETTINGS", "CONTROLS", "HELP" },
@@ -26,7 +26,7 @@ local tab_menus = {
         details = {
             QUICKSAVE = { heading = "SAVE", title = "Quick Save", opts = { "Save to quickslot" } },
             SAVE      = { heading = "SAVE", title = "Save Game", opts = { "New Save", "Overwrite: Whiterun Exterior", "Overwrite: Dragonsreach" } },
-            LOAD      = { heading = "LOAD", title = "Load Game", opts = { "Quicksave — Level 42", "Whiterun Exterior — Level 42", "Dragonsreach — Level 41", "Bleak Falls Barrow — Level 38" } },
+            LOAD      = { heading = "LOAD", title = "Load Game", opts = { "Quicksave: Level 42", "Whiterun Exterior: Level 42", "Dragonsreach: Level 41", "Bleak Falls Barrow: Level 38" } },
             MODS      = { heading = "MODS", title = "Modifications", opts = { "Browse Creation Club", "Installed Mods (12)", "Load Order" } },
             SETTINGS  = { heading = "SETTINGS", title = "Settings", opts = { "Display", "Audio", "Gameplay", "Controls" } },
             CONTROLS  = { heading = "CONTROLS", title = "Control Scheme", opts = { "Keyboard & Mouse", "Gamepad", "Reset to Defaults" } },
@@ -101,7 +101,7 @@ function show_detail(tab_name, item_key)
     end
 end
 
--- Tab click handlers
+-- -- Tab click handlers --
 function on_tab_quests(w)
     set_active_tab("tab_quests")
     load_tab_content("tab_quests")
@@ -117,7 +117,7 @@ function on_tab_system(w)
     load_tab_content("tab_system")
 end
 
--- Menu item click handlers
+-- -- Menu item click handlers --
 -- These map the menu widget to the current tab's items
 function menu_click(index)
     local tab = tab_menus[active_tab]
@@ -145,7 +145,7 @@ function on_menu_quit(w)
     end
 end
 
--- Initialize
+-- -- Initialize --
 set_active_tab("tab_system")
 load_tab_content("tab_system")
 show_detail("tab_system", "QUIT")

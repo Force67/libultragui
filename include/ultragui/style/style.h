@@ -121,7 +121,7 @@ struct Style {
 
     /// Scale all pixel-valued visual properties by a factor.
     /// Used for viewport-responsive scaling. Layout properties (padding, margin,
-    /// gap, dimensions) are NOT scaled here - the layout engine handles those.
+    /// gap, dimensions) are NOT scaled here: the layout engine handles those.
     /// This scales: font_size, letter_spacing, border_width, corner_radius,
     /// shadow, text_shadow, and backdrop_blur.
     void Scale(f32 s);

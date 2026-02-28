@@ -10,7 +10,7 @@ panel root {
     gap: 6;
     backdrop-blur: 12;
 
-    // CSS Variables: NERV color scheme
+    // -- CSS Variables: NERV color scheme --
     --nerv-orange: #ff9900;
     --nerv-red: #cc2200;
     --nerv-bg: #050510;
@@ -115,7 +115,7 @@ panel root {
                 border-color: --nerv-border;
                 border-width: 2;
                 gap: 4;
-                tooltip: "Main energy supply status — umbilical cable feed";
+                tooltip: "Main energy supply status: umbilical cable feed";
 
                 // Inset shadow for recessed monitor cell
                 shadow-color: #00000060;
@@ -218,7 +218,7 @@ panel root {
             text-transform: uppercase;
             cursor: pointer;
             tab-index: 0;
-            tooltip: "Emergency halt — cut all power systems";
+            tooltip: "Emergency halt: cut all power systems";
             :hover {
                 transition-duration: 0.3s;
                 transition-easing: spring; background: #143828; }
@@ -283,7 +283,7 @@ panel root {
             text-transform: uppercase;
             cursor: pointer;
             tab-index: 3;
-            tooltip: "Maximum output — high energy drain";
+            tooltip: "Maximum output: high energy drain";
             :hover {
                 transition-duration: 0.3s;
                 transition-easing: spring; background: #143828; }

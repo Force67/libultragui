@@ -68,7 +68,7 @@ void Text::OnPaint(Renderer2D& renderer) {
     // Apply text transform
     String display_text = apply_transform(text_, s.text_transform);
 
-    // Always shape fresh - the scratch buffer pointer from measure may be stale
+    // Always shape fresh: the scratch buffer pointer from measure may be stale
     auto run =
         te->Shape(resolved, display_text.c_str(), static_cast<u32>(display_text.size()),
                   s.font_size, s.letter_spacing, s.line_height_multiplier);

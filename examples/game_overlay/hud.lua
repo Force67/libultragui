@@ -29,7 +29,7 @@ end
 
 function on_btn_ability_3(w)
     ugui.log("Cast: Phase Shift!")
-    ugui.set("notify_text", "text", "Phase Shift — you blink forward!")
+    ugui.set("notify_text", "text", "Phase Shift: you blink forward!")
     ugui.set("notify_text", "color", "#88ffcc")
 end
 
@@ -53,12 +53,12 @@ end
 
 function on_btn_item_3(w)
     ugui.log("Used: Scroll of Power")
-    ugui.set("notify_text", "text", "Scroll of Power — ATK +25% for 30s")
+    ugui.set("notify_text", "text", "Scroll of Power: ATK +25% for 30s")
     ugui.set("notify_text", "color", "#ffcc44")
 end
 
 function on_btn_item_4(w)
     ugui.log("Used: Smoke Bomb")
-    ugui.set("notify_text", "text", "Smoke Bomb deployed — enemies confused!")
+    ugui.set("notify_text", "text", "Smoke Bomb deployed: enemies confused!")
     ugui.set("notify_text", "color", "#aaaaaa")
 end

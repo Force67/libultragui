@@ -1,8 +1,8 @@
--- Cosmos - Space Mission Control logic
+-- Cosmos: Space Mission Control logic
 
 ugui.log("Cosmos mission control loaded")
 
--- Navigation
+-- -- Navigation --
 
 local nav_items = {"nav_mission", "nav_telemetry", "nav_comms", "nav_crew", "nav_systems"}
 local active_nav = "nav_mission"
@@ -26,7 +26,7 @@ function on_nav_comms(w)    set_nav("nav_comms")    ugui.log("Nav: Comms") end
 function on_nav_crew(w)     set_nav("nav_crew")     ugui.log("Nav: Crew") end
 function on_nav_systems(w)  set_nav("nav_systems")  ugui.log("Nav: Systems") end
 
--- Action buttons
+-- -- Action buttons --
 
 function on_btn_abort(w)
     ugui.log("ABORT sequence initiated!")
@@ -47,6 +47,6 @@ function on_btn_hold(w)
     ugui.set("mission_phase", "color", "#64748b")
 end
 
--- Initialize
+-- -- Initialize --
 
 set_nav("nav_mission")

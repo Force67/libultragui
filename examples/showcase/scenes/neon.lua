@@ -1,9 +1,9 @@
--- Neon Arcade - menu logic
+-- Neon Arcade: menu logic
 -- Menu selection cycling, character selection, score display
 
 ugui.log("Neon Arcade loaded")
 
--- Menu state
+-- -- Menu state --
 
 local menu_items = {
     "menu_start", "menu_continue", "menu_versus", "menu_rankings", "menu_options"
@@ -51,7 +51,7 @@ function highlight_menu(index)
     selected_menu = index
 end
 
--- Character state
+-- -- Character state --
 
 local characters = {
     { name = "NOVA",   class = "STRIKER",      tier = "S TIER", accent = "magenta", power = 85 },
@@ -86,7 +86,7 @@ function highlight_char(index)
     ugui.set("char_title", "text", "SELECT FIGHTER [" .. characters[index].name .. "]")
 end
 
--- Score tracking
+-- -- Score tracking --
 
 local high_score = 9999999
 local last_score = 4218350
@@ -111,7 +111,7 @@ function update_scores()
     ugui.set("credits_value", "text", string.format("%02d", credits))
 end
 
--- Click handlers
+-- -- Click handlers --
 
 function on_menu_start(w)
     highlight_menu(1)
@@ -131,12 +131,12 @@ end
 
 function on_menu_continue(w)
     highlight_menu(2)
-    ugui.log("Continue — loading saved state...")
+    ugui.log("Continue: loading saved state...")
 end
 
 function on_menu_versus(w)
     highlight_menu(3)
-    ugui.log("VS Mode — waiting for player 2...")
+    ugui.log("VS Mode: waiting for player 2...")
     ugui.set("title_sub", "text", "WAITING FOR P2")
 end
 
@@ -156,7 +156,7 @@ function on_char_slot_2(w) highlight_char(2) end
 function on_char_slot_3(w) highlight_char(3) end
 function on_char_slot_4(w) highlight_char(4) end
 
--- Initialize
+-- -- Initialize --
 
 highlight_menu(1)
 highlight_char(1)

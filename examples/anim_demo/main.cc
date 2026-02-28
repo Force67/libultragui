@@ -1,4 +1,4 @@
-/// .uganim vector animation demo - lightweight alternative to Lottie.
+/// .uganim vector animation demo: lightweight alternative to Lottie.
 ///
 /// Usage: ./anim_demo [font_path]
 
@@ -68,7 +68,7 @@ panel root {
     }
 
     text subtitle {
-        text: "1,181 LOC — zero dependencies — powered by the built-in SVG rasterizer";
+        text: "1,181 LOC: zero dependencies: powered by the built-in SVG rasterizer";
         font-size: 14;
         color: #606080;
         text-align: center;
@@ -167,7 +167,7 @@ int main(int argc, char* argv[]) {
     }
 
     ugui::UIConfig config;
-    config.title = "ultragui — .uganim Demo";
+    config.title = "ultragui: .uganim Demo";
     config.width = 900;
     config.height = 520;
     config.clear_color = ugui::Color::FromHex(0x0f0f1a);

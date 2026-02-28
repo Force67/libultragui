@@ -1,5 +1,5 @@
 {
-  description = "libultragui — lean GPU-accelerated game GUI library";
+  description = "libultragui: lean GPU-accelerated game GUI library";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -72,7 +72,7 @@
             export VK_LAYER_PATH="${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d"
             export CC=clang
             export CXX=clang++
-            echo "🎮 libultragui dev shell — clang $(clang --version | head -1 | grep -oP '\d+\.\d+\.\d+'), cmake $(cmake --version | head -1 | grep -oP '\d+\.\d+\.\d+')"
+            echo "game libultragui dev shell: clang $(clang --version | head -1 | grep -oP '\d+\.\d+\.\d+'), cmake $(cmake --version | head -1 | grep -oP '\d+\.\d+\.\d+')"
           '';
         };
       }

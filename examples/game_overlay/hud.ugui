@@ -1,4 +1,4 @@
-// Game HUD overlay - all panels are semi-transparent so the 3D scene
+// Game HUD overlay: all panels are semi-transparent so the 3D scene
 // shows through. This demonstrates libultragui as a game UI layer.
 
 panel hud_root {
@@ -56,7 +56,7 @@ panel hud_root {
                         letter-spacing: 1;
                     }
                     text player_level {
-                        text: "Level 42  —  Archmage";
+                        text: "Level 42 | Archmage";
                         font-size: 11;
                         color: #8888aa;
                     }
@@ -245,7 +245,7 @@ panel hud_root {
         }
     }
 
-    // ===== SPACER (middle area is transparent - shows the game) =====
+    // ===== SPACER (middle area is transparent: shows the game) =====
     panel middle_spacer {
         flex-grow: 1;
     }

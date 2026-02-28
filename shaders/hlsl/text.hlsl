@@ -1,4 +1,4 @@
-// ultragui text shader - D3D12 HLSL port of text.vert + text.frag
+// ultragui text shader: D3D12 HLSL port of text.vert + text.frag
 // Compile: dxc -T vs_6_0 -E VSMain -Fo text_vs.cso text.hlsl
 //          dxc -T ps_6_0 -E PSMain -Fo text_ps.cso text.hlsl
 

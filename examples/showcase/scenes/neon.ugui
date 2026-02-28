@@ -1,4 +1,4 @@
-// Neon Arcade - game main menu
+// Neon Arcade: game main menu
 // Pure black, cyan/magenta accents, sharp edges, border-only styling, neon glow
 
 panel root {
@@ -10,7 +10,7 @@ panel root {
     justify: center;
     align: center;
 
-    // Outer frame - thin cyan border around entire menu
+    // -- Outer frame: thin cyan border around entire menu --
     panel outer_frame {
         layout: column;
         width: 720;
@@ -24,7 +24,7 @@ panel root {
         shadow-blur: 30;
         gradient-stops: #00f0ff00 0%, #00f0ff40 50%, #00f0ff00 100%;
 
-        // Title bar
+        // -- Title bar --
         panel title_bar {
             layout: row;
             justify: center;
@@ -84,7 +84,7 @@ panel root {
             }
         }
 
-        // Score display
+        // -- Score display --
         panel score_bar {
             layout: row;
             justify: space-between;
@@ -180,13 +180,13 @@ panel root {
             }
         }
 
-        // Main menu area
+        // -- Main menu area --
         panel menu_area {
             layout: row;
             flex-grow: 1;
             padding: 0;
 
-            // Menu items (left)
+            // -- Menu items (left) --
             panel menu_column {
                 layout: column;
                 flex-grow: 1;
@@ -345,13 +345,13 @@ panel root {
                 }
             }
 
-            // Vertical divider
+            // -- Vertical divider --
             panel menu_divider {
                 width: 1;
                 background: #ff00aa40;
             }
 
-            // Character selection (right)
+            // -- Character selection (right) --
             panel char_column {
                 layout: column;
                 width: 260;
@@ -386,7 +386,7 @@ panel root {
                     shadow-color: #ff00aa30;
                     shadow-blur: 20;
                     cursor: pointer;
-                    tooltip: "NOVA — Striker class, S Tier";
+                    tooltip: "NOVA: Striker class, S Tier";
                     tab-index: 5;
 
                     text char_name_1 {
@@ -454,7 +454,7 @@ panel root {
                     padding: 14 16;
                     gap: 6;
                     cursor: pointer;
-                    tooltip: "CIPHER — Technomancer class, A Tier";
+                    tooltip: "CIPHER: Technomancer class, A Tier";
                     tab-index: 6;
 
                     text char_name_2 {
@@ -506,7 +506,7 @@ panel root {
                     padding: 14 16;
                     gap: 6;
                     cursor: pointer;
-                    tooltip: "RAZE — Brawler class, A Tier";
+                    tooltip: "RAZE: Brawler class, A Tier";
                     tab-index: 7;
 
                     text char_name_3 {
@@ -558,7 +558,7 @@ panel root {
                     padding: 14 16;
                     gap: 6;
                     cursor: pointer;
-                    tooltip: "VORTEX — Support class, B Tier";
+                    tooltip: "VORTEX: Support class, B Tier";
                     tab-index: 8;
 
                     text char_name_4 {
@@ -602,7 +602,7 @@ panel root {
             }
         }
 
-        // Bottom bar
+        // -- Bottom bar --
         panel bottom_bar {
             layout: row;
             justify: space-between;

@@ -1,9 +1,9 @@
--- Glass - music player logic
+-- Glass: music player logic
 -- Play/pause toggle, track navigation, volume, shuffle/repeat states
 
 ugui.log("Glass player loaded")
 
--- Track data
+-- -- Track data --
 
 local tracks = {
     { name = "Midnight Frequencies", artist = "Aether Collective", dur = "4:28", dur_sec = 268 },
@@ -23,7 +23,7 @@ local repeat_on = false
 local volume = 68
 local playback_sec = 102  -- 1:42 into the first track
 
--- Helpers
+-- -- Helpers --
 
 function format_time(sec)
     local m = math.floor(sec / 60)
@@ -102,7 +102,7 @@ function switch_track(index)
     ugui.log("Now playing: " .. tracks[index].name)
 end
 
--- Controls
+-- -- Controls --
 
 function on_btn_play(w)
     is_playing = not is_playing
@@ -155,7 +155,7 @@ function on_btn_repeat(w)
     end
 end
 
--- Playlist row clicks
+-- -- Playlist row clicks --
 
 function on_track_row_1(w) switch_track(1) end
 function on_track_row_2(w) switch_track(2) end
@@ -166,7 +166,7 @@ function on_track_row_6(w) switch_track(6) end
 function on_track_row_7(w) switch_track(7) end
 function on_track_row_8(w) switch_track(8) end
 
--- Top nav
+-- -- Top nav --
 
 function on_btn_library(w)
     ugui.set("btn_library", "color", "#ffffff90")
@@ -174,7 +174,7 @@ function on_btn_library(w)
     ugui.set("btn_search", "color", "#ffffff60")
     ugui.set("btn_search", "background", "transparent")
     ugui.set("playlist_title", "text", "Luminance")
-    ugui.set("playlist_meta", "text", "12 tracks  ·  48 min")
+    ugui.set("playlist_meta", "text", "12 tracks | 48 min")
     ugui.log("Showing library")
 end
 
@@ -192,7 +192,7 @@ function on_btn_queue(w)
     ugui.log("Queue view toggled")
 end
 
--- Initialize
+-- -- Initialize --
 
 update_now_playing()
 update_playlist_highlight()

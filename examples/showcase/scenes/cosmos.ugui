@@ -1,4 +1,4 @@
-// Cosmos - Space Mission Control
+// Cosmos: Space Mission Control
 // Focused, clean layout. Dark blue-black, glass panels, glowing accents.
 
 panel root {
@@ -8,7 +8,7 @@ panel root {
     background: #06061a;
     padding: 0;
 
-    // CSS Variables
+    // -- CSS Variables --
     --accent: #3b82f6;
     --glow: #3b82f630;
     --glass: #0d1230;
@@ -21,7 +21,9 @@ panel root {
     --muted: #64748b;
     --dim: #334155;
 
+    // ===============================================
     // HEADER BAR
+    // ===============================================
     panel header {
         layout: row;
         align: center;
@@ -123,13 +125,15 @@ panel root {
         }
     }
 
+    // ===============================================
     // MAIN BODY
+    // ===============================================
     panel body {
         layout: row;
         flex-grow: 1;
         padding: 0;
 
-        // LEFT SIDEBAR
+        // -- LEFT SIDEBAR --
         panel sidebar {
             layout: column;
             width: 220;
@@ -247,7 +251,7 @@ panel root {
             }
         }
 
-        // MAIN CONTENT
+        // -- MAIN CONTENT --
         panel content {
             layout: column;
             flex-grow: 1;
@@ -255,7 +259,7 @@ panel root {
             gap: 16;
             overflow: scroll;
 
-            // STATS ROW
+            // -- STATS ROW --
             panel stats_row {
                 layout: row;
                 gap: 12;
@@ -411,7 +415,7 @@ panel root {
                 }
             }
 
-            // MIDDLE ROW: Telemetry + Controls
+            // -- MIDDLE ROW: Telemetry + Controls --
             panel mid_row {
                 layout: row;
                 gap: 12;
@@ -680,7 +684,7 @@ panel root {
                 }
             }
 
-            // BOTTOM ROW: Comms + Actions
+            // -- BOTTOM ROW: Comms + Actions --
             panel bottom_row {
                 layout: row;
                 gap: 12;
@@ -720,7 +724,7 @@ panel root {
 
                             panel msg1_dot { width: 6; height: 6; background: --accent; corner-radius: 3; }
                             text msg1_text {
-                                text: "CAPCOM 04:15:22 - You are GO for orbital insertion burn.";
+                                text: "CAPCOM 04:15:22: You are GO for orbital insertion burn.";
                                 font-size: 12;
                                 color: #94a3b8;
                             }
@@ -736,7 +740,7 @@ panel root {
 
                             panel msg2_dot { width: 6; height: 6; background: --green; corner-radius: 3; }
                             text msg2_text {
-                                text: "ARTEMIS 04:15:45 - Copy Houston. All systems nominal.";
+                                text: "ARTEMIS 04:15:45: Copy Houston. All systems nominal.";
                                 font-size: 12;
                                 color: #94a3b8;
                             }
@@ -752,7 +756,7 @@ panel root {
 
                             panel msg3_dot { width: 6; height: 6; background: --amber; corner-radius: 3; }
                             text msg3_text {
-                                text: "FLIGHT 04:16:03 - Thermal reading on engine 2 trending high.";
+                                text: "FLIGHT 04:16:03: Thermal reading on engine 2 trending high.";
                                 font-size: 12;
                                 color: #94a3b8;
                             }
@@ -767,7 +771,7 @@ panel root {
 
                             panel msg4_dot { width: 6; height: 6; background: --accent; corner-radius: 3; }
                             text msg4_text {
-                                text: "CAPCOM 04:17:11 - Trajectory nominal. T-2 minute call.";
+                                text: "CAPCOM 04:17:11: Trajectory nominal. T-2 minute call.";
                                 font-size: 12;
                                 color: #94a3b8;
                             }
@@ -895,7 +899,9 @@ panel root {
         }
     }
 
+    // ===============================================
     // FOOTER
+    // ===============================================
     panel footer {
         layout: row;
         justify: space-between;

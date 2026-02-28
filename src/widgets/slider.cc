@@ -60,7 +60,7 @@ void Slider::Measure(f32& out_width, f32& out_height) {
 }
 
 void Slider::OnPaint(Renderer2D& renderer) {
-  // Skip Widget::OnPaint - we draw our own custom visuals.
+  // Skip Widget::OnPaint: we draw our own custom visuals.
   auto s = ComputedStyle();
   s.Scale(ui_scale());
   f32 alpha = s.opacity;

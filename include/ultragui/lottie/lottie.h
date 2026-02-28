@@ -57,7 +57,7 @@ public:
     void Stop();          // resets to frame 0
     void set_loop(bool loop);
     void set_speed(f32 speed);  // 1.0 = normal, 2.0 = double speed
-    void Seek(f32 progress);    // 0.0 - 1.0
+    void Seek(f32 progress);    // 0.0: 1.0
 
     bool IsPlaying() const;
     bool IsLooping() const;
@@ -66,7 +66,7 @@ public:
     /// Total duration in seconds at speed=1.
     f64 duration() const;
 
-    /// Current playback position (0.0 - 1.0).
+    /// Current playback position (0.0: 1.0).
     f32 progress() const;
 
     /// Total frame count and current frame.

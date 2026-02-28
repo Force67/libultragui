@@ -40,7 +40,7 @@ bool Dropdown::OnClick() {
     MarkPaintDirty();
     return true;
   }
-  // Click on the header while open - close
+  // Click on the header while open: close
   open_ = false;
   MarkPaintDirty();
   return true;

@@ -1,4 +1,4 @@
--- NERV panel - mode button handlers
+-- NERV panel: mode button handlers
 
 local active_mode = "btn_normal"
 local modes = {"btn_stop", "btn_slow", "btn_normal", "btn_racing"}

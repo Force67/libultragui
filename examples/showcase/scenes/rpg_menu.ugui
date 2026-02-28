@@ -1,4 +1,4 @@
-// RPG journal/system menu - dense recreation of the Elder Scrolls V aesthetic
+// RPG journal/system menu: dense recreation of the Elder Scrolls V aesthetic
 // Ornamental details via Unicode glyphs, double-border frame, warm parchment tones,
 // selection indicator, per-tab content, version string
 
@@ -10,7 +10,7 @@ panel root {
     background-end: #0d0c0f;
     padding: 0;
 
-    // CSS Variables: Parchment palette
+    // -- CSS Variables: Parchment palette --
     --parchment: #c8c0b0;
     --parchment-dark: #6a6458;
     --border-gold: #6a645840;
@@ -20,12 +20,14 @@ panel root {
     // Top margin
     panel top_margin { height: 36; }
 
-    // TAB BAR - ornamental diamonds at edges, tabs centered
+    // =======================================================
+    // TAB BAR: ornamental diamonds at edges, tabs centered
+    // =======================================================
     panel tab_section {
         layout: column;
         padding: 0 60;
 
-        // Tab chamfered top
+        // -- Tab chamfered top --
         panel tab_chamfer_top {
             layout: row;
             width: 100%;
@@ -175,7 +177,7 @@ panel root {
             }
         }
 
-        // Tab chamfered bottom
+        // -- Tab chamfered bottom --
         panel tab_chamfer_bot {
             layout: row;
             width: 100%;
@@ -218,13 +220,15 @@ panel root {
         }
     }
 
-    // MAIN CONTENT FRAME - double border with chamfered corners
+    // =======================================================
+    // MAIN CONTENT FRAME: double border with chamfered corners
+    // =======================================================
     panel content_wrap {
         layout: column;
         flex-grow: 1;
         padding: 8 60;
 
-        // Chamfered top edge
+        // -- Chamfered top edge --
         // Row of: corner cut | top border line | corner cut
         panel chamfer_top {
             layout: row;
@@ -271,7 +275,7 @@ panel root {
             }
         }
 
-        // Main frame body (between chamfered top and bottom)
+        // -- Main frame body (between chamfered top and bottom) --
         panel frame_body {
             layout: row;
             flex-grow: 1;
@@ -306,7 +310,7 @@ panel root {
                 shadow-blur: 8;
                 shadow-inset: true;
 
-                // LEFT: Menu items
+                // --- LEFT: Menu items ---
                 panel left_col {
                     layout: column;
                     width: 320;
@@ -458,7 +462,7 @@ panel root {
                     // Push QUIT down
                     panel quit_spacer { flex-grow: 1; }
 
-                    // QUIT - bigger, with selection chevron
+                    // QUIT: bigger, with selection chevron
                     panel quit_row {
                         layout: row;
                         align: center;
@@ -501,14 +505,14 @@ panel root {
                     }
                 }
 
-                // DIVIDER
+                // --- DIVIDER ---
                 panel col_divider {
                     width: 1;
                     height: 100%;
                     background: #5a584e28;
                 }
 
-                // RIGHT: Detail panel
+                // --- RIGHT: Detail panel ---
                 panel right_col {
                     layout: column;
                     flex-grow: 1;
@@ -546,7 +550,7 @@ panel root {
                         margin: 6 0;
                     }
 
-                    // Quest description area - rich text with styled spans
+                    // Quest description area: rich text with styled spans
                     rich-text quest_desc {
                         padding: 0 0 4 0;
                         span { text: "Current Objective: "; font-weight: bold; color: --accent-gold; font-size: 13; }
@@ -610,7 +614,7 @@ panel root {
 
                     panel detail_fill { flex-grow: 1; }
 
-                    // SETTINGS PANEL (shown when SETTINGS tab active)
+                    // --- SETTINGS PANEL (shown when SETTINGS tab active) ---
                     panel settings_panel {
                         layout: column;
                         width: 100%;
@@ -821,7 +825,7 @@ panel root {
             }
         }
 
-        // Chamfered bottom edge
+        // -- Chamfered bottom edge --
         panel chamfer_bottom {
             layout: row;
             width: 100%;
@@ -867,7 +871,9 @@ panel root {
         }
     }
 
-    // BOTTOM STATUS BAR - level, XP, date
+    // =======================================================
+    // BOTTOM STATUS BAR: level, XP, date
+    // =======================================================
     panel bottom_section {
         layout: column;
         padding: 0 60;

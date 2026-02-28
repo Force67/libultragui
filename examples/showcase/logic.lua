@@ -1,4 +1,4 @@
--- libultragui showcase - UI logic
+-- libultragui showcase: UI logic
 
 ugui.log("Showcase logic loaded")
 

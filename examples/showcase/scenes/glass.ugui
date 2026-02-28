@@ -1,4 +1,4 @@
-// Glass - music player / media center
+// Glass: music player / media center
 // Dark backdrop, frosted glass surfaces, soft violet accent, generous spacing
 
 panel root {
@@ -8,7 +8,7 @@ panel root {
     height: 100%;
     padding: 0;
 
-    // Top bar
+    // -- Top bar --
     panel top_bar {
         layout: row;
         justify: space-between;
@@ -73,14 +73,14 @@ panel root {
         }
     }
 
-    // Main content
+    // -- Main content --
     panel main_body {
         layout: row;
         flex-grow: 1;
         padding: 0 32 0 32;
         gap: 20;
 
-        // Left: Now Playing
+        // -- Left: Now Playing --
         panel now_playing {
             layout: column;
             width: 380;
@@ -91,7 +91,7 @@ panel root {
             corner-radius-tr: 0;
             corner-radius-br: 0;
 
-            // Album art placeholder - colored rectangle
+            // Album art placeholder: colored rectangle
             panel album_art {
                 layout: column;
                 width: 380;
@@ -145,7 +145,7 @@ panel root {
                 }
 
                 text track_album {
-                    text: "Luminance  ·  2025";
+                    text: "Luminance | 2025";
                     font-size: 13;
                     color: #ffffff38;
                     letter-spacing: 0.5;
@@ -153,7 +153,7 @@ panel root {
                 }
             }
 
-            // Progress bar
+            // -- Progress bar --
             panel progress_area {
                 layout: column;
                 gap: 10;
@@ -185,7 +185,7 @@ panel root {
                 }
             }
 
-            // Playback controls
+            // -- Playback controls --
             panel controls {
                 layout: row;
                 justify: center;
@@ -264,7 +264,7 @@ panel root {
                 }
             }
 
-            // Volume
+            // -- Volume --
             panel volume_area {
                 layout: row;
                 align: center;
@@ -294,7 +294,7 @@ panel root {
             }
         }
 
-        // Right: Playlist
+        // -- Right: Playlist --
         panel playlist_area {
             layout: column;
             flex-grow: 1;
@@ -325,7 +325,7 @@ panel root {
                     }
 
                     text playlist_meta {
-                        text: "12 tracks  ·  48 min";
+                        text: "12 tracks | 48 min";
                         font-size: 13;
                         color: #ffffff40;
                         line-height: 1.4;
@@ -366,7 +366,7 @@ panel root {
                 shadow-blur: 16;
                 shadow-y: 6;
 
-                // Track 1 (currently playing - highlighted)
+                // Track 1 (currently playing: highlighted)
                 panel track_row_1 {
                     layout: row;
                     align: center;

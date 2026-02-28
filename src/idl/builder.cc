@@ -37,9 +37,9 @@ static f32 parse_float(const String& s) {
 
 static EdgeInsets parse_edge_insets(const String& s) {
     // Parse 1, 2, or 4 values like CSS shorthand:
-    // "10" -> all sides = 10
-    // "10 20" -> vertical=10, horizontal=20
-    // "10 20 30 40" -> top=10, right=20, bottom=30, left=40
+    //   "10"        -> all sides = 10
+    //   "10 20"     -> vertical=10, horizontal=20
+    //   "10 20 30 40" -> top=10, right=20, bottom=30, left=40
     f32 vals[4] = {};
     int count = 0;
     const char* ptr = s.data();
@@ -175,7 +175,7 @@ static constexpr std::pair<std::string_view, EasingType> kEasingTable[] = {
     {"spring", EasingType::kSpring},
 };
 
-// Easing substring match - order matters (ease-in-out before ease-in)
+// Easing substring match: order matters (ease-in-out before ease-in)
 static Optional<EasingType> FindEasingSubstring(std::string_view text) {
     for (auto& [substr, easing] : kEasingTable) {
         if (text.find(substr) != std::string_view::npos)
@@ -210,7 +210,7 @@ static Color parse_color(const String& s) {
 }
 
 // ---------------------------------------------------------------------------
-// Property dispatch table - maps CSS property names to Style mutators
+// Property dispatch table: maps CSS property names to Style mutators
 // ---------------------------------------------------------------------------
 
 using StyleSetter = void (*)(Style&, const String&);
@@ -408,7 +408,7 @@ static StyleSetter FindPropertySetter(std::string_view key) {
 }
 
 // ---------------------------------------------------------------------------
-// Style mask lookup - maps property names to StyleMask bits
+// Style mask lookup: maps property names to StyleMask bits
 // ---------------------------------------------------------------------------
 
 static constexpr std::pair<std::string_view, u64> kStyleMaskTable[] = {
@@ -467,7 +467,7 @@ static Transition parse_transition_shorthand(const String& val) {
 }
 
 // ---------------------------------------------------------------------------
-// Style parsing - dispatch table driven
+// Style parsing: dispatch table driven
 // ---------------------------------------------------------------------------
 
 Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) {
@@ -638,7 +638,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
         if (sel_it != node.properties.end())
             dd->set_selected_index(static_cast<i32>(parse_float(sel_it->second)));
         widget = dd;
-        // Return early - option children are data, not child widgets
+        // Return early: option children are data, not child widgets
         widget->set_id(id);
         widget->set_name(node.name);
         ApplyProperties(widget, node);
@@ -659,7 +659,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
             }
         }
         widget = menu;
-        // Return early - item children are data, not child widgets
+        // Return early: item children are data, not child widgets
         widget->set_id(id);
         widget->set_name(node.name);
         ApplyProperties(widget, node);
@@ -727,13 +727,13 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
             }
         }
         widget = rt;
-        // Return early - span children are data, not child widgets
+        // Return early: span children are data, not child widgets
         widget->set_id(id);
         widget->set_name(node.name);
         ApplyProperties(widget, node);
         return widget;
     } else {
-        // Unknown type - treat as panel
+        // Unknown type: treat as panel
         std::fprintf(stderr, "ultragui: unknown element type '%s' at line %u\n", node.type.c_str(),
                      node.source_line);
         widget = new Panel(id);
@@ -808,7 +808,7 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
             widget->AddStateTransition(state, trans);
     }
 
-    // Media query overrides - apply matching conditions on top of the base style
+    // Media query overrides: apply matching conditions on top of the base style
     for (auto& mq : node.media_queries) {
         bool matches = false;
         if (mq.condition == "min-width")

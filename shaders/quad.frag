@@ -30,7 +30,7 @@ float sdf_rounded_rect_4(vec2 p, vec2 b, vec4 radii) {
 
 void main() {
     vec4 tex_color = texture(tex_sampler, frag_uv);
-    // Texture stores sRGB data in UNORM format - linearize RGB for correct blending.
+    // Texture stores sRGB data in UNORM format: linearize RGB for correct blending.
     // Alpha channel is always linear.
     tex_color.rgb = srgb_to_linear(tex_color.rgb);
 

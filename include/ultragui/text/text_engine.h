@@ -26,7 +26,7 @@ struct GlyphMetrics {
     f32 u0, v0, u1, v1;
 };
 
-/// Shaped text run - the output of shaping a string with a font.
+/// Shaped text run: the output of shaping a string with a font.
 struct TextRun {
     struct Glyph {
         u32 glyph_id;

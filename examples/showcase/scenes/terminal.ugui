@@ -1,4 +1,4 @@
-// Terminal - network operations center
+// Terminal: network operations center
 // Pure black, phosphor green only, no corner-radius, no shadows, TUI aesthetic
 
 panel root {
@@ -8,7 +8,7 @@ panel root {
     height: 100%;
     padding: 0;
 
-    // Top header bar
+    // -- Top header bar --
     panel header_bar {
         layout: row;
         justify: space-between;
@@ -101,7 +101,7 @@ panel root {
         }
     }
 
-    // Secondary bar: tabs
+    // -- Secondary bar: tabs --
     panel tab_bar {
         layout: row;
         padding: 0;
@@ -202,13 +202,13 @@ panel root {
         }
     }
 
-    // Main content: three-column grid
+    // -- Main content: three-column grid --
     panel main_grid {
         layout: row;
         flex-grow: 1;
         padding: 0;
 
-        // Left column: system stats
+        // -- Left column: system stats --
         panel col_stats {
             layout: column;
             width: 280;
@@ -599,7 +599,7 @@ panel root {
             }
         }
 
-        // Center column: process list
+        // -- Center column: process list --
         panel col_processes {
             layout: column;
             flex-grow: 1;
@@ -812,7 +812,7 @@ panel root {
                     margin: 4 0 0 0;
 
                     text proc_total {
-                        text: "247 processes  ·  186 sleeping  ·  61 running  ·  0 zombie";
+                        text: "247 processes | 186 sleeping | 61 running | 0 zombie";
                         font-size: 11;
                         color: #00ff4160;
                     }
@@ -820,7 +820,7 @@ panel root {
             }
         }
 
-        // Right column: log feed
+        // -- Right column: log feed --
         panel col_logs {
             layout: column;
             width: 380;
@@ -1037,7 +1037,7 @@ panel root {
         }
     }
 
-    // Command input
+    // -- Command input --
     text-input cmd_input {
         placeholder: "$ enter command...";
         font-size: 13;
@@ -1050,7 +1050,7 @@ panel root {
         tab-index: 0;
     }
 
-    // Bottom status bar
+    // -- Bottom status bar --
     panel status_bar {
         layout: row;
         justify: space-between;

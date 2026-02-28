@@ -266,7 +266,7 @@ void UIContext::Update() {
     // Poll input (processes window resize events)
     platform_.PollEvents();
 
-    // Use platform window_size() for viewport - it reflects resizes immediately,
+    // Use platform window_size() for viewport: it reflects resizes immediately,
     // unlike rhi_->display_size() which waits for swapchain recreation in BeginFrame.
     Vec2 viewport = platform_.window_size();
 
@@ -418,7 +418,7 @@ void UIContext::UpdateTooltip() {
         tooltip_hover_start_ = last_time_;
     }
 
-    // Show tooltip after delay - we set a flag; actual drawing happens in Update()
+    // Show tooltip after delay: we set a flag; actual drawing happens in Update()
     if (tooltip_target_ && !tooltip_visible_ &&
         (last_time_ - tooltip_hover_start_) >= kTooltipDelay) {
         tooltip_visible_ = true;

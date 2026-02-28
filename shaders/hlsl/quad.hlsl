@@ -1,4 +1,4 @@
-// ultragui quad shader - D3D12 HLSL port of quad.vert + quad.frag
+// ultragui quad shader: D3D12 HLSL port of quad.vert + quad.frag
 // Compile: dxc -T vs_6_0 -E VSMain -Fo quad_vs.cso quad.hlsl
 //          dxc -T ps_6_0 -E PSMain -Fo quad_ps.cso quad.hlsl
 

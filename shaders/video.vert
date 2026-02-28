@@ -3,7 +3,7 @@
 layout(location = 0) out vec2 frag_uv;
 
 void main() {
-    // Fullscreen triangle from vertex index - no vertex buffer needed.
+    // Fullscreen triangle from vertex index: no vertex buffer needed.
     // Triangle covers clip space [-1,-1] to [3,1] / [-1,3]; clipped to screen.
     vec2 positions[3] = vec2[](
         vec2(-1.0, -1.0),

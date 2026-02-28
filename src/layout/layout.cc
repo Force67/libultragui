@@ -203,7 +203,7 @@ static void apply_style(YGNodeRef yg, const Style& s, const LayoutViewport& vp) 
     set_yoga_length_h(yg, s.height, vw, vh, sc, YGNodeStyleSetHeight, YGNodeStyleSetHeightPercent,
                       YGNodeStyleSetHeightAuto);
 
-    // Min/max - skip the default "unbounded" sentinel (1e6)
+    // Min/max: skip the default "unbounded" sentinel (1e6)
     if (s.min_width.value > 0.0f)
         set_yoga_length_w(yg, s.min_width, vw, vh, sc, YGNodeStyleSetMinWidth,
                           YGNodeStyleSetMinWidthPercent);
@@ -217,13 +217,13 @@ static void apply_style(YGNodeRef yg, const Style& s, const LayoutViewport& vp) 
         set_yoga_length_h(yg, s.max_height, vw, vh, sc, YGNodeStyleSetMaxHeight,
                           YGNodeStyleSetMaxHeightPercent);
 
-    // Margin (pixel values - scale them)
+    // Margin (pixel values: scale them)
     YGNodeStyleSetMargin(yg, YGEdgeTop, s.margin.top * sc);
     YGNodeStyleSetMargin(yg, YGEdgeRight, s.margin.right * sc);
     YGNodeStyleSetMargin(yg, YGEdgeBottom, s.margin.bottom * sc);
     YGNodeStyleSetMargin(yg, YGEdgeLeft, s.margin.left * sc);
 
-    // Padding (pixel values - scale them)
+    // Padding (pixel values: scale them)
     YGNodeStyleSetPadding(yg, YGEdgeTop, s.padding.top * sc);
     YGNodeStyleSetPadding(yg, YGEdgeRight, s.padding.right * sc);
     YGNodeStyleSetPadding(yg, YGEdgeBottom, s.padding.bottom * sc);
@@ -286,7 +286,7 @@ static void readback_results(YGNodeRef yg, LayoutNode* nodes, u32 node_index, f3
 
     node.layout_dirty = false;
 
-    // Recurse children - Yoga positions are relative to parent's border box
+    // Recurse children: Yoga positions are relative to parent's border box
     // (padding is already accounted for in the child's position), so pass
     // only the parent's absolute origin, not origin + padding.
     u32 child_idx = node.first_child;

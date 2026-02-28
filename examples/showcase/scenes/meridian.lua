@@ -1,8 +1,8 @@
--- Meridian - Developer Tools Landing Page logic
+-- Meridian: Developer Tools Landing Page logic
 
 ugui.log("Meridian landing page loaded")
 
--- Navigation handlers
+-- -- Navigation handlers --
 
 local nav_items = {"nav_features", "nav_pricing", "nav_docs", "nav_blog"}
 
@@ -44,7 +44,7 @@ function on_nav_logo(w)
     ugui.log("Nav: Home")
 end
 
--- CTA / action handlers
+-- -- CTA / action handlers --
 
 function on_nav_get_started(w)
     ugui.log("CTA: Get Started clicked")
@@ -64,7 +64,7 @@ function on_btn_join_waitlist(w)
     ugui.set("btn_join_waitlist", "background", "#6366f1")
 end
 
--- Pricing handlers
+-- -- Pricing handlers --
 
 function on_btn_hobby_start(w)
     ugui.log("Pricing: Hobby plan selected")
@@ -74,7 +74,7 @@ function on_btn_pro_start(w)
     ugui.log("Pricing: Pro plan selected")
 end
 
--- Final CTA handlers
+-- -- Final CTA handlers --
 
 function on_btn_cta_start(w)
     ugui.log("CTA: Start Free (footer)")
@@ -84,7 +84,7 @@ function on_btn_cta_contact(w)
     ugui.log("CTA: Talk to Sales")
 end
 
--- Footer handlers
+-- -- Footer handlers --
 
 function on_footer_privacy(w)  ugui.log("Footer: Privacy") end
 function on_footer_terms(w)    ugui.log("Footer: Terms") end

@@ -546,7 +546,7 @@ void Rasterize(const Document& doc, u8* pixels, u32 width, u32 height) {
         view_xform = Transform::Scale(sx, sy);
     }
 
-    // Scratch buffers - reused across shapes (clear preserves capacity)
+    // Scratch buffers: reused across shapes (clear preserves capacity)
     Vector<Vec2> points;
     Vector<u32> subpath_starts;
     Vector<Edge> edges;

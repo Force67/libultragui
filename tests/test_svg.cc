@@ -419,7 +419,7 @@ TEST(nested_groups) {
 }
 
 TEST(fill_rule_evenodd) {
-    // Concentric squares with evenodd - inner should be empty
+    // Concentric squares with evenodd: inner should be empty
     const char* svg = R"(
         <svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">
             <path d="M10,10 L90,10 L90,90 L10,90 Z M30,30 L70,30 L70,70 L30,70 Z"

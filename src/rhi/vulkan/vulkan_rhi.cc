@@ -44,7 +44,7 @@ static Vector<char> read_file(const String& path) {
 }
 
 static VkSurfaceFormatKHR choose_surface_format(const Vector<VkSurfaceFormatKHR>& formats) {
-    // Prefer sRGB format - the GPU automatically converts linear framebuffer writes
+    // Prefer sRGB format: the GPU automatically converts linear framebuffer writes
     // to sRGB on output, giving correct gamma-space anti-aliasing and blending.
     for (auto& f : formats) {
         if (f.format == VK_FORMAT_B8G8R8A8_SRGB &&
@@ -855,7 +855,7 @@ bool RHI::Impl::create_default_resources() {
     if (vkCreateSampler(device_, &sci, nullptr, &default_sampler_) != VK_SUCCESS)
         return false;
 
-    // Nearest sampler (text atlas - pixel-exact, no inter-glyph bleeding)
+    // Nearest sampler (text atlas: pixel-exact, no inter-glyph bleeding)
     VkSamplerCreateInfo nsci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     nsci.magFilter = VK_FILTER_NEAREST;
     nsci.minFilter = VK_FILTER_NEAREST;
@@ -1184,7 +1184,7 @@ bool RHI::Impl::BeginFrame(Color clear_color) {
     VkRect2D scissor{{0, 0}, swapchain_extent_};
     vkCmdSetScissor(f.cmd_buffer, 0, 1, &scissor);
 
-    // Push orthographic projection - use window (screen) coordinates so that
+    // Push orthographic projection: use window (screen) coordinates so that
     // vertex positions match the mouse/input coordinate space.
     f32 win_w = static_cast<f32>(swapchain_extent_.width) / dpi_scale_;
     f32 win_h = static_cast<f32>(swapchain_extent_.height) / dpi_scale_;
@@ -1289,7 +1289,7 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count, const 
         f.vertex_write_pos += vertex_count;
     }
 
-    // Indices are always different per batch - always append
+    // Indices are always different per batch: always append
     ensure_index_capacity(f.index_write_pos + index_count);
     VkDeviceSize ib_byte_offset = f.index_write_pos * sizeof(u32);
     void* data;
@@ -1355,7 +1355,7 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count, co
                                 1, &textures_[tex].descriptor, 0, nullptr);
     }
 
-    // Re-push constants (pipeline change resets them) - use display_size()
+    // Re-push constants (pipeline change resets them): use display_size()
     // which returns offscreen dimensions when inside an offscreen pass.
     Vec2 ds = display_size();
     f32 push[4] = {
@@ -1688,7 +1688,7 @@ bool RHI::Impl::ensure_video_pipeline() {
             return false;
     }
 
-    // Pipeline layout (no push constants - fullscreen pass from gl_VertexIndex)
+    // Pipeline layout (no push constants: fullscreen pass from gl_VertexIndex)
     VkPipelineLayoutCreateInfo plc{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plc.setLayoutCount = 1;
     plc.pSetLayouts = &video_desc_set_layout_;
@@ -1714,7 +1714,7 @@ bool RHI::Impl::ensure_video_pipeline() {
     stages[1].module = frag_mod;
     stages[1].pName = "main";
 
-    // No vertex input - vertices generated in shader from gl_VertexIndex
+    // No vertex input: vertices generated in shader from gl_VertexIndex
     VkPipelineVertexInputStateCreateInfo vertex_input{
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 
@@ -1737,7 +1737,7 @@ bool RHI::Impl::ensure_video_pipeline() {
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    // No blending - opaque video frame
+    // No blending: opaque video frame
     VkPipelineColorBlendAttachmentState blend_att{};
     blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;

@@ -1,4 +1,4 @@
-/// Video playback demo - shows MPEG-1 video with GPU YCbCr->RGB conversion.
+/// Video playback demo: shows MPEG-1 video with GPU YCbCr->RGB conversion.
 ///
 /// Scenes (press 1-3 to switch):
 ///   1. Basic video playback in a UI panel
@@ -6,10 +6,10 @@
 ///   3. Video on a spinning 3D cube (software-projected, GPU textured)
 ///
 /// Controls:
-///   Space  - play/pause
-///   R      - restart
-///   L      - toggle loop
-///   Left/Right - seek +-2s
+///   Space : play/pause
+///   R     : restart
+///   L     : toggle loop
+///   Left/Right: seek +-2s
 
 #include <ultragui/ultragui.h>
 #include <ultragui/widgets/image.h>
@@ -60,7 +60,7 @@ panel root {
     background: #0f0f1a; align: center;
 
     text title { text: "MPEG-1 Video Player"; font-size: 26; color: #e0e0ff; text-align: center; letter-spacing: 2; }
-    text subtitle { text: "GPU YCbCr→RGB conversion • pl_mpeg • zero licensing fees"; font-size: 13; color: #606080; text-align: center; }
+    text subtitle { text: "GPU YCbCr->RGB conversion * pl_mpeg * zero licensing fees"; font-size: 13; color: #606080; text-align: center; }
 
     panel video_card {
         layout: column; align: center; padding: 12;
@@ -71,7 +71,7 @@ panel root {
     }
 
     text time_display { text: "0:00 / 0:00"; font-size: 14; color: #8080a0; text-align: center; }
-    text controls { text: "Space: play/pause  R: restart  L: loop  ←/→: seek"; font-size: 11; color: #404060; text-align: center; }
+    text controls { text: "Space: play/pause  R: restart  L: loop  <-/->: seek"; font-size: 11; color: #404060; text-align: center; }
     text footer { text: "Press 1-3 to switch scenes"; font-size: 11; color: #303050; text-align: center; }
 }
 )";
@@ -83,7 +83,7 @@ panel root {
     padding: 30; gap: 20;
     background: #0a0a18; align: center;
 
-    text title { text: "Video Texture — One Decode, Many Widgets"; font-size: 24; color: #e0e0ff; text-align: center; }
+    text title { text: "Video Texture: One Decode, Many Widgets"; font-size: 24; color: #e0e0ff; text-align: center; }
 
     panel grid {
         layout: row; justify: center; gap: 20;
@@ -123,7 +123,7 @@ panel root {
         }
     }
 
-    text footer { text: "Same GPU texture — zero extra decode cost • Press 1-3 to switch"; font-size: 11; color: #404060; text-align: center; }
+    text footer { text: "Same GPU texture: zero extra decode cost * Press 1-3 to switch"; font-size: 11; color: #404060; text-align: center; }
 }
 )";
 
@@ -250,7 +250,7 @@ int main(int argc, char* argv[]) {
     std::string video_path = std::string(ULTRAGUI_VIDEO_DEMO_DIR) + "/demo.mpg";
 
     ugui::UIConfig config;
-    config.title = "ultragui — Video Demo";
+    config.title = "ultragui: Video Demo";
     config.width = 800;
     config.height = 600;
     config.clear_color = ugui::Color::FromHex(0x0f0f1a);

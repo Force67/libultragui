@@ -1,7 +1,7 @@
 #ifndef ULTRAGUI_ULTRAGUI_H_
 #define ULTRAGUI_ULTRAGUI_H_
 
-/// libultragui - Lean GPU-accelerated game GUI library
+/// libultragui: Lean GPU-accelerated game GUI library
 ///
 /// Umbrella header. Includes core types and the UIContext for convenience.
 

@@ -5,7 +5,7 @@
 
 namespace ugui {
 
-/// Container widget - equivalent to a <div> or Panel.
+/// Container widget: equivalent to a <div> or Panel.
 /// Lays out children according to its flex style.
 class Panel : public Widget {
 public:

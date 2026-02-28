@@ -20,7 +20,7 @@ class AudioEngine;
 ///   vid.Play();
 ///   // each frame:
 ///   vid.Update(dt);             // decode + upload planes
-/// vid.ConvertFrame(); // GPU YCbCr -> RGBA (call after AcquireFrame)
+///   vid.ConvertFrame();         // GPU YCbCr -> RGBA (call after AcquireFrame)
 ///   // use vid.texture() on an Image widget
 class VideoPlayer {
 public:

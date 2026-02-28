@@ -1,4 +1,4 @@
-/// libultragui showcase - demonstrates multiple visual identities.
+/// libultragui showcase: demonstrates multiple visual identities.
 ///
 /// Usage:
 ///   ./ultragui_showcase [scene] [font_path]
@@ -110,7 +110,7 @@ static void nerv_setup(ugui::UIContext& ui) {
         ugui::f32 hw = NERV_W * 0.5f;
         ugui::f32 hh = NERV_H * 0.5f;
 
-        // 3D perspective transform - tilt the monitor
+        // 3D perspective transform: tilt the monitor
         float angle_y = 0.35f;  // ~20 deg around Y axis
         float angle_x = -0.12f; // slight tilt back
         float focal = 900.0f;
@@ -136,7 +136,7 @@ static void nerv_setup(ugui::UIContext& ui) {
         auto [brx, bry] = project( hw,  hh);
         auto [blx, bly] = project(-hw,  hh);
 
-        // Ambient glow - use the projected bounding box
+        // Ambient glow: use the projected bounding box
         float gx = std::min({tlx, trx, brx, blx}) - 30.0f;
         float gy = std::min({tly, try_, bry, bly}) - 30.0f;
         float gw = std::max({tlx, trx, brx, blx}) - gx + 60.0f;

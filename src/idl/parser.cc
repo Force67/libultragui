@@ -376,7 +376,7 @@ private:
                                     advance();
                                 }
                                 if (current_.type == TokenType::kLBrace) {
-                                    // Recursively parse (simplified - only 3 levels deep here)
+                                    // Recursively parse (simplified: only 3 levels deep here)
                                     nested = parse_element_body(nested);
                                 }
                                 child.children.push_back(std::move(nested));
@@ -545,7 +545,7 @@ private:
         advance(); // skip "media"
 
         // Parse tokens until '{', extracting the condition identifier and numeric value.
-        // Parentheses '(' and ')' are not lexer tokens - they appear as kError tokens;
+        // Parentheses '(' and ')' are not lexer tokens: they appear as kError tokens;
         // colons inside the condition also appear as kColon. Skip them gracefully.
         while (current_.type != TokenType::kLBrace && current_.type != TokenType::kEof) {
             if (current_.type == TokenType::kIdentifier) {

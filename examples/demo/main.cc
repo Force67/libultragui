@@ -36,7 +36,7 @@ int main() {
     ugui::Renderer2D renderer;
     renderer.Init(&rhi);
 
-    std::printf("libultragui demo — rendering (%.0fx%.0f)\n", rhi.display_size().x,
+    std::printf("libultragui demo: rendering (%.0fx%.0f)\n", rhi.display_size().x,
                 rhi.display_size().y);
 
     while (!platform.ShouldClose()) {

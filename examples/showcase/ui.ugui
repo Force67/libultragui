@@ -1,4 +1,4 @@
-// libultragui showcase - a settings/dashboard UI
+// libultragui showcase: a settings/dashboard UI
 // Demonstrates: panels, shadows, gradients, borders, buttons, text, scroll, hover states
 
 panel root {
@@ -8,7 +8,7 @@ panel root {
     height: 100%;
     padding: 0;
 
-    // Left sidebar
+    // -- Left sidebar --
     panel sidebar {
         layout: column;
         width: 280;
@@ -115,7 +115,7 @@ panel root {
         }
     }
 
-    // Main content area
+    // -- Main content area --
     panel main_area {
         layout: column;
         flex-grow: 1;
@@ -343,7 +343,7 @@ panel root {
                         corner-radius: 4;
                     }
                     text item_text_3 {
-                        text: "Build #847 failed — pipeline error";
+                        text: "Build #847 failed: pipeline error";
                         font-size: 14;
                         color: #b0b0d0;
                     }

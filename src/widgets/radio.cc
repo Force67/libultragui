@@ -74,7 +74,7 @@ void Radio::OnPaint(Renderer2D& renderer) {
 
   bool is_selected = selected();
 
-  // Outer circle - always draw with border
+  // Outer circle: always draw with border
   Color border_color = (s.border_color.a > 0.0f)
                             ? s.border_color.WithAlpha(s.border_color.a * alpha)
                             : Color(0.6f, 0.6f, 0.6f, alpha);

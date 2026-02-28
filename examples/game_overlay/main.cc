@@ -1,4 +1,4 @@
-/// Game overlay demo - renders a spinning 3D cube as "game content"
+/// Game overlay demo: renders a spinning 3D cube as "game content"
 /// with a libultragui HUD overlaid on top.
 ///
 /// Demonstrates that libultragui works as an overlay for game/3D applications:
@@ -110,12 +110,12 @@ struct CubeFace {
 };
 
 static const CubeFace kCubeFaces[6] = {
-    {{0, 1, 2, 3}, 0.90f, 0.25f, 0.30f}, // front  - red
-    {{5, 4, 7, 6}, 0.20f, 0.60f, 0.95f}, // back   - blue
-    {{4, 0, 3, 7}, 0.30f, 0.85f, 0.45f}, // left   - green
-    {{1, 5, 6, 2}, 0.95f, 0.75f, 0.20f}, // right  - yellow
-    {{3, 2, 6, 7}, 0.85f, 0.40f, 0.90f}, // top    - purple
-    {{4, 5, 1, 0}, 0.20f, 0.90f, 0.85f}, // bottom - cyan
+    {{0, 1, 2, 3}, 0.90f, 0.25f, 0.30f}, // front : red
+    {{5, 4, 7, 6}, 0.20f, 0.60f, 0.95f}, // back  : blue
+    {{4, 0, 3, 7}, 0.30f, 0.85f, 0.45f}, // left  : green
+    {{1, 5, 6, 2}, 0.95f, 0.75f, 0.20f}, // right : yellow
+    {{3, 2, 6, 7}, 0.85f, 0.40f, 0.90f}, // top   : purple
+    {{4, 5, 1, 0}, 0.20f, 0.90f, 0.85f}, // bottom: cyan
 };
 
 static constexpr int kCubeEdges[12][2] = {
@@ -129,7 +129,7 @@ static constexpr int kCubeEdges[12][2] = {
 //
 // IMPORTANT: All geometry is batched into a single vertex+index array and
 // submitted with ONE DrawTriangles call. This is necessary because the RHI
-// has a vertex dedup optimization that caches the pointer - calling
+// has a vertex dedup optimization that caches the pointer: calling
 // DrawTriangles in a loop with a stack-local array would reuse the same
 // address each iteration, causing the dedup to skip uploads and draw stale
 // data for every face after the first.
@@ -173,7 +173,7 @@ static void DrawCube(ugui::RHI* rhi, float time, float screen_cx, float screen_c
 
     // Batch all face + edge geometry into one vertex/index array.
     // 6 faces x 4 verts = 24, 12 edges x 4 verts = 48 -> max 72 verts
-    // 6 faces x 6 idx = 36, 12 edges x 6 idx = 72 -> max 108 indices
+    // 6 faces x 6 idx  = 36, 12 edges x 6 idx  = 72 -> max 108 indices
     ugui::Vertex2D all_verts[72];
     ugui::u32 all_indices[108];
     ugui::u32 vert_count = 0;
@@ -252,7 +252,7 @@ static void DrawCube(ugui::RHI* rhi, float time, float screen_cx, float screen_c
         all_indices[idx_count++] = base + 3;
     }
 
-    // Single draw call - avoids the RHI vertex dedup issue
+    // Single draw call: avoids the RHI vertex dedup issue
     rhi->DrawTriangles(all_verts, vert_count, all_indices, idx_count);
 }
 
@@ -305,7 +305,7 @@ int main(int argc, char* argv[]) {
     std::printf("Font: %s\n", font_path);
 
     ugui::UIConfig config;
-    config.title = "libultragui — Game Overlay Demo";
+    config.title = "libultragui: Game Overlay Demo";
     config.width = 1280;
     config.height = 720;
     config.clear_color = ugui::Color::FromHex(0x08081a);

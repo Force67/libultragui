@@ -162,7 +162,7 @@ void Widget::OnPaint(Renderer2D& renderer) {
                              s.shadow.offset, radii);
     }
 
-    // Backdrop blur (frosted glass approximation - true Kawase blur requires a separate render pass)
+    // Backdrop blur (frosted glass approximation: true Kawase blur requires a separate render pass)
     if (s.backdrop_blur > 0.0f) {
         f32 blur_alpha = Clamp(s.backdrop_blur / 40.0f, 0.1f, 0.6f);
         Color frost = s.background.a > 0.0f ? s.background : Color{0.1f, 0.1f, 0.15f, 1.0f};

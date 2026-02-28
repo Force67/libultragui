@@ -1,4 +1,4 @@
-// ultragui video shader - D3D12 HLSL port of video.vert + video.frag
+// ultragui video shader: D3D12 HLSL port of video.vert + video.frag
 // Compile: dxc -T vs_6_0 -E VSMain -Fo video_vs.cso video.hlsl
 //          dxc -T ps_6_0 -E PSMain -Fo video_ps.cso video.hlsl
 
@@ -13,7 +13,7 @@ struct VSOutput {
 };
 
 VSOutput VSMain(uint vid : SV_VertexID) {
-    // Fullscreen triangle from vertex index - no vertex buffer needed.
+    // Fullscreen triangle from vertex index: no vertex buffer needed.
     float2 positions[3] = {
         float2(-1.0, -1.0),
         float2( 3.0, -1.0),

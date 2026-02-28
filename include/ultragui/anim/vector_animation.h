@@ -9,7 +9,7 @@ namespace ugui {
 class RHI;
 
 /// Lightweight vector animation player. Parses .uganim JSON files and
-/// renders frames via the built-in SVG rasterizer - zero external dependencies.
+/// renders frames via the built-in SVG rasterizer: zero external dependencies.
 /// Same API as LottieAnimation for drop-in replacement.
 class VectorAnimation {
 public:
