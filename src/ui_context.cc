@@ -189,6 +189,7 @@ Widget* UIContext::LoadUi(const char* path) {
         root_->SetContext(&widget_ctx_);
         RegisterWidgetTree(script_, root_);
     }
+    widget_cache_dirty_ = true;
 
     return root_;
 }
@@ -221,6 +222,7 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
         root_->SetContext(&widget_ctx_);
         RegisterWidgetTree(script_, root_);
     }
+    widget_cache_dirty_ = true;
 
     return root_;
 }
@@ -247,6 +249,7 @@ void UIContext::set_root(Widget* root) {
         root_->SetContext(&widget_ctx_);
         RegisterWidgetTree(script_, root_);
     }
+    widget_cache_dirty_ = true;
 }
 
 bool UIContext::Running() const {
@@ -595,7 +598,25 @@ void UIContext::SetTheme(const Theme& theme) {
 }
 
 Widget* UIContext::FindWidget(const char* name) const {
-    return ugui::FindWidget(root_, name);
+    if (widget_cache_dirty_)
+        RebuildWidgetCache();
+    auto it = widget_cache_.find(name);
+    if (it != widget_cache_.end()) return it->second;
+    return nullptr;
+}
+
+void UIContext::CacheWidgetTree(Widget* w, HashMap<String, Widget*>& cache) {
+    if (!w) return;
+    if (!w->name().empty())
+        cache[w->name()] = w;
+    for (auto* child : w->children())
+        CacheWidgetTree(child, cache);
+}
+
+void UIContext::RebuildWidgetCache() const {
+    widget_cache_.clear();
+    CacheWidgetTree(root_, widget_cache_);
+    widget_cache_dirty_ = false;
 }
 
 } // namespace ugui

@@ -129,8 +129,11 @@ public:
     /// Set the swapchain clear color (background).
     void set_clear_color(Color color) { config_.clear_color = color; }
 
-    /// Find a widget by name in the tree.
+    /// Find a widget by name in the tree (O(1) cached lookup).
     Widget* FindWidget(const char* name) const;
+
+    /// Invalidate the widget name cache (call after dynamically adding children).
+    void InvalidateWidgetCache() { widget_cache_dirty_ = true; }
 
     /// Load an SVG file and create a GPU texture.
     /// If width/height are 0, uses the SVG's native dimensions.
@@ -229,6 +232,12 @@ private:
         Vec2 position;
     };
     Vector<OverlayEntry> overlays_;
+
+    // Widget name -> pointer cache (O(1) lookup, rebuilt lazily).
+    mutable HashMap<String, Widget*> widget_cache_;
+    mutable bool widget_cache_dirty_ = true;
+    void RebuildWidgetCache() const;
+    static void CacheWidgetTree(Widget* w, HashMap<String, Widget*>& cache);
 
     // Tooltip state
     Widget* tooltip_target_ = nullptr;
