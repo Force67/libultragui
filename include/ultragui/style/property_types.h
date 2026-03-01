@@ -25,6 +25,7 @@ struct Length {
     constexpr Length(f32 v, Unit u) : value(v), unit(u) {}
 
     static constexpr Length Px(f32 v) { return {v, Unit::kPx}; }
+    static constexpr Length Pct(f32 v) { return {v, Unit::kPercent}; }
     static constexpr Length Percent(f32 v) { return {v, Unit::kPercent}; }
     static constexpr Length Vw(f32 v) { return {v, Unit::kVw}; }
     static constexpr Length Vh(f32 v) { return {v, Unit::kVh}; }

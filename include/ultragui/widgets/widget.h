@@ -28,6 +28,7 @@ public:
     // --- Tree management ---
     void AddChild(Widget* child);
     void RemoveChild(Widget* child);
+    void ClearChildren();
     Widget* ChildAt(u32 index) const;
     u32 child_count() const { return static_cast<u32>(children_.size()); }
     Widget* parent() const { return parent_; }

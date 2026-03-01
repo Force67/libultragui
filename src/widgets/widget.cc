@@ -53,6 +53,15 @@ void Widget::RemoveChild(Widget* child) {
     }
 }
 
+void Widget::ClearChildren() {
+    for (auto* child : children_) {
+        child->parent_ = nullptr;
+        delete child;
+    }
+    children_.clear();
+    MarkDirty();
+}
+
 Widget* Widget::ChildAt(u32 index) const {
     return index < children_.size() ? children_[index] : nullptr;
 }

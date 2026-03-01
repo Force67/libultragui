@@ -25,24 +25,13 @@ layout(location = 5) out vec2 frag_half_size;
 layout(location = 6) out float frag_border_width;
 layout(location = 7) out vec4 frag_border_color;
 
-// sRGB -> linear conversion (inverse of the sRGB transfer function).
-// Input colors are specified in sRGB (hex codes, CSS colors). The sRGB
-// swapchain format applies linear -> sRGB on output, so we must linearize
-// inputs to avoid double-gamma encoding.
-vec3 srgb_to_linear(vec3 c) {
-    // Exact piecewise sRGB EOTF
-    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
-}
-
 vec4 unpack_color(uint c) {
-    vec4 col = vec4(
+    return vec4(
         float(c & 0xFFu) / 255.0,
         float((c >> 8) & 0xFFu) / 255.0,
         float((c >> 16) & 0xFFu) / 255.0,
         float((c >> 24) & 0xFFu) / 255.0
     );
-    col.rgb = srgb_to_linear(col.rgb);
-    return col;
 }
 
 void main() {

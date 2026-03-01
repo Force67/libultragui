@@ -40,3 +40,5 @@ tests/cmake_install.cmake
 /_deps
 /build_verify
 *.log
+examples/ultragui_video_demo
+examples/ultragui_game_overlay

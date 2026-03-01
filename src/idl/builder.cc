@@ -569,6 +569,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
         widget = new Image(id);
     } else if (node.type == "scroll" || node.type == "scroll-view") {
         widget = new ScrollView(id);
+        widget->style().overflow = Overflow::kScroll;
     } else if (node.type == "text-input" || node.type == "input") {
         auto* input = new TextInput(id);
         auto text_it = node.properties.find("placeholder");
