@@ -200,6 +200,17 @@ bool InputRouter::Process(Widget* root) {
             }
             if (handled)
                 continue;
+
+            // Enter or Space activates the focused widget (keyboard/gamepad nav)
+            if (focused_ && (evt.key == 257 /* GLFW_KEY_ENTER */ ||
+                             evt.key == 335 /* GLFW_KEY_KP_ENTER */ ||
+                             evt.key == 32  /* GLFW_KEY_SPACE */)) {
+                if (on_click_)
+                    on_click_(focused_, MouseButton::kLeft);
+                focused_->OnClick();
+                consumed = true;
+                continue;
+            }
         }
         // Dispatch to focused widget
         if (focused_) {

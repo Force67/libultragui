@@ -52,7 +52,10 @@ public:
     /// Call before executing scripts so ugui.after() uses real time.
     void SyncTimerClock(double current_time);
 
-    /// Process pending timers. Call each frame with the current time.
+    /// Cancel all pending timers and tweens (call when replacing the UI tree).
+    void ClearTimersAndTweens();
+
+    /// Process pending timers and tweens. Call each frame with the current time.
     void UpdateTimers(double current_time);
 
     /// Auto-wire on_change callbacks for Dropdown/Checkbox/Slider widgets

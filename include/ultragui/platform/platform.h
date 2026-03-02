@@ -47,6 +47,9 @@ public:
     const char* clipboard_text() const;
     void set_clipboard_text(const char* text);
 
+    /// Open a URL in the system's default browser.
+    static void OpenURL(const char* url);
+
     /// Access the platform's input event queue.
     /// Filled during PollEvents(), consumed by InputRouter.
     InputQueue& input_queue();

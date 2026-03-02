@@ -177,6 +177,7 @@ Widget* UIContext::LoadUi(const char* path) {
         input_.ResetState();
         tooltip_target_ = nullptr;
         tooltip_visible_ = false;
+        script_.ClearTimersAndTweens();
         script_.ClearWidgetRegistry();
         if (owns_root_)
             delete root_;
@@ -211,6 +212,7 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
         input_.ResetState();
         tooltip_target_ = nullptr;
         tooltip_visible_ = false;
+        script_.ClearTimersAndTweens();
         script_.ClearWidgetRegistry();
         if (owns_root_)
             delete root_;
@@ -243,6 +245,7 @@ void UIContext::set_root(Widget* root) {
     input_.ResetState();
     tooltip_target_ = nullptr;
     tooltip_visible_ = false;
+    script_.ClearTimersAndTweens();
     script_.ClearWidgetRegistry();
 
     if (owns_root_)

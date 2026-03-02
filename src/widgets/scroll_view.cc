@@ -15,7 +15,10 @@ void ScrollView::ScrollBy(Vec2 delta) {
 }
 
 bool ScrollView::OnScroll(Vec2 delta) {
+    // Apply immediately for zero-latency feel
     ScrollBy(delta);
+    // Kick velocity for momentum coast after the scroll gesture ends
+    scroll_velocity_ = delta * 6.0f;
     return true;
 }
 
@@ -55,16 +58,25 @@ Widget* ScrollView::HitTest(Vec2 point) {
 }
 
 void ScrollView::OnUpdate(f64 dt) {
-    // Inertial scrolling
-    if (scroll_velocity_.LengthSq() > 0.01f) {
+    // Inertial scrolling with framerate-independent deceleration
+    if (scroll_velocity_.LengthSq() > 0.5f) {
         scroll_offset_ += scroll_velocity_ * static_cast<f32>(dt);
-        scroll_velocity_ *= deceleration_;
 
-        // Clamp
+        // Decay normalized to 60fps so momentum feels identical at any framerate
+        f32 decay = std::pow(deceleration_, static_cast<f32>(dt) * 60.0f);
+        scroll_velocity_ *= decay;
+
+        // Clamp offset to valid range
         f32 max_scroll_x = std::max(0.0f, content_size_.x - content_rect_.w);
         f32 max_scroll_y = std::max(0.0f, content_size_.y - content_rect_.h);
         scroll_offset_.x = std::clamp(scroll_offset_.x, 0.0f, max_scroll_x);
         scroll_offset_.y = std::clamp(scroll_offset_.y, 0.0f, max_scroll_y);
+
+        // Kill velocity at edges to prevent jitter
+        if (scroll_offset_.y <= 0.0f || scroll_offset_.y >= max_scroll_y)
+            scroll_velocity_.y = 0.0f;
+        if (scroll_offset_.x <= 0.0f || scroll_offset_.x >= max_scroll_x)
+            scroll_velocity_.x = 0.0f;
 
         MarkPaintDirty();
     } else {

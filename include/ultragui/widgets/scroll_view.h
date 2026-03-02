@@ -34,7 +34,7 @@ private:
     Vec2 scroll_offset_ = Vec2::Zero();
     Vec2 scroll_velocity_ = Vec2::Zero();
     Vec2 content_size_ = Vec2::Zero();
-    f32 deceleration_ = 0.95f;
+    f32 deceleration_ = 0.88f;
 };
 
 } // namespace ugui
