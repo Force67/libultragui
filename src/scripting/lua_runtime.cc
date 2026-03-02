@@ -1,5 +1,8 @@
 #include <ultragui/scripting/script_runtime.h>
 #include <ultragui/widgets/button.h>
+#include <ultragui/widgets/checkbox.h>
+#include <ultragui/widgets/dropdown.h>
+#include <ultragui/widgets/slider.h>
 #include <ultragui/widgets/text.h>
 #include <ultragui/widgets/widget.h>
 
@@ -23,6 +26,13 @@ struct ScriptRuntime::Impl {
     HashMap<String, Widget*> widget_registry;
     Vector<ScriptRuntime::NativeFunction*> native_functions;
 
+    struct TimerEntry {
+        double fire_time;
+        int func_ref;   // LUA_REGISTRYINDEX reference
+    };
+    Vector<TimerEntry> timers;
+    double current_time = 0.0;
+
     static Impl* FromState(lua_State* L) {
         lua_getfield(L, LUA_REGISTRYINDEX, REGISTRY_KEY);
         auto* rt = static_cast<Impl*>(lua_touserdata(L, -1));
@@ -35,6 +45,10 @@ struct ScriptRuntime::Impl {
     static int LuaUguiGetProp(lua_State* L);
     static int LuaUguiSetProp(lua_State* L);
     static int LuaUguiLog(lua_State* L);
+    static int LuaUguiAfter(lua_State* L);
+
+    // Push widget table with type-specific fields onto Lua stack.
+    void PushWidgetTable(Widget* widget);
 };
 
 ScriptRuntime::ScriptRuntime() : impl_(new Impl()) {}
@@ -124,6 +138,34 @@ Widget* ScriptRuntime::FindRegisteredWidget(const char* name) const {
     return it != impl_->widget_registry.end() ? it->second : nullptr;
 }
 
+void ScriptRuntime::Impl::PushWidgetTable(Widget* widget) {
+    lua_newtable(L);
+    lua_pushstring(L, widget->name().c_str());
+    lua_setfield(L, -2, "name");
+    lua_pushinteger(L, widget->id());
+    lua_setfield(L, -2, "id");
+
+    // Type-specific fields so Lua handlers get w.checked, w.selected, w.value
+    if (auto* cb = dynamic_cast<Checkbox*>(widget)) {
+        lua_pushboolean(L, cb->checked());
+        lua_setfield(L, -2, "checked");
+    }
+    if (auto* dd = dynamic_cast<Dropdown*>(widget)) {
+        lua_pushinteger(L, dd->selected_index());
+        lua_setfield(L, -2, "selected");
+        lua_pushstring(L, dd->selected_text().c_str());
+        lua_setfield(L, -2, "selected_text");
+    }
+    if (auto* sl = dynamic_cast<Slider*>(widget)) {
+        lua_pushnumber(L, sl->value());
+        lua_setfield(L, -2, "value");
+        lua_pushnumber(L, sl->min());
+        lua_setfield(L, -2, "min");
+        lua_pushnumber(L, sl->max());
+        lua_setfield(L, -2, "max");
+    }
+}
+
 bool ScriptRuntime::CallHandler(const char* func_name, Widget* widget) {
     lua_getglobal(impl_->L, func_name);
     if (!lua_isfunction(impl_->L, -1)) {
@@ -131,12 +173,7 @@ bool ScriptRuntime::CallHandler(const char* func_name, Widget* widget) {
         return false;
     }
 
-    // Push widget as a table with name and id
-    lua_newtable(impl_->L);
-    lua_pushstring(impl_->L, widget->name().c_str());
-    lua_setfield(impl_->L, -2, "name");
-    lua_pushinteger(impl_->L, widget->id());
-    lua_setfield(impl_->L, -2, "id");
+    impl_->PushWidgetTable(widget);
 
     if (lua_pcall(impl_->L, 1, 0, 0) != LUA_OK) {
         std::fprintf(stderr, "ultragui/lua: error calling '%s': %s\n", func_name,
@@ -145,6 +182,69 @@ bool ScriptRuntime::CallHandler(const char* func_name, Widget* widget) {
         return false;
     }
     return true;
+}
+
+void ScriptRuntime::ScheduleTimer(double delay_seconds, int lua_func_ref) {
+    impl_->timers.push_back({impl_->current_time + delay_seconds, lua_func_ref});
+}
+
+void ScriptRuntime::SyncTimerClock(double current_time) {
+    impl_->current_time = current_time;
+}
+
+void ScriptRuntime::UpdateTimers(double current_time) {
+    impl_->current_time = current_time;
+    // Process in a separate pass to avoid iterator invalidation if callbacks schedule more timers.
+    Vector<Impl::TimerEntry> ready;
+    auto& timers = impl_->timers;
+    for (size_t i = 0; i < timers.size(); ) {
+        if (current_time >= timers[i].fire_time) {
+            ready.push_back(timers[i]);
+            timers[i] = timers.back();
+            timers.pop_back();
+        } else {
+            ++i;
+        }
+    }
+    for (auto& entry : ready) {
+        lua_rawgeti(impl_->L, LUA_REGISTRYINDEX, entry.func_ref);
+        if (lua_pcall(impl_->L, 0, 0, 0) != LUA_OK) {
+            std::fprintf(stderr, "ultragui/lua: timer error: %s\n", lua_tostring(impl_->L, -1));
+            lua_pop(impl_->L, 1);
+        }
+        luaL_unref(impl_->L, LUA_REGISTRYINDEX, entry.func_ref);
+    }
+}
+
+static void WireChangeHandlersRecursive(ScriptRuntime& rt, Widget* w) {
+    if (!w) return;
+    const auto& name = w->name();
+    if (!name.empty()) {
+        if (auto* dd = dynamic_cast<Dropdown*>(w)) {
+            dd->set_on_change([&rt, widget = w](i32, const String&) {
+                std::string handler = "on_" + widget->name();
+                rt.CallHandler(handler.c_str(), widget);
+            });
+        }
+        if (auto* cb = dynamic_cast<Checkbox*>(w)) {
+            cb->set_on_change([&rt, widget = w](bool) {
+                std::string handler = "on_" + widget->name();
+                rt.CallHandler(handler.c_str(), widget);
+            });
+        }
+        if (auto* sl = dynamic_cast<Slider*>(w)) {
+            sl->set_on_change([&rt, widget = w](f32) {
+                std::string handler = "on_" + widget->name();
+                rt.CallHandler(handler.c_str(), widget);
+            });
+        }
+    }
+    for (u32 i = 0; i < w->child_count(); ++i)
+        WireChangeHandlersRecursive(rt, w->ChildAt(i));
+}
+
+void ScriptRuntime::WireChangeHandlers(Widget* root) {
+    WireChangeHandlersRecursive(*this, root);
 }
 
 void ScriptRuntime::RegisterFunction(const char* name, NativeFunction func) {
@@ -189,7 +289,20 @@ void ScriptRuntime::Impl::RegisterApi() {
     lua_pushcfunction(L, LuaUguiLog);
     lua_setfield(L, -2, "log");
 
+    lua_pushcfunction(L, LuaUguiAfter);
+    lua_setfield(L, -2, "after");
+
     lua_setglobal(L, "ugui");
+}
+
+int ScriptRuntime::Impl::LuaUguiAfter(lua_State* L) {
+    auto* impl = FromState(L);
+    double delay = luaL_checknumber(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    lua_pushvalue(L, 2);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    impl->timers.push_back({impl->current_time + delay, ref});
+    return 0;
 }
 
 int ScriptRuntime::Impl::LuaUguiFind(lua_State* L) {
@@ -259,6 +372,7 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
     } else if (strcmp(prop, "visible") == 0) {
         s.visibility = lua_toboolean(L, 3) ? Visibility::kVisible : Visibility::kHidden;
         w->set_style(s);
+        w->ClearAnimationStyle();
         return 0;
     } else if (strcmp(prop, "font-size") == 0) {
         s.font_size = static_cast<f32>(luaL_checknumber(L, 3));
@@ -271,19 +385,68 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
         s.corner_radius_bl = r;
     } else if (strcmp(prop, "color") == 0) {
         const char* val = luaL_checkstring(L, 3);
-        if (val[0] == '#' && strlen(val) == 7) {
+        size_t vlen = strlen(val);
+        if (val[0] == '#' && (vlen == 7 || vlen == 9)) {
             u32 hex = 0;
             std::from_chars(val + 1, val + 7, hex, 16);
             s.text_color = Color::FromHex(hex);
+            if (vlen == 9) {
+                u32 alpha = 0;
+                std::from_chars(val + 7, val + 9, alpha, 16);
+                s.text_color = s.text_color.WithAlpha(static_cast<f32>(alpha) / 255.0f);
+            }
         }
+    } else if (strcmp(prop, "text-shadow-color") == 0) {
+        const char* val = luaL_checkstring(L, 3);
+        size_t vlen = strlen(val);
+        if (val[0] == '#' && (vlen == 7 || vlen == 9)) {
+            u32 hex = 0;
+            std::from_chars(val + 1, val + 7, hex, 16);
+            s.text_shadow_color = Color::FromHex(hex);
+            if (vlen == 9) {
+                u32 alpha = 0;
+                std::from_chars(val + 7, val + 9, alpha, 16);
+                s.text_shadow_color = s.text_shadow_color.WithAlpha(static_cast<f32>(alpha) / 255.0f);
+            }
+        }
+    } else if (strcmp(prop, "shadow-color") == 0) {
+        const char* val = luaL_checkstring(L, 3);
+        size_t vlen = strlen(val);
+        if (val[0] == '#' && (vlen == 7 || vlen == 9)) {
+            u32 hex = 0;
+            std::from_chars(val + 1, val + 7, hex, 16);
+            s.shadow.color = Color::FromHex(hex);
+            if (vlen == 9) {
+                u32 alpha = 0;
+                std::from_chars(val + 7, val + 9, alpha, 16);
+                s.shadow.color = s.shadow.color.WithAlpha(static_cast<f32>(alpha) / 255.0f);
+            }
+        }
+    } else if (strcmp(prop, "shadow-blur") == 0) {
+        s.shadow.blur = static_cast<f32>(luaL_checknumber(L, 3));
+    } else if (strcmp(prop, "cursor") == 0) {
+        const char* val = luaL_checkstring(L, 3);
+        if (strcmp(val, "pointer") == 0) s.cursor = Cursor::kPointer;
+        else if (strcmp(val, "text") == 0) s.cursor = Cursor::kText;
+        else if (strcmp(val, "move") == 0) s.cursor = Cursor::kMove;
+        else if (strcmp(val, "not-allowed") == 0) s.cursor = Cursor::kNotAllowed;
+        else s.cursor = Cursor::kDefault;
     } else if (strcmp(prop, "background") == 0) {
         const char* val = luaL_checkstring(L, 3);
         if (strcmp(val, "transparent") == 0) {
             s.background = Color::Transparent();
-        } else if (val[0] == '#' && strlen(val) == 7) {
-            u32 hex = 0;
-            std::from_chars(val + 1, val + 7, hex, 16);
-            s.background = Color::FromHex(hex);
+        } else {
+            size_t vlen = strlen(val);
+            if (val[0] == '#' && (vlen == 7 || vlen == 9)) {
+                u32 hex = 0;
+                std::from_chars(val + 1, val + 7, hex, 16);
+                s.background = Color::FromHex(hex);
+                if (vlen == 9) {
+                    u32 alpha = 0;
+                    std::from_chars(val + 7, val + 9, alpha, 16);
+                    s.background = s.background.WithAlpha(static_cast<f32>(alpha) / 255.0f);
+                }
+            }
         }
     } else if (strcmp(prop, "width") == 0) {
         if (lua_type(L, 3) == LUA_TSTRING) {
@@ -312,15 +475,21 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
     } else if (strcmp(prop, "text") == 0) {
         if (auto* text = dynamic_cast<Text*>(w)) {
             text->set_text(luaL_checkstring(L, 3));
+            w->ClearAnimationStyle();
             return 0;
         }
         if (auto* btn = dynamic_cast<Button*>(w)) {
             btn->set_label(luaL_checkstring(L, 3));
+            w->ClearAnimationStyle();
             return 0;
         }
     }
 
     w->set_style(s);
+    // Cancel any active CSS transition so the scripted change is visible
+    // immediately. Without this, animation_style_ overrides the base style
+    // and the change appears to not take effect until the transition ends.
+    w->ClearAnimationStyle();
     return 0;
 }
 

@@ -37,11 +37,27 @@ public:
     void ClearWidgetRegistry();
 
     /// Call a named handler function, passing the widget as context.
+    /// The widget table includes type-specific fields (checked, selected, value).
     /// Returns true if the handler existed and ran successfully.
     bool CallHandler(const char* func_name, Widget* widget);
 
     /// Look up a registered widget by name.
     Widget* FindRegisteredWidget(const char* name) const;
+
+    /// Schedule a Lua callback to fire after `delay_seconds`.
+    /// The callback is a Lua function reference stored via luaL_ref.
+    void ScheduleTimer(double delay_seconds, int lua_func_ref);
+
+    /// Sync the timer clock without firing callbacks.
+    /// Call before executing scripts so ugui.after() uses real time.
+    void SyncTimerClock(double current_time);
+
+    /// Process pending timers. Call each frame with the current time.
+    void UpdateTimers(double current_time);
+
+    /// Auto-wire on_change callbacks for Dropdown/Checkbox/Slider widgets
+    /// in the tree so they dispatch to Lua on_<name>(w) handlers.
+    void WireChangeHandlers(Widget* root);
 
 #if ULTRAGUI_LUA
     /// Expose a C++ function to Lua under ugui.{name}. Lua-specific.

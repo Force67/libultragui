@@ -216,6 +216,11 @@ bool InputRouter::Process(Widget* root) {
             consumed |= focused_->OnCharInput(queue.char_events[i].codepoint);
     }
 
+    // Clear consumed events so they don't reprocess next frame.
+    // The built-in GLFW platform clears in PollEvents(), but external
+    // integrations (like nextrym) push events outside that path.
+    queue.clear();
+
     return consumed;
 }
 

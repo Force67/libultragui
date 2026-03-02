@@ -188,6 +188,7 @@ Widget* UIContext::LoadUi(const char* path) {
     if (root_) {
         root_->SetContext(&widget_ctx_);
         RegisterWidgetTree(script_, root_);
+        script_.WireChangeHandlers(root_);
     }
     widget_cache_dirty_ = true;
 
@@ -221,6 +222,7 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
     if (root_) {
         root_->SetContext(&widget_ctx_);
         RegisterWidgetTree(script_, root_);
+        script_.WireChangeHandlers(root_);
     }
     widget_cache_dirty_ = true;
 
@@ -228,10 +230,12 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
 }
 
 bool UIContext::LoadScript(const char* path) {
+    script_.SyncTimerClock(platform_.time());
     return script_.ExecFile(path);
 }
 
 bool UIContext::ExecScript(const char* script, const char* name) {
+    script_.SyncTimerClock(platform_.time());
     return script_.Exec(script, name);
 }
 
@@ -282,6 +286,9 @@ void UIContext::Update() {
     // Route input to widget tree
     if (root_)
         input_.Process(root_);
+
+    // Fire pending Lua timers
+    script_.UpdateTimers(now);
 
     // Update tooltip display
     UpdateTooltip();
