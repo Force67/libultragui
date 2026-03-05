@@ -21,9 +21,32 @@ public:
     using ChangeHandler = Function<void(const String&)>;
     void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
 
+    /// Fired when the user presses Enter (or Keypad Enter) while this
+    /// input is focused. Receives the current text. Typical use: REPL
+    /// "send" / form "submit".
+    using SubmitHandler = Function<void(const String&)>;
+    void set_on_submit(SubmitHandler handler) { on_submit_ = std::move(handler); }
+
+    /// Fired when the user presses Escape while this input is focused.
+    /// Typical use: clear filter / close popover.
+    using CancelHandler = Function<void()>;
+    void set_on_cancel(CancelHandler handler) { on_cancel_ = std::move(handler); }
+
+    /// Fired on Up / Down arrow keys when the caret is on the (single)
+    /// line. Useful for shell-style command history. The handler returns
+    /// the replacement text (empty string = no change).
+    using HistoryHandler = Function<String()>;
+    void set_on_history_prev(HistoryHandler handler) {
+        on_history_prev_ = std::move(handler);
+    }
+    void set_on_history_next(HistoryHandler handler) {
+        on_history_next_ = std::move(handler);
+    }
+
     bool OnCharInput(u32 codepoint) override;
     bool OnKeyDown(i32 key, i32 mods) override;
     bool OnClick() override;
+    bool consumes_text_input() const override { return true; }
     void Measure(f32& out_width, f32& out_height) override;
     void OnPaint(Renderer2D& renderer) override;
     void OnUpdate(f64 dt) override;
@@ -55,6 +78,10 @@ private:
     bool cursor_visible_ = true;
     f32 scroll_x_ = 0.0f;
     ChangeHandler on_change_;
+    SubmitHandler on_submit_;
+    CancelHandler on_cancel_;
+    HistoryHandler on_history_prev_;
+    HistoryHandler on_history_next_;
 };
 
 } // namespace ugui

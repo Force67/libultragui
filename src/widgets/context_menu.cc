@@ -38,6 +38,14 @@ void ContextMenu::ShowAt(UIContext* ctx, Vec2 position) {
   s.font_size = style_.font_size > 0.0f ? style_.font_size : 14.0f;
   s.text_color =
       style_.text_color.a > 0.0f ? style_.text_color : Color::White();
+
+  // Measure to get intrinsic size so the overlay doesn't fill the viewport.
+  set_style(s);
+  f32 mw = 0, mh = 0;
+  Measure(mw, mh);
+  s.width = Length::Px(mw);
+  s.height = Length::Px(mh);
+
   // Position via margin (same pattern as tooltip overlay)
   s.margin = EdgeInsets(position.y, 0, 0, position.x);
   set_style(s);
@@ -50,6 +58,11 @@ void ContextMenu::Hide(UIContext* ctx) {
   visible_ = false;
   hover_index_ = -1;
   ctx->HideOverlay(this);
+}
+
+void ContextMenu::OnDismiss() {
+  visible_ = false;
+  hover_index_ = -1;
 }
 
 bool ContextMenu::OnClick() {

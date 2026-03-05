@@ -286,7 +286,50 @@ void UIContext::Update() {
     // Recompute viewport scale factor each frame
     widget_ctx_.ui_scale = ComputeViewportScale(config_, viewport);
 
-    // Route input to widget tree
+    // Route input - overlays intercept clicks before the root tree.
+    // Press on an overlay dispatches OnClick; press outside dismisses all.
+    if (!overlays_.empty()) {
+        auto& queue = platform_.input_queue();
+        for (u32 i = 0; i < queue.button_count; ++i) {
+            auto& evt = queue.button_events[i];
+            if (!evt.pressed) continue;
+
+            Widget* hit = nullptr;
+            for (i32 j = static_cast<i32>(overlays_.size()) - 1; j >= 0; --j) {
+                auto* w = overlays_[j].widget;
+                if (!w) continue;
+                Widget* deepest = w->HitTest(evt.position);
+                if (deepest) {
+                    hit = deepest;
+                    break;
+                }
+            }
+
+            if (hit) {
+                // Dispatch click to overlay widget, then consume the event.
+                hit->OnClick();
+                for (u32 k = i + 1; k < queue.button_count; ++k)
+                    queue.button_events[k - 1] = queue.button_events[k];
+                --queue.button_count;
+                --i;
+            } else {
+                // Click outside - dismiss every overlay and consume the
+                // press so it doesn't also trigger something in the root
+                // tree (standard menu-dismiss behavior).
+                auto snap = overlays_;
+                overlays_.clear();
+                for (auto& entry : snap) {
+                    if (entry.widget)
+                        entry.widget->OnDismiss();
+                }
+                for (u32 k = i + 1; k < queue.button_count; ++k)
+                    queue.button_events[k - 1] = queue.button_events[k];
+                --queue.button_count;
+                --i;
+            }
+        }
+    }
+
     if (root_)
         input_.Process(root_);
 

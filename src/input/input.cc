@@ -41,6 +41,11 @@ bool InputRouter::Process(Widget* root) {
     if (pressed_ && !IsInWidgetTree(root, pressed_)) {
         pressed_ = nullptr;
         dragging_ = false;
+        drag_target_ = nullptr;
+    }
+    if (drag_target_ && !IsInWidgetTree(root, drag_target_)) {
+        drag_target_ = nullptr;
+        dragging_ = false;
     }
     if (focused_ && !IsInWidgetTree(root, focused_)) {
         focused_ = nullptr;
@@ -81,11 +86,32 @@ bool InputRouter::Process(Widget* root) {
             f32 dist2 = diff.x * diff.x + diff.y * diff.y;
             if (!dragging_ && dist2 > kDragThreshold * kDragThreshold) {
                 dragging_ = true;
-                pressed_->OnDragStart(drag_start_);
+                // Pick the actual drag target. If the pressed widget (or
+                // any ancestor up to the first non-handle) is tagged as
+                // a drag handle, walk further up to find the nearest
+                // draggable ancestor and dispatch drag events there.
+                // This is what makes "click panel header -> drag panel"
+                // work without the header swallowing button clicks.
+                Widget* dt = pressed_;
+                Widget* w = pressed_;
+                while (w && !w->drag_handle())
+                    w = w->parent();
+                if (w) {
+                    // Found a handle - climb to its draggable ancestor.
+                    Widget* anc = w->parent();
+                    while (anc && !anc->draggable())
+                        anc = anc->parent();
+                    if (anc)
+                        dt = anc;
+                    else if (w->draggable())
+                        dt = w;
+                }
+                drag_target_ = dt;
+                drag_target_->OnDragStart(drag_start_);
             }
-            if (dragging_) {
+            if (dragging_ && drag_target_) {
                 Vec2 delta = {pos.x - drag_prev_.x, pos.y - drag_prev_.y};
-                pressed_->OnDragMove(pos, delta);
+                drag_target_->OnDragMove(pos, delta);
                 drag_prev_ = pos;
                 consumed = true;
             }
@@ -102,6 +128,7 @@ bool InputRouter::Process(Widget* root) {
             drag_start_ = evt.position;
             drag_prev_ = evt.position;
             dragging_ = false;
+            drag_target_ = nullptr;
             if (target) {
                 target->set_widget_state(target->widget_state() | WidgetState::kPressed);
             }
@@ -110,17 +137,19 @@ bool InputRouter::Process(Widget* root) {
             consumed = true;
         } else {
             // Release
-            if (dragging_ && pressed_) {
-                pressed_->OnDragEnd(evt.position);
-                dragging_ = false;
+            if (dragging_ && drag_target_) {
+                drag_target_->OnDragEnd(evt.position);
             }
+            dragging_ = false;
+            bool was_dragging = (drag_target_ != nullptr);
+            drag_target_ = nullptr;
             if (pressed_) {
                 auto state = pressed_->widget_state();
                 pressed_->set_widget_state(static_cast<WidgetState>(
                     static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kPressed)));
 
                 // Click: press and release on same widget (only if not dragging)
-                if (!dragging_ && pressed_ == target && target) {
+                if (!was_dragging && pressed_ == target && target) {
                     if (on_click_)
                         on_click_(target, evt.button);
 
@@ -201,10 +230,17 @@ bool InputRouter::Process(Widget* root) {
             if (handled)
                 continue;
 
-            // Enter or Space activates the focused widget (keyboard/gamepad nav)
-            if (focused_ && (evt.key == 257 /* GLFW_KEY_ENTER */ ||
-                             evt.key == 335 /* GLFW_KEY_KP_ENTER */ ||
-                             evt.key == 32  /* GLFW_KEY_SPACE */)) {
+            // Enter or Space activates the focused widget (keyboard/gamepad
+            // nav). Skipped when the focused widget is a text input - for
+            // those, Space is a literal character and Enter is up to the
+            // widget's own OnKeyDown to interpret (e.g. submit). Otherwise
+            // pressing space inside a TextInput would invoke OnClick which
+            // re-seats the caret at the last mouse position before the
+            // OnCharInput pass inserts the literal space.
+            if (focused_ && !focused_->consumes_text_input() &&
+                (evt.key == 257 /* GLFW_KEY_ENTER */ ||
+                 evt.key == 335 /* GLFW_KEY_KP_ENTER */ ||
+                 evt.key == 32  /* GLFW_KEY_SPACE */)) {
                 if (on_click_)
                     on_click_(focused_, MouseButton::kLeft);
                 focused_->OnClick();
@@ -225,6 +261,84 @@ bool InputRouter::Process(Widget* root) {
     for (u32 i = 0; i < queue.char_count; ++i) {
         if (focused_)
             consumed |= focused_->OnCharInput(queue.char_events[i].codepoint);
+    }
+
+    // Process gamepad button events
+    for (u32 i = 0; i < queue.gamepad_button_count; ++i) {
+        auto& evt = queue.gamepad_button_events[i];
+        if (!evt.pressed) continue;
+
+        gamepad_nav_active_ = true;
+
+        if (evt.button == GamepadButton::kA) {
+            // A button = confirm / activate focused widget
+            if (focused_) {
+                if (on_click_)
+                    on_click_(focused_, MouseButton::kLeft);
+                focused_->OnClick();
+                consumed = true;
+            }
+        } else if (evt.button == GamepadButton::kB) {
+            // B button = back / cancel
+            if (on_gamepad_back_) {
+                on_gamepad_back_();
+                consumed = true;
+            }
+        } else if (evt.button == GamepadButton::kDPadUp) {
+            NavigateFocus(root, 0, -1);
+            consumed = true;
+        } else if (evt.button == GamepadButton::kDPadDown) {
+            NavigateFocus(root, 0, 1);
+            consumed = true;
+        } else if (evt.button == GamepadButton::kDPadLeft) {
+            NavigateFocus(root, -1, 0);
+            consumed = true;
+        } else if (evt.button == GamepadButton::kDPadRight) {
+            NavigateFocus(root, 1, 0);
+            consumed = true;
+        }
+    }
+
+    // Gamepad left stick navigation (with repeat)
+    // Accumulate the latest axis state from events
+    f32 stick_x = 0.0f, stick_y = 0.0f;
+    for (u32 i = 0; i < queue.gamepad_axis_count; ++i) {
+        auto& evt = queue.gamepad_axis_events[i];
+        if (evt.axis == GamepadAxis::kLeftX) stick_x = evt.value;
+        else if (evt.axis == GamepadAxis::kLeftY) stick_y = evt.value;
+    }
+    if (stick_x != 0.0f || stick_y != 0.0f) {
+        gamepad_nav_active_ = true;
+    }
+
+    // Determine navigation direction from stick
+    constexpr f32 kStickNavThreshold = 0.5f;
+    i8 nav_x = (stick_x > kStickNavThreshold) ? 1 : (stick_x < -kStickNavThreshold) ? -1 : 0;
+    i8 nav_y = (stick_y > kStickNavThreshold) ? 1 : (stick_y < -kStickNavThreshold) ? -1 : 0;
+
+    if (nav_x != gamepad_nav_dir_x_ || nav_y != gamepad_nav_dir_y_) {
+        // Direction changed - immediate navigation
+        gamepad_nav_dir_x_ = nav_x;
+        gamepad_nav_dir_y_ = nav_y;
+        gamepad_nav_timer_ = kGamepadNavInitialDelay;
+        if (nav_x != 0 || nav_y != 0) {
+            NavigateFocus(root, nav_x, nav_y);
+            consumed = true;
+        }
+    } else if (nav_x != 0 || nav_y != 0) {
+        // Same direction held - repeat after delay
+        // Note: we use a rough 1/60 estimate since we don't have delta_time here
+        gamepad_nav_timer_ -= 1.0f / 60.0f;
+        if (gamepad_nav_timer_ <= 0.0f) {
+            gamepad_nav_timer_ = kGamepadNavRepeatRate;
+            NavigateFocus(root, nav_x, nav_y);
+            consumed = true;
+        }
+    }
+
+    // Mouse input switches back to mouse mode
+    if (queue.move_count > 0 || queue.button_count > 0) {
+        gamepad_nav_active_ = false;
     }
 
     // Clear consumed events so they don't reprocess next frame.
@@ -270,6 +384,7 @@ void InputRouter::ResetState() {
     hovered_ = nullptr;
     focused_ = nullptr;
     pressed_ = nullptr;
+    drag_target_ = nullptr;
     dragging_ = false;
     mouse_pos_ = Vec2::Zero();
     drag_start_ = Vec2::Zero();
@@ -285,6 +400,76 @@ void InputRouter::RegisterShortcut(i32 key, i32 mods, ShortcutHandler handler) {
 
 void InputRouter::ClearShortcuts() {
     shortcuts_.clear();
+}
+
+void InputRouter::ProcessGamepadNavigation(Widget* root, f32 /*delta_time*/) {
+    // Handled inline in Process() via gamepad button/axis events.
+    (void)root;
+}
+
+void InputRouter::NavigateFocus(Widget* root, i8 dir_x, i8 dir_y) {
+    if (!root) return;
+
+    // Collect all focusable widgets
+    Vector<Widget*> focusable;
+    Function<void(Widget*)> collect = [&](Widget* w) {
+        if (w->focusable())
+            focusable.push_back(w);
+        for (auto* child : w->children())
+            collect(child);
+    };
+    collect(root);
+    if (focusable.empty()) return;
+
+    // Sort by tab_index for sequential navigation
+    std::sort(focusable.begin(), focusable.end(),
+              [](Widget* a, Widget* b) { return a->tab_index() < b->tab_index(); });
+
+    if (!focused_) {
+        // No focus yet - focus the first widget
+        set_focus(focusable.front());
+        if (on_hover_ && focused_) on_hover_(focused_, true);
+        return;
+    }
+
+    // For vertical D-pad (up/down), navigate sequentially through tab order
+    if (dir_y != 0) {
+        auto it = std::find(focusable.begin(), focusable.end(), focused_);
+        if (dir_y > 0) {
+            // Down: next in tab order
+            if (it == focusable.end() || std::next(it) == focusable.end())
+                set_focus(focusable.front());
+            else
+                set_focus(*std::next(it));
+        } else {
+            // Up: previous in tab order
+            if (it == focusable.begin() || it == focusable.end())
+                set_focus(focusable.back());
+            else
+                set_focus(*std::prev(it));
+        }
+    }
+
+    // For horizontal D-pad (left/right), also navigate sequentially (for menus)
+    if (dir_x != 0) {
+        auto it = std::find(focusable.begin(), focusable.end(), focused_);
+        if (dir_x > 0) {
+            if (it == focusable.end() || std::next(it) == focusable.end())
+                set_focus(focusable.front());
+            else
+                set_focus(*std::next(it));
+        } else {
+            if (it == focusable.begin() || it == focusable.end())
+                set_focus(focusable.back());
+            else
+                set_focus(*std::prev(it));
+        }
+    }
+
+    // Trigger hover callback so the UI plays sounds on focus change
+    if (on_hover_ && focused_) {
+        on_hover_(focused_, true);
+    }
 }
 
 } // namespace ugui

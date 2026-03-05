@@ -8,10 +8,15 @@
 
 // GLFW key codes (avoid including GLFW in widget code)
 namespace {
+constexpr int kKeyEnter = 257;
+constexpr int kKeyKpEnter = 335;
+constexpr int kKeyEscape = 256;
 constexpr int kKeyBackspace = 259;
 constexpr int kKeyDelete = 261;
 constexpr int kKeyRight = 262;
 constexpr int kKeyLeft = 263;
+constexpr int kKeyDown = 264;
+constexpr int kKeyUp = 265;
 constexpr int kKeyHome = 268;
 constexpr int kKeyEnd = 269;
 constexpr int kKeyA = 65;
@@ -157,6 +162,43 @@ bool TextInput::OnKeyDown(i32 key, i32 mods) {
     };
 
     switch (key) {
+    case kKeyEnter:
+    case kKeyKpEnter:
+        if (on_submit_) {
+            on_submit_(text_);
+            return true;
+        }
+        break;
+
+    case kKeyEscape:
+        if (on_cancel_) {
+            on_cancel_();
+            return true;
+        }
+        break;
+
+    case kKeyUp:
+        if (on_history_prev_) {
+            String repl = on_history_prev_();
+            if (repl.size() > 0 || repl != text_) {
+                set_text(repl);
+                if (on_change_)
+                    on_change_(text_);
+            }
+            return true;
+        }
+        break;
+
+    case kKeyDown:
+        if (on_history_next_) {
+            String repl = on_history_next_();
+            set_text(repl);
+            if (on_change_)
+                on_change_(text_);
+            return true;
+        }
+        break;
+
     case kKeyLeft:
         move_cursor(PrevPos(cursor_));
         return true;

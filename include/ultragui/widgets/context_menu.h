@@ -30,6 +30,7 @@ class ContextMenu : public Widget {
   const Vector<MenuItem>& items() const { return items_; }
 
   bool OnClick() override;
+  void OnDismiss() override;
   void Measure(f32& out_width, f32& out_height) override;
   void OnPaint(Renderer2D& renderer) override;
 

@@ -17,7 +17,7 @@ public:
     bool visible() const { return visible_; }
 
     /// Show the modal: creates a backdrop overlay and shows this widget on top.
-    void Show(UIContext* ctx);
+    virtual void Show(UIContext* ctx);
 
     /// Hide the modal: removes both backdrop and this widget from the overlay system.
     void Hide(UIContext* ctx);

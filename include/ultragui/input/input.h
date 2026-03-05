@@ -26,6 +26,10 @@ public:
     Widget* hovered_widget() const { return hovered_; }
     Widget* focused_widget() const { return focused_; }
     Widget* pressed_widget() const { return pressed_; }
+    /// True between OnDragStart and OnDragEnd. The application can use
+    /// this to defer destructive widget-tree rebuilds while a drag is
+    /// in flight (otherwise the drag target gets destroyed mid-move).
+    bool is_dragging() const { return dragging_; }
 
     void set_focus(Widget* widget);
     Vec2 mouse_position() const { return mouse_pos_; }
@@ -41,15 +45,33 @@ public:
     void RegisterShortcut(i32 key, i32 mods, ShortcutHandler handler);
     void ClearShortcuts();
 
+    /// Gamepad B-button callback for "back" / "cancel" navigation.
+    using GamepadBackHandler = Function<void()>;
+    void set_on_gamepad_back(GamepadBackHandler handler) { on_gamepad_back_ = std::move(handler); }
+
+    /// Whether gamepad navigation is currently active (last input was from gamepad).
+    bool gamepad_nav_active() const { return gamepad_nav_active_; }
+
 private:
     Platform* platform_ = nullptr;
     Widget* hovered_ = nullptr;
     Widget* focused_ = nullptr;
     Widget* pressed_ = nullptr;
+    /// Resolved drag target - usually `pressed_`, but may be a draggable
+    /// ancestor if the press landed on a drag handle (see input.cc).
+    Widget* drag_target_ = nullptr;
     Vec2 mouse_pos_ = Vec2::Zero();
     Vec2 drag_start_ = Vec2::Zero();
     Vec2 drag_prev_ = Vec2::Zero();
     bool dragging_ = false;
+    bool gamepad_nav_active_ = false;
+
+    // Gamepad stick repeat navigation
+    f32 gamepad_nav_timer_ = 0.0f;
+    static constexpr f32 kGamepadNavInitialDelay = 0.35f;
+    static constexpr f32 kGamepadNavRepeatRate = 0.12f;
+    i8 gamepad_nav_dir_x_ = 0;
+    i8 gamepad_nav_dir_y_ = 0;
 
     static constexpr f32 kDragThreshold = 4.0f;
 
@@ -62,6 +84,10 @@ private:
 
     ClickHandler on_click_;
     HoverHandler on_hover_;
+    GamepadBackHandler on_gamepad_back_;
+
+    void ProcessGamepadNavigation(Widget* root, f32 delta_time);
+    void NavigateFocus(Widget* root, i8 dir_x, i8 dir_y);
 };
 
 } // namespace ugui

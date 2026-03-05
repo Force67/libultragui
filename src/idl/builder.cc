@@ -279,6 +279,10 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
         else if (v == "absolute") s.position = Position::kAbsolute;
         else if (v == "sticky") s.position = Position::kSticky;
     }},
+    {"top", [](Style& s, const String& v) { s.top = parse_length(v); }},
+    {"bottom", [](Style& s, const String& v) { s.bottom = parse_length(v); }},
+    {"left", [](Style& s, const String& v) { s.left_offset = parse_length(v); }},
+    {"right", [](Style& s, const String& v) { s.right_offset = parse_length(v); }},
 
     // Sizing
     {"width", [](Style& s, const String& v) { s.width = parse_length(v); }},
