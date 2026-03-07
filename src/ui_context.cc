@@ -267,23 +267,20 @@ f64 UIContext::time() const {
     return initialized_ ? platform_.time() : 0.0;
 }
 
-void UIContext::Update() {
-    // Timing
-    f64 now = platform_.time();
-    dt_ = now - last_time_;
-    last_time_ = now;
+void UIContext::PumpInput() {
+    if (input_pumped_this_frame_)
+        return;
+    input_pumped_this_frame_ = true;
 
-    // Poll input (processes window resize events)
+    // Poll OS input (processes window resize events, fires platform
+    // callbacks that may push events into the queue).
     platform_.PollEvents();
 
-    // Use platform window_size() for viewport: it reflects resizes immediately,
-    // unlike rhi_->display_size() which waits for swapchain recreation in BeginFrame.
+    // Use platform window_size() for viewport: it reflects resizes
+    // immediately, unlike rhi_->display_size() which waits for
+    // swapchain recreation in BeginFrame.
     Vec2 viewport = platform_.window_size();
-
-    // Update builder viewport size so media queries reflect current window dimensions
     builder_.set_viewport_size(viewport);
-
-    // Recompute viewport scale factor each frame
     widget_ctx_.ui_scale = ComputeViewportScale(config_, viewport);
 
     // Route input - overlays intercept clicks before the root tree.
@@ -332,6 +329,23 @@ void UIContext::Update() {
 
     if (root_)
         input_.Process(root_);
+}
+
+void UIContext::Update() {
+    // Timing
+    f64 now = platform_.time();
+    dt_ = now - last_time_;
+    last_time_ = now;
+
+    // Drain input first if the application hasn't already done so via
+    // an early PumpInput call. Idempotent - re-entry is a no-op until
+    // the end of this Update resets the flag.
+    PumpInput();
+
+    // The layout / paint stages below need the live viewport size; the
+    // PumpInput call has already pushed it into builder_, but we still
+    // need a local copy here for the LayoutViewport struct.
+    Vec2 viewport = platform_.window_size();
 
     // Fire pending Lua timers
     script_.UpdateTimers(now);
@@ -464,6 +478,10 @@ void UIContext::Update() {
 
     renderer_.EndFrame();
     rhi_.EndFrame();
+
+    // Reset the per-frame input-pumped flag so the next frame can
+    // PumpInput again.
+    input_pumped_this_frame_ = false;
 }
 
 void UIContext::UpdateTooltip() {

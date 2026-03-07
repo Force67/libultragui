@@ -83,6 +83,21 @@ private:
         u32 index_count;
     };
 
+    // Each draw command points at a slot in either `batches_` or
+    // `text_batches_`. EndFrame walks `draw_order_` rather than the two
+    // batch vectors directly so quads and text are submitted to the GPU
+    // in the order they were emitted by the widget tree - without this,
+    // text from any earlier widget renders on top of any later widget's
+    // background, breaking modal overlays.
+    enum class DrawKind : u8 {
+        kQuad,
+        kText,
+    };
+    struct DrawCommand {
+        DrawKind kind;
+        u32 batch_index;
+    };
+
     // Quad batching
     Vector<Vertex2D> vertices_;
     Vector<u32> indices_;
@@ -93,6 +108,9 @@ private:
     Vector<u32> text_indices_;
     Vector<DrawBatch> text_batches_;
     RHITextureHandle current_text_atlas_ = kInvalidTexture;
+
+    // Submission order across both batch lists.
+    Vector<DrawCommand> draw_order_;
 
     RHITextureHandle GetRadialGradientTexture(Color center, Color edge);
     RHITextureHandle GetMultiStopGradientTexture(const GradientStop* stops, u32 count,

@@ -102,7 +102,24 @@ public:
     /// Returns true while the window is open.
     bool Running() const;
 
-    /// Run one frame: poll input, update animations, compute layout, paint.
+    /// Drain the OS input queue and dispatch click / hover / drag /
+    /// keyboard events through the widget tree. Idempotent within a
+    /// frame: a flag prevents double-processing if Update() is called
+    /// later in the same frame, and Update() will auto-call PumpInput
+    /// if the application hasn't already.
+    ///
+    /// Why expose this separately? Applications that rebuild their
+    /// widget tree on a dirty flag (like the xeed editor) want click
+    /// handlers to fire BEFORE the rebuild check, so the rebuild can
+    /// happen in the same frame as the click. Calling PumpInput at the
+    /// start of the application's render function and Update later
+    /// gives same-frame click->rebuild->render latency. Otherwise the
+    /// click handler runs inside Update, sets the dirty flag too late,
+    /// and the rebuild only happens on the NEXT frame.
+    void PumpInput();
+
+    /// Run one frame: poll input (if not already pumped), update
+    /// animations, compute layout, paint.
     void Update();
 
     /// Clean up all subsystems.
@@ -217,6 +234,10 @@ private:
     Vector<LayoutNode> layout_nodes_;
     bool owns_root_ = false; // true if root was created by load_ui
     bool initialized_ = false;
+    // Flips true on PumpInput, false at the end of Update. Lets the
+    // application call PumpInput early in its frame for same-frame
+    // click->rebuild latency without double-processing input.
+    bool input_pumped_this_frame_ = false;
     String current_theme_name_;
 
     struct OffscreenPass {

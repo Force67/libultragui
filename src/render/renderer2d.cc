@@ -14,6 +14,7 @@ bool Renderer2D::Init(RHI* rhi) {
     text_vertices_.reserve(4096);
     text_indices_.reserve(8192);
     text_batches_.reserve(16);
+    draw_order_.reserve(128);
     return true;
 }
 
@@ -25,6 +26,7 @@ void Renderer2D::Shutdown() {
     text_vertices_.clear();
     text_indices_.clear();
     text_batches_.clear();
+    draw_order_.clear();
 }
 
 void Renderer2D::BeginFrame() {
@@ -34,6 +36,7 @@ void Renderer2D::BeginFrame() {
     text_vertices_.clear();
     text_indices_.clear();
     text_batches_.clear();
+    draw_order_.clear();
     scissor_stack_.clear();
     current_texture_ = kInvalidTexture;
     current_text_atlas_ = kInvalidTexture;
@@ -44,20 +47,25 @@ void Renderer2D::EndFrame() {
     FlushBatch();
     FlushTextBatch();
 
-    // Draw quads first
-    for (auto& batch : batches_) {
-        rhi_->SetScissor(batch.scissor);
-        rhi_->DrawTriangles(vertices_.data(), static_cast<u32>(vertices_.size()),
-                             indices_.data() + batch.index_offset, batch.index_count,
-                             batch.texture);
-    }
-
-    // Then draw text on top
-    for (auto& batch : text_batches_) {
-        rhi_->SetScissor(batch.scissor);
-        rhi_->DrawTextTriangles(text_vertices_.data(), static_cast<u32>(text_vertices_.size()),
-                                  text_indices_.data() + batch.index_offset, batch.index_count,
-                                  batch.texture);
+    // Walk submission order so quads and text are interleaved exactly
+    // as the widget tree emitted them. Without this, all text was drawn
+    // after all quads in a global pass - meaning a settings modal would
+    // be covered by text from any panel painted earlier in the tree.
+    for (const auto& cmd : draw_order_) {
+        if (cmd.kind == DrawKind::kQuad) {
+            const auto& batch = batches_[cmd.batch_index];
+            rhi_->SetScissor(batch.scissor);
+            rhi_->DrawTriangles(vertices_.data(), static_cast<u32>(vertices_.size()),
+                                 indices_.data() + batch.index_offset, batch.index_count,
+                                 batch.texture);
+        } else {
+            const auto& batch = text_batches_[cmd.batch_index];
+            rhi_->SetScissor(batch.scissor);
+            rhi_->DrawTextTriangles(text_vertices_.data(),
+                                      static_cast<u32>(text_vertices_.size()),
+                                      text_indices_.data() + batch.index_offset,
+                                      batch.index_count, batch.texture);
+        }
     }
 }
 
@@ -331,6 +339,21 @@ void Renderer2D::PopScissor() {
 
 void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii, f32 softness,
                            f32 border_width, u32 border_color, RHITextureHandle texture) {
+    // If there are pending text indices that haven't been flushed yet,
+    // close them off as their own batch first so the upcoming quad
+    // renders ON TOP of them rather than getting batched with earlier
+    // quads (which would all draw before any text). This is what makes
+    // a settings modal cover panels with text behind it.
+    {
+        u32 expected_text_end = 0;
+        if (!text_batches_.empty()) {
+            const auto& prev = text_batches_.back();
+            expected_text_end = prev.index_offset + prev.index_count;
+        }
+        if (static_cast<u32>(text_indices_.size()) > expected_text_end)
+            FlushTextBatch();
+    }
+
     // Start a new batch if texture changed
     if (texture != current_texture_) {
         FlushBatch();
@@ -394,6 +417,8 @@ void Renderer2D::FlushBatch() {
         idx_offset,
         total_indices - idx_offset,
     });
+    draw_order_.push_back({DrawKind::kQuad,
+                            static_cast<u32>(batches_.size() - 1)});
 }
 
 void Renderer2D::FlushTextBatch() {
@@ -413,10 +438,26 @@ void Renderer2D::FlushTextBatch() {
         idx_offset,
         total_indices - idx_offset,
     });
+    draw_order_.push_back({DrawKind::kText,
+                            static_cast<u32>(text_batches_.size() - 1)});
 }
 
 void Renderer2D::DrawText(Vec2 pos, const TextRun& run, Color color,
                            RHITextureHandle atlas_texture) {
+    // If there are pending quad indices that haven't been flushed yet,
+    // close them off as their own batch first so the upcoming text
+    // renders ON TOP of those quads (and BELOW any later quads). See
+    // the symmetric guard in EmitQuad for the rationale.
+    {
+        u32 expected_quad_end = 0;
+        if (!batches_.empty()) {
+            const auto& prev = batches_.back();
+            expected_quad_end = prev.index_offset + prev.index_count;
+        }
+        if (static_cast<u32>(indices_.size()) > expected_quad_end)
+            FlushBatch();
+    }
+
     if (atlas_texture != current_text_atlas_) {
         FlushTextBatch();
         current_text_atlas_ = atlas_texture;

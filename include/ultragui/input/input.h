@@ -31,6 +31,14 @@ public:
     /// in flight (otherwise the drag target gets destroyed mid-move).
     bool is_dragging() const { return dragging_; }
 
+    /// Re-run hit-testing at the cached mouse position and update the
+    /// hovered widget + cursor. Call this after replacing the widget
+    /// tree (e.g. via LoadUi) so the hover state survives the rebuild
+    /// - otherwise stationary cursors lose their hover styling until
+    /// the user wiggles the mouse, which appears as flicker on
+    /// FPS/animation-driven dirty rebuilds.
+    void RefreshHover(Widget* root);
+
     void set_focus(Widget* widget);
     Vec2 mouse_position() const { return mouse_pos_; }
 

@@ -80,19 +80,25 @@ bool InputRouter::Process(Widget* root) {
             consumed = true;
         }
 
-        // Drag detection: if mouse is pressed and moved beyond threshold
+        // Drag detection: if mouse is pressed and moved beyond threshold,
+        // AND there's a draggable target reachable from the pressed
+        // widget, enter drag mode. Otherwise leave drag_target_ null so
+        // the release path still fires a click - without this guard, any
+        // tiny mouse drift between press and release on a non-draggable
+        // widget (button, category row, etc.) would set drag_target_ to
+        // the pressed widget, the default OnDragStart would no-op, and
+        // the release would then suppress the click via was_dragging.
         if (pressed_) {
             Vec2 diff = {pos.x - drag_start_.x, pos.y - drag_start_.y};
             f32 dist2 = diff.x * diff.x + diff.y * diff.y;
             if (!dragging_ && dist2 > kDragThreshold * kDragThreshold) {
-                dragging_ = true;
                 // Pick the actual drag target. If the pressed widget (or
                 // any ancestor up to the first non-handle) is tagged as
                 // a drag handle, walk further up to find the nearest
                 // draggable ancestor and dispatch drag events there.
                 // This is what makes "click panel header -> drag panel"
                 // work without the header swallowing button clicks.
-                Widget* dt = pressed_;
+                Widget* dt = nullptr;
                 Widget* w = pressed_;
                 while (w && !w->drag_handle())
                     w = w->parent();
@@ -105,9 +111,15 @@ bool InputRouter::Process(Widget* root) {
                         dt = anc;
                     else if (w->draggable())
                         dt = w;
+                } else if (pressed_->draggable()) {
+                    // Pressed widget is itself draggable (no handle needed).
+                    dt = pressed_;
                 }
-                drag_target_ = dt;
-                drag_target_->OnDragStart(drag_start_);
+                if (dt) {
+                    dragging_ = true;
+                    drag_target_ = dt;
+                    drag_target_->OnDragStart(drag_start_);
+                }
             }
             if (dragging_ && drag_target_) {
                 Vec2 delta = {pos.x - drag_prev_.x, pos.y - drag_prev_.y};
@@ -347,6 +359,30 @@ bool InputRouter::Process(Widget* root) {
     queue.clear();
 
     return consumed;
+}
+
+void InputRouter::RefreshHover(Widget* root) {
+    if (!root || !platform_)
+        return;
+    Widget* new_hover = root->HitTest(mouse_pos_);
+    if (new_hover == hovered_)
+        return;
+    if (hovered_) {
+        auto state = hovered_->widget_state();
+        hovered_->set_widget_state(static_cast<WidgetState>(
+            static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kHovered)));
+        if (on_hover_)
+            on_hover_(hovered_, false);
+    }
+    hovered_ = new_hover;
+    if (hovered_) {
+        hovered_->set_widget_state(hovered_->widget_state() | WidgetState::kHovered);
+        if (on_hover_)
+            on_hover_(hovered_, true);
+        platform_->SetCursor(hovered_->ComputedStyle().cursor);
+    } else {
+        platform_->SetCursor(Cursor::kAuto);
+    }
 }
 
 void InputRouter::set_focus(Widget* widget) {
