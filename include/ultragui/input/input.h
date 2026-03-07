@@ -40,6 +40,12 @@ public:
     void RefreshHover(Widget* root);
 
     void set_focus(Widget* widget);
+    /// Set the hovered widget directly. Mirrors set_focus - used by
+    /// applications that destroy + rebuild the widget tree on a dirty
+    /// flag and want hover state to survive without waiting for the
+    /// next mouse-move event. Updates the kHovered widget-state bit on
+    /// both the old and new widgets and updates the cursor.
+    void set_hover(Widget* widget);
     Vec2 mouse_position() const { return mouse_pos_; }
 
     // Event callbacks (optional, for the application layer)

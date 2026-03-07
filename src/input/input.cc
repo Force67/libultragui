@@ -385,6 +385,28 @@ void InputRouter::RefreshHover(Widget* root) {
     }
 }
 
+void InputRouter::set_hover(Widget* widget) {
+    if (hovered_ == widget)
+        return;
+    if (hovered_) {
+        auto state = hovered_->widget_state();
+        hovered_->set_widget_state(static_cast<WidgetState>(
+            static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kHovered)));
+        if (on_hover_)
+            on_hover_(hovered_, false);
+    }
+    hovered_ = widget;
+    if (hovered_) {
+        hovered_->set_widget_state(hovered_->widget_state() | WidgetState::kHovered);
+        if (on_hover_)
+            on_hover_(hovered_, true);
+        if (platform_)
+            platform_->SetCursor(hovered_->ComputedStyle().cursor);
+    } else if (platform_) {
+        platform_->SetCursor(Cursor::kAuto);
+    }
+}
+
 void InputRouter::set_focus(Widget* widget) {
     if (focused_ == widget)
         return;

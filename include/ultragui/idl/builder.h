@@ -31,16 +31,27 @@ public:
     /// Returns the root widget (may be the same or new).
     Widget* Rebuild(const UguiDocument& doc, Widget* existing_root);
 
+    /// Apply a top-level `class <name> { ... }` style class to an
+    /// already-constructed widget. Used by application code to style
+    /// dynamically-spawned widgets (chat bubbles, list rows, etc.)
+    /// without rebuilding their style in C++. Returns true if the
+    /// class was found.
+    bool ApplyStyleClass(Widget* widget, const String& class_name) const;
+
+    /// Look up a style class by name; returns nullptr if not found.
+    const UguiDocument::StyleClass* FindStyleClass(const String& name) const;
+
 private:
     Widget* BuildNode(const UguiNode& node, u32& id_counter);
     void ApplyProperties(Widget* widget, const UguiNode& node);
-    Style ParseStyle(const HashMap<String, String>& props);
+    Style ParseStyle(const HashMap<String, String>& props) const;
 
     void CollectVariables(const UguiNode& node);
     String ResolveValue(const String& value) const;
 
     HashMap<String, WidgetFactory> factories_;
     HashMap<String, String> variables_;
+    HashMap<String, UguiDocument::StyleClass> style_classes_;
     Animator* animator_ = nullptr;
     Vec2 viewport_size_ = {1280.0f, 720.0f};
 };

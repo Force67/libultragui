@@ -160,11 +160,17 @@ static constexpr std::pair<std::string_view, WidgetState> kWidgetStateTable[] = 
     {"hover", WidgetState::kHovered},
     {"hovered", WidgetState::kHovered},
     {"pressed", WidgetState::kPressed},
-    {"active", WidgetState::kPressed},
     {"focused", WidgetState::kFocused},
     {"focus", WidgetState::kFocused},
     {"disabled", WidgetState::kDisabled},
     {"checked", WidgetState::kChecked},
+    // `:selected` and `:active` are application-driven states for
+    // marking a widget as the currently-active/highlighted entry in a
+    // sidebar / list / nav bar. Toggled via Widget::set_selected()
+    // (or set_widget_state) from C++. Distinct from `:pressed` which
+    // means "user is currently mouse-pressing".
+    {"selected", WidgetState::kSelected},
+    {"active", WidgetState::kSelected},
 };
 
 static constexpr std::pair<std::string_view, EasingType> kEasingTable[] = {
@@ -474,7 +480,7 @@ static Transition parse_transition_shorthand(const String& val) {
 // Style parsing: dispatch table driven
 // ---------------------------------------------------------------------------
 
-Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) {
+Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) const {
     Style s;
     for (auto& [key, val] : props) {
         if (auto setter = FindPropertySetter(key)) {
@@ -520,12 +526,23 @@ String UguiBuilder::ResolveValue(const String& value) const {
 // ---------------------------------------------------------------------------
 
 Widget* UguiBuilder::Build(const UguiDocument& doc) {
-    if (doc.roots.empty())
+    if (doc.roots.empty() && doc.style_classes.empty())
         return nullptr;
 
     // Collect CSS custom properties from all nodes
     for (auto& root : doc.roots)
         CollectVariables(root);
+
+    // Stash style class declarations so ApplyProperties + the public
+    // ApplyStyleClass entry point can look them up by name. Replace the
+    // table on every Build so reloading a .ugui drops stale classes.
+    style_classes_.clear();
+    for (auto& sc : doc.style_classes) {
+        style_classes_[sc.name] = sc;
+    }
+
+    if (doc.roots.empty())
+        return nullptr;
 
     u32 id_counter = 1;
     if (doc.roots.size() == 1)
@@ -539,6 +556,42 @@ Widget* UguiBuilder::Build(const UguiDocument& doc) {
             root->AddChild(child);
     }
     return root;
+}
+
+const UguiDocument::StyleClass* UguiBuilder::FindStyleClass(const String& name) const {
+    auto it = style_classes_.find(name);
+    return it == style_classes_.end() ? nullptr : &it->second;
+}
+
+bool UguiBuilder::ApplyStyleClass(Widget* widget, const String& class_name) const {
+    if (!widget) return false;
+    const auto* sc = FindStyleClass(class_name);
+    if (!sc) return false;
+
+    // Merge the class's base properties on top of the widget's current
+    // base style. The class wins for any property it explicitly sets;
+    // unspecified properties are left untouched.
+    Style merged = widget->style();
+    for (auto& [key, val] : sc->properties) {
+        if (auto setter = FindPropertySetter(key)) {
+            String resolved = ResolveValue(val);
+            setter(merged, resolved);
+        }
+    }
+    widget->set_style(merged);
+
+    // Class state-blocks (`:hover { ... }` etc.) are appended as state
+    // overrides - same machinery the inline element state blocks use.
+    for (auto& sb : sc->state_blocks) {
+        WidgetState state = LookupEnum(kWidgetStateTable, sb.state).value_or(WidgetState::kNone);
+        Style override_style = ParseStyle(sb.properties);
+        u64 mask = std::accumulate(sb.properties.begin(), sb.properties.end(), u64{0},
+                                   [](u64 acc, const auto& kv) {
+                                       return acc | LookupStyleMask(kv.first);
+                                   });
+        widget->AddStateOverride(state, override_style, mask);
+    }
+    return true;
 }
 
 Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
@@ -758,7 +811,25 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
 }
 
 void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
-    widget->set_style(ParseStyle(node.properties));
+    // Apply a top-level style class first if the element opted in via
+    // `class: name;`. The class is the BASE; inline properties below
+    // win over class properties. State blocks from the class are
+    // appended to the widget's state-override list and run alongside
+    // any inline state blocks the element declares.
+    auto class_it = node.properties.find("class");
+    if (class_it != node.properties.end()) {
+        ApplyStyleClass(widget, class_it->second);
+    }
+
+    // Apply inline properties on top of any class defaults. Properties
+    // not set inline keep whatever the class supplied.
+    Style merged = widget->style();
+    for (auto& [key, val] : node.properties) {
+        if (auto setter = FindPropertySetter(key)) {
+            setter(merged, ResolveValue(val));
+        }
+    }
+    widget->set_style(merged);
 
     // Tooltip
     auto tooltip_it = node.properties.find("tooltip");

@@ -14,6 +14,13 @@ void Toggle::set_on(bool v) {
     state_ = static_cast<WidgetState>(static_cast<u16>(state_) &
                                       ~static_cast<u16>(WidgetState::kChecked));
   }
+  // Snap the thumb position so external state restoration (e.g. the
+  // settings panel re-applying the bool every gui rebuild) shows the
+  // correct visual immediately. Without this, every rebuild resets
+  // thumb_anim_ to its zero default and the toggle appears stuck OFF
+  // until OnUpdate slowly animates it to the target - which never
+  // settles because the next rebuild resets it again.
+  thumb_anim_ = v ? 1.0f : 0.0f;
   MarkPaintDirty();
 }
 

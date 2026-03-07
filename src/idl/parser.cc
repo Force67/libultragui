@@ -240,6 +240,16 @@ public:
         doc.source_path = file_;
 
         while (current_.type != TokenType::kEof) {
+            // Top-level `class <name> { ... }` blocks are collected
+            // separately as style class declarations rather than as
+            // widget elements.
+            if (current_.type == TokenType::kIdentifier &&
+                current_.value == "class") {
+                auto sc = parse_style_class();
+                if (!sc.name.empty())
+                    doc.style_classes.push_back(std::move(sc));
+                continue;
+            }
             auto node = parse_element();
             if (node.type.empty())
                 break;
@@ -247,6 +257,39 @@ public:
         }
 
         return errors.empty();
+    }
+
+    UguiDocument::StyleClass parse_style_class() {
+        UguiDocument::StyleClass sc;
+        advance(); // skip 'class' identifier
+        if (current_.type != TokenType::kIdentifier) {
+            error("expected class name after 'class'");
+            return sc;
+        }
+        sc.name = current_.value;
+        advance();
+        expect(TokenType::kLBrace);
+        while (current_.type != TokenType::kRBrace &&
+               current_.type != TokenType::kEof) {
+            if (current_.type == TokenType::kColon) {
+                sc.state_blocks.push_back(parse_state_block());
+            } else if (current_.type == TokenType::kIdentifier) {
+                Token id = current_;
+                advance();
+                if (current_.type == TokenType::kColon) {
+                    advance(); // skip ':'
+                    String value = parse_value();
+                    if (current_.type == TokenType::kSemicolon) advance();
+                    sc.properties[id.value] = value;
+                } else {
+                    advance();
+                }
+            } else {
+                advance();
+            }
+        }
+        if (current_.type == TokenType::kRBrace) advance();
+        return sc;
     }
 
 private:

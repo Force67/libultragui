@@ -53,6 +53,23 @@ public:
     WidgetState widget_state() const { return state_; }
     void set_widget_state(WidgetState state);
 
+    /// Toggle the kSelected bit on this widget. Use this for
+    /// application-driven highlighting (active sidebar entry, current
+    /// list selection, etc.) so the widget's :selected/:active style
+    /// override declared in the .ugui file kicks in. This keeps the
+    /// visual rules in the IDL instead of having C++ rewrite the base
+    /// style imperatively each time the active row changes.
+    void set_selected(bool v) {
+        WidgetState s = state_;
+        if (v)
+            s = s | WidgetState::kSelected;
+        else
+            s = static_cast<WidgetState>(static_cast<u16>(s) &
+                                         ~static_cast<u16>(WidgetState::kSelected));
+        set_widget_state(s);
+    }
+    bool selected() const { return HasState(state_, WidgetState::kSelected); }
+
     /// Get the effective style (base + active overrides + animation)
     Style ComputedStyle() const;
 

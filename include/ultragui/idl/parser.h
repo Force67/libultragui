@@ -56,6 +56,19 @@ struct UguiNode {
 struct UguiDocument {
     Vector<UguiNode> roots;
     String source_path;
+
+    /// Top-level `class <name> { property: value; ... }` blocks. The
+    /// parser collects these out-of-band so they can be referenced by
+    /// widgets via a `class:` property and applied as additional style
+    /// overrides on top of the widget's base style. Application code
+    /// can also fetch a class by name via UIContext::ApplyStyleClass
+    /// to style dynamically-spawned widgets without subclassing.
+    struct StyleClass {
+        String name;
+        HashMap<String, String> properties;
+        Vector<UguiNode::StateBlock> state_blocks;
+    };
+    Vector<StyleClass> style_classes;
 };
 
 /// Parse error info
