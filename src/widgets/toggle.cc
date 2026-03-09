@@ -76,7 +76,8 @@ void Toggle::OnPaint(Renderer2D& renderer) {
   Color off_color = Color::FromHex(0x3a3a3a);
   Color on_color = Color::FromHex(0x4a7aff);
 
-  // Use style background if explicitly set (non-zero alpha), otherwise use defaults
+  // Use style background if explicitly set (non-zero alpha), otherwise use
+  // defaults
   if (s.background.a > 0.0f) {
     off_color = s.background;
     if (s.background_end.a > 0.0f) {
@@ -96,7 +97,8 @@ void Toggle::OnPaint(Renderer2D& renderer) {
   f32 thumb_radius = thumb_size * 0.5f;
   u32 thumb_radii = Vertex2D::PackRadii(thumb_radius);
 
-  f32 thumb_x = track_x + inset + thumb_anim_ * (track_w - thumb_size - inset * 2.0f);
+  f32 thumb_x =
+      track_x + inset + thumb_anim_ * (track_w - thumb_size - inset * 2.0f);
   f32 thumb_y = track_y + inset;
 
   Color thumb_color = Color::White().WithAlpha(alpha);

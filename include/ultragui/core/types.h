@@ -20,6 +20,6 @@ using f32 = float;
 using f64 = double;
 using usize = size_t;
 
-} // namespace ugui
+}  // namespace ugui
 
 #endif  // ULTRAGUI_CORE_TYPES_H_

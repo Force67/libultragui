@@ -57,8 +57,8 @@ using Function = std::function<Sig>;
 template <typename T>
 using Optional = std::optional<T>;
 
-} // namespace ugui
+}  // namespace ugui
 
-#endif // ULTRAGUI_CUSTOM_CONFIG
+#endif  // ULTRAGUI_CUSTOM_CONFIG
 
-#endif // ULTRAGUI_CORE_CONFIG_H_
+#endif  // ULTRAGUI_CORE_CONFIG_H_

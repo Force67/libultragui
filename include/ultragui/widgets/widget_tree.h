@@ -19,6 +19,6 @@ void UpdateWidgetTree(Widget* root, f64 dt);
 /// Bottom-up measure pass: measures all widgets and sets intrinsic sizes.
 void MeasureWidgetTree(Widget* root);
 
-} // namespace ugui
+}  // namespace ugui
 
 #endif  // ULTRAGUI_WIDGETS_WIDGET_TREE_H_

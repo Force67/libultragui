@@ -9,6 +9,6 @@ class Widget;
 /// Register all named widgets in a tree with a scripting runtime.
 void RegisterWidgetTree(ScriptRuntime& rt, Widget* root);
 
-} // namespace ugui
+}  // namespace ugui
 
-#endif // ULTRAGUI_SCRIPTING_LUA_WIDGETS_H_
+#endif  // ULTRAGUI_SCRIPTING_LUA_WIDGETS_H_

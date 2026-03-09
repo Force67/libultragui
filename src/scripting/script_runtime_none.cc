@@ -15,10 +15,12 @@ void ScriptRuntime::RegisterWidget(Widget*) {}
 void ScriptRuntime::UnregisterWidget(Widget*) {}
 void ScriptRuntime::ClearWidgetRegistry() {}
 bool ScriptRuntime::CallHandler(const char*, Widget*) { return false; }
-Widget* ScriptRuntime::FindRegisteredWidget(const char*) const { return nullptr; }
+Widget* ScriptRuntime::FindRegisteredWidget(const char*) const {
+  return nullptr;
+}
 void ScriptRuntime::UpdateTimers(double) {}
 void ScriptRuntime::SyncTimerClock(double) {}
 void ScriptRuntime::WireChangeHandlers(Widget*) {}
 void ScriptRuntime::ClearTimersAndTweens() {}
 
-} // namespace ugui
+}  // namespace ugui

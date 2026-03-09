@@ -11,8 +11,8 @@ class Widget;
 /// results back to widgets. The scratch buffer is reused across frames to
 /// avoid per-frame allocation.
 void ComputeWidgetLayout(Widget* root, const LayoutViewport& vp,
-                           LayoutEngine& engine, Vector<LayoutNode>& scratch);
+                         LayoutEngine& engine, Vector<LayoutNode>& scratch);
 
-} // namespace ugui
+}  // namespace ugui
 
 #endif  // ULTRAGUI_LAYOUT_LAYOUT_TREE_H_

@@ -10,6 +10,6 @@ class Renderer2D;
 /// Handles visibility culling and overflow scissoring.
 void PaintWidgetTree(Widget* root, Renderer2D& renderer);
 
-} // namespace ugui
+}  // namespace ugui
 
 #endif  // ULTRAGUI_RENDER_PAINT_H_

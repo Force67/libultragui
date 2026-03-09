@@ -17,6 +17,6 @@ void RegisterLottieLua(
     Function<LottieAnimation*(const char*, unsigned, unsigned)> loader,
     Function<Widget*(const char*)> find_widget);
 
-} // namespace ugui
+}  // namespace ugui
 
 #endif  // ULTRAGUI_SCRIPTING_LUA_LOTTIE_H_

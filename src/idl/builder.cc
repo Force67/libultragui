@@ -30,66 +30,55 @@ namespace ugui {
 // ---------------------------------------------------------------------------
 
 static f32 parse_float(const String& s) {
-    f32 v = 0;
-    std::from_chars(s.data(), s.data() + s.size(), v);
-    return v;
+  f32 v = 0;
+  std::from_chars(s.data(), s.data() + s.size(), v);
+  return v;
 }
 
 static EdgeInsets parse_edge_insets(const String& s) {
-    // Parse 1, 2, or 4 values like CSS shorthand:
-    //   "10"        -> all sides = 10
-    //   "10 20"     -> vertical=10, horizontal=20
-    //   "10 20 30 40" -> top=10, right=20, bottom=30, left=40
-    f32 vals[4] = {};
-    int count = 0;
-    const char* ptr = s.data();
-    const char* end = s.data() + s.size();
-    while (ptr < end && count < 4) {
-        while (ptr < end && (*ptr == ' ' || *ptr == '\t'))
-            ++ptr;
-        if (ptr >= end)
-            break;
-        f32 v = 0;
-        auto result = std::from_chars(ptr, end, v);
-        if (result.ptr == ptr)
-            break;
-        vals[count++] = v;
-        ptr = result.ptr;
-    }
+  // Parse 1, 2, or 4 values like CSS shorthand:
+  //   "10"        -> all sides = 10
+  //   "10 20"     -> vertical=10, horizontal=20
+  //   "10 20 30 40" -> top=10, right=20, bottom=30, left=40
+  f32 vals[4] = {};
+  int count = 0;
+  const char* ptr = s.data();
+  const char* end = s.data() + s.size();
+  while (ptr < end && count < 4) {
+    while (ptr < end && (*ptr == ' ' || *ptr == '\t')) ++ptr;
+    if (ptr >= end) break;
+    f32 v = 0;
+    auto result = std::from_chars(ptr, end, v);
+    if (result.ptr == ptr) break;
+    vals[count++] = v;
+    ptr = result.ptr;
+  }
 
-    if (count == 1)
-        return EdgeInsets(vals[0]);
-    if (count == 2)
-        return EdgeInsets(vals[0], vals[1]);
-    if (count >= 4)
-        return EdgeInsets(vals[0], vals[1], vals[2], vals[3]);
-    return EdgeInsets(vals[0]);
+  if (count == 1) return EdgeInsets(vals[0]);
+  if (count == 2) return EdgeInsets(vals[0], vals[1]);
+  if (count >= 4) return EdgeInsets(vals[0], vals[1], vals[2], vals[3]);
+  return EdgeInsets(vals[0]);
 }
 
 static Length parse_length(const String& s) {
-    if (s == "auto")
-        return Length::Auto();
-    f32 v = 0;
-    auto end = std::from_chars(s.data(), s.data() + s.size(), v).ptr;
-    String unit(end, s.data() + s.size());
-    if (unit == "%")
-        return Length::Percent(v);
-    if (unit == "vw")
-        return Length::Vw(v);
-    if (unit == "vh")
-        return Length::Vh(v);
-    if (unit == "fr" || unit == "frac")
-        return Length::Frac(v);
-    // Bare decimal 0.0-1.0 without unit -> treat as fractional
-    if (unit.empty() && v > 0.0f && v <= 1.0f && s.find('.') != String::npos)
-        return Length::Frac(v);
-    return Length::Px(v);
+  if (s == "auto") return Length::Auto();
+  f32 v = 0;
+  auto end = std::from_chars(s.data(), s.data() + s.size(), v).ptr;
+  String unit(end, s.data() + s.size());
+  if (unit == "%") return Length::Percent(v);
+  if (unit == "vw") return Length::Vw(v);
+  if (unit == "vh") return Length::Vh(v);
+  if (unit == "fr" || unit == "frac") return Length::Frac(v);
+  // Bare decimal 0.0-1.0 without unit -> treat as fractional
+  if (unit.empty() && v > 0.0f && v <= 1.0f && s.find('.') != String::npos)
+    return Length::Frac(v);
+  return Length::Px(v);
 }
 
 static f32 parse_duration(const String& val) {
-    f32 dur = 0;
-    std::from_chars(val.data(), val.data() + val.size(), dur);
-    return val.find("ms") != String::npos ? dur / 1000.0f : dur;
+  f32 dur = 0;
+  std::from_chars(val.data(), val.data() + val.size(), dur);
+  return val.find("ms") != String::npos ? dur / 1000.0f : dur;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,28 +87,29 @@ static f32 parse_duration(const String& val) {
 
 template <typename E, std::size_t N>
 static Optional<E> LookupEnum(const std::pair<std::string_view, E> (&table)[N],
-                                   std::string_view key) {
-    for (auto& [k, v] : table) {
-        if (k == key)
-            return v;
-    }
-    return std::nullopt;
+                              std::string_view key) {
+  for (auto& [k, v] : table) {
+    if (k == key) return v;
+  }
+  return std::nullopt;
 }
 
-static constexpr std::pair<std::string_view, FlexDirection> kFlexDirectionTable[] = {
-    {"row", FlexDirection::kRow},
-    {"column", FlexDirection::kColumn},
-    {"row-reverse", FlexDirection::kRowReverse},
-    {"column-reverse", FlexDirection::kColumnReverse},
+static constexpr std::pair<std::string_view, FlexDirection>
+    kFlexDirectionTable[] = {
+        {"row", FlexDirection::kRow},
+        {"column", FlexDirection::kColumn},
+        {"row-reverse", FlexDirection::kRowReverse},
+        {"column-reverse", FlexDirection::kColumnReverse},
 };
 
-static constexpr std::pair<std::string_view, JustifyContent> kJustifyContentTable[] = {
-    {"start", JustifyContent::kStart},
-    {"end", JustifyContent::kEnd},
-    {"center", JustifyContent::kCenter},
-    {"space-between", JustifyContent::kSpaceBetween},
-    {"space-around", JustifyContent::kSpaceAround},
-    {"space-evenly", JustifyContent::kSpaceEvenly},
+static constexpr std::pair<std::string_view, JustifyContent>
+    kJustifyContentTable[] = {
+        {"start", JustifyContent::kStart},
+        {"end", JustifyContent::kEnd},
+        {"center", JustifyContent::kCenter},
+        {"space-between", JustifyContent::kSpaceBetween},
+        {"space-around", JustifyContent::kSpaceAround},
+        {"space-evenly", JustifyContent::kSpaceEvenly},
 };
 
 static constexpr std::pair<std::string_view, AlignItems> kAlignItemsTable[] = {
@@ -141,11 +131,12 @@ static constexpr std::pair<std::string_view, Overflow> kOverflowTable[] = {
     {"scroll", Overflow::kScroll},
 };
 
-static constexpr std::pair<std::string_view, TextTransform> kTextTransformTable[] = {
-    {"uppercase", TextTransform::kUppercase},
-    {"lowercase", TextTransform::kLowercase},
-    {"capitalize", TextTransform::kCapitalize},
-    {"none", TextTransform::kNone},
+static constexpr std::pair<std::string_view, TextTransform>
+    kTextTransformTable[] = {
+        {"uppercase", TextTransform::kUppercase},
+        {"lowercase", TextTransform::kLowercase},
+        {"capitalize", TextTransform::kCapitalize},
+        {"none", TextTransform::kNone},
 };
 
 static constexpr std::pair<std::string_view, Cursor> kCursorTable[] = {
@@ -156,63 +147,57 @@ static constexpr std::pair<std::string_view, Cursor> kCursorTable[] = {
     {"not-allowed", Cursor::kNotAllowed},
 };
 
-static constexpr std::pair<std::string_view, WidgetState> kWidgetStateTable[] = {
-    {"hover", WidgetState::kHovered},
-    {"hovered", WidgetState::kHovered},
-    {"pressed", WidgetState::kPressed},
-    {"focused", WidgetState::kFocused},
-    {"focus", WidgetState::kFocused},
-    {"disabled", WidgetState::kDisabled},
-    {"checked", WidgetState::kChecked},
-    // `:selected` and `:active` are application-driven states for
-    // marking a widget as the currently-active/highlighted entry in a
-    // sidebar / list / nav bar. Toggled via Widget::set_selected()
-    // (or set_widget_state) from C++. Distinct from `:pressed` which
-    // means "user is currently mouse-pressing".
-    {"selected", WidgetState::kSelected},
-    {"active", WidgetState::kSelected},
+static constexpr std::pair<std::string_view, WidgetState> kWidgetStateTable[] =
+    {
+        {"hover", WidgetState::kHovered},
+        {"hovered", WidgetState::kHovered},
+        {"pressed", WidgetState::kPressed},
+        {"focused", WidgetState::kFocused},
+        {"focus", WidgetState::kFocused},
+        {"disabled", WidgetState::kDisabled},
+        {"checked", WidgetState::kChecked},
+        // `:selected` and `:active` are application-driven states for
+        // marking a widget as the currently-active/highlighted entry in a
+        // sidebar / list / nav bar. Toggled via Widget::set_selected()
+        // (or set_widget_state) from C++. Distinct from `:pressed` which
+        // means "user is currently mouse-pressing".
+        {"selected", WidgetState::kSelected},
+        {"active", WidgetState::kSelected},
 };
 
 static constexpr std::pair<std::string_view, EasingType> kEasingTable[] = {
-    {"ease-in-out", EasingType::kEaseInOut},
-    {"ease-in", EasingType::kEaseIn},
-    {"ease-out", EasingType::kEaseOut},
-    {"linear", EasingType::kLinear},
+    {"ease-in-out", EasingType::kEaseInOut}, {"ease-in", EasingType::kEaseIn},
+    {"ease-out", EasingType::kEaseOut},      {"linear", EasingType::kLinear},
     {"spring", EasingType::kSpring},
 };
 
 // Easing substring match: order matters (ease-in-out before ease-in)
 static Optional<EasingType> FindEasingSubstring(std::string_view text) {
-    for (auto& [substr, easing] : kEasingTable) {
-        if (text.find(substr) != std::string_view::npos)
-            return easing;
-    }
-    return std::nullopt;
+  for (auto& [substr, easing] : kEasingTable) {
+    if (text.find(substr) != std::string_view::npos) return easing;
+  }
+  return std::nullopt;
 }
 
 // Named color table
 static constexpr std::pair<std::string_view, Color> kNamedColors[] = {
-    {"white", Color::White()},
-    {"black", Color::Black()},
-    {"red", Color::Red()},
-    {"green", Color::Green()},
-    {"blue", Color::Blue()},
-    {"transparent", Color::Transparent()},
+    {"white", Color::White()}, {"black", Color::Black()},
+    {"red", Color::Red()},     {"green", Color::Green()},
+    {"blue", Color::Blue()},   {"transparent", Color::Transparent()},
 };
 
 static Color parse_color(const String& s) {
-    if (s.size() > 1 && s[0] == '#') {
-        u32 hex = 0;
-        std::from_chars(s.data() + 1, s.data() + s.size(), hex, 16);
-        if (s.size() == 7)
-            return Color::FromHex(hex);
-        if (s.size() == 9) {
-            u32 rgb = hex >> 8;
-            f32 alpha = static_cast<f32>(hex & 0xFF) / 255.0f;
-            return Color::FromHex(rgb, alpha);
-        }
+  if (s.size() > 1 && s[0] == '#') {
+    u32 hex = 0;
+    std::from_chars(s.data() + 1, s.data() + s.size(), hex, 16);
+    if (s.size() == 7) return Color::FromHex(hex);
+    if (s.size() == 9) {
+      u32 rgb = hex >> 8;
+      f32 alpha = static_cast<f32>(hex & 0xFF) / 255.0f;
+      return Color::FromHex(rgb, alpha);
     }
-    return LookupEnum(kNamedColors, s).value_or(Color::White());
+  }
+  return LookupEnum(kNamedColors, s).value_or(Color::White());
 }
 
 // ---------------------------------------------------------------------------
@@ -410,11 +395,10 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
 };
 
 static StyleSetter FindPropertySetter(std::string_view key) {
-    for (auto& [name, setter] : kPropertyTable) {
-        if (name == key)
-            return setter;
-    }
-    return nullptr;
+  for (auto& [name, setter] : kPropertyTable) {
+    if (name == key) return setter;
+  }
+  return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,11 +433,10 @@ static constexpr std::pair<std::string_view, u64> kStyleMaskTable[] = {
 };
 
 static u64 LookupStyleMask(std::string_view key) {
-    for (auto& [k, v] : kStyleMaskTable) {
-        if (k == key)
-            return v;
-    }
-    return 0;
+  for (auto& [k, v] : kStyleMaskTable) {
+    if (k == key) return v;
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -461,19 +444,18 @@ static u64 LookupStyleMask(std::string_view key) {
 // ---------------------------------------------------------------------------
 
 static Transition parse_transition_shorthand(const String& val) {
-    Transition trans;
-    f32 dur = 0;
-    const char* p = val.c_str();
-    auto r = std::from_chars(p, p + val.size(), dur);
-    if (r.ptr != p) {
-        trans.duration = (*r.ptr == 'm' && *(r.ptr + 1) == 's') ? dur / 1000.0f : dur;
-        p = r.ptr;
-        while (*p && (*p == 's' || *p == 'm' || *p == ' '))
-            ++p;
-    }
-    if (auto easing = FindEasingSubstring(p))
-        trans.easing = *easing;
-    return trans;
+  Transition trans;
+  f32 dur = 0;
+  const char* p = val.c_str();
+  auto r = std::from_chars(p, p + val.size(), dur);
+  if (r.ptr != p) {
+    trans.duration =
+        (*r.ptr == 'm' && *(r.ptr + 1) == 's') ? dur / 1000.0f : dur;
+    p = r.ptr;
+    while (*p && (*p == 's' || *p == 'm' || *p == ' ')) ++p;
+  }
+  if (auto easing = FindEasingSubstring(p)) trans.easing = *easing;
+  return trans;
 }
 
 // ---------------------------------------------------------------------------
@@ -481,14 +463,14 @@ static Transition parse_transition_shorthand(const String& val) {
 // ---------------------------------------------------------------------------
 
 Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) const {
-    Style s;
-    for (auto& [key, val] : props) {
-        if (auto setter = FindPropertySetter(key)) {
-            String resolved = ResolveValue(val);
-            setter(s, resolved);
-        }
+  Style s;
+  for (auto& [key, val] : props) {
+    if (auto setter = FindPropertySetter(key)) {
+      String resolved = ResolveValue(val);
+      setter(s, resolved);
     }
-    return s;
+  }
+  return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -496,7 +478,7 @@ Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) const {
 // ---------------------------------------------------------------------------
 
 void UguiBuilder::RegisterType(const String& type_name, WidgetFactory factory) {
-    factories_[type_name] = std::move(factory);
+  factories_[type_name] = std::move(factory);
 }
 
 // ---------------------------------------------------------------------------
@@ -504,21 +486,18 @@ void UguiBuilder::RegisterType(const String& type_name, WidgetFactory factory) {
 // ---------------------------------------------------------------------------
 
 void UguiBuilder::CollectVariables(const UguiNode& node) {
-    for (auto& [key, val] : node.properties) {
-        if (key.size() > 2 && key[0] == '-' && key[1] == '-')
-            variables_[key] = val;
-    }
-    for (auto& child : node.children)
-        CollectVariables(child);
+  for (auto& [key, val] : node.properties) {
+    if (key.size() > 2 && key[0] == '-' && key[1] == '-') variables_[key] = val;
+  }
+  for (auto& child : node.children) CollectVariables(child);
 }
 
 String UguiBuilder::ResolveValue(const String& value) const {
-    if (value.size() > 2 && value[0] == '-' && value[1] == '-') {
-        auto it = variables_.find(value);
-        if (it != variables_.end())
-            return it->second;
-    }
-    return value;
+  if (value.size() > 2 && value[0] == '-' && value[1] == '-') {
+    auto it = variables_.find(value);
+    if (it != variables_.end()) return it->second;
+  }
+  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -526,423 +505,423 @@ String UguiBuilder::ResolveValue(const String& value) const {
 // ---------------------------------------------------------------------------
 
 Widget* UguiBuilder::Build(const UguiDocument& doc) {
-    if (doc.roots.empty() && doc.style_classes.empty())
-        return nullptr;
+  if (doc.roots.empty() && doc.style_classes.empty()) return nullptr;
 
-    // Collect CSS custom properties from all nodes
-    for (auto& root : doc.roots)
-        CollectVariables(root);
+  // Collect CSS custom properties from all nodes
+  for (auto& root : doc.roots) CollectVariables(root);
 
-    // Stash style class declarations so ApplyProperties + the public
-    // ApplyStyleClass entry point can look them up by name. Replace the
-    // table on every Build so reloading a .ugui drops stale classes.
-    style_classes_.clear();
-    for (auto& sc : doc.style_classes) {
-        style_classes_[sc.name] = sc;
-    }
+  // Stash style class declarations so ApplyProperties + the public
+  // ApplyStyleClass entry point can look them up by name. Replace the
+  // table on every Build so reloading a .ugui drops stale classes.
+  style_classes_.clear();
+  for (auto& sc : doc.style_classes) {
+    style_classes_[sc.name] = sc;
+  }
 
-    if (doc.roots.empty())
-        return nullptr;
+  if (doc.roots.empty()) return nullptr;
 
-    u32 id_counter = 1;
-    if (doc.roots.size() == 1)
-        return BuildNode(doc.roots[0], id_counter);
+  u32 id_counter = 1;
+  if (doc.roots.size() == 1) return BuildNode(doc.roots[0], id_counter);
 
-    // Multiple roots: wrap in a panel
-    auto* root = new Panel(0);
-    root->set_name("_root");
-    for (auto& node : doc.roots) {
-        if (auto* child = BuildNode(node, id_counter))
-            root->AddChild(child);
-    }
-    return root;
+  // Multiple roots: wrap in a panel
+  auto* root = new Panel(0);
+  root->set_name("_root");
+  for (auto& node : doc.roots) {
+    if (auto* child = BuildNode(node, id_counter)) root->AddChild(child);
+  }
+  return root;
 }
 
-const UguiDocument::StyleClass* UguiBuilder::FindStyleClass(const String& name) const {
-    auto it = style_classes_.find(name);
-    return it == style_classes_.end() ? nullptr : &it->second;
+const UguiDocument::StyleClass* UguiBuilder::FindStyleClass(
+    const String& name) const {
+  auto it = style_classes_.find(name);
+  return it == style_classes_.end() ? nullptr : &it->second;
 }
 
-bool UguiBuilder::ApplyStyleClass(Widget* widget, const String& class_name) const {
-    if (!widget) return false;
-    const auto* sc = FindStyleClass(class_name);
-    if (!sc) return false;
+bool UguiBuilder::ApplyStyleClass(Widget* widget,
+                                  const String& class_name) const {
+  if (!widget) return false;
+  const auto* sc = FindStyleClass(class_name);
+  if (!sc) return false;
 
-    // Merge the class's base properties on top of the widget's current
-    // base style. The class wins for any property it explicitly sets;
-    // unspecified properties are left untouched.
-    Style merged = widget->style();
-    for (auto& [key, val] : sc->properties) {
-        if (auto setter = FindPropertySetter(key)) {
-            String resolved = ResolveValue(val);
-            setter(merged, resolved);
-        }
+  // Merge the class's base properties on top of the widget's current
+  // base style. The class wins for any property it explicitly sets;
+  // unspecified properties are left untouched.
+  Style merged = widget->style();
+  for (auto& [key, val] : sc->properties) {
+    if (auto setter = FindPropertySetter(key)) {
+      String resolved = ResolveValue(val);
+      setter(merged, resolved);
     }
-    widget->set_style(merged);
+  }
+  widget->set_style(merged);
 
-    // Class state-blocks (`:hover { ... }` etc.) are appended as state
-    // overrides - same machinery the inline element state blocks use.
-    for (auto& sb : sc->state_blocks) {
-        WidgetState state = LookupEnum(kWidgetStateTable, sb.state).value_or(WidgetState::kNone);
-        Style override_style = ParseStyle(sb.properties);
-        u64 mask = std::accumulate(sb.properties.begin(), sb.properties.end(), u64{0},
-                                   [](u64 acc, const auto& kv) {
-                                       return acc | LookupStyleMask(kv.first);
-                                   });
-        widget->AddStateOverride(state, override_style, mask);
-    }
-    return true;
+  // Class state-blocks (`:hover { ... }` etc.) are appended as state
+  // overrides - same machinery the inline element state blocks use.
+  for (auto& sb : sc->state_blocks) {
+    WidgetState state =
+        LookupEnum(kWidgetStateTable, sb.state).value_or(WidgetState::kNone);
+    Style override_style = ParseStyle(sb.properties);
+    u64 mask = std::accumulate(sb.properties.begin(), sb.properties.end(),
+                               u64{0}, [](u64 acc, const auto& kv) {
+                                 return acc | LookupStyleMask(kv.first);
+                               });
+    widget->AddStateOverride(state, override_style, mask);
+  }
+  return true;
 }
 
 Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
-    Widget* widget = nullptr;
-    u32 id = id_counter++;
+  Widget* widget = nullptr;
+  u32 id = id_counter++;
 
-    // Try registered factory
-    auto it = factories_.find(node.type);
-    if (it != factories_.end()) {
-        widget = it->second(node.name);
-    } else if (node.type == "panel" || node.type == "div" || node.type == "container") {
-        widget = new Panel(id);
-    } else if (node.type == "text" || node.type == "label") {
-        auto* text = new Text(id);
-        auto text_it = node.properties.find("content");
-        if (text_it == node.properties.end())
-            text_it = node.properties.find("text");
-        if (text_it != node.properties.end())
-            text->set_text(text_it->second);
-        widget = text;
-    } else if (node.type == "button") {
-        auto* btn = new Button(id);
-        auto text_it = node.properties.find("text");
-        if (text_it == node.properties.end())
-            text_it = node.properties.find("label");
-        if (text_it != node.properties.end())
-            btn->set_label(text_it->second);
-        widget = btn;
-    } else if (node.type == "modal" || node.type == "dialog") {
-        widget = new Modal(id);
-    } else if (node.type == "image" || node.type == "img") {
-        widget = new Image(id);
-    } else if (node.type == "scroll" || node.type == "scroll-view") {
-        widget = new ScrollView(id);
-        widget->style().overflow = Overflow::kScroll;
-    } else if (node.type == "text-input" || node.type == "input") {
-        auto* input = new TextInput(id);
-        auto text_it = node.properties.find("placeholder");
-        if (text_it != node.properties.end())
-            input->set_placeholder(text_it->second);
-        auto val_it = node.properties.find("value");
-        if (val_it != node.properties.end())
-            input->set_text(val_it->second);
-        widget = input;
-    } else if (node.type == "checkbox") {
-        auto* cb = new Checkbox(id);
-        auto text_it = node.properties.find("label");
-        if (text_it == node.properties.end())
-            text_it = node.properties.find("text");
-        if (text_it != node.properties.end())
-            cb->set_label(text_it->second);
-        auto checked_it = node.properties.find("checked");
-        if (checked_it != node.properties.end() && checked_it->second == "true")
-            cb->set_checked(true);
-        widget = cb;
-    } else if (node.type == "slider" || node.type == "range") {
-        auto* sl = new Slider(id);
-        auto min_it = node.properties.find("min");
-        if (min_it != node.properties.end())
-            sl->set_min(parse_float(min_it->second));
-        auto max_it = node.properties.find("max");
-        if (max_it != node.properties.end())
-            sl->set_max(parse_float(max_it->second));
-        auto val_it = node.properties.find("value");
-        if (val_it != node.properties.end())
-            sl->set_value(parse_float(val_it->second));
-        widget = sl;
-    } else if (node.type == "radio") {
-        auto* radio = new Radio(id);
-        auto text_it = node.properties.find("label");
-        if (text_it == node.properties.end())
-            text_it = node.properties.find("text");
-        if (text_it != node.properties.end())
-            radio->set_label(text_it->second);
-        auto group_it = node.properties.find("group");
-        if (group_it != node.properties.end())
-            radio->set_group(group_it->second);
-        auto checked_it = node.properties.find("checked");
-        if (checked_it != node.properties.end() && checked_it->second == "true")
-            radio->set_selected(true);
-        widget = radio;
-    } else if (node.type == "toggle" || node.type == "switch") {
-        auto* tog = new Toggle(id);
-        auto checked_it = node.properties.find("checked");
-        if (checked_it != node.properties.end() && checked_it->second == "true")
-            tog->set_on(true);
-        widget = tog;
-    } else if (node.type == "dropdown" || node.type == "select") {
-        auto* dd = new Dropdown(id);
-        Vector<String> opts;
-        for (auto& child_node : node.children) {
-            auto text_it = child_node.properties.find("text");
-            if (text_it == child_node.properties.end())
-                text_it = child_node.properties.find("label");
-            if (text_it != child_node.properties.end())
-                opts.push_back(text_it->second);
-            else if (!child_node.name.empty())
-                opts.push_back(child_node.name);
-        }
-        dd->set_options(opts);
-        auto sel_it = node.properties.find("selected");
-        if (sel_it != node.properties.end())
-            dd->set_selected_index(static_cast<i32>(parse_float(sel_it->second)));
-        widget = dd;
-        // Return early: option children are data, not child widgets
-        widget->set_id(id);
-        widget->set_name(node.name);
-        ApplyProperties(widget, node);
-        return widget;
-    } else if (node.type == "context-menu") {
-        auto* menu = new ContextMenu(id);
-        for (auto& child_node : node.children) {
-            if (child_node.type == "separator") {
-                menu->AddSeparator();
-            } else {
-                auto text_it = child_node.properties.find("text");
-                if (text_it == child_node.properties.end())
-                    text_it = child_node.properties.find("label");
-                String label = text_it != child_node.properties.end()
-                                        ? text_it->second
-                                        : child_node.name;
-                menu->AddItem(label, nullptr);
-            }
-        }
-        widget = menu;
-        // Return early: item children are data, not child widgets
-        widget->set_id(id);
-        widget->set_name(node.name);
-        ApplyProperties(widget, node);
-        return widget;
-    } else if (node.type == "rich-text" || node.type == "richtext") {
-        auto* rt = new RichText(id);
-        // Parse child "span" elements as TextSpan data, not child widgets
-        for (const auto& child_node : node.children) {
-            if (child_node.type == "span") {
-                TextSpan span;
-                auto text_it = child_node.properties.find("text");
-                if (text_it == child_node.properties.end())
-                    text_it = child_node.properties.find("content");
-                if (text_it != child_node.properties.end())
-                    span.text = text_it->second;
-
-                auto color_it = child_node.properties.find("color");
-                if (color_it != child_node.properties.end())
-                    span.color = parse_color(color_it->second);
-
-                auto size_it = child_node.properties.find("font-size");
-                if (size_it != child_node.properties.end())
-                    span.font_size = parse_float(size_it->second);
-
-                auto weight_it = child_node.properties.find("font-weight");
-                if (weight_it != child_node.properties.end()) {
-                    static constexpr std::pair<std::string_view, FontWeight>
-                        kSpanWeightTable[] = {
-                            {"thin", FontWeight::kThin},
-                            {"extra-light", FontWeight::kExtraLight},
-                            {"light", FontWeight::kLight},
-                            {"regular", FontWeight::kRegular},
-                            {"normal", FontWeight::kRegular},
-                            {"medium", FontWeight::kMedium},
-                            {"semi-bold", FontWeight::kSemiBold},
-                            {"semibold", FontWeight::kSemiBold},
-                            {"bold", FontWeight::kBold},
-                            {"extra-bold", FontWeight::kExtraBold},
-                            {"black", FontWeight::kBlack},
-                        };
-                    if (auto w = LookupEnum(kSpanWeightTable, weight_it->second))
-                        span.font_weight = *w;
-                }
-
-                auto style_it = child_node.properties.find("font-style");
-                if (style_it != child_node.properties.end() &&
-                    style_it->second == "italic") {
-                    span.font_style = FontStyle::kItalic;
-                }
-
-                auto dec_it = child_node.properties.find("text-decoration");
-                if (dec_it != child_node.properties.end()) {
-                    if (dec_it->second == "underline")
-                        span.decoration = TextDecoration::kUnderline;
-                    else if (dec_it->second == "line-through" ||
-                             dec_it->second == "strikethrough")
-                        span.decoration = TextDecoration::kStrikethrough;
-                    else if (dec_it->second == "underline line-through" ||
-                             dec_it->second == "underline strikethrough")
-                        span.decoration = TextDecoration::kUnderline |
-                                          TextDecoration::kStrikethrough;
-                }
-
-                rt->AddSpan(span);
-            }
-        }
-        widget = rt;
-        // Return early: span children are data, not child widgets
-        widget->set_id(id);
-        widget->set_name(node.name);
-        ApplyProperties(widget, node);
-        return widget;
-    } else {
-        // Unknown type: treat as panel
-        std::fprintf(stderr, "ultragui: unknown element type '%s' at line %u\n", node.type.c_str(),
-                     node.source_line);
-        widget = new Panel(id);
+  // Try registered factory
+  auto it = factories_.find(node.type);
+  if (it != factories_.end()) {
+    widget = it->second(node.name);
+  } else if (node.type == "panel" || node.type == "div" ||
+             node.type == "container") {
+    widget = new Panel(id);
+  } else if (node.type == "text" || node.type == "label") {
+    auto* text = new Text(id);
+    auto text_it = node.properties.find("content");
+    if (text_it == node.properties.end())
+      text_it = node.properties.find("text");
+    if (text_it != node.properties.end()) text->set_text(text_it->second);
+    widget = text;
+  } else if (node.type == "button") {
+    auto* btn = new Button(id);
+    auto text_it = node.properties.find("text");
+    if (text_it == node.properties.end())
+      text_it = node.properties.find("label");
+    if (text_it != node.properties.end()) btn->set_label(text_it->second);
+    widget = btn;
+  } else if (node.type == "modal" || node.type == "dialog") {
+    widget = new Modal(id);
+  } else if (node.type == "image" || node.type == "img") {
+    widget = new Image(id);
+  } else if (node.type == "scroll" || node.type == "scroll-view") {
+    widget = new ScrollView(id);
+    widget->style().overflow = Overflow::kScroll;
+  } else if (node.type == "text-input" || node.type == "input") {
+    auto* input = new TextInput(id);
+    auto text_it = node.properties.find("placeholder");
+    if (text_it != node.properties.end())
+      input->set_placeholder(text_it->second);
+    auto val_it = node.properties.find("value");
+    if (val_it != node.properties.end()) input->set_text(val_it->second);
+    widget = input;
+  } else if (node.type == "checkbox") {
+    auto* cb = new Checkbox(id);
+    auto text_it = node.properties.find("label");
+    if (text_it == node.properties.end())
+      text_it = node.properties.find("text");
+    if (text_it != node.properties.end()) cb->set_label(text_it->second);
+    auto checked_it = node.properties.find("checked");
+    if (checked_it != node.properties.end() && checked_it->second == "true")
+      cb->set_checked(true);
+    widget = cb;
+  } else if (node.type == "slider" || node.type == "range") {
+    auto* sl = new Slider(id);
+    auto min_it = node.properties.find("min");
+    if (min_it != node.properties.end())
+      sl->set_min(parse_float(min_it->second));
+    auto max_it = node.properties.find("max");
+    if (max_it != node.properties.end())
+      sl->set_max(parse_float(max_it->second));
+    auto val_it = node.properties.find("value");
+    if (val_it != node.properties.end())
+      sl->set_value(parse_float(val_it->second));
+    widget = sl;
+  } else if (node.type == "radio") {
+    auto* radio = new Radio(id);
+    auto text_it = node.properties.find("label");
+    if (text_it == node.properties.end())
+      text_it = node.properties.find("text");
+    if (text_it != node.properties.end()) radio->set_label(text_it->second);
+    auto group_it = node.properties.find("group");
+    if (group_it != node.properties.end()) radio->set_group(group_it->second);
+    auto checked_it = node.properties.find("checked");
+    if (checked_it != node.properties.end() && checked_it->second == "true")
+      radio->set_selected(true);
+    widget = radio;
+  } else if (node.type == "toggle" || node.type == "switch") {
+    auto* tog = new Toggle(id);
+    auto checked_it = node.properties.find("checked");
+    if (checked_it != node.properties.end() && checked_it->second == "true")
+      tog->set_on(true);
+    widget = tog;
+  } else if (node.type == "dropdown" || node.type == "select") {
+    auto* dd = new Dropdown(id);
+    Vector<String> opts;
+    for (auto& child_node : node.children) {
+      auto text_it = child_node.properties.find("text");
+      if (text_it == child_node.properties.end())
+        text_it = child_node.properties.find("label");
+      if (text_it != child_node.properties.end())
+        opts.push_back(text_it->second);
+      else if (!child_node.name.empty())
+        opts.push_back(child_node.name);
     }
-
+    dd->set_options(opts);
+    auto sel_it = node.properties.find("selected");
+    if (sel_it != node.properties.end())
+      dd->set_selected_index(static_cast<i32>(parse_float(sel_it->second)));
+    widget = dd;
+    // Return early: option children are data, not child widgets
     widget->set_id(id);
     widget->set_name(node.name);
-
     ApplyProperties(widget, node);
-
-    for (auto& child_node : node.children) {
-        if (auto* child = BuildNode(child_node, id_counter))
-            widget->AddChild(child);
-    }
-
     return widget;
+  } else if (node.type == "context-menu") {
+    auto* menu = new ContextMenu(id);
+    for (auto& child_node : node.children) {
+      if (child_node.type == "separator") {
+        menu->AddSeparator();
+      } else {
+        auto text_it = child_node.properties.find("text");
+        if (text_it == child_node.properties.end())
+          text_it = child_node.properties.find("label");
+        String label = text_it != child_node.properties.end() ? text_it->second
+                                                              : child_node.name;
+        menu->AddItem(label, nullptr);
+      }
+    }
+    widget = menu;
+    // Return early: item children are data, not child widgets
+    widget->set_id(id);
+    widget->set_name(node.name);
+    ApplyProperties(widget, node);
+    return widget;
+  } else if (node.type == "rich-text" || node.type == "richtext") {
+    auto* rt = new RichText(id);
+    // Parse child "span" elements as TextSpan data, not child widgets
+    for (const auto& child_node : node.children) {
+      if (child_node.type == "span") {
+        TextSpan span;
+        auto text_it = child_node.properties.find("text");
+        if (text_it == child_node.properties.end())
+          text_it = child_node.properties.find("content");
+        if (text_it != child_node.properties.end()) span.text = text_it->second;
+
+        auto color_it = child_node.properties.find("color");
+        if (color_it != child_node.properties.end())
+          span.color = parse_color(color_it->second);
+
+        auto size_it = child_node.properties.find("font-size");
+        if (size_it != child_node.properties.end())
+          span.font_size = parse_float(size_it->second);
+
+        auto weight_it = child_node.properties.find("font-weight");
+        if (weight_it != child_node.properties.end()) {
+          static constexpr std::pair<std::string_view, FontWeight>
+              kSpanWeightTable[] = {
+                  {"thin", FontWeight::kThin},
+                  {"extra-light", FontWeight::kExtraLight},
+                  {"light", FontWeight::kLight},
+                  {"regular", FontWeight::kRegular},
+                  {"normal", FontWeight::kRegular},
+                  {"medium", FontWeight::kMedium},
+                  {"semi-bold", FontWeight::kSemiBold},
+                  {"semibold", FontWeight::kSemiBold},
+                  {"bold", FontWeight::kBold},
+                  {"extra-bold", FontWeight::kExtraBold},
+                  {"black", FontWeight::kBlack},
+              };
+          if (auto w = LookupEnum(kSpanWeightTable, weight_it->second))
+            span.font_weight = *w;
+        }
+
+        auto style_it = child_node.properties.find("font-style");
+        if (style_it != child_node.properties.end() &&
+            style_it->second == "italic") {
+          span.font_style = FontStyle::kItalic;
+        }
+
+        auto dec_it = child_node.properties.find("text-decoration");
+        if (dec_it != child_node.properties.end()) {
+          if (dec_it->second == "underline")
+            span.decoration = TextDecoration::kUnderline;
+          else if (dec_it->second == "line-through" ||
+                   dec_it->second == "strikethrough")
+            span.decoration = TextDecoration::kStrikethrough;
+          else if (dec_it->second == "underline line-through" ||
+                   dec_it->second == "underline strikethrough")
+            span.decoration =
+                TextDecoration::kUnderline | TextDecoration::kStrikethrough;
+        }
+
+        rt->AddSpan(span);
+      }
+    }
+    widget = rt;
+    // Return early: span children are data, not child widgets
+    widget->set_id(id);
+    widget->set_name(node.name);
+    ApplyProperties(widget, node);
+    return widget;
+  } else {
+    // Unknown type: treat as panel
+    std::fprintf(stderr, "ultragui: unknown element type '%s' at line %u\n",
+                 node.type.c_str(), node.source_line);
+    widget = new Panel(id);
+  }
+
+  widget->set_id(id);
+  widget->set_name(node.name);
+
+  ApplyProperties(widget, node);
+
+  for (auto& child_node : node.children) {
+    if (auto* child = BuildNode(child_node, id_counter))
+      widget->AddChild(child);
+  }
+
+  return widget;
 }
 
 void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
-    // Apply a top-level style class first if the element opted in via
-    // `class: name;`. The class is the BASE; inline properties below
-    // win over class properties. State blocks from the class are
-    // appended to the widget's state-override list and run alongside
-    // any inline state blocks the element declares.
-    auto class_it = node.properties.find("class");
-    if (class_it != node.properties.end()) {
-        ApplyStyleClass(widget, class_it->second);
-    }
+  // Apply a top-level style class first if the element opted in via
+  // `class: name;`. The class is the BASE; inline properties below
+  // win over class properties. State blocks from the class are
+  // appended to the widget's state-override list and run alongside
+  // any inline state blocks the element declares.
+  auto class_it = node.properties.find("class");
+  if (class_it != node.properties.end()) {
+    ApplyStyleClass(widget, class_it->second);
+  }
 
-    // Apply inline properties on top of any class defaults. Properties
-    // not set inline keep whatever the class supplied.
-    Style merged = widget->style();
-    for (auto& [key, val] : node.properties) {
+  // Apply inline properties on top of any class defaults. Properties
+  // not set inline keep whatever the class supplied.
+  Style merged = widget->style();
+  for (auto& [key, val] : node.properties) {
+    if (auto setter = FindPropertySetter(key)) {
+      setter(merged, ResolveValue(val));
+    }
+  }
+  widget->set_style(merged);
+
+  // Tooltip
+  auto tooltip_it = node.properties.find("tooltip");
+  if (tooltip_it != node.properties.end())
+    widget->set_tooltip(tooltip_it->second);
+
+  // Tab navigation
+  auto tab_it = node.properties.find("tab-index");
+  if (tab_it != node.properties.end())
+    widget->set_tab_index(static_cast<i32>(parse_float(tab_it->second)));
+
+  // State overrides
+  for (auto& sb : node.state_blocks) {
+    WidgetState state =
+        LookupEnum(kWidgetStateTable, sb.state).value_or(WidgetState::kNone);
+    Style override_style = ParseStyle(sb.properties);
+
+    // Build mask via fold over property keys
+    u64 mask = std::accumulate(sb.properties.begin(), sb.properties.end(),
+                               u64{0}, [](u64 acc, const auto& kv) {
+                                 return acc | LookupStyleMask(kv.first);
+                               });
+
+    widget->AddStateOverride(state, override_style, mask);
+
+    // Parse transition
+    Transition trans;
+    bool has_transition = false;
+
+    if (auto t_it = sb.properties.find("transition");
+        t_it != sb.properties.end()) {
+      trans = parse_transition_shorthand(t_it->second);
+      has_transition = true;
+    }
+    if (auto td_it = sb.properties.find("transition-duration");
+        td_it != sb.properties.end()) {
+      trans.duration = parse_duration(td_it->second);
+      has_transition = true;
+    }
+    if (auto te_it = sb.properties.find("transition-easing");
+        te_it != sb.properties.end()) {
+      if (auto e = LookupEnum(kEasingTable, te_it->second)) trans.easing = *e;
+    }
+    if (auto tl_it = sb.properties.find("transition-delay");
+        tl_it != sb.properties.end()) {
+      trans.delay = parse_duration(tl_it->second);
+    }
+    if (auto ss_it = sb.properties.find("spring-stiffness");
+        ss_it != sb.properties.end())
+      trans.spring_stiffness = parse_float(ss_it->second);
+    if (auto sd_it = sb.properties.find("spring-damping");
+        sd_it != sb.properties.end())
+      trans.spring_damping = parse_float(sd_it->second);
+    if (auto sm_it = sb.properties.find("spring-mass");
+        sm_it != sb.properties.end())
+      trans.spring_mass = parse_float(sm_it->second);
+
+    if (has_transition && state != WidgetState::kNone)
+      widget->AddStateTransition(state, trans);
+  }
+
+  // Media query overrides: apply matching conditions on top of the base style
+  for (auto& mq : node.media_queries) {
+    bool matches = false;
+    if (mq.condition == "min-width")
+      matches = viewport_size_.x >= mq.value;
+    else if (mq.condition == "max-width")
+      matches = viewport_size_.x <= mq.value;
+    else if (mq.condition == "min-height")
+      matches = viewport_size_.y >= mq.value;
+    else if (mq.condition == "max-height")
+      matches = viewport_size_.y <= mq.value;
+
+    if (matches) {
+      Style& style = widget->style();
+      for (auto& [key, val] : mq.properties) {
         if (auto setter = FindPropertySetter(key)) {
-            setter(merged, ResolveValue(val));
+          String resolved = ResolveValue(val);
+          setter(style, resolved);
         }
+      }
     }
-    widget->set_style(merged);
+  }
 
-    // Tooltip
-    auto tooltip_it = node.properties.find("tooltip");
-    if (tooltip_it != node.properties.end())
-        widget->set_tooltip(tooltip_it->second);
+  // @keyframes blocks
+  for (auto& kb : node.keyframe_blocks) {
+    if (!animator_ || kb.stops.empty()) continue;
 
-    // Tab navigation
-    auto tab_it = node.properties.find("tab-index");
-    if (tab_it != node.properties.end())
-        widget->set_tab_index(static_cast<i32>(parse_float(tab_it->second)));
+    KeyframeAnimation anim;
+    anim.widget_id = widget->id();
 
-    // State overrides
-    for (auto& sb : node.state_blocks) {
-        WidgetState state = LookupEnum(kWidgetStateTable, sb.state).value_or(WidgetState::kNone);
-        Style override_style = ParseStyle(sb.properties);
+    // Parse top-level properties
+    if (auto d_it = kb.properties.find("duration"); d_it != kb.properties.end())
+      anim.duration = parse_duration(d_it->second);
+    if (auto l_it = kb.properties.find("loop"); l_it != kb.properties.end())
+      anim.repeat_count = (l_it->second == "true") ? -1 : 1;
+    if (auto a_it = kb.properties.find("alternate");
+        a_it != kb.properties.end())
+      anim.alternate = (a_it->second == "true");
 
-        // Build mask via fold over property keys
-        u64 mask = std::accumulate(sb.properties.begin(), sb.properties.end(), u64{0},
-                                   [](u64 acc, const auto& kv) {
-                                       return acc | LookupStyleMask(kv.first);
-                                   });
+    // Transform stops -> sorted keyframes
+    anim.keyframes.reserve(kb.stops.size());
+    std::transform(kb.stops.begin(), kb.stops.end(),
+                   std::back_inserter(anim.keyframes),
+                   [this](const auto& stop) {
+                     return Keyframe{stop.percent, ParseStyle(stop.properties)};
+                   });
+    std::sort(
+        anim.keyframes.begin(), anim.keyframes.end(),
+        [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
 
-        widget->AddStateOverride(state, override_style, mask);
-
-        // Parse transition
-        Transition trans;
-        bool has_transition = false;
-
-        if (auto t_it = sb.properties.find("transition"); t_it != sb.properties.end()) {
-            trans = parse_transition_shorthand(t_it->second);
-            has_transition = true;
-        }
-        if (auto td_it = sb.properties.find("transition-duration"); td_it != sb.properties.end()) {
-            trans.duration = parse_duration(td_it->second);
-            has_transition = true;
-        }
-        if (auto te_it = sb.properties.find("transition-easing"); te_it != sb.properties.end()) {
-            if (auto e = LookupEnum(kEasingTable, te_it->second))
-                trans.easing = *e;
-        }
-        if (auto tl_it = sb.properties.find("transition-delay"); tl_it != sb.properties.end()) {
-            trans.delay = parse_duration(tl_it->second);
-        }
-        if (auto ss_it = sb.properties.find("spring-stiffness"); ss_it != sb.properties.end())
-            trans.spring_stiffness = parse_float(ss_it->second);
-        if (auto sd_it = sb.properties.find("spring-damping"); sd_it != sb.properties.end())
-            trans.spring_damping = parse_float(sd_it->second);
-        if (auto sm_it = sb.properties.find("spring-mass"); sm_it != sb.properties.end())
-            trans.spring_mass = parse_float(sm_it->second);
-
-        if (has_transition && state != WidgetState::kNone)
-            widget->AddStateTransition(state, trans);
-    }
-
-    // Media query overrides: apply matching conditions on top of the base style
-    for (auto& mq : node.media_queries) {
-        bool matches = false;
-        if (mq.condition == "min-width")
-            matches = viewport_size_.x >= mq.value;
-        else if (mq.condition == "max-width")
-            matches = viewport_size_.x <= mq.value;
-        else if (mq.condition == "min-height")
-            matches = viewport_size_.y >= mq.value;
-        else if (mq.condition == "max-height")
-            matches = viewport_size_.y <= mq.value;
-
-        if (matches) {
-            Style& style = widget->style();
-            for (auto& [key, val] : mq.properties) {
-                if (auto setter = FindPropertySetter(key)) {
-                    String resolved = ResolveValue(val);
-                    setter(style, resolved);
-                }
-            }
-        }
-    }
-
-    // @keyframes blocks
-    for (auto& kb : node.keyframe_blocks) {
-        if (!animator_ || kb.stops.empty())
-            continue;
-
-        KeyframeAnimation anim;
-        anim.widget_id = widget->id();
-
-        // Parse top-level properties
-        if (auto d_it = kb.properties.find("duration"); d_it != kb.properties.end())
-            anim.duration = parse_duration(d_it->second);
-        if (auto l_it = kb.properties.find("loop"); l_it != kb.properties.end())
-            anim.repeat_count = (l_it->second == "true") ? -1 : 1;
-        if (auto a_it = kb.properties.find("alternate"); a_it != kb.properties.end())
-            anim.alternate = (a_it->second == "true");
-
-        // Transform stops -> sorted keyframes
-        anim.keyframes.reserve(kb.stops.size());
-        std::transform(kb.stops.begin(), kb.stops.end(), std::back_inserter(anim.keyframes),
-                       [this](const auto& stop) {
-                           return Keyframe{stop.percent, ParseStyle(stop.properties)};
-                       });
-        std::sort(anim.keyframes.begin(), anim.keyframes.end(),
-                  [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
-
-        anim.active = true;
-        anim.start_time = 0; // Will be set when UIContext starts the animator
-        animator_->StartAnimation(anim, 0);
-    }
+    anim.active = true;
+    anim.start_time = 0;  // Will be set when UIContext starts the animator
+    animator_->StartAnimation(anim, 0);
+  }
 }
 
 Widget* UguiBuilder::Rebuild(const UguiDocument& doc, Widget* existing_root) {
-    // Simple rebuild: delete old tree and build new one
-    // TODO: diff-based patching for hot reload
-    delete existing_root;
-    return Build(doc);
+  // Simple rebuild: delete old tree and build new one
+  // TODO: diff-based patching for hot reload
+  delete existing_root;
+  return Build(doc);
 }
 
-} // namespace ugui
+}  // namespace ugui

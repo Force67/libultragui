@@ -24,32 +24,32 @@
 #include <ultragui/render/renderer2d.h>
 #include <ultragui/rhi/rhi.h>
 #include <ultragui/scripting/script_runtime.h>
-#include <ultragui/text/text_engine.h>
 #include <ultragui/style/theme.h>
 #include <ultragui/svg/svg.h>
+#include <ultragui/text/text_engine.h>
 #include <ultragui/widgets/widget.h>
 
 namespace ugui {
 
 /// Configuration for UIContext initialization.
 struct UIConfig {
-    const char* title = "ultragui";
-    i32 width = 1280;
-    i32 height = 720;
-    bool resizable = true;
-    bool vsync = true;
-    bool validation = true;
-    Color clear_color = Color::FromHex(0x0f0f1a);
-    const char* shader_dir = nullptr; // Falls back to ULTRAGUI_SHADER_DIR
+  const char* title = "ultragui";
+  i32 width = 1280;
+  i32 height = 720;
+  bool resizable = true;
+  bool vsync = true;
+  bool validation = true;
+  Color clear_color = Color::FromHex(0x0f0f1a);
+  const char* shader_dir = nullptr;  // Falls back to ULTRAGUI_SHADER_DIR
 
-    /// Viewport scaling mode. When set to anything other than kNone, all pixel
-    /// sizes (font-size, border, corner-radius, shadow, padding, margin, gap,
-    /// and fixed-px dimensions) scale proportionally as the window is resized.
-    /// The design_width/design_height define the reference resolution at which
-    /// the scale factor is 1.0. Behaves like CSS rem-based responsive design.
-    ViewportScaleMode scale_mode = ViewportScaleMode::kNone;
-    f32 design_width = 1280.0f;
-    f32 design_height = 720.0f;
+  /// Viewport scaling mode. When set to anything other than kNone, all pixel
+  /// sizes (font-size, border, corner-radius, shadow, padding, margin, gap,
+  /// and fixed-px dimensions) scale proportionally as the window is resized.
+  /// The design_width/design_height define the reference resolution at which
+  /// the scale factor is 1.0. Behaves like CSS rem-based responsive design.
+  ViewportScaleMode scale_mode = ViewportScaleMode::kNone;
+  f32 design_width = 1280.0f;
+  f32 design_height = 720.0f;
 };
 
 /// High-level framework context. Ties together all subsystems
@@ -65,211 +65,212 @@ struct UIConfig {
 ///   while (ui.Running()) { ui.Update(); }
 ///   ui.Shutdown();
 class UIContext {
-public:
-    UIContext() = default;
-    ~UIContext();
+ public:
+  UIContext() = default;
+  ~UIContext();
 
-    /// Initialize all subsystems. Returns false on failure.
-    bool Init(const UIConfig& config = {});
+  /// Initialize all subsystems. Returns false on failure.
+  bool Init(const UIConfig& config = {});
 
-    /// Load a TTF/OTF font. Returns a handle, or kInvalidFont on failure.
-    FontHandle LoadFont(const char* path);
+  /// Load a TTF/OTF font. Returns a handle, or kInvalidFont on failure.
+  FontHandle LoadFont(const char* path);
 
-    /// Set the default font used by the builder for text/button widgets.
-    void set_default_font(FontHandle font);
+  /// Set the default font used by the builder for text/button widgets.
+  void set_default_font(FontHandle font);
 
-    /// Load a .ugui layout file. Builds the widget tree. Returns the root widget.
-    Widget* LoadUi(const char* path);
+  /// Load a .ugui layout file. Builds the widget tree. Returns the root widget.
+  Widget* LoadUi(const char* path);
 
-    /// Load a .ugui layout from a string.
-    Widget* LoadUiString(const char* source, const char* name = "inline");
+  /// Load a .ugui layout from a string.
+  Widget* LoadUiString(const char* source, const char* name = "inline");
 
-    /// Load and execute a script file. No-op if no scripting runtime is set.
-    bool LoadScript(const char* path);
+  /// Load and execute a script file. No-op if no scripting runtime is set.
+  bool LoadScript(const char* path);
 
-    /// Execute a script string. No-op if no scripting runtime is set.
-    bool ExecScript(const char* script, const char* name = "chunk");
+  /// Execute a script string. No-op if no scripting runtime is set.
+  bool ExecScript(const char* script, const char* name = "chunk");
 
-    /// Get the scripting runtime.
-    ScriptRuntime& script() { return script_; }
+  /// Get the scripting runtime.
+  ScriptRuntime& script() { return script_; }
 
-    /// Set the root widget directly (takes ownership for painting, not deletion).
-    void set_root(Widget* root);
+  /// Set the root widget directly (takes ownership for painting, not deletion).
+  void set_root(Widget* root);
 
-    /// Get the current root widget.
-    Widget* root() const { return root_; }
+  /// Get the current root widget.
+  Widget* root() const { return root_; }
 
-    /// Returns true while the window is open.
-    bool Running() const;
+  /// Returns true while the window is open.
+  bool Running() const;
 
-    /// Drain the OS input queue and dispatch click / hover / drag /
-    /// keyboard events through the widget tree. Idempotent within a
-    /// frame: a flag prevents double-processing if Update() is called
-    /// later in the same frame, and Update() will auto-call PumpInput
-    /// if the application hasn't already.
-    ///
-    /// Why expose this separately? Applications that rebuild their
-    /// widget tree on a dirty flag (like the xeed editor) want click
-    /// handlers to fire BEFORE the rebuild check, so the rebuild can
-    /// happen in the same frame as the click. Calling PumpInput at the
-    /// start of the application's render function and Update later
-    /// gives same-frame click->rebuild->render latency. Otherwise the
-    /// click handler runs inside Update, sets the dirty flag too late,
-    /// and the rebuild only happens on the NEXT frame.
-    void PumpInput();
+  /// Drain the OS input queue and dispatch click / hover / drag /
+  /// keyboard events through the widget tree. Idempotent within a
+  /// frame: a flag prevents double-processing if Update() is called
+  /// later in the same frame, and Update() will auto-call PumpInput
+  /// if the application hasn't already.
+  ///
+  /// Why expose this separately? Applications that rebuild their
+  /// widget tree on a dirty flag (like the xeed editor) want click
+  /// handlers to fire BEFORE the rebuild check, so the rebuild can
+  /// happen in the same frame as the click. Calling PumpInput at the
+  /// start of the application's render function and Update later
+  /// gives same-frame click->rebuild->render latency. Otherwise the
+  /// click handler runs inside Update, sets the dirty flag too late,
+  /// and the rebuild only happens on the NEXT frame.
+  void PumpInput();
 
-    /// Run one frame: poll input (if not already pumped), update
-    /// animations, compute layout, paint.
-    void Update();
+  /// Run one frame: poll input (if not already pumped), update
+  /// animations, compute layout, paint.
+  void Update();
 
-    /// Clean up all subsystems.
-    void Shutdown();
+  /// Clean up all subsystems.
+  void Shutdown();
 
-    // --- Access subsystems ---
-    Platform* platform() { return &platform_; }
-    RHI* rhi() { return &rhi_; }
-    Renderer2D& renderer() { return renderer_; }
-    TextEngine& text_engine() { return text_engine_; }
-    InputRouter& input() { return input_; }
-    Animator& animator() { return animator_; }
-    UguiBuilder& builder() { return builder_; }
+  // --- Access subsystems ---
+  Platform* platform() { return &platform_; }
+  RHI* rhi() { return &rhi_; }
+  Renderer2D& renderer() { return renderer_; }
+  TextEngine& text_engine() { return text_engine_; }
+  InputRouter& input() { return input_; }
+  Animator& animator() { return animator_; }
+  UguiBuilder& builder() { return builder_; }
 #if ULTRAGUI_AUDIO
-    AudioEngine& audio() { return audio_; }
+  AudioEngine& audio() { return audio_; }
 #endif
 
-    /// Get current time in seconds.
-    f64 time() const;
+  /// Get current time in seconds.
+  f64 time() const;
 
-    /// Get delta time since last frame.
-    f64 delta_time() const { return dt_; }
+  /// Get delta time since last frame.
+  f64 delta_time() const { return dt_; }
 
-    /// Set the swapchain clear color (background).
-    void set_clear_color(Color color) { config_.clear_color = color; }
+  /// Set the swapchain clear color (background).
+  void set_clear_color(Color color) { config_.clear_color = color; }
 
-    /// Find a widget by name in the tree (O(1) cached lookup).
-    Widget* FindWidget(const char* name) const;
+  /// Find a widget by name in the tree (O(1) cached lookup).
+  Widget* FindWidget(const char* name) const;
 
-    /// Invalidate the widget name cache (call after dynamically adding children).
-    void InvalidateWidgetCache() { widget_cache_dirty_ = true; }
+  /// Invalidate the widget name cache (call after dynamically adding children).
+  void InvalidateWidgetCache() { widget_cache_dirty_ = true; }
 
-    /// Load an SVG file and create a GPU texture.
-    /// If width/height are 0, uses the SVG's native dimensions.
-    RHITextureHandle LoadSvg(const char* path, u32 width = 0, u32 height = 0);
+  /// Load an SVG file and create a GPU texture.
+  /// If width/height are 0, uses the SVG's native dimensions.
+  RHITextureHandle LoadSvg(const char* path, u32 width = 0, u32 height = 0);
 
-    /// Load a .uganim vector animation. The returned animation is owned by
-    /// UIContext and automatically updated each frame. Returns nullptr on failure.
-    VectorAnimation* LoadAnim(const char* path, u32 width, u32 height);
+  /// Load a .uganim vector animation. The returned animation is owned by
+  /// UIContext and automatically updated each frame. Returns nullptr on
+  /// failure.
+  VectorAnimation* LoadAnim(const char* path, u32 width, u32 height);
 
 #if ULTRAGUI_LOTTIE
-    /// Load a Lottie animation. The returned animation is owned by UIContext
-    /// and automatically updated each frame. Returns nullptr on failure.
-    LottieAnimation* LoadLottie(const char* path, u32 width, u32 height);
+  /// Load a Lottie animation. The returned animation is owned by UIContext
+  /// and automatically updated each frame. Returns nullptr on failure.
+  LottieAnimation* LoadLottie(const char* path, u32 width, u32 height);
 #endif
 
 #if ULTRAGUI_VIDEO
-    /// Load an MPEG-1 video. The returned player is owned by UIContext and
-    /// automatically updated each frame. Returns nullptr on failure.
-    /// If ULTRAGUI_AUDIO is enabled, audio from the video will play through
-    /// a dedicated miniaudio device.
-    VideoPlayer* LoadVideo(const char* path);
+  /// Load an MPEG-1 video. The returned player is owned by UIContext and
+  /// automatically updated each frame. Returns nullptr on failure.
+  /// If ULTRAGUI_AUDIO is enabled, audio from the video will play through
+  /// a dedicated miniaudio device.
+  VideoPlayer* LoadVideo(const char* path);
 #endif
 
-    /// Create an offscreen render target (delegates to RHI).
-    RHITextureHandle CreateRenderTarget(u32 width, u32 height);
+  /// Create an offscreen render target (delegates to RHI).
+  RHITextureHandle CreateRenderTarget(u32 width, u32 height);
 
-    /// Queue a widget tree to be rendered to an offscreen target during the
-    /// next Update() call, before the main swapchain pass.
-    void QueueOffscreen(RHITextureHandle target, Widget* root, Color clear_color);
+  /// Queue a widget tree to be rendered to an offscreen target during the
+  /// next Update() call, before the main swapchain pass.
+  void QueueOffscreen(RHITextureHandle target, Widget* root, Color clear_color);
 
-    // --- Overlay system ---
+  // --- Overlay system ---
 
-    /// Show a widget as an overlay at the given screen position.
-    /// The widget floats above the normal widget tree.
-    void ShowOverlay(Widget* widget, Vec2 position);
+  /// Show a widget as an overlay at the given screen position.
+  /// The widget floats above the normal widget tree.
+  void ShowOverlay(Widget* widget, Vec2 position);
 
-    /// Hide a previously shown overlay widget.
-    void HideOverlay(Widget* widget);
+  /// Hide a previously shown overlay widget.
+  void HideOverlay(Widget* widget);
 
-    /// Custom paint callback for the swapchain pass. When set, replaces the
-    /// default compute_layout() + paint_tree() with the callback.
-    using PaintCallback = Function<void(Renderer2D&, RHI*)>;
-    void SetOnPaint(PaintCallback cb);
+  /// Custom paint callback for the swapchain pass. When set, replaces the
+  /// default compute_layout() + paint_tree() with the callback.
+  using PaintCallback = Function<void(Renderer2D&, RHI*)>;
+  void SetOnPaint(PaintCallback cb);
 
-    /// Apply a theme -- sets all theme tokens as CSS variables on the builder.
-    /// Variables take effect on the next LoadUi/LoadUiString call.
-    void SetTheme(const Theme& theme);
+  /// Apply a theme -- sets all theme tokens as CSS variables on the builder.
+  /// Variables take effect on the next LoadUi/LoadUiString call.
+  void SetTheme(const Theme& theme);
 
-    /// Get the current theme name (empty if no theme has been applied).
-    const String& theme_name() const { return current_theme_name_; }
+  /// Get the current theme name (empty if no theme has been applied).
+  const String& theme_name() const { return current_theme_name_; }
 
-private:
-    Platform platform_;
-    RHI rhi_;
-    Renderer2D renderer_;
-    TextEngine text_engine_;
-    LayoutEngine layout_engine_;
-    InputRouter input_;
-    Animator animator_;
-    ScriptRuntime script_;
-    UguiBuilder builder_;
+ private:
+  Platform platform_;
+  RHI rhi_;
+  Renderer2D renderer_;
+  TextEngine text_engine_;
+  LayoutEngine layout_engine_;
+  InputRouter input_;
+  Animator animator_;
+  ScriptRuntime script_;
+  UguiBuilder builder_;
 #if ULTRAGUI_AUDIO
-    AudioEngine audio_;
+  AudioEngine audio_;
 #endif
-    Vector<VectorAnimation*> vector_anims_;
+  Vector<VectorAnimation*> vector_anims_;
 #if ULTRAGUI_LOTTIE
-    Vector<LottieAnimation*> lottie_anims_;
+  Vector<LottieAnimation*> lottie_anims_;
 #endif
 #if ULTRAGUI_VIDEO
-    Vector<VideoPlayer*> video_players_;
+  Vector<VideoPlayer*> video_players_;
 #endif
 
-    Widget* root_ = nullptr;
-    FontHandle default_font_ = kInvalidFont;
-    UIConfig config_;
-    WidgetContext widget_ctx_;
+  Widget* root_ = nullptr;
+  FontHandle default_font_ = kInvalidFont;
+  UIConfig config_;
+  WidgetContext widget_ctx_;
 
-    f64 last_time_ = 0.0;
-    f64 dt_ = 0.0;
+  f64 last_time_ = 0.0;
+  f64 dt_ = 0.0;
 
-    Vector<LayoutNode> layout_nodes_;
-    bool owns_root_ = false; // true if root was created by load_ui
-    bool initialized_ = false;
-    // Flips true on PumpInput, false at the end of Update. Lets the
-    // application call PumpInput early in its frame for same-frame
-    // click->rebuild latency without double-processing input.
-    bool input_pumped_this_frame_ = false;
-    String current_theme_name_;
+  Vector<LayoutNode> layout_nodes_;
+  bool owns_root_ = false;  // true if root was created by load_ui
+  bool initialized_ = false;
+  // Flips true on PumpInput, false at the end of Update. Lets the
+  // application call PumpInput early in its frame for same-frame
+  // click->rebuild latency without double-processing input.
+  bool input_pumped_this_frame_ = false;
+  String current_theme_name_;
 
-    struct OffscreenPass {
-        RHITextureHandle target;
-        Widget* root;
-        Color clear_color;
-    };
-    Vector<OffscreenPass> offscreen_queue_;
-    PaintCallback on_paint_cb_;
+  struct OffscreenPass {
+    RHITextureHandle target;
+    Widget* root;
+    Color clear_color;
+  };
+  Vector<OffscreenPass> offscreen_queue_;
+  PaintCallback on_paint_cb_;
 
-    struct OverlayEntry {
-        Widget* widget = nullptr;
-        Vec2 position;
-    };
-    Vector<OverlayEntry> overlays_;
+  struct OverlayEntry {
+    Widget* widget = nullptr;
+    Vec2 position;
+  };
+  Vector<OverlayEntry> overlays_;
 
-    // Widget name -> pointer cache (O(1) lookup, rebuilt lazily).
-    mutable HashMap<String, Widget*> widget_cache_;
-    mutable bool widget_cache_dirty_ = true;
-    void RebuildWidgetCache() const;
-    static void CacheWidgetTree(Widget* w, HashMap<String, Widget*>& cache);
+  // Widget name -> pointer cache (O(1) lookup, rebuilt lazily).
+  mutable HashMap<String, Widget*> widget_cache_;
+  mutable bool widget_cache_dirty_ = true;
+  void RebuildWidgetCache() const;
+  static void CacheWidgetTree(Widget* w, HashMap<String, Widget*>& cache);
 
-    // Tooltip state
-    Widget* tooltip_target_ = nullptr;
-    bool tooltip_visible_ = false;
-    f64 tooltip_hover_start_ = 0.0;
-    static constexpr f64 kTooltipDelay = 0.5;
+  // Tooltip state
+  Widget* tooltip_target_ = nullptr;
+  bool tooltip_visible_ = false;
+  f64 tooltip_hover_start_ = 0.0;
+  static constexpr f64 kTooltipDelay = 0.5;
 
-    void UpdateTooltip();
-    void DrawTooltip();
+  void UpdateTooltip();
+  void DrawTooltip();
 };
 
-} // namespace ugui
+}  // namespace ugui
 
 #endif  // ULTRAGUI_UI_CONTEXT_H_

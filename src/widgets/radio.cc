@@ -76,8 +76,8 @@ void Radio::OnPaint(Renderer2D& renderer) {
 
   // Outer circle: always draw with border
   Color border_color = (s.border_color.a > 0.0f)
-                            ? s.border_color.WithAlpha(s.border_color.a * alpha)
-                            : Color(0.6f, 0.6f, 0.6f, alpha);
+                           ? s.border_color.WithAlpha(s.border_color.a * alpha)
+                           : Color(0.6f, 0.6f, 0.6f, alpha);
   f32 bw = std::max(s.border_width, 1.5f);
 
   if (is_selected) {
@@ -103,9 +103,9 @@ void Radio::OnPaint(Renderer2D& renderer) {
   auto* te = text_engine();
   FontHandle fh = effective_font();
   if (te && fh != kInvalidFont && !label_.empty()) {
-    auto run = te->Shape(fh, label_.c_str(), static_cast<u32>(label_.size()),
-                         s.font_size, s.letter_spacing,
-                         s.line_height_multiplier);
+    auto run =
+        te->Shape(fh, label_.c_str(), static_cast<u32>(label_.size()),
+                  s.font_size, s.letter_spacing, s.line_height_multiplier);
 
     f32 text_x = circle_x + circle_size + kGap;
     f32 text_y = content_rect_.y + (content_rect_.h - run.line_height) * 0.5f;

@@ -97,9 +97,9 @@ void Checkbox::OnPaint(Renderer2D& renderer) {
   auto* te = text_engine();
   FontHandle fh = effective_font();
   if (te && fh != kInvalidFont && !label_.empty()) {
-    auto run = te->Shape(fh, label_.c_str(), static_cast<u32>(label_.size()),
-                         s.font_size, s.letter_spacing,
-                         s.line_height_multiplier);
+    auto run =
+        te->Shape(fh, label_.c_str(), static_cast<u32>(label_.size()),
+                  s.font_size, s.letter_spacing, s.line_height_multiplier);
 
     f32 text_x = box_x + box_size + kGap;
     f32 text_y = content_rect_.y + (content_rect_.h - run.line_height) * 0.5f;
@@ -115,7 +115,8 @@ void Checkbox::OnPaint(Renderer2D& renderer) {
       renderer.DrawText(shadow_pos, run, shadow_color, te->atlas_texture());
     }
 
-    renderer.DrawText(Vec2{text_x, text_y}, run, text_color, te->atlas_texture());
+    renderer.DrawText(Vec2{text_x, text_y}, run, text_color,
+                      te->atlas_texture());
   }
 }
 

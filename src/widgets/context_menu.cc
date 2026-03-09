@@ -20,8 +20,7 @@ constexpr f32 kSeparatorPad = 4.0f;
 
 }  // namespace
 
-void ContextMenu::AddItem(const String& label,
-                          Function<void()> action) {
+void ContextMenu::AddItem(const String& label, Function<void()> action) {
   items_.push_back({label, std::move(action), false});
   MarkDirty();
 }
@@ -93,9 +92,8 @@ bool ContextMenu::OnClick() {
   // Walk items to find which row was clicked
   f32 y = content_rect_.y;
   for (i32 i = 0; i < static_cast<i32>(items_.size()); ++i) {
-    f32 item_h =
-        items_[i].separator ? (kSeparatorHeight + kSeparatorPad * 2.0f)
-                            : row_height;
+    f32 item_h = items_[i].separator ? (kSeparatorHeight + kSeparatorPad * 2.0f)
+                                     : row_height;
     if (!items_[i].separator && mouse.y >= y && mouse.y < y + item_h &&
         mouse.x >= rect_.x && mouse.x <= rect_.x + rect_.w) {
       if (items_[i].action) {
@@ -128,8 +126,7 @@ void ContextMenu::Measure(f32& out_width, f32& out_height) {
       if (te && fh != kInvalidFont && !item.label.empty()) {
         auto run = te->Shape(fh, item.label.c_str(),
                              static_cast<u32>(item.label.size()), font_size,
-                             letter_sp,
-                             style_.line_height_multiplier);
+                             letter_sp, style_.line_height_multiplier);
         max_width = std::max(max_width, run.total_advance);
       }
     }
@@ -156,12 +153,13 @@ void ContextMenu::OnPaint(Renderer2D& renderer) {
   // Determine hover index from mouse position
   hover_index_ = -1;
   if (context_ && context_->platform) {
-    Vec2 mouse = InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
+    Vec2 mouse =
+        InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
     f32 y = content_rect_.y;
     for (i32 i = 0; i < static_cast<i32>(items_.size()); ++i) {
-      f32 item_h =
-          items_[i].separator ? (kSeparatorHeight + kSeparatorPad * 2.0f)
-                              : row_height;
+      f32 item_h = items_[i].separator
+                       ? (kSeparatorHeight + kSeparatorPad * 2.0f)
+                       : row_height;
       if (!items_[i].separator && mouse.y >= y && mouse.y < y + item_h &&
           mouse.x >= rect_.x && mouse.x <= rect_.x + rect_.w) {
         hover_index_ = i;
@@ -184,10 +182,9 @@ void ContextMenu::OnPaint(Renderer2D& renderer) {
   for (i32 i = 0; i < static_cast<i32>(items_.size()); ++i) {
     if (items_[i].separator) {
       f32 sep_y = y + kSeparatorPad;
-      renderer.DrawRect(
-          {content_rect_.x + kRowHPadding * 0.5f, sep_y,
-           content_rect_.w - kRowHPadding, kSeparatorHeight},
-          sep_color);
+      renderer.DrawRect({content_rect_.x + kRowHPadding * 0.5f, sep_y,
+                         content_rect_.w - kRowHPadding, kSeparatorHeight},
+                        sep_color);
       y += kSeparatorHeight + kSeparatorPad * 2.0f;
       continue;
     }
@@ -196,9 +193,8 @@ void ContextMenu::OnPaint(Renderer2D& renderer) {
     // edge to edge instead of stopping short.
     if (i == hover_index_) {
       u32 row_radii = Vertex2D::PackRadii(4.0f);
-      renderer.DrawRect(
-          {content_rect_.x, y, content_rect_.w, row_height},
-          highlight, row_radii);
+      renderer.DrawRect({content_rect_.x, y, content_rect_.w, row_height},
+                        highlight, row_radii);
     }
 
     // Draw label text aligned with the same kRowHPadding the menu was

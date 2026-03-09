@@ -9,6 +9,6 @@ class AudioEngine;
 /// Register audio Lua bindings (ugui.play_sound, ugui.stop_sound, etc.)
 void RegisterAudioLua(ScriptRuntime& rt, AudioEngine& audio);
 
-} // namespace ugui
+}  // namespace ugui
 
 #endif  // ULTRAGUI_SCRIPTING_LUA_AUDIO_H_

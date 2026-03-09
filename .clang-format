@@ -1,48 +1,16 @@
 ---
 Language: Cpp
-BasedOnStyle: LLVM
-IndentWidth: 4
-TabWidth: 4
-UseTab: Never
-ColumnLimit: 100
-AccessModifierOffset: -4
+BasedOnStyle: Google
 
-# Braces
-BreakBeforeBraces: Attach
-AllowShortFunctionsOnASingleLine: Inline
-AllowShortIfStatementsOnASingleLine: Never
-AllowShortLoopsOnASingleLine: false
-
-# Alignment
-AlignAfterOpenBracket: Align
-AlignConsecutiveAssignments: false
-AlignConsecutiveDeclarations: false
-AlignOperands: true
-AlignTrailingComments: true
-
-# Includes
+# Keep project headers grouped ahead of system/third-party includes.
 IncludeBlocks: Regroup
 IncludeCategories:
   - Regex: '^<ultragui/'
     Priority: 1
-  - Regex: '^<(vulkan|d3d12|dxgi)/'
+  - Regex: '^<(vulkan|d3d12|d3d11|dxgi)/'
     Priority: 2
   - Regex: '^<'
     Priority: 3
   - Regex: '^"'
     Priority: 4
-
-# Pointers & References
-PointerAlignment: Left
-
-# Namespaces
-NamespaceIndentation: None
-CompactNamespaces: false
-FixNamespaceComments: true
-
-# Other
-SortIncludes: true
-ReflowComments: true
-SpaceAfterCStyleCast: false
-SpaceBeforeParens: ControlStatements
 ...

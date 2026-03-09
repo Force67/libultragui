@@ -28,8 +28,7 @@ Widget* Dropdown::HitTest(Vec2 point) {
     f32 row_height = s.font_size * 1.5f;
     f32 list_h = row_height * static_cast<f32>(options_.size());
     Rect expanded = {rect_.x, rect_.y, rect_.w, rect_.h + list_h};
-    if (expanded.contains(point))
-      return this;
+    if (expanded.contains(point)) return this;
   }
   return Widget::HitTest(point);
 }
@@ -47,16 +46,14 @@ bool Dropdown::OnClick() {
 }
 
 void Dropdown::OnUpdate(f64) {
-  if (!open_ || options_.empty() || !context_ || !context_->platform)
-    return;
+  if (!open_ || options_.empty() || !context_ || !context_->platform) return;
 
   auto& queue = context_->platform->input_queue();
 
   // Check for mouse button press events while open
   for (u32 i = 0; i < queue.button_count; ++i) {
     auto& evt = queue.button_events[i];
-    if (!evt.pressed)
-      continue;
+    if (!evt.pressed) continue;
 
     auto s = ComputedStyle();
     s.Scale(ui_scale());
@@ -65,13 +62,12 @@ void Dropdown::OnUpdate(f64) {
     f32 list_bottom = list_top + row_height * static_cast<f32>(options_.size());
 
     Vec2 pos = InputToLayoutPoint(evt.position);
-    if (pos.y >= list_top && pos.y < list_bottom &&
-        pos.x >= rect_.x && pos.x <= rect_.x + rect_.w) {
+    if (pos.y >= list_top && pos.y < list_bottom && pos.x >= rect_.x &&
+        pos.x <= rect_.x + rect_.w) {
       i32 idx = static_cast<i32>((pos.y - list_top) / row_height);
       if (idx >= 0 && idx < static_cast<i32>(options_.size())) {
         selected_ = idx;
-        if (on_change_)
-          on_change_(selected_, options_[selected_]);
+        if (on_change_) on_change_(selected_, options_[selected_]);
       }
     }
     // Close on any click while open
@@ -101,8 +97,7 @@ void Dropdown::Measure(f32& out_width, f32& out_height) {
   f32 max_width = 0.0f;
   for (auto& opt : options_) {
     auto run = te->Shape(fh, opt.c_str(), static_cast<u32>(opt.size()),
-                         font_size, letter_sp,
-                         style_.line_height_multiplier);
+                         font_size, letter_sp, style_.line_height_multiplier);
     max_width = std::max(max_width, run.total_advance);
   }
 
@@ -135,12 +130,12 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
 
   // Determine hover index from mouse position when open
   if (open_ && context_ && context_->platform) {
-    Vec2 mouse = InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
+    Vec2 mouse =
+        InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
     f32 list_top = rect_.y + rect_.h;
-    f32 list_bottom =
-        list_top + row_height * static_cast<f32>(options_.size());
-    if (mouse.y >= list_top && mouse.y < list_bottom &&
-        mouse.x >= rect_.x && mouse.x <= rect_.x + rect_.w) {
+    f32 list_bottom = list_top + row_height * static_cast<f32>(options_.size());
+    if (mouse.y >= list_top && mouse.y < list_bottom && mouse.x >= rect_.x &&
+        mouse.x <= rect_.x + rect_.w) {
       hover_index_ = static_cast<i32>((mouse.y - list_top) / row_height);
     } else {
       hover_index_ = -1;
@@ -155,20 +150,18 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
           ? options_[selected_]
           : "Select...";
 
-  auto run = te->Shape(fh, display_text.c_str(),
-                       static_cast<u32>(display_text.size()), font_size,
-                       s.letter_spacing, s.line_height_multiplier);
+  auto run =
+      te->Shape(fh, display_text.c_str(), static_cast<u32>(display_text.size()),
+                font_size, s.letter_spacing, s.line_height_multiplier);
 
   f32 text_x = content_rect_.x + kHPadding;
-  f32 text_y =
-      content_rect_.y + (content_rect_.h - run.line_height) * 0.5f;
+  f32 text_y = content_rect_.y + (content_rect_.h - run.line_height) * 0.5f;
 
-  Color text_color = (selected_ >= 0)
-                         ? s.text_color.WithAlpha(s.text_color.a * alpha)
-                         : s.text_color.WithAlpha(s.text_color.a * alpha * 0.5f);
+  Color text_color =
+      (selected_ >= 0) ? s.text_color.WithAlpha(s.text_color.a * alpha)
+                       : s.text_color.WithAlpha(s.text_color.a * alpha * 0.5f);
 
-  renderer.DrawText(Vec2{text_x, text_y}, run, text_color,
-                    te->atlas_texture());
+  renderer.DrawText(Vec2{text_x, text_y}, run, text_color, te->atlas_texture());
 
   // --- Draw chevron indicator on the right side ---
   f32 chevron_x = content_rect_.x + content_rect_.w - kChevronWidth;
@@ -180,29 +173,25 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
   if (open_) {
     // Upward chevron "^"
     // Left stroke: bottom-left to center-top
-    renderer.DrawRect(
-        {chevron_x + 2.0f, chevron_cy - chevron_size * 0.3f,
-         chevron_size * 0.8f, line_thickness},
-        chevron_color);
+    renderer.DrawRect({chevron_x + 2.0f, chevron_cy - chevron_size * 0.3f,
+                       chevron_size * 0.8f, line_thickness},
+                      chevron_color);
     // Right stroke: center-top to bottom-right
     renderer.DrawRect(
         {chevron_x + 2.0f + chevron_size * 0.8f,
-         chevron_cy - chevron_size * 0.3f, chevron_size * 0.8f,
-         line_thickness},
+         chevron_cy - chevron_size * 0.3f, chevron_size * 0.8f, line_thickness},
         chevron_color);
   } else {
     // Downward chevron "v"
     // Left stroke
-    renderer.DrawRect(
-        {chevron_x + 2.0f, chevron_cy - line_thickness * 0.5f,
-         chevron_size * 0.8f, line_thickness},
-        chevron_color);
+    renderer.DrawRect({chevron_x + 2.0f, chevron_cy - line_thickness * 0.5f,
+                       chevron_size * 0.8f, line_thickness},
+                      chevron_color);
     // Right stroke
-    renderer.DrawRect(
-        {chevron_x + 2.0f + chevron_size * 0.8f,
-         chevron_cy - line_thickness * 0.5f, chevron_size * 0.8f,
-         line_thickness},
-        chevron_color);
+    renderer.DrawRect({chevron_x + 2.0f + chevron_size * 0.8f,
+                       chevron_cy - line_thickness * 0.5f, chevron_size * 0.8f,
+                       line_thickness},
+                      chevron_color);
   }
 
   // --- Draw option list when open ---
@@ -215,18 +204,19 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
 
   // List background
   Color list_bg = (s.background.a > 0.0f)
-                      ? s.background.WithAlpha(Clamp(s.background.a + 0.1f, 0.0f, 1.0f) * alpha)
+                      ? s.background.WithAlpha(
+                            Clamp(s.background.a + 0.1f, 0.0f, 1.0f) * alpha)
                       : Color(0.12f, 0.12f, 0.2f, 0.95f * alpha);
-  u32 list_radii = Vertex2D::PackRadii(0.0f, 0.0f, s.corner_radius_br,
-                                       s.corner_radius_bl);
+  u32 list_radii =
+      Vertex2D::PackRadii(0.0f, 0.0f, s.corner_radius_br, s.corner_radius_bl);
   renderer.DrawRect({list_x, list_y, list_w, list_h}, list_bg, list_radii);
 
   // List border
   if (s.border_color.a > 0.0f && s.border_width > 0.0f) {
     Color border = s.border_color.WithAlpha(s.border_color.a * alpha);
     renderer.DrawBorderedRect({list_x, list_y, list_w, list_h},
-                              Color::Transparent(), border,
-                              s.border_width, list_radii);
+                              Color::Transparent(), border, s.border_width,
+                              list_radii);
   }
 
   // Draw each option row
@@ -238,10 +228,8 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
     bool is_selected = (i == selected_);
 
     if (is_hovered || is_selected) {
-      Color highlight =
-          is_hovered
-              ? Color(1.0f, 1.0f, 1.0f, 0.1f * alpha)
-              : s.text_color.WithAlpha(0.15f * alpha);
+      Color highlight = is_hovered ? Color(1.0f, 1.0f, 1.0f, 0.1f * alpha)
+                                   : s.text_color.WithAlpha(0.15f * alpha);
       // Round bottom corners on last item
       u32 row_radii = 0;
       if (i == static_cast<i32>(options_.size()) - 1) {
@@ -249,14 +237,13 @@ void Dropdown::OnPaint(Renderer2D& renderer) {
                                         s.corner_radius_bl);
       }
       renderer.DrawRect({list_x, row_y, list_w, row_height}, highlight,
-                         row_radii);
+                        row_radii);
     }
 
     // Draw option text
     auto opt_run =
-        te->Shape(fh, options_[i].c_str(),
-                  static_cast<u32>(options_[i].size()), font_size,
-                  s.letter_spacing, s.line_height_multiplier);
+        te->Shape(fh, options_[i].c_str(), static_cast<u32>(options_[i].size()),
+                  font_size, s.letter_spacing, s.line_height_multiplier);
 
     f32 opt_x = list_x + kHPadding + s.padding.left;
     f32 opt_y = row_y + (row_height - opt_run.line_height) * 0.5f;

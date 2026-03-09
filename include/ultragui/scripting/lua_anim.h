@@ -15,6 +15,6 @@ void RegisterAnimLua(
     Function<VectorAnimation*(const char*, unsigned, unsigned)> loader,
     Function<Widget*(const char*)> find_widget);
 
-} // namespace ugui
+}  // namespace ugui
 
 #endif  // ULTRAGUI_SCRIPTING_LUA_ANIM_H_
