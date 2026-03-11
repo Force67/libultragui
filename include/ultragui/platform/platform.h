@@ -48,7 +48,9 @@ class Platform {
   const char* clipboard_text() const;
   void set_clipboard_text(const char* text);
 
-  /// Open a URL in the system's default browser.
+  /// Open a URL in the system's default browser. A default implementation is
+  /// compiled when the ULTRAGUI_DEFAULT_OPEN_URL CMake option is ON (default);
+  /// turn it off to link your own ugui::Platform::OpenURL.
   static void OpenURL(const char* url);
 
   /// Access the platform's input event queue.

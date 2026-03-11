@@ -21,6 +21,7 @@ option(ULTRAGUI_AUDIO "Enable audio engine (miniaudio)" ON)
 option(ULTRAGUI_LOTTIE "Enable Lottie animation support (rlottie)" ON)
 option(ULTRAGUI_VIDEO "Enable MPEG-1 video playback (pl_mpeg)" ON)
 option(ULTRAGUI_LUA "Enable built-in Lua scripting runtime" ON)
+option(ULTRAGUI_DEFAULT_OPEN_URL "Compile a default Platform::OpenURL implementation" ON)
 
 # Compiler warnings
 add_library(ultragui_warnings INTERFACE)
@@ -195,6 +196,10 @@ if(ULTRAGUI_LUA)
     )
 endif()
 
+if(ULTRAGUI_DEFAULT_OPEN_URL)
+    list(APPEND ULTRAGUI_SOURCES src/platform/platform_open_url.cc)
+endif()
+
 if(ULTRAGUI_AUDIO)
     list(APPEND ULTRAGUI_SOURCES src/audio/audio.cc)
     if(ULTRAGUI_LUA)
@@ -278,6 +283,10 @@ endif()
 
 if(ULTRAGUI_LUA)
     target_compile_definitions(ultragui PUBLIC ULTRAGUI_LUA=1)
+endif()
+
+if(ULTRAGUI_DEFAULT_OPEN_URL AND WIN32)
+    target_link_libraries(ultragui PRIVATE shell32)
 endif()
 
 if(ULTRAGUI_LOTTIE)
