@@ -1,6 +1,7 @@
 #ifndef ULTRAGUI_VIDEO_VIDEO_H_
 #define ULTRAGUI_VIDEO_VIDEO_H_
 
+#include <ultragui/ultragui_config.h>
 #include <ultragui/core/types.h>
 #include <ultragui/rhi/rhi_types.h>
 

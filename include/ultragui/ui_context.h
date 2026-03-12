@@ -1,6 +1,8 @@
 #ifndef ULTRAGUI_UI_CONTEXT_H_
 #define ULTRAGUI_UI_CONTEXT_H_
 
+#include <ultragui/ultragui_config.h>
+
 #include <ultragui/animation/animator.h>
 #include <ultragui/layout/layout_tree.h>
 #include <ultragui/render/paint.h>

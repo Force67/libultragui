@@ -5,6 +5,8 @@
 ///
 /// Umbrella header. Includes core types and the UIContext for convenience.
 
+#include <ultragui/ultragui_config.h>
+
 #include <ultragui/core/arena.h>
 #include <ultragui/core/color.h>
 #include <ultragui/core/config.h>

@@ -252,16 +252,29 @@ target_link_libraries(ultragui
         yogacore
 )
 
+# Feature flags: always defined to 0/1 so the built library and the public
+# headers (include/ultragui/ultragui_config.h) always agree. The option(...)
+# switches above are authoritative.
+target_compile_definitions(ultragui PUBLIC
+    ULTRAGUI_BACKEND_VULKAN=$<BOOL:${ULTRAGUI_BACKEND_VULKAN}>
+    ULTRAGUI_BACKEND_D3D12=$<BOOL:${ULTRAGUI_BACKEND_D3D12}>
+    ULTRAGUI_BACKEND_D3D11=$<BOOL:${ULTRAGUI_BACKEND_D3D11}>
+    ULTRAGUI_BACKEND_OPENGL=$<BOOL:${ULTRAGUI_BACKEND_OPENGL}>
+    ULTRAGUI_LUA=$<BOOL:${ULTRAGUI_LUA}>
+    ULTRAGUI_AUDIO=$<BOOL:${ULTRAGUI_AUDIO}>
+    ULTRAGUI_LOTTIE=$<BOOL:${ULTRAGUI_LOTTIE}>
+    ULTRAGUI_VIDEO=$<BOOL:${ULTRAGUI_VIDEO}>
+    ULTRAGUI_DEFAULT_OPEN_URL=$<BOOL:${ULTRAGUI_DEFAULT_OPEN_URL}>
+)
+
 if(ULTRAGUI_BACKEND_VULKAN)
     target_link_libraries(ultragui PRIVATE Vulkan::Vulkan)
-    target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_VULKAN=1)
 endif()
 
 if(ULTRAGUI_BACKEND_D3D12)
     pkg_check_modules(VKD3D REQUIRED IMPORTED_TARGET libvkd3d)
     pkg_check_modules(VKD3D_UTILS REQUIRED IMPORTED_TARGET libvkd3d-utils)
     target_link_libraries(ultragui PRIVATE PkgConfig::VKD3D PkgConfig::VKD3D_UTILS Vulkan::Vulkan)
-    target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_D3D12=1)
     target_compile_definitions(ultragui PRIVATE
         ULTRAGUI_HLSL_SHADER_DIR="${HLSL_OUT_DIR}"
     )
@@ -272,17 +285,11 @@ if(ULTRAGUI_BACKEND_D3D11)
     pkg_check_modules(DXVK_DXGI REQUIRED IMPORTED_TARGET dxvk-dxgi)
     pkg_check_modules(VKD3D_UTILS_D3D11 REQUIRED IMPORTED_TARGET libvkd3d-utils)
     target_link_libraries(ultragui PRIVATE PkgConfig::DXVK_D3D11 PkgConfig::DXVK_DXGI PkgConfig::VKD3D_UTILS_D3D11)
-    target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_D3D11=1)
 endif()
 
 if(ULTRAGUI_BACKEND_OPENGL)
     find_package(OpenGL REQUIRED)
     target_link_libraries(ultragui PRIVATE OpenGL::GL)
-    target_compile_definitions(ultragui PUBLIC ULTRAGUI_BACKEND_OPENGL=1)
-endif()
-
-if(ULTRAGUI_LUA)
-    target_compile_definitions(ultragui PUBLIC ULTRAGUI_LUA=1)
 endif()
 
 if(ULTRAGUI_DEFAULT_OPEN_URL AND WIN32)
@@ -291,11 +298,9 @@ endif()
 
 if(ULTRAGUI_LOTTIE)
     target_link_libraries(ultragui PRIVATE rlottie)
-    target_compile_definitions(ultragui PUBLIC ULTRAGUI_LOTTIE=1)
 endif()
 
 if(ULTRAGUI_VIDEO)
-    target_compile_definitions(ultragui PUBLIC ULTRAGUI_VIDEO=1)
     # pl_mpeg is header-only, no linking needed.
     # When ULTRAGUI_AUDIO is also ON, video.cc includes miniaudio.h for audio
     # bridge -- the include path is already provided by the AUDIO block below.
@@ -303,7 +308,6 @@ if(ULTRAGUI_VIDEO)
 endif()
 
 if(ULTRAGUI_AUDIO)
-    target_compile_definitions(ultragui PUBLIC ULTRAGUI_AUDIO=1)
     # miniaudio uses dlopen for audio backends on Linux, pthread for threading
     if(UNIX AND NOT APPLE)
         target_link_libraries(ultragui PRIVATE pthread m dl)

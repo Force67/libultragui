@@ -1,6 +1,8 @@
 #ifndef ULTRAGUI_SCRIPTING_SCRIPT_RUNTIME_H_
 #define ULTRAGUI_SCRIPTING_SCRIPT_RUNTIME_H_
 
+#include <ultragui/ultragui_config.h>
+
 #if ULTRAGUI_LUA
 #include <ultragui/core/types.h>
 struct lua_State;
