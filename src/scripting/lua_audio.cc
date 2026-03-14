@@ -9,7 +9,7 @@ extern "C" {
 
 namespace ugui {
 
-void RegisterAudioLua(ScriptRuntime& lua, AudioEngine& audio) {
+void RegisterAudioLua(ScriptRuntime& lua, AudioBackend& audio) {
   // ugui.play_sound(path [, volume [, loop]]) -> handle
   lua.RegisterFunction("play_sound", [&audio](lua_State* L) -> int {
     const char* path = luaL_checkstring(L, 1);

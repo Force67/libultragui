@@ -216,7 +216,7 @@ VideoPlayer& VideoPlayer::operator=(VideoPlayer&& other) noexcept {
   return *this;
 }
 
-bool VideoPlayer::Load(RHI* rhi, const char* path, AudioEngine* audio) {
+bool VideoPlayer::Load(RHI* rhi, const char* path, AudioBackend* audio) {
   if (impl_) Unload();
 
   plm_t* plm = plm_create_with_filename(path);

@@ -1,4 +1,3 @@
-#define MINIAUDIO_IMPLEMENTATION
 #include <ultragui/audio/audio.h>
 #include <ultragui/core/config.h>
 
@@ -286,5 +285,7 @@ void AudioEngine::ResumeAll() {
     if (s.active && !s.preloaded) ma_sound_start(&s.sound);
   }
 }
+
+AudioBackend* CreateDefaultAudioBackend() { return new AudioEngine(); }
 
 }  // namespace ugui

@@ -1,14 +1,14 @@
 #ifndef ULTRAGUI_VIDEO_VIDEO_H_
 #define ULTRAGUI_VIDEO_VIDEO_H_
 
-#include <ultragui/ultragui_config.h>
 #include <ultragui/core/types.h>
 #include <ultragui/rhi/rhi_types.h>
+#include <ultragui/ultragui_config.h>
 
 namespace ugui {
 
 class RHI;
-class AudioEngine;
+class AudioBackend;
 
 /// MPEG-1 video player backed by pl_mpeg.
 /// Decodes video frames on CPU, uploads YCbCr planes as R8 textures, and
@@ -36,7 +36,7 @@ class VideoPlayer {
   /// Load an MPEG-1 (.mpg) file and prepare for playback.
   /// If audio is non-null and the file has an audio stream, audio will
   /// be decoded and played back via miniaudio.
-  bool Load(RHI* rhi, const char* path, AudioEngine* audio = nullptr);
+  bool Load(RHI* rhi, const char* path, AudioBackend* audio = nullptr);
 
   /// Advance playback by dt seconds. Decodes video frame and uploads to GPU.
   void Update(f64 dt);

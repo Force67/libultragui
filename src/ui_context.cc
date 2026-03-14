@@ -96,10 +96,18 @@ bool UIContext::Init(const UIConfig& config) {
   // Scripting runtime
   script_.Init();
 
+#if ULTRAGUI_AUDIO
+  // Use the injected backend if one was set, otherwise the bundled default.
+  if (!audio_) {
+    audio_ = CreateDefaultAudioBackend();
+    owns_audio_ = true;
+  }
+#endif
+
 #if ULTRAGUI_LUA
   {
 #if ULTRAGUI_AUDIO
-    RegisterAudioLua(script_, audio_);
+    RegisterAudioLua(script_, *audio_);
 #endif
 #if ULTRAGUI_LOTTIE
     RegisterLottieLua(
@@ -125,7 +133,7 @@ bool UIContext::Init(const UIConfig& config) {
 #endif
 
 #if ULTRAGUI_AUDIO
-  if (!audio_.Init()) {
+  if (!audio_->Init()) {
     std::fprintf(stderr, "ultragui: audio init failed (non-fatal)\n");
   }
 #endif
@@ -557,7 +565,12 @@ void UIContext::Shutdown() {
   video_players_.clear();
 #endif
 #if ULTRAGUI_AUDIO
-  audio_.Shutdown();
+  if (audio_) {
+    audio_->Shutdown();
+    if (owns_audio_) delete audio_;
+    audio_ = nullptr;
+    owns_audio_ = false;
+  }
 #endif
   script_.Shutdown();
   renderer_.Shutdown();
@@ -567,6 +580,14 @@ void UIContext::Shutdown() {
 
   initialized_ = false;
 }
+
+#if ULTRAGUI_AUDIO
+void UIContext::set_audio(AudioBackend* backend) {
+  if (owns_audio_) delete audio_;
+  audio_ = backend;
+  owns_audio_ = false;
+}
+#endif
 
 RHITextureHandle UIContext::LoadSvg(const char* path, u32 width, u32 height) {
   return LoadSvgTexture(&rhi_, path, width, height);
@@ -598,9 +619,9 @@ LottieAnimation* UIContext::LoadLottie(const char* path, u32 width,
 #if ULTRAGUI_VIDEO
 VideoPlayer* UIContext::LoadVideo(const char* path) {
   auto* vid = new VideoPlayer();
-  AudioEngine* audio_ptr = nullptr;
+  AudioBackend* audio_ptr = nullptr;
 #if ULTRAGUI_AUDIO
-  audio_ptr = &audio_;
+  audio_ptr = audio_;
 #endif
   if (!vid->Load(&rhi_, path, audio_ptr)) {
     delete vid;

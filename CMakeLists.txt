@@ -142,6 +142,8 @@ else()
 endif()
 set(ULTRAGUI_SCRIPT_SOURCE "${_default_script_src}"
     CACHE FILEPATH "Script runtime implementation source file")
+set(ULTRAGUI_AUDIO_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/audio/audio.cc"
+    CACHE FILEPATH "Audio backend implementation source file (defines CreateDefaultAudioBackend)")
 
 # --- Core library ---
 set(ULTRAGUI_SOURCES
@@ -201,7 +203,12 @@ if(ULTRAGUI_DEFAULT_OPEN_URL)
 endif()
 
 if(ULTRAGUI_AUDIO)
-    list(APPEND ULTRAGUI_SOURCES src/audio/audio.cc)
+    list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_AUDIO_SOURCE})
+    # miniaudio's implementation is its own TU so the video audio bridge still
+    # links when ULTRAGUI_AUDIO_SOURCE is swapped for a custom backend.
+    if(ULTRAGUI_AUDIO_SOURCE STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/src/audio/audio.cc" OR ULTRAGUI_VIDEO)
+        list(APPEND ULTRAGUI_SOURCES src/audio/miniaudio_impl.cc)
+    endif()
     if(ULTRAGUI_LUA)
         list(APPEND ULTRAGUI_SOURCES src/scripting/lua_audio.cc)
     endif()

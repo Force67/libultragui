@@ -1,11 +1,10 @@
 #ifndef ULTRAGUI_UI_CONTEXT_H_
 #define ULTRAGUI_UI_CONTEXT_H_
 
-#include <ultragui/ultragui_config.h>
-
 #include <ultragui/animation/animator.h>
 #include <ultragui/layout/layout_tree.h>
 #include <ultragui/render/paint.h>
+#include <ultragui/ultragui_config.h>
 #include <ultragui/widgets/widget_tree.h>
 #if ULTRAGUI_AUDIO
 #include <ultragui/audio/audio.h>
@@ -136,7 +135,13 @@ class UIContext {
   Animator& animator() { return animator_; }
   UguiBuilder& builder() { return builder_; }
 #if ULTRAGUI_AUDIO
-  AudioEngine& audio() { return audio_; }
+  /// The active audio backend. Valid after Init(); defaults to the bundled
+  /// miniaudio engine unless a backend was injected via set_audio().
+  AudioBackend& audio() { return *audio_; }
+
+  /// Inject a custom audio backend. Call before Init(). The caller retains
+  /// ownership (UIContext will not delete an injected backend).
+  void set_audio(AudioBackend* backend);
 #endif
 
   /// Get current time in seconds.
@@ -216,7 +221,8 @@ class UIContext {
   ScriptRuntime script_;
   UguiBuilder builder_;
 #if ULTRAGUI_AUDIO
-  AudioEngine audio_;
+  AudioBackend* audio_ = nullptr;
+  bool owns_audio_ = false;  // true when audio_ is the default backend we made
 #endif
   Vector<VectorAnimation*> vector_anims_;
 #if ULTRAGUI_LOTTIE

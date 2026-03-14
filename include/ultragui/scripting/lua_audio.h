@@ -4,10 +4,10 @@
 namespace ugui {
 
 class ScriptRuntime;
-class AudioEngine;
+class AudioBackend;
 
 /// Register audio Lua bindings (ugui.play_sound, ugui.stop_sound, etc.)
-void RegisterAudioLua(ScriptRuntime& rt, AudioEngine& audio);
+void RegisterAudioLua(ScriptRuntime& rt, AudioBackend& audio);
 
 }  // namespace ugui
 
