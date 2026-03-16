@@ -9,6 +9,7 @@ namespace ugui {
 
 struct Platform::Impl {
   GLFWwindow* window = nullptr;
+  bool external = false;  // window owned by the host (embedding)
   InputQueue queue;
 
   static void glfw_mouse_pos_cb(GLFWwindow* window, double x, double y) {
@@ -45,29 +46,35 @@ Platform::Platform() : impl_(new Impl()) {}
 Platform::~Platform() { delete impl_; }
 
 bool Platform::Init(const WindowConfig& config) {
-  if (!glfwInit()) {
-    std::fprintf(stderr, "ultragui: glfwInit() failed\n");
-    return false;
-  }
-
-  if (config.opengl) {
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-    glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_TRUE);
+  if (config.external_window) {
+    // Embedding: the host already created and owns the window/context.
+    impl_->window = static_cast<GLFWwindow*>(config.external_window);
+    impl_->external = true;
   } else {
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  }
-  glfwWindowHint(GLFW_RESIZABLE, config.resizable ? GLFW_TRUE : GLFW_FALSE);
+    if (!glfwInit()) {
+      std::fprintf(stderr, "ultragui: glfwInit() failed\n");
+      return false;
+    }
 
-  impl_->window = glfwCreateWindow(config.width, config.height, config.title,
-                                   nullptr, nullptr);
-  if (!impl_->window) {
-    std::fprintf(stderr, "ultragui: glfwCreateWindow() failed\n");
-    glfwTerminate();
-    return false;
+    if (config.opengl) {
+      glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
+      glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+      glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+      glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+      glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+      glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_TRUE);
+    } else {
+      glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    }
+    glfwWindowHint(GLFW_RESIZABLE, config.resizable ? GLFW_TRUE : GLFW_FALSE);
+
+    impl_->window = glfwCreateWindow(config.width, config.height, config.title,
+                                     nullptr, nullptr);
+    if (!impl_->window) {
+      std::fprintf(stderr, "ultragui: glfwCreateWindow() failed\n");
+      glfwTerminate();
+      return false;
+    }
   }
 
   // Install input callbacks
@@ -82,6 +89,11 @@ bool Platform::Init(const WindowConfig& config) {
 }
 
 void Platform::Shutdown() {
+  // When embedding, the host owns the window and GLFW lifecycle.
+  if (impl_->external) {
+    impl_->window = nullptr;
+    return;
+  }
   if (impl_->window) {
     glfwDestroyWindow(impl_->window);
     impl_->window = nullptr;

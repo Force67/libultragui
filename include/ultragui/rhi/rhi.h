@@ -16,6 +16,11 @@ struct RHIConfig {
   bool validation = true;
   bool vsync = true;
   const char* shader_dir = nullptr;
+  /// Embedded mode: the host owns the frame. The RHI renders into the existing
+  /// (host) surface without clearing it on BeginFrame or presenting on
+  /// EndFrame; the host is responsible for clearing and presenting. Used when
+  /// dropping ultragui on top of an application's own render pipeline.
+  bool embedded = false;
 };
 
 /// Concrete GPU abstraction with link-time swappable implementation.

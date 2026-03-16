@@ -60,6 +60,7 @@ bool UIContext::Init(const UIConfig& config) {
   wcfg.title = config.title;
   wcfg.resizable = config.resizable;
   wcfg.vsync = config.vsync;
+  wcfg.external_window = config.external_window;
 #if ULTRAGUI_BACKEND_OPENGL
   wcfg.opengl = true;
 #endif
@@ -75,6 +76,7 @@ bool UIContext::Init(const UIConfig& config) {
   rcfg.validation = config.validation;
   rcfg.vsync = config.vsync;
   rcfg.shader_dir = config.shader_dir;
+  rcfg.embedded = config.embedded;
 
   if (!rhi_.Init(rcfg)) {
     std::fprintf(stderr, "ultragui: failed to initialize Vulkan RHI\n");

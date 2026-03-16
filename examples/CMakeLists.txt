@@ -29,6 +29,14 @@ target_compile_definitions(ultragui_game_overlay PRIVATE
 )
 add_dependencies(ultragui_game_overlay ultragui_shaders)
 
+# Embedding sample: host owns the window + GL pipeline, ultragui composites on
+# top. Requires the OpenGL backend (host shares its GL context with the RHI).
+if(ULTRAGUI_BACKEND_OPENGL)
+    find_package(OpenGL REQUIRED)
+    add_executable(ultragui_embed_gl embed_gl/main.cc)
+    target_link_libraries(ultragui_embed_gl PRIVATE ultragui glfw OpenGL::GL)
+endif()
+
 if(ULTRAGUI_VIDEO)
     add_executable(ultragui_video_demo video_demo/main.cc)
     target_link_libraries(ultragui_video_demo PRIVATE ultragui glfw)

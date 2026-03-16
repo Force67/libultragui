@@ -51,6 +51,13 @@ struct UIConfig {
   ViewportScaleMode scale_mode = ViewportScaleMode::kNone;
   f32 design_width = 1280.0f;
   f32 design_height = 720.0f;
+
+  /// Embedding: attach to a host-created window (GLFWwindow*) instead of
+  /// creating one, and run the RHI in embedded mode (host clears and presents).
+  /// Set both to drop ultragui on top of an application's own render pipeline.
+  /// See examples/embed_gl for a worked example. (OpenGL backend.)
+  void* external_window = nullptr;
+  bool embedded = false;
 };
 
 /// High-level framework context. Ties together all subsystems

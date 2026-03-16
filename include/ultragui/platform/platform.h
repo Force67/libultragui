@@ -26,6 +26,11 @@ class Platform {
     bool vsync = true;
     bool opengl =
         false;  ///< Create OpenGL 3.3 core context instead of no-API window
+    /// Attach to a host-created window (GLFWwindow*) instead of creating one.
+    /// When set, Platform does not init/terminate GLFW or create/destroy the
+    /// window; the host owns its lifetime. Used for embedding ultragui in an
+    /// application that already owns its window and GPU context.
+    void* external_window = nullptr;
   };
 
   bool Init(const WindowConfig& config);

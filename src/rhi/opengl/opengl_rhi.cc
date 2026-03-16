@@ -466,6 +466,7 @@ struct RHI::Impl {
   GLFWwindow* window_ = nullptr;
   f32 dpi_scale_ = 1.0f;
   bool vsync_ = true;
+  bool embedded_ = false;
 
   // Shader programs
   GLuint quad_program_ = 0;
@@ -743,6 +744,7 @@ void RHI::Impl::ensure_text_index_capacity(u32 needed) {
 bool RHI::Impl::Init(const RHIConfig& config) {
   window_ = static_cast<GLFWwindow*>(config.platform->native_handle());
   vsync_ = config.vsync;
+  embedded_ = config.embedded;
 
   glfwMakeContextCurrent(window_);
 
@@ -763,16 +765,19 @@ bool RHI::Impl::Init(const RHIConfig& config) {
     dpi_scale_ = (ww > 0) ? static_cast<f32>(fw) / static_cast<f32>(ww) : 1.0f;
   }
 
-  // Framebuffer resize callback
-  s_rhi_instance = this;
-  glfwSetFramebufferSizeCallback(window_, [](GLFWwindow*, int, int) {
-    if (!s_rhi_instance) return;
-    int fw2, fh2, ww2, wh2;
-    glfwGetFramebufferSize(s_rhi_instance->window_, &fw2, &fh2);
-    glfwGetWindowSize(s_rhi_instance->window_, &ww2, &wh2);
-    s_rhi_instance->dpi_scale_ =
-        (ww2 > 0) ? static_cast<f32>(fw2) / static_cast<f32>(ww2) : 1.0f;
-  });
+  // Framebuffer resize callback. Skipped in embedded mode so we don't clobber
+  // the host's own callback; dpi is recomputed each BeginFrame instead.
+  if (!embedded_) {
+    s_rhi_instance = this;
+    glfwSetFramebufferSizeCallback(window_, [](GLFWwindow*, int, int) {
+      if (!s_rhi_instance) return;
+      int fw2, fh2, ww2, wh2;
+      glfwGetFramebufferSize(s_rhi_instance->window_, &fw2, &fh2);
+      glfwGetWindowSize(s_rhi_instance->window_, &ww2, &wh2);
+      s_rhi_instance->dpi_scale_ =
+          (ww2 > 0) ? static_cast<f32>(fw2) / static_cast<f32>(ww2) : 1.0f;
+    });
+  }
 
   // GL state
   glEnable(GL_BLEND);
@@ -847,8 +852,8 @@ bool RHI::Impl::Init(const RHIConfig& config) {
                                  RHIFilter::kNearest);
   if (white_texture_ == kInvalidTexture) return false;
 
-  // Swap interval
-  glfwSwapInterval(vsync_ ? 1 : 0);
+  // Swap interval (host controls presentation in embedded mode)
+  if (!embedded_) glfwSwapInterval(vsync_ ? 1 : 0);
 
   // Get initial framebuffer size
   {
@@ -912,12 +917,18 @@ bool RHI::Impl::AcquireFrame() {
 bool RHI::Impl::BeginFrame(Color clear_color) {
   if (!AcquireFrame()) return false;
 
-  // Update framebuffer size
+  // Update framebuffer size (and dpi, since the resize callback is not
+  // installed in embedded mode).
   {
-    int fw, fh;
+    int fw, fh, ww, wh;
     glfwGetFramebufferSize(window_, &fw, &fh);
     swapchain_width_ = static_cast<u32>(fw);
     swapchain_height_ = static_cast<u32>(fh);
+    if (embedded_) {
+      glfwGetWindowSize(window_, &ww, &wh);
+      dpi_scale_ =
+          (ww > 0) ? static_cast<f32>(fw) / static_cast<f32>(ww) : 1.0f;
+    }
   }
 
   // Bind the default framebuffer
@@ -931,9 +942,12 @@ bool RHI::Impl::BeginFrame(Color clear_color) {
 
   // Clear: glClearColor is NOT affected by GL_FRAMEBUFFER_SRGB, so we
   // must manually encode the linear clear color into sRGB for correct output.
-  glClearColor(linear_to_srgb(clear_color.r), linear_to_srgb(clear_color.g),
-               linear_to_srgb(clear_color.b), clear_color.a);
-  glClear(GL_COLOR_BUFFER_BIT);
+  // In embedded mode the host owns the clear, so we draw on top of its content.
+  if (!embedded_) {
+    glClearColor(linear_to_srgb(clear_color.r), linear_to_srgb(clear_color.g),
+                 linear_to_srgb(clear_color.b), clear_color.a);
+    glClear(GL_COLOR_BUFFER_BIT);
+  }
 
   // Activate quad program and set projection
   glUseProgram(quad_program_);
@@ -947,7 +961,8 @@ bool RHI::Impl::BeginFrame(Color clear_color) {
 }
 
 void RHI::Impl::EndFrame() {
-  glfwSwapBuffers(window_);
+  // In embedded mode the host presents (swaps buffers) after compositing.
+  if (!embedded_) glfwSwapBuffers(window_);
   frame_active_ = false;
 }
 
