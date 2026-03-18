@@ -3,6 +3,7 @@
 
 #include <ultragui/core/color.h>
 #include <ultragui/core/rect.h>
+#include <ultragui/render/draw_data.h>
 #include <ultragui/render/vertex.h>
 #include <ultragui/rhi/rhi.h>
 #include <ultragui/style/enums.h>
@@ -72,6 +73,18 @@ class Renderer2D {
   void PushScissor(Rect rect);
   void PopScissor();
 
+  /// Finalize the current frame's batches and return them as a renderer-API
+  /// agnostic draw list (the ImDrawData analog), instead of submitting via the
+  /// RHI. Call after painting and instead of EndFrame(); a backend
+  /// (see ugui_impl_*) renders the returned data. Pointers stay valid until
+  /// the next BeginFrame(). Does not touch the RHI, so it works without a
+  /// device.
+  const DrawData& GetDrawData();
+
+  /// Display (window-coordinate) viewport size, used to seed the default
+  /// scissor when no RHI is attached (draw-data / embedded use).
+  void set_display_size(Vec2 size) { display_size_ = size; }
+
  private:
   void FlushBatch();
   void FlushTextBatch();
@@ -126,6 +139,11 @@ class Renderer2D {
   HashMap<u64, RHITextureHandle> gradient_cache_;
   RHITextureHandle current_texture_ = kInvalidTexture;
   Rect current_scissor_ = {};
+
+  // Draw-data output (GetDrawData)
+  Vector<DrawCmd> draw_cmds_;
+  DrawData draw_data_;
+  Vec2 display_size_ = {0.0f, 0.0f};
 };
 
 }  // namespace ugui

@@ -109,6 +109,17 @@ class TextEngine {
   /// Get atlas dimensions
   Vec2 atlas_size() const;
 
+  /// CPU pixels of the glyph atlas, single-channel 8-bit alpha (R8), row-major,
+  /// atlas_size().x * atlas_size().y bytes. For renderer backends that own the
+  /// font texture themselves (the Dear ImGui io.Fonts->GetTexDataAsAlpha8
+  /// analog). Valid for the lifetime of the engine; contents grow as glyphs are
+  /// shaped.
+  const u8* atlas_pixels() const;
+
+  /// Monotonic counter bumped whenever the atlas contents change (a new glyph
+  /// was packed). A backend re-uploads its font texture when this changes.
+  u32 atlas_revision() const;
+
  private:
   struct Impl;
   Impl* impl_ = nullptr;

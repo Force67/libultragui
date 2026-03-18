@@ -65,6 +65,7 @@ struct TextEngine::Impl {
   // Glyph atlas
   u8 atlas_pixels[ATLAS_SIZE * ATLAS_SIZE] = {};
   bool atlas_dirty = false;
+  u32 atlas_revision = 0;  // bumped whenever atlas contents change
   u32 atlas_cursor_x = 1;  // current packing position
   u32 atlas_cursor_y = 1;
   u32 atlas_row_height = 0;
@@ -259,6 +260,7 @@ CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id,
   if (bh > atlas_row_height) atlas_row_height = bh;
 
   atlas_dirty = true;
+  ++atlas_revision;
   auto [inserted, _] = glyph_cache.emplace(key, cg);
   return &inserted->second;
 }
@@ -445,5 +447,9 @@ void TextEngine::FlushAtlas() {
 Vec2 TextEngine::atlas_size() const {
   return {static_cast<f32>(ATLAS_SIZE), static_cast<f32>(ATLAS_SIZE)};
 }
+
+const u8* TextEngine::atlas_pixels() const { return impl_->atlas_pixels; }
+
+u32 TextEngine::atlas_revision() const { return impl_->atlas_revision; }
 
 }  // namespace ugui

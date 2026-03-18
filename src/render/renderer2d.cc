@@ -40,7 +40,53 @@ void Renderer2D::BeginFrame() {
   scissor_stack_.clear();
   current_texture_ = kInvalidTexture;
   current_text_atlas_ = kInvalidTexture;
-  current_scissor_ = Rect{0, 0, rhi_->display_size().x, rhi_->display_size().y};
+  Vec2 vp = rhi_ ? rhi_->display_size() : display_size_;
+  current_scissor_ = Rect{0, 0, vp.x, vp.y};
+}
+
+const DrawData& Renderer2D::GetDrawData() {
+  // Finalize pending geometry into batches, exactly as EndFrame() does before
+  // submitting, but expose it instead of issuing RHI draw calls.
+  FlushBatch();
+  FlushTextBatch();
+
+  draw_cmds_.clear();
+  draw_cmds_.reserve(draw_order_.size());
+  for (const auto& cmd : draw_order_) {
+    DrawCmd out;
+    if (cmd.kind == DrawKind::kQuad) {
+      const auto& batch = batches_[cmd.batch_index];
+      out.clip_rect = batch.scissor;
+      out.index_offset = batch.index_offset;
+      out.elem_count = batch.index_count;
+      out.is_text = false;
+      out.texture_id = (batch.texture == kInvalidTexture)
+                           ? kNullTextureId
+                           : static_cast<TextureId>(batch.texture);
+    } else {
+      const auto& batch = text_batches_[cmd.batch_index];
+      out.clip_rect = batch.scissor;
+      out.index_offset = batch.index_offset;
+      out.elem_count = batch.index_count;
+      out.is_text = true;
+      out.texture_id = kFontTextureId;
+    }
+    draw_cmds_.push_back(out);
+  }
+
+  draw_data_.quad_vertices = vertices_.data();
+  draw_data_.quad_vertex_count = static_cast<u32>(vertices_.size());
+  draw_data_.quad_indices = indices_.data();
+  draw_data_.quad_index_count = static_cast<u32>(indices_.size());
+  draw_data_.text_vertices = text_vertices_.data();
+  draw_data_.text_vertex_count = static_cast<u32>(text_vertices_.size());
+  draw_data_.text_indices = text_indices_.data();
+  draw_data_.text_index_count = static_cast<u32>(text_indices_.size());
+  draw_data_.commands = draw_cmds_.data();
+  draw_data_.command_count = static_cast<u32>(draw_cmds_.size());
+  draw_data_.display_size = display_size_;
+  draw_data_.valid = true;
+  return draw_data_;
 }
 
 void Renderer2D::EndFrame() {
