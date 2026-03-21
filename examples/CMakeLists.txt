@@ -29,6 +29,19 @@ target_compile_definitions(ultragui_game_overlay PRIVATE
 )
 add_dependencies(ultragui_game_overlay ultragui_shaders)
 
+# Embedding sample (Dear ImGui style): host owns the Vulkan device, swapchain
+# and render pass; ultragui produces a draw list (ui.RenderDrawData) that the
+# ugui_impl_vulkan backend records into the host's command buffer.
+if(ULTRAGUI_BACKEND_VULKAN)
+    add_executable(ultragui_embed_vulkan
+        embed_vulkan/main.cc
+        ${CMAKE_SOURCE_DIR}/src/backends/ugui_impl_vulkan.cc)
+    target_link_libraries(ultragui_embed_vulkan PRIVATE ultragui glfw Vulkan::Vulkan)
+    target_compile_definitions(ultragui_embed_vulkan PRIVATE
+        ULTRAGUI_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders")
+    add_dependencies(ultragui_embed_vulkan ultragui_shaders)
+endif()
+
 # Embedding sample: host owns the window + GL pipeline, ultragui composites on
 # top. Requires the OpenGL backend (host shares its GL context with the RHI).
 if(ULTRAGUI_BACKEND_OPENGL)

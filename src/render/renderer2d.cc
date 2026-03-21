@@ -223,6 +223,7 @@ void Renderer2D::DrawRectGradient(Rect rect, Color start_color, Color end_color,
 
 RHITextureHandle Renderer2D::GetRadialGradientTexture(Color center,
                                                       Color edge) {
+  if (!rhi_) return kInvalidTexture;  // draw-data mode: host owns textures
   u32 c1 = Vertex2D::PackColor(center.r, center.g, center.b, center.a);
   u32 c2 = Vertex2D::PackColor(edge.r, edge.g, edge.b, edge.a);
   u64 key = static_cast<u64>(c1) | (static_cast<u64>(c2) << 32);
@@ -287,6 +288,7 @@ static Color SampleGradient(const GradientStop* stops, u32 count, f32 t) {
 
 RHITextureHandle Renderer2D::GetMultiStopGradientTexture(
     const GradientStop* stops, u32 count, GradientType type, f32 angle_deg) {
+  if (!rhi_) return kInvalidTexture;  // draw-data mode: host owns textures
   // Hash the gradient parameters for caching
   u64 hash = static_cast<u64>(count) ^ (static_cast<u64>(type) << 8);
   for (u32 i = 0; i < count; ++i) {

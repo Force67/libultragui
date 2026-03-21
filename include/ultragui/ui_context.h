@@ -58,6 +58,13 @@ struct UIConfig {
   /// See examples/embed_gl for a worked example. (OpenGL backend.)
   void* external_window = nullptr;
   bool embedded = false;
+
+  /// Draw-data mode (Dear ImGui style): ultragui creates NO graphics device.
+  /// Each frame, call RenderDrawData() to get a renderer-agnostic draw list
+  /// that your own backend renders (see ugui_impl_vulkan.h / examples/
+  /// embed_vulkan). Requires external_window for input/timing. The host owns
+  /// the GPU entirely and uploads the glyph atlas (TextEngine::atlas_pixels()).
+  bool draw_data = false;
 };
 
 /// High-level framework context. Ties together all subsystems
@@ -129,6 +136,14 @@ class UIContext {
   /// Run one frame: poll input (if not already pumped), update
   /// animations, compute layout, paint.
   void Update();
+
+  /// Draw-data mode only (UIConfig::draw_data): poll input, update, compute
+  /// layout, and paint into a renderer-agnostic draw list, returning it WITHOUT
+  /// touching any GPU. Your backend (e.g. ugui_impl_vulkan) renders the result
+  /// into your own command buffer. The returned reference is valid until the
+  /// next RenderDrawData() call. Upload the glyph atlas from text_engine()
+  /// when its atlas_revision() changes.
+  const DrawData& RenderDrawData();
 
   /// Clean up all subsystems.
   void Shutdown();

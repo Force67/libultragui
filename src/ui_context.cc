@@ -53,6 +53,11 @@ UIContext::~UIContext() {
 bool UIContext::Init(const UIConfig& config) {
   config_ = config;
 
+  if (config.draw_data && !config.external_window) {
+    std::fprintf(stderr, "ultragui: draw_data mode requires external_window\n");
+    return false;
+  }
+
   // Platform
   Platform::WindowConfig wcfg;
   wcfg.width = config.width;
@@ -70,25 +75,32 @@ bool UIContext::Init(const UIConfig& config) {
     return false;
   }
 
-  // RHI
-  RHIConfig rcfg;
-  rcfg.platform = &platform_;
-  rcfg.validation = config.validation;
-  rcfg.vsync = config.vsync;
-  rcfg.shader_dir = config.shader_dir;
-  rcfg.embedded = config.embedded;
+  // RHI. Skipped in draw-data mode: the host owns the GPU and renders the
+  // draw list returned by RenderDrawData() with its own backend.
+  RHI* rhi_ptr = nullptr;
+  if (!config.draw_data) {
+    RHIConfig rcfg;
+    rcfg.platform = &platform_;
+    rcfg.validation = config.validation;
+    rcfg.vsync = config.vsync;
+    rcfg.shader_dir = config.shader_dir;
+    rcfg.embedded = config.embedded;
 
-  if (!rhi_.Init(rcfg)) {
-    std::fprintf(stderr, "ultragui: failed to initialize Vulkan RHI\n");
-    platform_.Shutdown();
-    return false;
+    if (!rhi_.Init(rcfg)) {
+      std::fprintf(stderr, "ultragui: failed to initialize RHI\n");
+      platform_.Shutdown();
+      return false;
+    }
+    rhi_ptr = &rhi_;
   }
 
   // Renderer
-  renderer_.Init(&rhi_);
+  renderer_.Init(rhi_ptr);
+  renderer_.set_display_size(
+      {static_cast<f32>(config.width), static_cast<f32>(config.height)});
 
   // Text engine
-  if (!text_engine_.Init(&rhi_)) {
+  if (!text_engine_.Init(rhi_ptr)) {
     std::fprintf(stderr, "ultragui: failed to initialize text engine\n");
   }
 
@@ -478,6 +490,65 @@ void UIContext::Update() {
   input_pumped_this_frame_ = false;
 }
 
+const DrawData& UIContext::RenderDrawData() {
+  // Timing
+  f64 now = platform_.time();
+  dt_ = now - last_time_;
+  last_time_ = now;
+
+  // Input (via the attached host window) + viewport
+  PumpInput();
+  Vec2 viewport = platform_.window_size();
+  renderer_.set_display_size(viewport);
+
+  script_.UpdateTimers(now);
+  UpdateTooltip();
+
+  // Animations + per-widget update (texture-backed anims (lottie/video) are not
+  // produced in draw-data mode, since the host owns the GPU).
+  if (root_) {
+    animator_.Update(
+        now,
+        [](u32 widget_id, const Style& animated_style, void* user_data) {
+          auto* root = static_cast<Widget*>(user_data);
+          Widget* w = FindWidgetById(root, widget_id);
+          if (w) w->SetAnimationStyle(animated_style);
+        },
+        root_,
+        [](u32 widget_id, void* user_data) {
+          auto* root = static_cast<Widget*>(user_data);
+          Widget* w = FindWidgetById(root, widget_id);
+          if (w) w->ClearAnimationStyle();
+        });
+    UpdateWidgetTree(root_, dt_);
+  }
+
+  // Text shaping (no GPU upload: the host uploads from text_engine().)
+  text_engine_.BeginFrame();
+  if (root_) MeasureWidgetTree(root_);
+  for (auto& overlay : overlays_) {
+    if (overlay.widget) MeasureWidgetTree(overlay.widget);
+  }
+
+  // Paint into the renderer; collect as a draw list instead of submitting.
+  renderer_.BeginFrame();
+  LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
+  if (root_) {
+    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
+    PaintWidgetTree(root_, renderer_);
+  }
+  for (auto& overlay : overlays_) {
+    if (overlay.widget) {
+      ComputeWidgetLayout(overlay.widget, vp, layout_engine_, layout_nodes_);
+      PaintWidgetTree(overlay.widget, renderer_);
+    }
+  }
+  DrawTooltip();
+
+  input_pumped_this_frame_ = false;
+  return renderer_.GetDrawData();
+}
+
 void UIContext::UpdateTooltip() {
   Widget* hovered = input_.hovered_widget();
 
@@ -577,7 +648,7 @@ void UIContext::Shutdown() {
   script_.Shutdown();
   renderer_.Shutdown();
   text_engine_.Shutdown();
-  rhi_.Shutdown();
+  if (!config_.draw_data) rhi_.Shutdown();
   platform_.Shutdown();
 
   initialized_ = false;
