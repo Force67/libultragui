@@ -131,61 +131,61 @@ endif()
 
 # --- Swappable implementation sources ---
 # Point these at your own .cc file to provide a custom backend.
-set(ULTRAGUI_PLATFORM_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/platform_glfw.cc"
+set(ULTRAGUI_PLATFORM_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ugui/platform/platform_glfw.cc"
     CACHE FILEPATH "Platform implementation source file")
-set(ULTRAGUI_RHI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/rhi/vulkan/vulkan_rhi.cc"
+set(ULTRAGUI_RHI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/vulkan/vulkan_rhi.cc"
     CACHE FILEPATH "RHI implementation source file")
 if(ULTRAGUI_LUA)
-    set(_default_script_src "${CMAKE_CURRENT_SOURCE_DIR}/src/scripting/lua_runtime.cc")
+    set(_default_script_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/scripting/lua_runtime.cc")
 else()
-    set(_default_script_src "${CMAKE_CURRENT_SOURCE_DIR}/src/scripting/script_runtime_none.cc")
+    set(_default_script_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/scripting/script_runtime_none.cc")
 endif()
 set(ULTRAGUI_SCRIPT_SOURCE "${_default_script_src}"
     CACHE FILEPATH "Script runtime implementation source file")
-set(ULTRAGUI_AUDIO_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/audio/audio.cc"
+set(ULTRAGUI_AUDIO_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ugui/audio/audio.cc"
     CACHE FILEPATH "Audio backend implementation source file (defines CreateDefaultAudioBackend)")
 
 # --- Core library ---
 set(ULTRAGUI_SOURCES
-    src/core/arena.cc
-    src/core/string_utils.cc
-    src/render/renderer2d.cc
-    src/style/style.cc
-    src/style/transition.cc
-    src/text/text_engine.cc
-    src/layout/layout.cc
-    src/animation/animator.cc
-    src/widgets/widget.cc
-    src/widgets/panel.cc
-    src/widgets/text.cc
-    src/widgets/text_input.cc
-    src/widgets/checkbox.cc
-    src/widgets/radio.cc
-    src/widgets/toggle.cc
-    src/widgets/slider.cc
-    src/widgets/button.cc
-    src/widgets/context_menu.cc
-    src/widgets/dropdown.cc
-    src/widgets/image.cc
-    src/widgets/modal.cc
-    src/widgets/rich_text.cc
-    src/widgets/scroll_view.cc
-    src/widgets/widget_tree.cc
-    src/idl/parser.cc
-    src/idl/builder.cc
-    src/input/input.cc
-    src/scripting/lua_widgets.cc
-    src/anim/json.cc
-    src/anim/anim_parser.cc
-    src/anim/anim_eval.cc
-    src/anim/anim_render.cc
-    src/anim/vector_animation.cc
-    src/layout/layout_tree.cc
-    src/render/paint.cc
-    src/svg/svg.cc
-    src/svg/svg_parser.cc
-    src/svg/svg_rasterizer.cc
-    src/ui_context.cc
+    ugui/core/arena.cc
+    ugui/core/string_utils.cc
+    ugui/render/renderer2d.cc
+    ugui/style/style.cc
+    ugui/style/transition.cc
+    ugui/text/text_engine.cc
+    ugui/layout/layout.cc
+    ugui/animation/animator.cc
+    ugui/widgets/widget.cc
+    ugui/widgets/panel.cc
+    ugui/widgets/text.cc
+    ugui/widgets/text_input.cc
+    ugui/widgets/checkbox.cc
+    ugui/widgets/radio.cc
+    ugui/widgets/toggle.cc
+    ugui/widgets/slider.cc
+    ugui/widgets/button.cc
+    ugui/widgets/context_menu.cc
+    ugui/widgets/dropdown.cc
+    ugui/widgets/image.cc
+    ugui/widgets/modal.cc
+    ugui/widgets/rich_text.cc
+    ugui/widgets/scroll_view.cc
+    ugui/widgets/widget_tree.cc
+    ugui/idl/parser.cc
+    ugui/idl/builder.cc
+    ugui/input/input.cc
+    ugui/scripting/lua_widgets.cc
+    ugui/anim/json.cc
+    ugui/anim/anim_parser.cc
+    ugui/anim/anim_eval.cc
+    ugui/anim/anim_render.cc
+    ugui/anim/vector_animation.cc
+    ugui/layout/layout_tree.cc
+    ugui/render/paint.cc
+    ugui/svg/svg.cc
+    ugui/svg/svg_parser.cc
+    ugui/svg/svg_rasterizer.cc
+    ugui/ui_context.cc
 )
 
 list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_PLATFORM_SOURCE})
@@ -194,37 +194,37 @@ list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_SCRIPT_SOURCE})
 
 if(ULTRAGUI_LUA)
     list(APPEND ULTRAGUI_SOURCES
-        src/scripting/lua_anim.cc
+        ugui/scripting/lua_anim.cc
     )
 endif()
 
 if(ULTRAGUI_DEFAULT_OPEN_URL)
-    list(APPEND ULTRAGUI_SOURCES src/platform/platform_open_url.cc)
+    list(APPEND ULTRAGUI_SOURCES ugui/platform/platform_open_url.cc)
 endif()
 
 if(ULTRAGUI_AUDIO)
     list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_AUDIO_SOURCE})
     # miniaudio's implementation is its own TU so the video audio bridge still
     # links when ULTRAGUI_AUDIO_SOURCE is swapped for a custom backend.
-    if(ULTRAGUI_AUDIO_SOURCE STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/src/audio/audio.cc" OR ULTRAGUI_VIDEO)
-        list(APPEND ULTRAGUI_SOURCES src/audio/miniaudio_impl.cc)
+    if(ULTRAGUI_AUDIO_SOURCE STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/ugui/audio/audio.cc" OR ULTRAGUI_VIDEO)
+        list(APPEND ULTRAGUI_SOURCES ugui/audio/miniaudio_impl.cc)
     endif()
     if(ULTRAGUI_LUA)
-        list(APPEND ULTRAGUI_SOURCES src/scripting/lua_audio.cc)
+        list(APPEND ULTRAGUI_SOURCES ugui/scripting/lua_audio.cc)
     endif()
 endif()
 
 if(ULTRAGUI_LOTTIE)
-    list(APPEND ULTRAGUI_SOURCES src/lottie/lottie.cc)
+    list(APPEND ULTRAGUI_SOURCES ugui/lottie/lottie.cc)
     if(ULTRAGUI_LUA)
-        list(APPEND ULTRAGUI_SOURCES src/scripting/lua_lottie.cc)
+        list(APPEND ULTRAGUI_SOURCES ugui/scripting/lua_lottie.cc)
     endif()
 endif()
 
 if(ULTRAGUI_VIDEO)
-    list(APPEND ULTRAGUI_SOURCES src/video/video.cc)
+    list(APPEND ULTRAGUI_SOURCES ugui/video/video.cc)
     if(ULTRAGUI_LUA)
-        list(APPEND ULTRAGUI_SOURCES src/scripting/lua_video.cc)
+        list(APPEND ULTRAGUI_SOURCES ugui/scripting/lua_video.cc)
     endif()
 endif()
 
@@ -236,10 +236,11 @@ endif()
 
 target_include_directories(ultragui
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
+        # Headers and sources are co-located under ugui/, so the include root is
+        # the project root and headers resolve as <ugui/...>.
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:.>
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
         $<$<BOOL:${ULTRAGUI_AUDIO}>:${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio>
         $<$<BOOL:${ULTRAGUI_VIDEO}>:${CMAKE_CURRENT_SOURCE_DIR}/third_party/pl_mpeg>
 )

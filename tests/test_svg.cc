@@ -1,4 +1,4 @@
-#include <ultragui/svg/svg.h>
+#include <ugui/svg/svg.h>
 
 #include <cstdio>
 #include <cstdlib>

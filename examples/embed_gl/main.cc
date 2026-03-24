@@ -19,7 +19,7 @@
 //   cmake --build build --target ultragui_embed_gl
 
 #define GLFW_INCLUDE_NONE
-#include <ultragui/ultragui.h>
+#include <ugui/ultragui.h>
 
 #include <GLFW/glfw3.h>
 #include <cstdio>

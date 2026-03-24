@@ -35,7 +35,7 @@ add_dependencies(ultragui_game_overlay ultragui_shaders)
 if(ULTRAGUI_BACKEND_VULKAN)
     add_executable(ultragui_embed_vulkan
         embed_vulkan/main.cc
-        ${CMAKE_SOURCE_DIR}/src/backends/ugui_impl_vulkan.cc)
+        ${CMAKE_SOURCE_DIR}/ugui/backends/ugui_impl_vulkan.cc)
     target_link_libraries(ultragui_embed_vulkan PRIVATE ultragui glfw Vulkan::Vulkan)
     target_compile_definitions(ultragui_embed_vulkan PRIVATE
         ULTRAGUI_SHADER_DIR="${CMAKE_BINARY_DIR}/shaders")

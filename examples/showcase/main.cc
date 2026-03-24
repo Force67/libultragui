@@ -6,8 +6,8 @@
 /// Scenes: dashboard (default), neon, glass, terminal, rpg, nerv, cosmos,
 /// meridian Press 1-8 to switch scenes at runtime.
 
-#include <ultragui/ultragui.h>
-#include <ultragui/widgets/button.h>
+#include <ugui/ultragui.h>
+#include <ugui/widgets/button.h>
 
 #include <algorithm>
 #include <cmath>

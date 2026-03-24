@@ -1,6 +1,6 @@
-#include <ultragui/scripting/script_runtime.h>
-#include <ultragui/widgets/panel.h>
-#include <ultragui/widgets/scroll_view.h>
+#include <ugui/scripting/script_runtime.h>
+#include <ugui/widgets/panel.h>
+#include <ugui/widgets/scroll_view.h>
 
 #include <cstdio>
 #include <cstdlib>

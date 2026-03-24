@@ -14,8 +14,8 @@
 //   ./build/examples/ultragui_embed_vulkan
 
 #define GLFW_INCLUDE_VULKAN
-#include <ultragui/backends/ugui_impl_vulkan.h>
-#include <ultragui/ultragui.h>
+#include <ugui/backends/ugui_impl_vulkan.h>
+#include <ugui/ultragui.h>
 
 #include <GLFW/glfw3.h>
 #include <cmath>

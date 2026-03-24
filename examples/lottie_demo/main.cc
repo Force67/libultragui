@@ -2,9 +2,9 @@
 ///
 /// Usage: ./lottie_demo [font_path]
 
-#include <ultragui/ultragui.h>
-#include <ultragui/widgets/image.h>
-#include <ultragui/widgets/text.h>
+#include <ugui/ultragui.h>
+#include <ugui/widgets/image.h>
+#include <ugui/widgets/text.h>
 
 #include <cstdio>
 #include <cstdlib>

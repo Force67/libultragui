@@ -1,4 +1,4 @@
-#include <ultragui/lottie/lottie.h>
+#include <ugui/lottie/lottie.h>
 
 #include <cmath>
 #include <cstdio>

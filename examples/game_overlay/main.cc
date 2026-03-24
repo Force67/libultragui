@@ -5,11 +5,11 @@
 /// the game draws its own scene, then the UI framework paints HUD elements
 /// on top within the same render pass.
 
-#include <ultragui/layout/layout_tree.h>
-#include <ultragui/render/paint.h>
-#include <ultragui/ultragui.h>
-#include <ultragui/widgets/text.h>
-#include <ultragui/widgets/widget.h>
+#include <ugui/layout/layout_tree.h>
+#include <ugui/render/paint.h>
+#include <ugui/ultragui.h>
+#include <ugui/widgets/text.h>
+#include <ugui/widgets/widget.h>
 
 #include <algorithm>
 #include <cmath>

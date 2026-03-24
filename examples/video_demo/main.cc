@@ -11,9 +11,9 @@
 ///   L     : toggle loop
 ///   Left/Right: seek +-2s
 
-#include <ultragui/ultragui.h>
-#include <ultragui/widgets/image.h>
-#include <ultragui/widgets/text.h>
+#include <ugui/ultragui.h>
+#include <ugui/widgets/image.h>
+#include <ugui/widgets/text.h>
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>

@@ -2,9 +2,9 @@
 ///
 /// Usage: ./anim_demo [font_path]
 
-#include <ultragui/anim/vector_animation.h>
-#include <ultragui/ultragui.h>
-#include <ultragui/widgets/image.h>
+#include <ugui/anim/vector_animation.h>
+#include <ugui/ultragui.h>
+#include <ugui/widgets/image.h>
 
 #include <cstdio>
 #include <cstdlib>

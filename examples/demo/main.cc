@@ -1,7 +1,7 @@
 /// Demo: opens a window and renders colored rounded rectangles via the Vulkan
 /// RHI.
 
-#include <ultragui/ultragui.h>
+#include <ugui/ultragui.h>
 
 #include <cmath>
 #include <cstdio>
