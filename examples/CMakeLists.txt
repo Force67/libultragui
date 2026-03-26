@@ -42,6 +42,14 @@ if(ULTRAGUI_BACKEND_VULKAN)
     add_dependencies(ultragui_embed_vulkan ultragui_shaders)
 endif()
 
+# Embedding sample (Dear ImGui style) on OpenGL 3.3 via draw data. Works with
+# any library RHI backend, since draw-data mode uses no RHI of its own.
+find_package(OpenGL REQUIRED)
+add_executable(ultragui_embed_opengl3
+    embed_opengl3/main.cc
+    ${CMAKE_SOURCE_DIR}/ugui/backends/ugui_impl_opengl3.cc)
+target_link_libraries(ultragui_embed_opengl3 PRIVATE ultragui glfw OpenGL::GL)
+
 # Embedding sample: host owns the window + GL pipeline, ultragui composites on
 # top. Requires the OpenGL backend (host shares its GL context with the RHI).
 if(ULTRAGUI_BACKEND_OPENGL)
