@@ -10,15 +10,13 @@ static constexpr SoundHandle kInvalidSound = 0;
 
 /// Abstract audio backend interface.
 ///
-/// `UIContext` talks to audio exclusively through this interface, so a host
-/// application can supply its own implementation in two ways:
-///
-///   1. Runtime injection: pass an instance to `UIContext::set_audio()` before
-///      `Init()`. The host owns its lifetime.
-///   2. Link-time swap: point the `ULTRAGUI_AUDIO_SOURCE` CMake variable at a
-///      .cc that defines `CreateDefaultAudioBackend()` returning your backend.
-///
-/// The bundled miniaudio implementation is `AudioEngine` (see audio.h).
+/// `UIContext` talks to audio exclusively through this interface. Like the
+/// renderer backends, the implementation is wired in by the application, not
+/// baked into the library: compile a backend .cc into your app and hand an
+/// instance to `UIContext::set_audio()` before `Init()` (the host owns its
+/// lifetime). The bundled implementation is the miniaudio `AudioEngine` in
+/// ugui/backends/ugui_impl_miniaudio. Until one is wired, audio is a silent
+/// no-op (see NullAudioBackend).
 class AudioBackend {
  public:
   AudioBackend() = default;
@@ -53,10 +51,32 @@ class AudioBackend {
   virtual void ResumeAll() = 0;
 };
 
-/// Create the default audio backend. Defined in ULTRAGUI_AUDIO_SOURCE
-/// (src/audio/audio.cc by default, returning the miniaudio AudioEngine).
-/// Caller owns the returned instance.
-AudioBackend* CreateDefaultAudioBackend();
+/// No-op audio backend. The default until a real backend is wired via
+/// UIContext::set_audio(), so audio calls are silent rather than crashing.
+/// Compile a backend (e.g. ugui/backends/ugui_impl_miniaudio.cc) into your app
+/// and wire it in to get sound.
+class NullAudioBackend final : public AudioBackend {
+ public:
+  bool Init() override { return true; }
+  void Shutdown() override {}
+  bool IsInitialized() const override { return false; }
+  SoundHandle Play(const char*, f32, bool) override { return kInvalidSound; }
+  SoundHandle Load(const char*) override { return kInvalidSound; }
+  SoundHandle PlayLoaded(SoundHandle, f32, bool) override {
+    return kInvalidSound;
+  }
+  void Stop(SoundHandle) override {}
+  bool IsPlaying(SoundHandle) const override { return false; }
+  void set_volume(SoundHandle, f32) override {}
+  void set_pan(SoundHandle, f32) override {}
+  void set_pitch(SoundHandle, f32) override {}
+  void Seek(SoundHandle, f32) override {}
+  void set_master_volume(f32) override {}
+  f32 master_volume() const override { return 1.0f; }
+  void StopAll() override {}
+  void PauseAll() override {}
+  void ResumeAll() override {}
+};
 
 }  // namespace ugui
 

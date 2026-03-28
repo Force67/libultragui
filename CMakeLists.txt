@@ -142,8 +142,6 @@ else()
 endif()
 set(ULTRAGUI_SCRIPT_SOURCE "${_default_script_src}"
     CACHE FILEPATH "Script runtime implementation source file")
-set(ULTRAGUI_AUDIO_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ugui/audio/audio.cc"
-    CACHE FILEPATH "Audio backend implementation source file (defines CreateDefaultAudioBackend)")
 
 # --- Core library ---
 set(ULTRAGUI_SOURCES
@@ -203,12 +201,10 @@ if(ULTRAGUI_DEFAULT_OPEN_URL)
 endif()
 
 if(ULTRAGUI_AUDIO)
-    list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_AUDIO_SOURCE})
-    # miniaudio's implementation is its own TU so the video audio bridge still
-    # links when ULTRAGUI_AUDIO_SOURCE is swapped for a custom backend.
-    if(ULTRAGUI_AUDIO_SOURCE STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/ugui/audio/audio.cc" OR ULTRAGUI_VIDEO)
-        list(APPEND ULTRAGUI_SOURCES ugui/audio/miniaudio_impl.cc)
-    endif()
+    # miniaudio's implementation (one TU). Linked by the video audio bridge and
+    # by the wire-in miniaudio backend (ugui/backends/ugui_impl_miniaudio.cc),
+    # which applications compile into their own target (Dear ImGui style).
+    list(APPEND ULTRAGUI_SOURCES ugui/audio/miniaudio_impl.cc)
     if(ULTRAGUI_LUA)
         list(APPEND ULTRAGUI_SOURCES ugui/scripting/lua_audio.cc)
     endif()
@@ -316,7 +312,9 @@ if(ULTRAGUI_VIDEO)
 endif()
 
 if(ULTRAGUI_AUDIO)
-    # miniaudio uses dlopen for audio backends on Linux, pthread for threading
+    # miniaudio uses dlopen for audio backends on Linux, pthread for threading.
+    # Propagated to consumers (incl. the wire-in miniaudio backend) since this
+    # is a static library.
     if(UNIX AND NOT APPLE)
         target_link_libraries(ultragui PRIVATE pthread m dl)
     elseif(APPLE)

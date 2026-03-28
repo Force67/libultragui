@@ -7,7 +7,7 @@
 #include <ugui/ultragui_config.h>
 #include <ugui/widgets/widget_tree.h>
 #if ULTRAGUI_AUDIO
-#include <ugui/audio/audio.h>
+#include <ugui/audio/audio_backend.h>
 #endif
 #include <ugui/anim/vector_animation.h>
 #if ULTRAGUI_LOTTIE
@@ -157,12 +157,13 @@ class UIContext {
   Animator& animator() { return animator_; }
   UguiBuilder& builder() { return builder_; }
 #if ULTRAGUI_AUDIO
-  /// The active audio backend. Valid after Init(); defaults to the bundled
-  /// miniaudio engine unless a backend was injected via set_audio().
+  /// The active audio backend. Always valid; a silent NullAudioBackend until a
+  /// real backend is wired via set_audio().
   AudioBackend& audio() { return *audio_; }
 
-  /// Inject a custom audio backend. Call before Init(). The caller retains
-  /// ownership (UIContext will not delete an injected backend).
+  /// Wire in an audio backend (e.g. ugui::AudioEngine from
+  /// ugui/backends/ugui_impl_miniaudio). Call before Init(); UIContext will
+  /// Init()/Shutdown() it but never deletes it (the caller owns it).
   void set_audio(AudioBackend* backend);
 #endif
 
@@ -243,8 +244,8 @@ class UIContext {
   ScriptRuntime script_;
   UguiBuilder builder_;
 #if ULTRAGUI_AUDIO
-  AudioBackend* audio_ = nullptr;
-  bool owns_audio_ = false;  // true when audio_ is the default backend we made
+  NullAudioBackend null_audio_;         // silent default
+  AudioBackend* audio_ = &null_audio_;  // wired via set_audio(); not owned
 #endif
   Vector<VectorAnimation*> vector_anims_;
 #if ULTRAGUI_LOTTIE

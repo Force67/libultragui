@@ -110,14 +110,6 @@ bool UIContext::Init(const UIConfig& config) {
   // Scripting runtime
   script_.Init();
 
-#if ULTRAGUI_AUDIO
-  // Use the injected backend if one was set, otherwise the bundled default.
-  if (!audio_) {
-    audio_ = CreateDefaultAudioBackend();
-    owns_audio_ = true;
-  }
-#endif
-
 #if ULTRAGUI_LUA
   {
 #if ULTRAGUI_AUDIO
@@ -638,12 +630,7 @@ void UIContext::Shutdown() {
   video_players_.clear();
 #endif
 #if ULTRAGUI_AUDIO
-  if (audio_) {
-    audio_->Shutdown();
-    if (owns_audio_) delete audio_;
-    audio_ = nullptr;
-    owns_audio_ = false;
-  }
+  audio_->Shutdown();  // wired backend is owned by the caller; never deleted
 #endif
   script_.Shutdown();
   renderer_.Shutdown();
@@ -656,9 +643,7 @@ void UIContext::Shutdown() {
 
 #if ULTRAGUI_AUDIO
 void UIContext::set_audio(AudioBackend* backend) {
-  if (owns_audio_) delete audio_;
-  audio_ = backend;
-  owns_audio_ = false;
+  audio_ = backend ? backend : &null_audio_;
 }
 #endif
 

@@ -1,10 +1,9 @@
-#include <ugui/audio/audio.h>
-#include <ugui/core/config.h>
-
 #include <cstdio>
 #include <miniaudio.h>
 #include <mutex>
 #include <string>
+#include <ugui/backends/ugui_impl_miniaudio.h>
+#include <ugui/core/config.h>
 #include <unordered_map>
 #include <vector>
 
@@ -285,7 +284,5 @@ void AudioEngine::ResumeAll() {
     if (s.active && !s.preloaded) ma_sound_start(&s.sound);
   }
 }
-
-AudioBackend* CreateDefaultAudioBackend() { return new AudioEngine(); }
 
 }  // namespace ugui
