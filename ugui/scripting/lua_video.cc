@@ -115,7 +115,7 @@ void RegisterVideoLua(ScriptRuntime& lua,
     const char* name = luaL_checkstring(L, 2);
     if (v) {
       Widget* w = find_widget(name);
-      if (auto* img = dynamic_cast<Image*>(w)) {
+      if (auto* img = widget_cast<Image>(w)) {
         img->set_texture(v->texture(), static_cast<f32>(v->width()),
                          static_cast<f32>(v->height()));
       }

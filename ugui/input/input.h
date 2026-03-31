@@ -1,6 +1,7 @@
 #ifndef ULTRAGUI_INPUT_INPUT_H_
 #define ULTRAGUI_INPUT_INPUT_H_
 
+#include <ugui/core/handle.h>
 #include <ugui/core/math.h>
 #include <ugui/core/types.h>
 #include <ugui/input/input_queue.h>
@@ -9,6 +10,7 @@ namespace ugui {
 
 class Widget;
 class Platform;
+class WidgetRegistry;
 
 /// Routes input events from an InputQueue to the widget tree.
 /// Manages hover, press, and focus state. Platform-agnostic.
@@ -23,9 +25,9 @@ class InputRouter {
   /// Clear cached hover/press/focus state. Call when replacing the widget tree.
   void ResetState();
 
-  Widget* hovered_widget() const { return hovered_; }
-  Widget* focused_widget() const { return focused_; }
-  Widget* pressed_widget() const { return pressed_; }
+  Widget* hovered_widget() const { return Resolve(hovered_); }
+  Widget* focused_widget() const { return Resolve(focused_); }
+  Widget* pressed_widget() const { return Resolve(pressed_); }
   /// True between OnDragStart and OnDragEnd. The application can use
   /// this to defer destructive widget-tree rebuilds while a drag is
   /// in flight (otherwise the drag target gets destroyed mid-move).
@@ -72,12 +74,20 @@ class InputRouter {
 
  private:
   Platform* platform_ = nullptr;
-  Widget* hovered_ = nullptr;
-  Widget* focused_ = nullptr;
-  Widget* pressed_ = nullptr;
+  WidgetRegistry* registry_ = nullptr;  // resolves the handles below
+
+  // Persistent widget references are stored as generation-checked handles, not
+  // raw pointers, so a tree rebuild that destroys these widgets leaves the
+  // handles resolving to null instead of dangling.
+  WidgetId hovered_;
+  WidgetId focused_;
+  WidgetId pressed_;
   /// Resolved drag target - usually `pressed_`, but may be a draggable
   /// ancestor if the press landed on a drag handle (see input.cc).
-  Widget* drag_target_ = nullptr;
+  WidgetId drag_target_;
+
+  /// Resolve a stored handle to a live widget (or nullptr).
+  Widget* Resolve(WidgetId id) const;
   Vec2 mouse_pos_ = Vec2::Zero();
   Vec2 drag_start_ = Vec2::Zero();
   Vec2 drag_prev_ = Vec2::Zero();

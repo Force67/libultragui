@@ -8,6 +8,7 @@ namespace ugui {
 
 class Animator;
 class Platform;
+class WidgetRegistry;
 
 /// Shared context propagated through the widget tree.
 /// Provides widgets with access to subsystems they need (text shaping, etc.)
@@ -18,6 +19,7 @@ struct WidgetContext {
   Animator* animator = nullptr;
   f64* current_time = nullptr;
   Platform* platform = nullptr;
+  WidgetRegistry* registry = nullptr;  ///< for Widget::handle() (stable ids)
   f32 ui_scale = 1.0f;  ///< Viewport scale factor (1.0 = design resolution)
 };
 

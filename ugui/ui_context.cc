@@ -121,19 +121,19 @@ bool UIContext::Init(const UIConfig& config) {
         [this](const char* path, unsigned w, unsigned h) -> LottieAnimation* {
           return LoadLottie(path, w, h);
         },
-        [this](const char* name) -> Widget* { return FindWidget(name); });
+        [this](const char* name) -> Widget* { return FindWidgetPtr(name); });
 #endif
     RegisterAnimLua(
         script_,
         [this](const char* path, unsigned w, unsigned h) -> VectorAnimation* {
           return LoadAnim(path, w, h);
         },
-        [this](const char* name) -> Widget* { return FindWidget(name); });
+        [this](const char* name) -> Widget* { return FindWidgetPtr(name); });
 #if ULTRAGUI_VIDEO
     RegisterVideoLua(
         script_,
         [this](const char* path) -> VideoPlayer* { return LoadVideo(path); },
-        [this](const char* name) -> Widget* { return FindWidget(name); });
+        [this](const char* name) -> Widget* { return FindWidgetPtr(name); });
 #endif
   }
 #endif
@@ -149,6 +149,7 @@ bool UIContext::Init(const UIConfig& config) {
   widget_ctx_.animator = &animator_;
   widget_ctx_.current_time = &last_time_;
   widget_ctx_.platform = &platform_;
+  widget_ctx_.registry = &widget_registry_;
   widget_ctx_.ui_scale = ComputeViewportScale(
       config_,
       {static_cast<f32>(config.width), static_cast<f32>(config.height)});
@@ -728,11 +729,16 @@ void UIContext::SetTheme(const Theme& theme) {
   // A full hot-reload would require re-parsing and rebuilding the tree.
 }
 
-Widget* UIContext::FindWidget(const char* name) const {
+Widget* UIContext::FindWidgetPtr(const char* name) const {
   if (widget_cache_dirty_) RebuildWidgetCache();
   auto it = widget_cache_.find(name);
   if (it != widget_cache_.end()) return it->second;
   return nullptr;
+}
+
+WidgetId UIContext::FindWidget(const char* name) const {
+  Widget* w = FindWidgetPtr(name);
+  return w ? w->handle() : kNullWidget;
 }
 
 void UIContext::CacheWidgetTree(Widget* w, HashMap<String, Widget*>& cache) {

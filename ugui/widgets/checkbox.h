@@ -8,6 +8,10 @@ namespace ugui {
 /// Interactive checkbox widget with optional text label.
 class Checkbox : public Widget {
  public:
+  static constexpr WidgetKind kKind = WidgetKind::kCheckbox;
+  WidgetKind kind() const override { return kKind; }
+
+ public:
   using Widget::Widget;
 
   bool checked() const { return HasState(state_, WidgetState::kChecked); }

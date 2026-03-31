@@ -8,6 +8,10 @@ namespace ugui {
 /// Text display widget.
 class Text : public Widget {
  public:
+  static constexpr WidgetKind kKind = WidgetKind::kText;
+  WidgetKind kind() const override { return kKind; }
+
+ public:
   using Widget::Widget;
 
   void set_text(const String& text) {

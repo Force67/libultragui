@@ -1,6 +1,7 @@
 #ifndef ULTRAGUI_WIDGETS_WIDGET_H_
 #define ULTRAGUI_WIDGETS_WIDGET_H_
 
+#include <ugui/core/handle.h>
 #include <ugui/core/rect.h>
 #include <ugui/core/types.h>
 #include <ugui/style/style.h>
@@ -10,11 +11,35 @@
 namespace ugui {
 
 class Renderer2D;
+class WidgetRegistry;
 struct LayoutNode;
+
+/// Stable type tag for every widget, enabling handle-safe downcasts without
+/// RTTI (see widget_cast). Subclasses set their own value via kKind/kind().
+enum class WidgetKind : u8 {
+  kWidget,
+  kPanel,
+  kText,
+  kButton,
+  kImage,
+  kCheckbox,
+  kRadio,
+  kToggle,
+  kSlider,
+  kDropdown,
+  kTextInput,
+  kScrollView,
+  kContextMenu,
+  kModal,
+  kRichText,
+  kMessageBox,
+};
 
 /// Base class for all UI widgets. Provides lifecycle, tree structure,
 /// hit-testing, and dirty-flag propagation.
 class Widget {
+  friend class WidgetRegistry;
+
  public:
   explicit Widget(u32 id = 0) : id_(id == 0 ? NextAutoId() : id) {}
 
@@ -39,6 +64,14 @@ class Widget {
   void set_id(u32 id) { id_ = id; }
   const String& name() const { return name_; }
   void set_name(const String& name) { name_ = name; }
+
+  /// Stable type tag for handle-safe casts (no RTTI). Subclasses override.
+  virtual WidgetKind kind() const { return WidgetKind::kWidget; }
+
+  /// Stable handle to this widget. Prefer storing this over a raw Widget*:
+  /// once the widget is destroyed the handle resolves to null instead of
+  /// dangling. The slot is allocated lazily on first use.
+  WidgetId handle();
 
   // --- Style ---
   Style& style() { return style_; }
@@ -171,6 +204,8 @@ class Widget {
 
  protected:
   u32 id_ = 0;
+  WidgetId self_;                       // handle, assigned lazily by registry
+  WidgetRegistry* registry_ = nullptr;  // owning registry (for release on dtor)
   String name_;
   String tooltip_;
   Widget* parent_ = nullptr;
@@ -206,6 +241,17 @@ class Widget {
   Vec2 drag_press_ = Vec2::Zero();
   DragHandler on_drag_;
 };
+
+/// Handle-safe downcast: returns p as T* when its kind matches, else nullptr.
+/// Drop-in replacement for dynamic_cast that needs no RTTI.
+template <class T>
+T* widget_cast(Widget* p) {
+  return (p && p->kind() == T::kKind) ? static_cast<T*>(p) : nullptr;
+}
+template <class T>
+const T* widget_cast(const Widget* p) {
+  return (p && p->kind() == T::kKind) ? static_cast<const T*>(p) : nullptr;
+}
 
 }  // namespace ugui
 

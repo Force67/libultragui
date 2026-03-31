@@ -46,6 +46,11 @@ TEST(scrollview_hit_test_respects_scroll_offset) {
 
   ugui::Widget* hit = root.HitTest({20, 40});  // visual child y-range: 30..70
   ASSERT(hit == &child);
+
+  // These widgets are stack-allocated; detach them so the parents' owning
+  // destructors don't delete non-heap pointers as the stack unwinds.
+  scroll.RemoveChild(&child);
+  root.RemoveChild(&scroll);
 }
 
 TEST(widget_input_to_layout_point_accumulates_scroll_parents) {
@@ -64,6 +69,11 @@ TEST(widget_input_to_layout_point_accumulates_scroll_parents) {
   ugui::Vec2 p = leaf.InputToLayoutPoint({1, 2});
   ASSERT(p.x == 6.0f);
   ASSERT(p.y == 32.0f);
+
+  // Detach stack-allocated widgets before the parents' destructors run.
+  b.RemoveChild(&leaf);
+  a.RemoveChild(&b);
+  root.RemoveChild(&a);
 }
 
 TEST(script_runtime_widget_registry_can_be_cleared) {

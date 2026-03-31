@@ -8,6 +8,10 @@ namespace ugui {
 /// Interactive radio button widget with group-based mutual exclusion.
 class Radio : public Widget {
  public:
+  static constexpr WidgetKind kKind = WidgetKind::kRadio;
+  WidgetKind kind() const override { return kKind; }
+
+ public:
   using Widget::Widget;
 
   bool selected() const { return HasState(state_, WidgetState::kChecked); }

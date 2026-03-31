@@ -9,6 +9,10 @@ namespace ugui {
 /// Supports mouse drag interaction and an on-change callback.
 class Slider : public Widget {
  public:
+  static constexpr WidgetKind kKind = WidgetKind::kSlider;
+  WidgetKind kind() const override { return kKind; }
+
+ public:
   using Widget::Widget;
 
   f32 value() const { return value_; }

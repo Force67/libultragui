@@ -86,7 +86,7 @@ void RegisterAnimLua(
     const char* name = luaL_checkstring(L, 2);
     if (a) {
       Widget* w = find_widget(name);
-      if (auto* img = dynamic_cast<Image*>(w)) {
+      if (auto* img = widget_cast<Image>(w)) {
         img->set_texture(a->texture(), static_cast<f32>(a->width()),
                          static_cast<f32>(a->height()));
       }

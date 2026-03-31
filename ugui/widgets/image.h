@@ -9,6 +9,10 @@ namespace ugui {
 /// Image display widget.
 class Image : public Widget {
  public:
+  static constexpr WidgetKind kKind = WidgetKind::kImage;
+  WidgetKind kind() const override { return kKind; }
+
+ public:
   using Widget::Widget;
 
   void set_texture(RHITextureHandle texture, f32 width, f32 height) {

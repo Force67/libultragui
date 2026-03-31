@@ -1,8 +1,7 @@
+#include <algorithm>
 #include <ugui/layout/layout_tree.h>
 #include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/widget.h>
-
-#include <algorithm>
 
 namespace ugui {
 
@@ -43,7 +42,7 @@ static void build_layout_nodes(Widget* widget, u32 parent_index,
 static ScrollView* FindScrollParent(Widget* widget) {
   Widget* p = widget->parent();
   while (p) {
-    if (auto* sv = dynamic_cast<ScrollView*>(p)) return sv;
+    if (auto* sv = widget_cast<ScrollView>(p)) return sv;
     p = p->parent();
   }
   return nullptr;

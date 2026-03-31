@@ -154,6 +154,7 @@ set(ULTRAGUI_SOURCES
     ugui/layout/layout.cc
     ugui/animation/animator.cc
     ugui/widgets/widget.cc
+    ugui/widgets/widget_registry.cc
     ugui/widgets/panel.cc
     ugui/widgets/text.cc
     ugui/widgets/text_input.cc

@@ -9,6 +9,10 @@ namespace ugui {
 /// the scroll view clips and translates its children.
 class ScrollView : public Widget {
  public:
+  static constexpr WidgetKind kKind = WidgetKind::kScrollView;
+  WidgetKind kind() const override { return kKind; }
+
+ public:
   using Widget::Widget;
 
   Vec2 scroll_offset() const { return scroll_offset_; }

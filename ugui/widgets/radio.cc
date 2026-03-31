@@ -1,9 +1,8 @@
+#include <algorithm>
+#include <string>
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
 #include <ugui/widgets/radio.h>
-
-#include <algorithm>
-#include <string>
 
 namespace ugui {
 
@@ -21,7 +20,7 @@ void Radio::DeselectSiblings() {
   if (!parent_) return;
   for (auto* child : parent_->children()) {
     if (child == this) continue;
-    auto* sibling = dynamic_cast<Radio*>(child);
+    auto* sibling = widget_cast<Radio>(child);
     if (sibling && sibling->group() == group_) {
       sibling->set_selected(false);
     }

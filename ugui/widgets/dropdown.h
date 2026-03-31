@@ -9,6 +9,10 @@ namespace ugui {
 /// and expands inline to show a list of options when clicked.
 class Dropdown : public Widget {
  public:
+  static constexpr WidgetKind kKind = WidgetKind::kDropdown;
+  WidgetKind kind() const override { return kKind; }
+
+ public:
   using Widget::Widget;
 
   void set_options(const Vector<String>& opts) {

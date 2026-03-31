@@ -8,6 +8,10 @@ namespace ugui {
 /// Interactive button widget with text label.
 class Button : public Widget {
  public:
+  static constexpr WidgetKind kKind = WidgetKind::kButton;
+  WidgetKind kind() const override { return kKind; }
+
+ public:
   using Widget::Widget;
 
   void set_label(const String& label) {

@@ -29,6 +29,7 @@
 #include <ugui/svg/svg.h>
 #include <ugui/text/text_engine.h>
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_registry.h>
 
 namespace ugui {
 
@@ -176,8 +177,14 @@ class UIContext {
   /// Set the swapchain clear color (background).
   void set_clear_color(Color color) { config_.clear_color = color; }
 
-  /// Find a widget by name in the tree (O(1) cached lookup).
-  Widget* FindWidget(const char* name) const;
+  /// Find a widget by name (O(1) cached lookup). Returns a stable handle;
+  /// resolve it via widgets().Get(id) right before use. Prefer this over a raw
+  /// pointer so a stale reference safely becomes null after a tree rebuild.
+  WidgetId FindWidget(const char* name) const;
+
+  /// The widget handle registry: widgets().Get(id) resolves a WidgetId to a
+  /// live Widget* (or nullptr), GetAs<T>(id) does a kind-checked downcast.
+  WidgetRegistry& widgets() { return widget_registry_; }
 
   /// Invalidate the widget name cache (call after dynamically adding children).
   void InvalidateWidgetCache() { widget_cache_dirty_ = true; }
@@ -258,7 +265,11 @@ class UIContext {
   Widget* root_ = nullptr;
   FontHandle default_font_ = kInvalidFont;
   UIConfig config_;
+  WidgetRegistry widget_registry_;
   WidgetContext widget_ctx_;
+
+  /// Resolve a cached widget name to a live pointer (transient, internal use).
+  Widget* FindWidgetPtr(const char* name) const;
 
   f64 last_time_ = 0.0;
   f64 dt_ = 0.0;

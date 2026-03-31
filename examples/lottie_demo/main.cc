@@ -199,7 +199,7 @@ int main(int argc, char* argv[]) {
       anim->set_loop(true);
 
       auto* img =
-          dynamic_cast<ugui::Image*>(ui.FindWidget(anims[i].widget_name));
+          ui.widgets().GetAs<ugui::Image>(ui.FindWidget(anims[i].widget_name));
       if (img) img->set_texture(anim->texture(), 128, 128);
 
       loaded[i] = anim;
@@ -217,7 +217,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < ANIM_COUNT; ++i) {
       if (!loaded[i]) continue;
       auto* img =
-          dynamic_cast<ugui::Image*>(ui.FindWidget(anims[i].widget_name));
+          ui.widgets().GetAs<ugui::Image>(ui.FindWidget(anims[i].widget_name));
       if (img) img->set_texture(loaded[i]->texture(), 128, 128);
     }
 

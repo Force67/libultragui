@@ -1,12 +1,12 @@
+#include <algorithm>
+#include <ranges>
 #include <ugui/animation/animator.h>
 #include <ugui/layout/layout.h>
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
 #include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/widget.h>
-
-#include <algorithm>
-#include <ranges>
+#include <ugui/widgets/widget_registry.h>
 
 namespace ugui {
 
@@ -23,9 +23,17 @@ static u32 style_corner_radii(const Style& s) {
 }
 
 Widget::~Widget() {
+  // Invalidate any outstanding handles to this widget before it goes away.
+  if (registry_ && self_.valid()) registry_->Release(self_);
   for (auto* child : children_) {
     delete child;
   }
+}
+
+WidgetId Widget::handle() {
+  if (self_.valid()) return self_;
+  if (context_ && context_->registry) return context_->registry->Acquire(this);
+  return kNullWidget;
 }
 
 void Widget::SetContext(const WidgetContext* ctx) {
@@ -145,8 +153,7 @@ Widget* Widget::HitTest(Vec2 point) {
 Vec2 Widget::InputToLayoutPoint(Vec2 point) const {
   const Widget* p = parent_;
   while (p) {
-    if (auto* sv = dynamic_cast<const ScrollView*>(p))
-      point += sv->scroll_offset();
+    if (auto* sv = widget_cast<ScrollView>(p)) point += sv->scroll_offset();
     p = p->parent();
   }
   return point;

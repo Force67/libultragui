@@ -204,17 +204,17 @@ void ScriptRuntime::Impl::PushWidgetTable(Widget* widget) {
   lua_setfield(L, -2, "id");
 
   // Type-specific fields so Lua handlers get w.checked, w.selected, w.value
-  if (auto* cb = dynamic_cast<Checkbox*>(widget)) {
+  if (auto* cb = widget_cast<Checkbox>(widget)) {
     lua_pushboolean(L, cb->checked());
     lua_setfield(L, -2, "checked");
   }
-  if (auto* dd = dynamic_cast<Dropdown*>(widget)) {
+  if (auto* dd = widget_cast<Dropdown>(widget)) {
     lua_pushinteger(L, dd->selected_index());
     lua_setfield(L, -2, "selected");
     lua_pushstring(L, dd->selected_text().c_str());
     lua_setfield(L, -2, "selected_text");
   }
-  if (auto* sl = dynamic_cast<Slider*>(widget)) {
+  if (auto* sl = widget_cast<Slider>(widget)) {
     lua_pushnumber(L, sl->value());
     lua_setfield(L, -2, "value");
     lua_pushnumber(L, sl->min());
@@ -334,19 +334,19 @@ static void WireChangeHandlersRecursive(ScriptRuntime& rt, Widget* w) {
   if (!w) return;
   const auto& name = w->name();
   if (!name.empty()) {
-    if (auto* dd = dynamic_cast<Dropdown*>(w)) {
+    if (auto* dd = widget_cast<Dropdown>(w)) {
       dd->set_on_change([&rt, widget = w](i32, const String&) {
         std::string handler = "on_" + widget->name();
         rt.CallHandler(handler.c_str(), widget);
       });
     }
-    if (auto* cb = dynamic_cast<Checkbox*>(w)) {
+    if (auto* cb = widget_cast<Checkbox>(w)) {
       cb->set_on_change([&rt, widget = w](bool) {
         std::string handler = "on_" + widget->name();
         rt.CallHandler(handler.c_str(), widget);
       });
     }
-    if (auto* sl = dynamic_cast<Slider*>(w)) {
+    if (auto* sl = widget_cast<Slider>(w)) {
       sl->set_on_change([&rt, widget = w](f32) {
         std::string handler = "on_" + widget->name();
         rt.CallHandler(handler.c_str(), widget);
@@ -535,8 +535,7 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
   auto it = rt->widget_registry.find(name);
   Widget* w = (it != rt->widget_registry.end()) ? it->second : nullptr;
   if (!w) {
-    std::fprintf(stderr, "ugui/lua: ugui.set: widget '%s' not found\n",
-                 name);
+    std::fprintf(stderr, "ugui/lua: ugui.set: widget '%s' not found\n", name);
     return 0;
   }
 
@@ -657,27 +656,27 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
       s.height = Length::Px(static_cast<f32>(luaL_checknumber(L, 3)));
     }
   } else if (strcmp(prop, "selected") == 0) {
-    if (auto* dd = dynamic_cast<Dropdown*>(w)) {
+    if (auto* dd = widget_cast<Dropdown>(w)) {
       dd->set_selected_index(static_cast<i32>(luaL_checkinteger(L, 3)));
       return 0;
     }
   } else if (strcmp(prop, "checked") == 0) {
-    if (auto* cb = dynamic_cast<Checkbox*>(w)) {
+    if (auto* cb = widget_cast<Checkbox>(w)) {
       cb->set_checked(lua_toboolean(L, 3));
       return 0;
     }
   } else if (strcmp(prop, "value") == 0) {
-    if (auto* sl = dynamic_cast<Slider*>(w)) {
+    if (auto* sl = widget_cast<Slider>(w)) {
       sl->set_value(static_cast<f32>(luaL_checknumber(L, 3)));
       return 0;
     }
   } else if (strcmp(prop, "text") == 0) {
-    if (auto* text = dynamic_cast<Text*>(w)) {
+    if (auto* text = widget_cast<Text>(w)) {
       text->set_text(luaL_checkstring(L, 3));
       w->ClearAnimationStyle();
       return 0;
     }
-    if (auto* btn = dynamic_cast<Button*>(w)) {
+    if (auto* btn = widget_cast<Button>(w)) {
       btn->set_label(luaL_checkstring(L, 3));
       w->ClearAnimationStyle();
       return 0;
