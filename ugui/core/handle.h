@@ -24,6 +24,10 @@ struct WidgetId {
   bool operator!=(const WidgetId& o) const { return !(*this == o); }
 };
 
+/// Short alias for the widget handle. `wid` is the preferred spelling for
+/// referring to a widget anywhere a raw Widget* used to be stored.
+using wid = WidgetId;
+
 inline constexpr WidgetId kNullWidget{};
 
 struct WidgetIdHash {

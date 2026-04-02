@@ -33,17 +33,17 @@ static void build_layout_nodes(Widget* widget, u32 parent_index,
   }
 
   // Recurse children
-  for (u32 i = 0; i < widget->child_count(); ++i) {
-    build_layout_nodes(widget->ChildAt(i), my_index, nodes);
+  for (Widget* child : widget->child_ptrs()) {
+    build_layout_nodes(child, my_index, nodes);
   }
 }
 
 /// Walk up from `widget` to find the nearest ScrollView ancestor.
 static ScrollView* FindScrollParent(Widget* widget) {
-  Widget* p = widget->parent();
+  Widget* p = widget->parent_ptr();
   while (p) {
     if (auto* sv = widget_cast<ScrollView>(p)) return sv;
-    p = p->parent();
+    p = p->parent_ptr();
   }
   return nullptr;
 }
@@ -72,8 +72,8 @@ static void apply_layout_results(Widget* widget, u32& node_index,
   widget->OnLayout(node.computed_rect, node.content_rect);
 
   ++node_index;
-  for (u32 i = 0; i < widget->child_count(); ++i) {
-    apply_layout_results(widget->ChildAt(i), node_index, nodes);
+  for (Widget* child : widget->child_ptrs()) {
+    apply_layout_results(child, node_index, nodes);
   }
 }
 

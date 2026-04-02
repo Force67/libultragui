@@ -353,8 +353,8 @@ static void WireChangeHandlersRecursive(ScriptRuntime& rt, Widget* w) {
       });
     }
   }
-  for (u32 i = 0; i < w->child_count(); ++i)
-    WireChangeHandlersRecursive(rt, w->ChildAt(i));
+  for (Widget* child : w->child_ptrs())
+    WireChangeHandlersRecursive(rt, child);
 }
 
 void ScriptRuntime::WireChangeHandlers(Widget* root) {

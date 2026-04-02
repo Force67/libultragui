@@ -39,7 +39,7 @@ class Dropdown : public Widget {
   void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
 
   bool OnClick() override;
-  Widget* HitTest(Vec2 point) override;
+  wid HitTest(Vec2 point) override;
   void Measure(f32& out_width, f32& out_height) override;
   void OnPaint(Renderer2D& renderer) override;
   void OnUpdate(f64 dt) override;

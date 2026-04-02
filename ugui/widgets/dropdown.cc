@@ -20,7 +20,7 @@ void Dropdown::set_selected_index(i32 idx) {
   MarkDirty();
 }
 
-Widget* Dropdown::HitTest(Vec2 point) {
+wid Dropdown::HitTest(Vec2 point) {
   // When open, expand hit area to include the option list below
   if (open_ && !options_.empty()) {
     auto s = ComputedStyle();
@@ -28,7 +28,7 @@ Widget* Dropdown::HitTest(Vec2 point) {
     f32 row_height = s.font_size * 1.5f;
     f32 list_h = row_height * static_cast<f32>(options_.size());
     Rect expanded = {rect_.x, rect_.y, rect_.w, rect_.h + list_h};
-    if (expanded.contains(point)) return this;
+    if (expanded.contains(point)) return self_;
   }
   return Widget::HitTest(point);
 }

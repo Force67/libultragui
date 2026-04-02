@@ -44,8 +44,8 @@ TEST(scrollview_hit_test_respects_scroll_offset) {
   child.OnLayout({10, 80, 50, 40}, {10, 80, 50, 40});
   scroll.set_scroll_offset({0, 50});
 
-  ugui::Widget* hit = root.HitTest({20, 40});  // visual child y-range: 30..70
-  ASSERT(hit == &child);
+  ugui::wid hit = root.HitTest({20, 40});  // visual child y-range: 30..70
+  ASSERT(hit == child.handle());
 
   // These widgets are stack-allocated; detach them so the parents' owning
   // destructors don't delete non-heap pointers as the stack unwinds.

@@ -46,7 +46,7 @@ static void PaintWidgetTreeImpl(Widget* widget, Renderer2D& renderer,
   if (auto* sv = widget_cast<ScrollView>(widget))
     child_offset = child_offset + sv->scroll_offset();
 
-  for (auto* child : widget->children())
+  for (auto* child : widget->child_ptrs())
     PaintWidgetTreeImpl(child, renderer, child_offset);
 
   if (clip) renderer.PopScissor();

@@ -1,11 +1,10 @@
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
 #include <ugui/widgets/scroll_view.h>
+#include <ugui/widgets/widget_registry.h>
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
-#include <ranges>
 
 namespace ugui {
 
@@ -25,14 +24,13 @@ bool ScrollView::OnScroll(Vec2 delta) {
 void ScrollView::OnLayout(const Rect& rect, const Rect& content_rect) {
   Widget::OnLayout(rect, content_rect);
 
-  // Compute total content size from children (fold)
-  content_size_ = std::accumulate(
-      children_.begin(), children_.end(), Vec2{0, 0},
-      [&content_rect](Vec2 acc, const Widget* child) {
-        Rect cr = child->rect();
-        return Vec2{std::max(acc.x, cr.x + cr.w - content_rect.x),
-                    std::max(acc.y, cr.y + cr.h - content_rect.y)};
-      });
+  // Compute total content size from children
+  content_size_ = Vec2{0, 0};
+  for (const Widget* child : child_ptrs()) {
+    Rect cr = child->rect();
+    content_size_.x = std::max(content_size_.x, cr.x + cr.w - content_rect.x);
+    content_size_.y = std::max(content_size_.y, cr.y + cr.h - content_rect.y);
+  }
 
   // Clamp scroll offset
   f32 max_scroll_x = std::max(0.0f, content_size_.x - content_rect.w);
@@ -41,18 +39,21 @@ void ScrollView::OnLayout(const Rect& rect, const Rect& content_rect) {
   scroll_offset_.y = std::clamp(scroll_offset_.y, 0.0f, max_scroll_y);
 }
 
-Widget* ScrollView::HitTest(Vec2 point) {
-  if (!rect_.contains(point)) return nullptr;
+wid ScrollView::HitTest(Vec2 point) {
+  if (!rect_.contains(point)) return kNullWidget;
 
   // Children are visually translated by scroll_offset_ in the paint pass.
   // Translate input coordinates back into the children's layout space.
   if (content_rect_.contains(point)) {
     Vec2 child_point = point + scroll_offset_;
-    for (auto* child : children_ | std::views::reverse) {
-      if (auto* hit = child->HitTest(child_point)) return hit;
+    for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
+      if (Widget* child = registry_ ? registry_->Get(*it) : nullptr) {
+        wid hit = child->HitTest(child_point);
+        if (hit.valid()) return hit;
+      }
     }
   }
-  return this;
+  return self_;
 }
 
 void ScrollView::OnUpdate(f64 dt) {

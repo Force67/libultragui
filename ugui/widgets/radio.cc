@@ -17,8 +17,9 @@ void Radio::set_selected(bool v) {
 }
 
 void Radio::DeselectSiblings() {
-  if (!parent_) return;
-  for (auto* child : parent_->children()) {
+  Widget* parent = parent_ptr();
+  if (!parent) return;
+  for (Widget* child : parent->child_ptrs()) {
     if (child == this) continue;
     auto* sibling = widget_cast<Radio>(child);
     if (sibling && sibling->group() == group_) {

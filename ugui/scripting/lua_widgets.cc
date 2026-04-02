@@ -9,8 +9,8 @@ void RegisterWidgetTree(ScriptRuntime& rt, Widget* root) {
   if (!root->name().empty()) {
     rt.RegisterWidget(root);
   }
-  for (u32 i = 0; i < root->child_count(); ++i) {
-    RegisterWidgetTree(rt, root->ChildAt(i));
+  for (Widget* child : root->child_ptrs()) {
+    RegisterWidgetTree(rt, child);
   }
 }
 

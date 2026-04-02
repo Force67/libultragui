@@ -30,7 +30,7 @@ class ScrollView : public Widget {
   bool OnScroll(Vec2 delta) override;
 
   void OnLayout(const Rect& rect, const Rect& content_rect) override;
-  Widget* HitTest(Vec2 point) override;
+  wid HitTest(Vec2 point) override;
   void OnPaint(Renderer2D& renderer) override;
   void OnUpdate(f64 dt) override;
 

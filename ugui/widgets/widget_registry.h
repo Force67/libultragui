@@ -9,11 +9,12 @@
 namespace ugui {
 
 /// Generation-checked slot map that hands out stable WidgetId handles for live
-/// widgets. The widget tree still owns its widgets (parent/child links and
-/// destruction are unchanged); this registry only tracks liveness so that any
-/// stored reference is a handle that safely resolves to null once the widget is
-/// gone. Acquire() is lazy: a slot is allocated the first time a widget needs a
-/// handle, and freed (generation bumped) in the widget's destructor.
+/// widgets. The widget tree still owns its widgets (destruction is unchanged),
+/// but parent/child links are stored as handles that resolve through this
+/// registry, so any stored reference safely resolves to null once the widget is
+/// gone. Every widget Acquire()s a slot eagerly in its constructor (via the
+/// active registry), and the slot is freed (generation bumped) in the
+/// destructor.
 class WidgetRegistry {
  public:
   /// Return the widget's handle, allocating a slot on first use. Idempotent.
@@ -34,6 +35,24 @@ class WidgetRegistry {
   /// Release a slot (called from ~Widget). Bumps the generation so outstanding
   /// handles to this slot become stale.
   void Release(WidgetId id);
+
+  /// Registry that new widgets register themselves into: the active context's,
+  /// or a process-global default for widgets created without a UIContext.
+  /// Every Widget acquires a handle from this in its constructor, so the tree
+  /// can reference children/parents by handle instead of raw pointers.
+  static WidgetRegistry* Active();
+
+  /// RAII scope that makes `r` the active registry on this thread. UIContext
+  /// wraps tree creation/update in one of these.
+  struct ScopedActive {
+    explicit ScopedActive(WidgetRegistry* r);
+    ~ScopedActive();
+    ScopedActive(const ScopedActive&) = delete;
+    ScopedActive& operator=(const ScopedActive&) = delete;
+
+   private:
+    WidgetRegistry* prev_;
+  };
 
  private:
   struct Slot {

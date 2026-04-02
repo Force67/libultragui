@@ -305,7 +305,7 @@ void UIContext::PumpInput() {
       for (i32 j = static_cast<i32>(overlays_.size()) - 1; j >= 0; --j) {
         auto* w = overlays_[j].widget;
         if (!w) continue;
-        Widget* deepest = w->HitTest(evt.position);
+        Widget* deepest = widget_registry_.Get(w->HitTest(evt.position));
         if (deepest) {
           hit = deepest;
           break;
@@ -548,7 +548,7 @@ void UIContext::UpdateTooltip() {
   // Find the nearest ancestor with a tooltip (walk up the tree)
   Widget* tip_target = hovered;
   while (tip_target && tip_target->tooltip().empty())
-    tip_target = tip_target->parent();
+    tip_target = tip_target->parent_ptr();
 
   if (tip_target != tooltip_target_) {
     tooltip_target_ = tip_target;
@@ -744,7 +744,7 @@ WidgetId UIContext::FindWidget(const char* name) const {
 void UIContext::CacheWidgetTree(Widget* w, HashMap<String, Widget*>& cache) {
   if (!w) return;
   if (!w->name().empty()) cache[w->name()] = w;
-  for (auto* child : w->children()) CacheWidgetTree(child, cache);
+  for (auto* child : w->child_ptrs()) CacheWidgetTree(child, cache);
 }
 
 void UIContext::RebuildWidgetCache() const {

@@ -39,7 +39,7 @@ bool InputRouter::Process(Widget* root) {
     Vec2 pos = queue.move_events[queue.move_count - 1].position;  // latest
     mouse_pos_ = pos;
     Widget* hovered = Resolve(hovered_);
-    Widget* new_hover = root->HitTest(pos);
+    Widget* new_hover = Resolve(root->HitTest(pos));
 
     if (new_hover != hovered) {
       if (hovered) {
@@ -69,10 +69,10 @@ bool InputRouter::Process(Widget* root) {
         // the nearest draggable ancestor so "drag the header moves the panel".
         Widget* dt = nullptr;
         Widget* w = pressed;
-        while (w && !w->drag_handle()) w = w->parent();
+        while (w && !w->drag_handle()) w = w->parent_ptr();
         if (w) {
-          Widget* anc = w->parent();
-          while (anc && !anc->draggable()) anc = anc->parent();
+          Widget* anc = w->parent_ptr();
+          while (anc && !anc->draggable()) anc = anc->parent_ptr();
           if (anc)
             dt = anc;
           else if (w->draggable())
@@ -99,7 +99,7 @@ bool InputRouter::Process(Widget* root) {
   // Process mouse buttons -> press/click
   for (u32 i = 0; i < queue.button_count; ++i) {
     auto& evt = queue.button_events[i];
-    Widget* target = root->HitTest(evt.position);
+    Widget* target = Resolve(root->HitTest(evt.position));
 
     if (evt.pressed) {
       pressed_ = target ? target->handle() : kNullWidget;
@@ -141,13 +141,13 @@ bool InputRouter::Process(Widget* root) {
   // Process scroll -> bubble up to find a handler
   for (u32 i = 0; i < queue.scroll_count; ++i) {
     auto& evt = queue.scroll_events[i];
-    Widget* w = root->HitTest(evt.position);
+    Widget* w = Resolve(root->HitTest(evt.position));
     while (w) {
       if (w->OnScroll(Vec2{-evt.delta.x * 40.0f, -evt.delta.y * 40.0f})) {
         consumed = true;
         break;
       }
-      w = w->parent();
+      w = w->parent_ptr();
     }
   }
 
@@ -159,7 +159,7 @@ bool InputRouter::Process(Widget* root) {
       Vector<Widget*> focusable;
       Function<void(Widget*)> collect = [&](Widget* w) {
         if (w->focusable()) focusable.push_back(w);
-        for (auto* child : w->children()) collect(child);
+        for (auto* child : w->child_ptrs()) collect(child);
       };
       collect(root);
       if (focusable.empty()) continue;
@@ -307,7 +307,7 @@ void InputRouter::RefreshHover(Widget* root) {
   if (!root || !platform_) return;
   registry_ = root->context() ? root->context()->registry : nullptr;
   Widget* hovered = Resolve(hovered_);
-  Widget* new_hover = root->HitTest(mouse_pos_);
+  Widget* new_hover = Resolve(root->HitTest(mouse_pos_));
   if (new_hover == hovered) return;
   if (hovered) {
     SetHoverBit(hovered, false);
@@ -399,7 +399,7 @@ void InputRouter::NavigateFocus(Widget* root, i8 dir_x, i8 dir_y) {
   Vector<Widget*> focusable;
   Function<void(Widget*)> collect = [&](Widget* w) {
     if (w->focusable()) focusable.push_back(w);
-    for (auto* child : w->children()) collect(child);
+    for (auto* child : w->child_ptrs()) collect(child);
   };
   collect(root);
   if (focusable.empty()) return;

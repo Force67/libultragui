@@ -22,55 +22,72 @@ static u32 style_corner_radii(const Style& s) {
   return Vertex2D::PackRadii(s.corner_radius);
 }
 
-Widget::~Widget() {
-  // Invalidate any outstanding handles to this widget before it goes away.
-  if (registry_ && self_.valid()) registry_->Release(self_);
-  for (auto* child : children_) {
-    delete child;
-  }
+Widget::Widget(u32 id) : id_(id == 0 ? NextAutoId() : id) {
+  // Register eagerly so every widget has a stable handle from birth; tree links
+  // and external references store the handle instead of a raw pointer.
+  WidgetRegistry::Active()->Acquire(this);  // sets self_ and registry_
 }
 
-WidgetId Widget::handle() {
-  if (self_.valid()) return self_;
-  if (context_ && context_->registry) return context_->registry->Acquire(this);
-  return kNullWidget;
+Widget::~Widget() {
+  for (wid c : children_) {
+    if (Widget* child = registry_ ? registry_->Get(c) : nullptr) delete child;
+  }
+  // Invalidate outstanding handles to this widget before it goes away.
+  if (registry_ && self_.valid()) registry_->Release(self_);
+}
+
+WidgetId Widget::handle() { return self_; }
+
+Widget* Widget::parent_ptr() const {
+  return registry_ ? registry_->Get(parent_) : nullptr;
+}
+
+Vector<Widget*> Widget::child_ptrs() const {
+  Vector<Widget*> out;
+  out.reserve(children_.size());
+  for (wid c : children_) {
+    if (Widget* w = registry_ ? registry_->Get(c) : nullptr) out.push_back(w);
+  }
+  return out;
 }
 
 void Widget::SetContext(const WidgetContext* ctx) {
   context_ = ctx;
-  for (auto* child : children_) {
-    child->SetContext(ctx);
-  }
+  for (Widget* child : child_ptrs()) child->SetContext(ctx);
 }
 
 void Widget::AddChild(Widget* child) {
-  if (child->parent_) child->parent_->RemoveChild(child);
-  child->parent_ = this;
-  children_.push_back(child);
+  if (!child) return;
+  if (Widget* old = child->parent_ptr()) old->RemoveChild(child);
+  child->parent_ = self_;
+  children_.push_back(child->self_);
   if (context_) child->SetContext(context_);
   MarkDirty();
 }
 
 void Widget::RemoveChild(Widget* child) {
-  auto it = std::find(children_.begin(), children_.end(), child);
+  if (!child) return;
+  auto it = std::find(children_.begin(), children_.end(), child->self_);
   if (it != children_.end()) {
-    (*it)->parent_ = nullptr;
+    child->parent_ = kNullWidget;
     children_.erase(it);
     MarkDirty();
   }
 }
 
 void Widget::ClearChildren() {
-  for (auto* child : children_) {
-    child->parent_ = nullptr;
-    delete child;
+  for (wid c : children_) {
+    if (Widget* child = registry_ ? registry_->Get(c) : nullptr) {
+      child->parent_ = kNullWidget;
+      delete child;
+    }
   }
   children_.clear();
   MarkDirty();
 }
 
-Widget* Widget::ChildAt(u32 index) const {
-  return index < children_.size() ? children_[index] : nullptr;
+wid Widget::ChildAt(u32 index) const {
+  return index < children_.size() ? children_[index] : kNullWidget;
 }
 
 void Widget::AddStateOverride(WidgetState state, const Style& override_style,
@@ -137,24 +154,27 @@ void Widget::MarkDirty() {
   layout_dirty_ = true;
   paint_dirty_ = true;
   // Propagate up to root
-  if (parent_) parent_->MarkDirty();
+  if (Widget* p = parent_ptr()) p->MarkDirty();
 }
 
-Widget* Widget::HitTest(Vec2 point) {
-  if (!rect_.contains(point)) return nullptr;
+wid Widget::HitTest(Vec2 point) {
+  if (!rect_.contains(point)) return kNullWidget;
 
   // Check children in reverse (top-most first)
-  for (auto* child : children_ | std::views::reverse) {
-    if (auto* hit = child->HitTest(point)) return hit;
+  for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
+    if (Widget* child = registry_ ? registry_->Get(*it) : nullptr) {
+      wid hit = child->HitTest(point);
+      if (hit.valid()) return hit;
+    }
   }
-  return this;
+  return self_;
 }
 
 Vec2 Widget::InputToLayoutPoint(Vec2 point) const {
-  const Widget* p = parent_;
+  Widget* p = parent_ptr();
   while (p) {
     if (auto* sv = widget_cast<ScrollView>(p)) point += sv->scroll_offset();
-    p = p->parent();
+    p = p->parent_ptr();
   }
   return point;
 }

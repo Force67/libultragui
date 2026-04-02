@@ -266,6 +266,10 @@ class UIContext {
   FontHandle default_font_ = kInvalidFont;
   UIConfig config_;
   WidgetRegistry widget_registry_;
+  // Makes widget_registry_ the active registry for this thread for the entire
+  // lifetime of the context, so every widget (built from IDL, created lazily,
+  // or by the application) registers into it and tree links resolve correctly.
+  WidgetRegistry::ScopedActive registry_scope_{&widget_registry_};
   WidgetContext widget_ctx_;
 
   /// Resolve a cached widget name to a live pointer (transient, internal use).

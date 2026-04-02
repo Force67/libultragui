@@ -3,6 +3,21 @@
 
 namespace ugui {
 
+namespace {
+thread_local WidgetRegistry* t_active = nullptr;
+}  // namespace
+
+WidgetRegistry* WidgetRegistry::Active() {
+  if (t_active) return t_active;
+  static WidgetRegistry s_default;  // for widgets created without a UIContext
+  return &s_default;
+}
+
+WidgetRegistry::ScopedActive::ScopedActive(WidgetRegistry* r) : prev_(t_active) {
+  t_active = r;
+}
+WidgetRegistry::ScopedActive::~ScopedActive() { t_active = prev_; }
+
 WidgetId WidgetRegistry::Acquire(Widget* w) {
   if (!w) return kNullWidget;
 

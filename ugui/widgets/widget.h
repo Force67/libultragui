@@ -41,7 +41,7 @@ class Widget {
   friend class WidgetRegistry;
 
  public:
-  explicit Widget(u32 id = 0) : id_(id == 0 ? NextAutoId() : id) {}
+  explicit Widget(u32 id = 0);
 
   /// Generate a unique widget ID (thread-local counter).
   static u32 NextAutoId() {
@@ -50,14 +50,19 @@ class Widget {
   }
   virtual ~Widget();
 
-  // --- Tree management ---
+  // --- Tree management (links are stable handles, not raw pointers) ---
   void AddChild(Widget* child);
   void RemoveChild(Widget* child);
   void ClearChildren();
-  Widget* ChildAt(u32 index) const;
+  wid ChildAt(u32 index) const;
   u32 child_count() const { return static_cast<u32>(children_.size()); }
-  Widget* parent() const { return parent_; }
-  const Vector<Widget*>& children() const { return children_; }
+  wid parent() const { return parent_; }
+  const Vector<wid>& children() const { return children_; }
+
+  /// Transient resolved views for traversal. The returned pointers are valid
+  /// only until the tree changes; never store them (store the wid instead).
+  Widget* parent_ptr() const;
+  Vector<Widget*> child_ptrs() const;
 
   // --- Identity ---
   u32 id() const { return id_; }
@@ -70,7 +75,7 @@ class Widget {
 
   /// Stable handle to this widget. Prefer storing this over a raw Widget*:
   /// once the widget is destroyed the handle resolves to null instead of
-  /// dangling. The slot is allocated lazily on first use.
+  /// dangling. The slot is allocated eagerly in the constructor.
   WidgetId handle();
 
   // --- Style ---
@@ -129,7 +134,7 @@ class Widget {
 
   // --- Hit testing ---
   bool contains(Vec2 point) const { return rect_.contains(point); }
-  virtual Widget* HitTest(Vec2 point);
+  virtual wid HitTest(Vec2 point);
 
   /// Convert a screen/input point into this widget's layout space by
   /// accounting for ancestor scroll offsets.
@@ -204,12 +209,12 @@ class Widget {
 
  protected:
   u32 id_ = 0;
-  WidgetId self_;                       // handle, assigned lazily by registry
-  WidgetRegistry* registry_ = nullptr;  // owning registry (for release on dtor)
+  wid self_;                            // this widget's handle (set in ctor)
+  WidgetRegistry* registry_ = nullptr;  // owning registry (resolves links)
   String name_;
   String tooltip_;
-  Widget* parent_ = nullptr;
-  Vector<Widget*> children_;
+  wid parent_;
+  Vector<wid> children_;
   const WidgetContext* context_ = nullptr;
 
   Style style_;
