@@ -59,6 +59,10 @@ void WidgetRegistry::Release(WidgetId id) {
   if (id.index == 0 || id.index >= slots_.size()) return;
   Slot& s = slots_[id.index];
   if (!s.alive || s.generation != id.generation) return;
+  // Drop any components attached to this entity (id still matches its slot
+  // generation here, so the stores find and erase them).
+  for (auto& store : stores_)
+    if (store) store->Remove(id);
   s.alive = false;
   s.ptr = nullptr;
   ++s.generation;

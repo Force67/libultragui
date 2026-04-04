@@ -186,6 +186,10 @@ class UIContext {
   /// live Widget* (or nullptr), GetAs<T>(id) does a kind-checked downcast.
   WidgetRegistry& widgets() { return widget_registry_; }
 
+  /// The entity-and-component world (same object as widgets()). Attach custom
+  /// components to any widget: ui.world().Add<MyComponent>(id, {...}).
+  World& world() { return widget_registry_; }
+
   /// Invalidate the widget name cache (call after dynamically adding children).
   void InvalidateWidgetCache() { widget_cache_dirty_ = true; }
 
