@@ -1,9 +1,9 @@
 #include <algorithm>
-#include <ranges>
 #include <ugui/animation/animator.h>
 #include <ugui/layout/layout.h>
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
+#include <ugui/widgets/components.h>
 #include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
@@ -37,6 +37,16 @@ Widget::~Widget() {
 }
 
 WidgetId Widget::handle() { return self_; }
+
+void Widget::set_tooltip(const String& text) {
+  if (registry_) registry_->Add<Tooltip>(self_, Tooltip{text});
+}
+
+const String& Widget::tooltip() const {
+  static const String kEmpty;
+  Tooltip* t = registry_ ? registry_->Get<Tooltip>(self_) : nullptr;
+  return t ? t->text : kEmpty;
+}
 
 Widget* Widget::parent_ptr() const {
   return registry_ ? registry_->Get(parent_) : nullptr;
@@ -183,47 +193,6 @@ void Widget::OnLayout(const Rect& rect, const Rect& content_rect) {
   rect_ = rect;
   content_rect_ = content_rect;
   layout_dirty_ = false;
-}
-
-// Drag-to-move default implementation
-//
-// When draggable_ is set, the first OnDragStart pins the widget to its
-// current screen-space rect via style.left_offset / style.top in pixels
-// and clears any right/bottom anchoring. Subsequent OnDragMove calls
-// offset that anchor by (cursor - press), so the widget tracks the
-// cursor exactly even after a layout pass repositions it.
-
-void Widget::OnDragStart(Vec2 pos) {
-  if (!draggable_) return;
-  drag_origin_x_ = rect_.x;
-  drag_origin_y_ = rect_.y;
-  drag_press_ = pos;
-  // Convert anchoring to top/left in screen pixels regardless of how
-  // the widget was originally positioned (left/top, right/bottom, or
-  // a mix). The layout engine will resolve these on the next pass.
-  style_.left_offset = Length::Px(rect_.x);
-  style_.top = Length::Px(rect_.y);
-  style_.right_offset = Length::Auto();
-  style_.bottom = Length::Auto();
-  // Make sure the widget actually participates in absolute positioning.
-  if (style_.position != Position::kAbsolute)
-    style_.position = Position::kAbsolute;
-  MarkDirty();
-}
-
-void Widget::OnDragMove(Vec2 pos, Vec2 /*delta*/) {
-  if (!draggable_) return;
-  f32 nx = drag_origin_x_ + (pos.x - drag_press_.x);
-  f32 ny = drag_origin_y_ + (pos.y - drag_press_.y);
-  style_.left_offset = Length::Px(nx);
-  style_.top = Length::Px(ny);
-  MarkDirty();
-  if (on_drag_) on_drag_(Vec2{nx, ny});
-}
-
-void Widget::OnDragEnd(Vec2 /*pos*/) {
-  // No-op by default; the in-flight position is already committed via
-  // OnDragMove. Subclasses can override for snap-back / persistence.
 }
 
 void Widget::OnPaint(Renderer2D& renderer) {

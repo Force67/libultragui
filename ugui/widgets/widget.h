@@ -152,9 +152,9 @@ class Widget {
   virtual void OnPaint(Renderer2D& renderer);
   virtual void Measure(f32& out_width, f32& out_height);
 
-  // --- Tooltip ---
-  void set_tooltip(const String& text) { tooltip_ = text; }
-  const String& tooltip() const { return tooltip_; }
+  // --- Tooltip (stored as a Tooltip component on this entity) ---
+  void set_tooltip(const String& text);
+  const String& tooltip() const;
 
   // --- Tab navigation ---
   void set_tab_index(i32 idx) { tab_index_ = idx; }
@@ -178,30 +178,11 @@ class Widget {
   /// TextInput::OnClick which repositions the caret to the last
   /// mouse position whenever the user types a space.
   virtual bool consumes_text_input() const { return false; }
-  virtual void OnDragStart(Vec2 pos);
-  virtual void OnDragMove(Vec2 pos, Vec2 delta);
-  virtual void OnDragEnd(Vec2 pos);
   /// Called when an overlay is dismissed (click outside).
   virtual void OnDismiss() {}
 
-  // --- Drag-to-move support ------------------------------------------
-  /// Mark this widget as user-movable. The default OnDragStart/Move
-  /// will rewrite its style.left_offset / style.top in pixels so the
-  /// next layout pass moves it to the cursor. Right/bottom anchoring
-  /// is converted to left/top on the first drag.
-  void set_draggable(bool d) { draggable_ = d; }
-  bool draggable() const { return draggable_; }
-  /// Mark this widget as a "drag handle" for an ancestor: clicking
-  /// here and dragging routes the drag events to the nearest draggable
-  /// ancestor instead of the leaf widget itself. Used to make panel
-  /// headers grab the surrounding panel.
-  void set_drag_handle(bool d) { drag_handle_ = d; }
-  bool drag_handle() const { return drag_handle_; }
-  /// Optional notifier fired during a default drag move with the
-  /// new top-left of the widget in screen pixels. Lets the application
-  /// persist the dragged position across widget-tree rebuilds.
-  using DragHandler = Function<void(Vec2 /*top_left*/)>;
-  void set_on_drag(DragHandler h) { on_drag_ = std::move(h); }
+  // Drag-to-move now lives in the Movable / DragHandle components (see
+  // components.h); attach them via the World and the input system handles it.
 
   // --- Layout integration ---
   void PopulateLayoutNode(LayoutNode& node) const;
@@ -212,7 +193,6 @@ class Widget {
   wid self_;                            // this widget's handle (set in ctor)
   WidgetRegistry* registry_ = nullptr;  // owning registry (resolves links)
   String name_;
-  String tooltip_;
   wid parent_;
   Vector<wid> children_;
   const WidgetContext* context_ = nullptr;
@@ -235,16 +215,6 @@ class Widget {
   i32 tab_index_ = -1;  // -1 = not focusable via tab, 0+ = tab order
   bool layout_dirty_ = true;
   bool paint_dirty_ = true;
-
-  // Drag-to-move state. drag_origin_x/y_ capture the widget's top-left
-  // when the drag started; drag_press_ captures the cursor at that
-  // moment. OnDragMove offsets origin by (cursor - press) each frame.
-  bool draggable_ = false;
-  bool drag_handle_ = false;
-  f32 drag_origin_x_ = 0;
-  f32 drag_origin_y_ = 0;
-  Vec2 drag_press_ = Vec2::Zero();
-  DragHandler on_drag_;
 };
 
 /// Handle-safe downcast: returns p as T* when its kind matches, else nullptr.

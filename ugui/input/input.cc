@@ -3,6 +3,7 @@
 #include <ugui/input/input.h>
 #include <ugui/platform/platform.h>
 #include <ugui/style/style.h>
+#include <ugui/widgets/components.h>
 #include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
 #include <vector>
@@ -22,6 +23,39 @@ static void SetHoverBit(Widget* w, bool on) {
   else
     w->set_widget_state(static_cast<WidgetState>(
         static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kHovered)));
+}
+
+// --- Drag-to-move system ----------------------------------------------------
+// The Movable component carries the drag state; these run when a press on a
+// Movable (or its DragHandle) crosses the drag threshold. The first move pins
+// the widget to its current rect via style.left/top in pixels (clearing any
+// right/bottom anchoring), then each move offsets that anchor by cursor-press.
+
+static void DragStart(World& world, Widget* w, Vec2 pos) {
+  Movable* m = world.Get<Movable>(w->handle());
+  if (!m) return;
+  m->origin_x = w->rect().x;
+  m->origin_y = w->rect().y;
+  m->press = pos;
+  Style& s = w->style();
+  s.left_offset = Length::Px(w->rect().x);
+  s.top = Length::Px(w->rect().y);
+  s.right_offset = Length::Auto();
+  s.bottom = Length::Auto();
+  if (s.position != Position::kAbsolute) s.position = Position::kAbsolute;
+  w->MarkDirty();
+}
+
+static void DragMove(World& world, Widget* w, Vec2 pos) {
+  Movable* m = world.Get<Movable>(w->handle());
+  if (!m) return;
+  f32 nx = m->origin_x + (pos.x - m->press.x);
+  f32 ny = m->origin_y + (pos.y - m->press.y);
+  Style& s = w->style();
+  s.left_offset = Length::Px(nx);
+  s.top = Length::Px(ny);
+  w->MarkDirty();
+  if (m->on_drag) m->on_drag(Vec2{nx, ny});
 }
 
 bool InputRouter::Process(Widget* root) {
@@ -65,31 +99,32 @@ bool InputRouter::Process(Widget* root) {
       Vec2 diff = {pos.x - drag_start_.x, pos.y - drag_start_.y};
       f32 dist2 = diff.x * diff.x + diff.y * diff.y;
       if (!dragging_ && dist2 > kDragThreshold * kDragThreshold) {
-        // If the pressed widget (or an ancestor) is a drag handle, climb to
-        // the nearest draggable ancestor so "drag the header moves the panel".
+        // If the pressed widget (or an ancestor) has a DragHandle, climb to the
+        // nearest Movable ancestor so "drag the header moves the panel".
         Widget* dt = nullptr;
         Widget* w = pressed;
-        while (w && !w->drag_handle()) w = w->parent_ptr();
+        while (w && !registry_->Has<DragHandle>(w->handle()))
+          w = w->parent_ptr();
         if (w) {
           Widget* anc = w->parent_ptr();
-          while (anc && !anc->draggable()) anc = anc->parent_ptr();
+          while (anc && !registry_->Has<Movable>(anc->handle()))
+            anc = anc->parent_ptr();
           if (anc)
             dt = anc;
-          else if (w->draggable())
+          else if (registry_->Has<Movable>(w->handle()))
             dt = w;
-        } else if (pressed->draggable()) {
+        } else if (registry_->Has<Movable>(pressed->handle())) {
           dt = pressed;
         }
         if (dt) {
           dragging_ = true;
           drag_target_ = dt->handle();
-          dt->OnDragStart(drag_start_);
+          DragStart(*registry_, dt, drag_start_);
         }
       }
       Widget* drag_target = Resolve(drag_target_);
       if (dragging_ && drag_target) {
-        Vec2 delta = {pos.x - drag_prev_.x, pos.y - drag_prev_.y};
-        drag_target->OnDragMove(pos, delta);
+        DragMove(*registry_, drag_target, pos);
         drag_prev_ = pos;
         consumed = true;
       }
@@ -114,9 +149,9 @@ bool InputRouter::Process(Widget* root) {
       set_focus(target);
       consumed = true;
     } else {
-      // Release
+      // Release. Drag end is a no-op: the position was already committed by
+      // DragMove during the drag.
       Widget* drag_target = Resolve(drag_target_);
-      if (dragging_ && drag_target) drag_target->OnDragEnd(evt.position);
       dragging_ = false;
       bool was_dragging = (drag_target != nullptr);
       drag_target_ = kNullWidget;

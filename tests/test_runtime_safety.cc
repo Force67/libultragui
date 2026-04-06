@@ -1,6 +1,8 @@
 #include <ugui/scripting/script_runtime.h>
+#include <ugui/widgets/components.h>
 #include <ugui/widgets/panel.h>
 #include <ugui/widgets/scroll_view.h>
+#include <ugui/widgets/widget_registry.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -89,6 +91,50 @@ TEST(script_runtime_widget_registry_can_be_cleared) {
   ASSERT(rt.FindRegisteredWidget("root") == nullptr);
 
   rt.Shutdown();
+}
+
+namespace {
+struct TestTag {
+  int v;
+};
+}  // namespace
+
+TEST(component_store_add_get_remove) {
+  ugui::Panel w(1);
+  ugui::World* world = ugui::WidgetRegistry::Active();
+
+  world->Add<TestTag>(w.handle(), TestTag{42});
+  ASSERT(world->Has<TestTag>(w.handle()));
+  ASSERT(world->Get<TestTag>(w.handle())->v == 42);
+
+  world->Add<TestTag>(w.handle(), TestTag{7});  // overwrite
+  ASSERT(world->Get<TestTag>(w.handle())->v == 7);
+
+  world->Remove<TestTag>(w.handle());
+  ASSERT(!world->Has<TestTag>(w.handle()));
+}
+
+TEST(component_dropped_when_entity_released) {
+  ugui::World* world = ugui::WidgetRegistry::Active();
+  ugui::wid saved;
+  {
+    ugui::Panel w(2);
+    saved = w.handle();
+    world->Add<TestTag>(saved, TestTag{99});
+    ASSERT(world->Has<TestTag>(saved));
+  }
+  // The widget is gone: its handle resolves to null and the component was
+  // dropped during release (no leak, no stale read).
+  ASSERT(world->Get(saved) == nullptr);
+  ASSERT(!world->Has<TestTag>(saved));
+}
+
+TEST(tooltip_is_stored_as_component) {
+  ugui::Panel w(3);
+  ASSERT(w.tooltip().empty());
+  w.set_tooltip("help");
+  ASSERT(w.tooltip() == "help");
+  ASSERT(ugui::WidgetRegistry::Active()->Has<ugui::Tooltip>(w.handle()));
 }
 
 int main() {
