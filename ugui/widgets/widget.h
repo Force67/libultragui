@@ -198,16 +198,10 @@ class Widget {
   const WidgetContext* context_ = nullptr;
 
   Style style_;
-  Vector<StyleOverride> state_overrides_;
   WidgetState state_ = WidgetState::kNone;
-
-  struct StateTransitionConfig {
-    WidgetState state;
-    Transition transition;
-  };
-  Vector<StateTransitionConfig> state_transitions_;
-
-  Optional<Style> animation_style_;
+  // State overrides/transitions live in a StateStyle component, and the active
+  // animation override in an AnimStyle component (see components.h), so plain
+  // widgets carry neither.
 
   Rect rect_;
   Rect content_rect_;

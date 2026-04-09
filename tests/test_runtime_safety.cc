@@ -137,6 +137,23 @@ TEST(tooltip_is_stored_as_component) {
   ASSERT(ugui::WidgetRegistry::Active()->Has<ugui::Tooltip>(w.handle()));
 }
 
+TEST(state_styles_and_anim_live_in_components) {
+  ugui::Panel w(4);
+  ugui::World* world = ugui::WidgetRegistry::Active();
+  ugui::Style override_style;
+
+  // Plain widget carries neither component.
+  ASSERT(!world->Has<ugui::StateStyle>(w.handle()));
+  w.AddStateOverride(ugui::WidgetState::kHovered, override_style, 0);
+  ASSERT(world->Has<ugui::StateStyle>(w.handle()));
+
+  ASSERT(!world->Has<ugui::AnimStyle>(w.handle()));
+  w.SetAnimationStyle(override_style);
+  ASSERT(world->Has<ugui::AnimStyle>(w.handle()));
+  w.ClearAnimationStyle();
+  ASSERT(!world->Has<ugui::AnimStyle>(w.handle()));
+}
+
 int main() {
   std::printf("Runtime safety test suite\n");
   std::printf("=========================\n");

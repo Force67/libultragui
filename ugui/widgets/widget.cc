@@ -102,12 +102,14 @@ wid Widget::ChildAt(u32 index) const {
 
 void Widget::AddStateOverride(WidgetState state, const Style& override_style,
                               u64 mask) {
-  state_overrides_.push_back({state, override_style, mask});
+  registry_->GetOrAdd<StateStyle>(self_).overrides.push_back(
+      {state, override_style, mask});
 }
 
 void Widget::AddStateTransition(WidgetState state,
                                 const Transition& transition) {
-  state_transitions_.push_back({state, transition});
+  registry_->GetOrAdd<StateStyle>(self_).transitions.push_back(
+      {state, transition});
 }
 
 void Widget::set_widget_state(WidgetState state) {
@@ -116,16 +118,15 @@ void Widget::set_widget_state(WidgetState state) {
     state_ = state;
 
     // Trigger transitions if configured
-    if (context_ && context_->animator && context_->current_time &&
-        !state_transitions_.empty()) {
-      Style from =
-          ResolveStyle(style_, state_overrides_.data(),
-                       static_cast<u32>(state_overrides_.size()), old_state);
-      Style to = ResolveStyle(style_, state_overrides_.data(),
-                              static_cast<u32>(state_overrides_.size()), state);
+    StateStyle* ss = registry_ ? registry_->Get<StateStyle>(self_) : nullptr;
+    if (context_ && context_->animator && context_->current_time && ss &&
+        !ss->transitions.empty()) {
+      u32 n = static_cast<u32>(ss->overrides.size());
+      Style from = ResolveStyle(style_, ss->overrides.data(), n, old_state);
+      Style to = ResolveStyle(style_, ss->overrides.data(), n, state);
 
       // Find the best matching transition config
-      for (auto& stc : state_transitions_) {
+      for (auto& stc : ss->transitions) {
         u16 activated = static_cast<u16>(state) & ~static_cast<u16>(old_state);
         u16 deactivated =
             static_cast<u16>(old_state) & ~static_cast<u16>(state);
@@ -144,20 +145,22 @@ void Widget::set_widget_state(WidgetState state) {
 }
 
 void Widget::SetAnimationStyle(const Style& s) {
-  animation_style_ = s;
+  if (registry_) registry_->Add<AnimStyle>(self_, AnimStyle{s});
   MarkPaintDirty();
 }
 
 void Widget::ClearAnimationStyle() {
-  animation_style_.reset();
+  if (registry_) registry_->Remove<AnimStyle>(self_);
   MarkPaintDirty();
 }
 
 Style Widget::ComputedStyle() const {
-  if (animation_style_) return *animation_style_;
-  if (state_overrides_.empty()) return style_;
-  return ResolveStyle(style_, state_overrides_.data(),
-                      static_cast<u32>(state_overrides_.size()), state_);
+  if (AnimStyle* a = registry_ ? registry_->Get<AnimStyle>(self_) : nullptr)
+    return a->style;
+  StateStyle* ss = registry_ ? registry_->Get<StateStyle>(self_) : nullptr;
+  if (!ss || ss->overrides.empty()) return style_;
+  return ResolveStyle(style_, ss->overrides.data(),
+                      static_cast<u32>(ss->overrides.size()), state_);
 }
 
 void Widget::MarkDirty() {

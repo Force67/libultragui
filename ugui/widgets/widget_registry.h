@@ -52,6 +52,13 @@ class WidgetRegistry {
   C& Add(WidgetId id, C value) {
     return Store<C>().Add(id, std::move(value));
   }
+  /// Get the component for `id`, creating a default-constructed one if absent.
+  template <class C>
+  C& GetOrAdd(WidgetId id) {
+    ComponentStore<C>& s = Store<C>();
+    C* c = s.Get(id);
+    return c ? *c : s.Add(id, C{});
+  }
   template <class C>
   C* Get(WidgetId id) {
     return Store<C>().Get(id);

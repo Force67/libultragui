@@ -4,6 +4,8 @@
 #include <ugui/core/config.h>
 #include <ugui/core/math.h>
 #include <ugui/core/types.h>
+#include <ugui/style/style.h>
+#include <ugui/style/transition.h>
 
 namespace ugui {
 
@@ -34,6 +36,28 @@ struct Movable {
 /// Tag: clicking inside this widget and dragging routes the drag to the nearest
 /// Movable ancestor (e.g. a panel header grabs the whole panel).
 struct DragHandle {};
+
+/// A state -> transition mapping (e.g. fade when :hover activates).
+struct StateTransitionRule {
+  WidgetState state;
+  Transition transition;
+};
+
+/// Per-state style overrides (:hover, :pressed, :selected, ...) and their
+/// transitions. Only widgets that declare state styles carry this, so a plain
+/// panel no longer pays for two empty vectors.
+struct StateStyle {
+  Vector<StyleOverride> overrides;
+  Vector<StateTransitionRule> transitions;
+};
+
+/// Active animated style override written by the animator. Its presence means
+/// the widget is currently showing an animated style; removing the component
+/// reverts to the resolved base/state style. Kept off the base so non-animating
+/// widgets do not each reserve a full Style.
+struct AnimStyle {
+  Style style;
+};
 
 }  // namespace ugui
 
