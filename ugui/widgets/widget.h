@@ -33,6 +33,7 @@ enum class WidgetKind : u8 {
   kModal,
   kRichText,
   kMessageBox,
+  kCount,  // number of kinds; not a real widget
 };
 
 /// Base class for all UI widgets. Provides lifecycle, tree structure,
@@ -70,8 +71,14 @@ class Widget {
   const String& name() const { return name_; }
   void set_name(const String& name) { name_ = name; }
 
-  /// Stable type tag for handle-safe casts (no RTTI). Subclasses override.
-  virtual WidgetKind kind() const { return WidgetKind::kWidget; }
+  /// Stable type tag for handle-safe casts (no RTTI) and per-kind vtable
+  /// dispatch. Stored as a field so a generic Widget can be any kind; the
+  /// remaining subclasses still override this.
+  virtual WidgetKind kind() const { return kind_; }
+  void set_kind(WidgetKind k) { kind_ = k; }
+
+  /// The World this widget belongs to (resolves its handles and components).
+  WidgetRegistry* registry() const { return registry_; }
 
   /// Stable handle to this widget. Prefer storing this over a raw Widget*:
   /// once the widget is destroyed the handle resolves to null instead of
@@ -165,7 +172,7 @@ class Widget {
   f32 ui_scale() const { return context_ ? context_->ui_scale : 1.0f; }
 
   // --- Event dispatch (override in subclasses) ---
-  virtual bool OnClick() { return false; }
+  virtual bool OnClick();
   virtual bool OnScroll(Vec2 delta) { return false; }
   virtual bool OnKeyDown(i32 key, i32 mods) { return false; }
   virtual bool OnKeyUp(i32 key, i32 mods) { return false; }
@@ -190,6 +197,7 @@ class Widget {
 
  protected:
   u32 id_ = 0;
+  WidgetKind kind_ = WidgetKind::kWidget;  // drives vtable dispatch
   wid self_;                            // this widget's handle (set in ctor)
   WidgetRegistry* registry_ = nullptr;  // owning registry (resolves links)
   String name_;

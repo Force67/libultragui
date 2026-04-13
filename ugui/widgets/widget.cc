@@ -7,6 +7,7 @@
 #include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
@@ -171,6 +172,9 @@ void Widget::MarkDirty() {
 }
 
 wid Widget::HitTest(Vec2 point) {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.hit_test && registry_) return vt.hit_test(*registry_, *this, point);
+
   if (!rect_.contains(point)) return kNullWidget;
 
   // Check children in reverse (top-most first)
@@ -307,11 +311,27 @@ void Widget::OnPaint(Renderer2D& renderer) {
     renderer.DrawBorderedRect(focus_rect, Color::Transparent(), focus_color,
                               2.0f * sc, radii);
   }
+
+  // Kind-specific overlay (text glyphs, image texture, ...): the base draws the
+  // box above, the vtable draws the content on top.
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.draw && registry_) vt.draw(*registry_, *this, renderer);
 }
 
 void Widget::Measure(f32& out_width, f32& out_height) {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.measure && registry_) {
+    vt.measure(*registry_, *this, out_width, out_height);
+    return;
+  }
   out_width = intrinsic_w_;
   out_height = intrinsic_h_;
+}
+
+bool Widget::OnClick() {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.on_click && registry_) return vt.on_click(*registry_, *this);
+  return false;
 }
 
 void Widget::PopulateLayoutNode(LayoutNode& node) const {

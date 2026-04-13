@@ -1,5 +1,6 @@
 #include <ugui/scripting/script_runtime.h>
 #include <ugui/widgets/components.h>
+#include <ugui/widgets/image.h>
 #include <ugui/widgets/panel.h>
 #include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/widget_registry.h>
@@ -152,6 +153,24 @@ TEST(state_styles_and_anim_live_in_components) {
   ASSERT(world->Has<ugui::AnimStyle>(w.handle()));
   w.ClearAnimationStyle();
   ASSERT(!world->Has<ugui::AnimStyle>(w.handle()));
+}
+
+TEST(image_is_a_generic_widget_with_component) {
+  ugui::Widget* img = ugui::CreateImage(5);
+  ASSERT(img->kind() == ugui::WidgetKind::kImage);
+  ASSERT(img->registry()->Has<ugui::ImageContent>(img->handle()));
+
+  ugui::SetImageTexture(img, 42, 64, 48);
+  ugui::ImageContent* c = img->registry()->Get<ugui::ImageContent>(img->handle());
+  ASSERT(c->texture == 42);
+  ASSERT(c->natural_w == 64);
+
+  // Measure dispatches through the vtable to read the component.
+  float w = 0, h = 0;
+  img->Measure(w, h);
+  ASSERT(w == 64 && h == 48);
+
+  delete img;
 }
 
 int main() {

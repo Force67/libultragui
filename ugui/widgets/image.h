@@ -3,32 +3,30 @@
 
 #include <ugui/rhi/rhi_types.h>
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
-/// Image display widget.
-class Image : public Widget {
- public:
-  static constexpr WidgetKind kKind = WidgetKind::kImage;
-  WidgetKind kind() const override { return kKind; }
-
- public:
-  using Widget::Widget;
-
-  void set_texture(RHITextureHandle texture, f32 width, f32 height) {
-    texture_ = texture;
-    natural_w_ = width;
-    natural_h_ = height;
-    MarkDirty();
-  }
-
-  void Measure(f32& out_width, f32& out_height) override;
-  void OnPaint(Renderer2D& renderer) override;
-
- private:
-  RHITextureHandle texture_ = kInvalidTexture;
-  f32 natural_w_ = 0, natural_h_ = 0;
+/// Texture shown by an image widget (WidgetKind::kImage). This is the widget's
+/// data; its behaviour lives in ImageVTable(). An image is a generic Widget
+/// carrying this component, not a subclass.
+struct ImageContent {
+  RHITextureHandle texture = kInvalidTexture;
+  f32 natural_w = 0;
+  f32 natural_h = 0;
 };
+
+/// Behaviour table (draw + measure) for image widgets.
+WidgetVTable ImageVTable();
+
+/// Create an image entity: a generic Widget tagged kImage with an empty
+/// ImageContent component.
+Widget* CreateImage(u32 id);
+
+/// Set (or replace) the texture an image widget shows. No-op if `w` is null or
+/// is not an image. Component-based replacement for the old Image::set_texture.
+void SetImageTexture(Widget* w, RHITextureHandle texture, f32 width,
+                     f32 height);
 
 }  // namespace ugui
 

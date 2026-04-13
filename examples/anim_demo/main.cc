@@ -198,9 +198,9 @@ int main(int argc, char* argv[]) {
       anim->Play();
       anim->set_loop(true);
 
-      auto* img =
-          ui.widgets().GetAs<ugui::Image>(ui.FindWidget(anims[i].widget_name));
-      if (img) img->set_texture(anim->texture(), 128, 128);
+      ugui::SetImageTexture(
+          ui.widgets().Get(ui.FindWidget(anims[i].widget_name)),
+          anim->texture(), 128, 128);
 
       loaded[i] = anim;
       std::printf("Loaded: %s (%.1fs)\n", anims[i].label, anim->duration());
@@ -213,9 +213,9 @@ int main(int argc, char* argv[]) {
     // Re-attach textures each frame (handle is stable but Image needs to know)
     for (int i = 0; i < ANIM_COUNT; ++i) {
       if (!loaded[i]) continue;
-      auto* img =
-          ui.widgets().GetAs<ugui::Image>(ui.FindWidget(anims[i].widget_name));
-      if (img) img->set_texture(loaded[i]->texture(), 128, 128);
+      ugui::SetImageTexture(
+          ui.widgets().Get(ui.FindWidget(anims[i].widget_name)),
+          loaded[i]->texture(), 128, 128);
     }
     ui.Update();
   }

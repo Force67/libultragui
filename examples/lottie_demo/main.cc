@@ -198,9 +198,9 @@ int main(int argc, char* argv[]) {
       anim->Play();
       anim->set_loop(true);
 
-      auto* img =
-          ui.widgets().GetAs<ugui::Image>(ui.FindWidget(anims[i].widget_name));
-      if (img) img->set_texture(anim->texture(), 128, 128);
+      ugui::SetImageTexture(
+          ui.widgets().Get(ui.FindWidget(anims[i].widget_name)),
+          anim->texture(), 128, 128);
 
       loaded[i] = anim;
       std::printf("Loaded: %s (%.1fs, %u frames @ %.0f fps)\n", anims[i].label,
@@ -216,9 +216,9 @@ int main(int argc, char* argv[]) {
     // (the texture handle is stable, but the Image widget needs to know)
     for (int i = 0; i < ANIM_COUNT; ++i) {
       if (!loaded[i]) continue;
-      auto* img =
-          ui.widgets().GetAs<ugui::Image>(ui.FindWidget(anims[i].widget_name));
-      if (img) img->set_texture(loaded[i]->texture(), 128, 128);
+      ugui::SetImageTexture(
+          ui.widgets().Get(ui.FindWidget(anims[i].widget_name)),
+          loaded[i]->texture(), 128, 128);
     }
 
     ui.Update();

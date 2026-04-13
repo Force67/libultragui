@@ -599,7 +599,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
   } else if (node.type == "modal" || node.type == "dialog") {
     widget = new Modal(id);
   } else if (node.type == "image" || node.type == "img") {
-    widget = new Image(id);
+    widget = CreateImage(id);
   } else if (node.type == "scroll" || node.type == "scroll-view") {
     widget = new ScrollView(id);
     widget->style().overflow = Overflow::kScroll;

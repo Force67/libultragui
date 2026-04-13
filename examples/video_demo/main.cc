@@ -382,10 +382,11 @@ int main(int argc, char* argv[]) {
 
     // Attach video texture to Image widgets
     if (scene == 0) {
-      auto* img = ui.widgets().GetAs<ugui::Image>(ui.FindWidget("video_frame"));
-      if (img && video->texture() != ugui::kInvalidTexture)
-        img->set_texture(video->texture(), static_cast<float>(video->width()),
-                         static_cast<float>(video->height()));
+      if (video->texture() != ugui::kInvalidTexture)
+        ugui::SetImageTexture(ui.widgets().Get(ui.FindWidget("video_frame")),
+                              video->texture(),
+                              static_cast<float>(video->width()),
+                              static_cast<float>(video->height()));
       // Time display
       auto* td = ui.widgets().GetAs<ugui::Text>(ui.FindWidget("time_display"));
       if (td) {
@@ -400,10 +401,11 @@ int main(int argc, char* argv[]) {
     } else if (scene == 1) {
       const char* names[] = {"vid1", "vid2", "vid3", "vid4"};
       for (auto* name : names) {
-        auto* img = ui.widgets().GetAs<ugui::Image>(ui.FindWidget(name));
-        if (img && video->texture() != ugui::kInvalidTexture)
-          img->set_texture(video->texture(), static_cast<float>(video->width()),
-                           static_cast<float>(video->height()));
+        if (video->texture() != ugui::kInvalidTexture)
+          ugui::SetImageTexture(ui.widgets().Get(ui.FindWidget(name)),
+                                video->texture(),
+                                static_cast<float>(video->width()),
+                                static_cast<float>(video->height()));
       }
     }
 
