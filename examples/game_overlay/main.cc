@@ -426,8 +426,8 @@ int main(int argc, char* argv[]) {
       if (!ui.script().Exec(
               ("ugui.set('fps_text', 'text', '" + fps_str + "')").c_str(),
               "fps"))
-        if (auto* w = ui.widgets().GetAs<ugui::Text>(ui.FindWidget("fps_text")))
-          w->set_text(fps_str.c_str());
+        ugui::SetText(ui.widgets().Get(ui.FindWidget("fps_text")),
+                      fps_str.c_str());
     }
 
     ui.Update();

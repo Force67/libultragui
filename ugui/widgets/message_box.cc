@@ -31,8 +31,8 @@ void MessageBox::Setup(const char* title, const char* message,
   set_style(ds);
 
   // Title
-  auto* titleWidget = new Text(0);
-  titleWidget->set_text(title);
+  auto* titleWidget = CreateText(0);
+  SetText(titleWidget, title);
   Style ts;
   ts.font_size = 18;
   ts.font_weight = FontWeight::kBold;
@@ -41,8 +41,8 @@ void MessageBox::Setup(const char* title, const char* message,
   AddChild(titleWidget);
 
   // Message
-  auto* messageWidget = new Text(0);
-  messageWidget->set_text(message);
+  auto* messageWidget = CreateText(0);
+  SetText(messageWidget, message);
   Style ms;
   ms.font_size = 14;
   ms.text_color = Color::FromRgba8(200, 200, 210, 255);

@@ -388,7 +388,7 @@ int main(int argc, char* argv[]) {
                               static_cast<float>(video->width()),
                               static_cast<float>(video->height()));
       // Time display
-      auto* td = ui.widgets().GetAs<ugui::Text>(ui.FindWidget("time_display"));
+      ugui::Widget* td = ui.widgets().Get(ui.FindWidget("time_display"));
       if (td) {
         double pos = video->position(), dur = video->duration();
         char buf[64];
@@ -396,7 +396,7 @@ int main(int argc, char* argv[]) {
                       (int)pos % 60, (int)dur / 60, (int)dur % 60,
                       video->IsLooping() ? "  [LOOP]" : "",
                       video->IsPlaying() ? "" : "  [PAUSED]");
-        td->set_text(buf);
+        ugui::SetText(td, buf);
       }
     } else if (scene == 1) {
       const char* names[] = {"vid1", "vid2", "vid3", "vid4"};

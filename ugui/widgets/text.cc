@@ -1,12 +1,15 @@
 #include <ugui/render/renderer2d.h>
 #include <ugui/widgets/text.h>
+#include <ugui/widgets/widget_registry.h>
 
+#include <algorithm>
 #include <cctype>
 #include <string>
 
 namespace ugui {
+namespace {
 
-static String apply_transform(const String& s, TextTransform t) {
+String apply_transform(const String& s, TextTransform t) {
   if (t == TextTransform::kNone) return s;
   String out = s;
   if (t == TextTransform::kUppercase) {
@@ -28,39 +31,51 @@ static String apply_transform(const String& s, TextTransform t) {
   return out;
 }
 
-void Text::Measure(f32& out_width, f32& out_height) {
-  auto* te = text_engine();
-  FontHandle fh = effective_font();
-  if (!te || fh == kInvalidFont || text_.empty()) {
+TextEngine* text_engine(const Widget& w) {
+  return w.context() ? w.context()->text_engine : nullptr;
+}
+
+FontHandle effective_font(const Widget& w, const TextContent& c) {
+  if (c.font != kInvalidFont) return c.font;
+  return w.context() ? w.context()->default_font : kInvalidFont;
+}
+
+void TextMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+                 f32& out_height) {
+  TextContent* c = world.Get<TextContent>(w.handle());
+  TextEngine* te = text_engine(w);
+  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  if (!c || !te || fh == kInvalidFont || c->text.empty()) {
     out_width = 0;
     out_height = 0;
     return;
   }
 
+  const Style& st = w.style();
   FontHandle resolved = fh;
-  if (style_.font_weight != FontWeight::kRegular ||
-      style_.font_style != FontStyle::kNormal)
-    resolved = te->ResolveFont(fh, style_.font_weight, style_.font_style);
+  if (st.font_weight != FontWeight::kRegular ||
+      st.font_style != FontStyle::kNormal)
+    resolved = te->ResolveFont(fh, st.font_weight, st.font_style);
 
-  String display_text = apply_transform(text_, style_.text_transform);
-  f32 sc = ui_scale();
+  String display_text = apply_transform(c->text, st.text_transform);
+  f32 sc = w.ui_scale();
   auto run =
       te->Shape(resolved, display_text.c_str(),
-                static_cast<u32>(display_text.size()), style_.font_size * sc,
-                style_.letter_spacing * sc, style_.line_height_multiplier);
+                static_cast<u32>(display_text.size()), st.font_size * sc,
+                st.letter_spacing * sc, st.line_height_multiplier);
   out_width = run.total_advance;
   out_height = run.line_height;
 }
 
-void Text::OnPaint(Renderer2D& renderer) {
-  Widget::OnPaint(renderer);  // Background, shadow, border
+void TextDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
+  // The base Widget::OnPaint already drew background / shadow / border.
+  TextContent* c = world.Get<TextContent>(w.handle());
+  TextEngine* te = text_engine(w);
+  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  if (!c || !te || fh == kInvalidFont || c->text.empty()) return;
 
-  auto* te = text_engine();
-  FontHandle fh = effective_font();
-  if (!te || fh == kInvalidFont || text_.empty()) return;
-
-  auto s = ComputedStyle();
-  s.Scale(ui_scale());
+  Style s = w.ComputedStyle();
+  s.Scale(w.ui_scale());
   f32 alpha = s.opacity;
 
   // Resolve font for weight/style
@@ -69,8 +84,7 @@ void Text::OnPaint(Renderer2D& renderer) {
       s.font_style != FontStyle::kNormal)
     resolved = te->ResolveFont(fh, s.font_weight, s.font_style);
 
-  // Apply text transform
-  String display_text = apply_transform(text_, s.text_transform);
+  String display_text = apply_transform(c->text, s.text_transform);
 
   // Always shape fresh: the scratch buffer pointer from measure may be stale
   auto run = te->Shape(resolved, display_text.c_str(),
@@ -78,23 +92,24 @@ void Text::OnPaint(Renderer2D& renderer) {
                        s.letter_spacing, s.line_height_multiplier);
 
   // Position text within content rect
-  f32 x = content_rect_.x;
-  f32 y = content_rect_.y;
+  Rect content = w.content_rect();
+  f32 x = content.x;
+  f32 y = content.y;
 
   // Horizontal alignment
   switch (s.text_align) {
     case TextAlign::kCenter:
-      x += (content_rect_.w - run.total_advance) * 0.5f;
+      x += (content.w - run.total_advance) * 0.5f;
       break;
     case TextAlign::kRight:
-      x += content_rect_.w - run.total_advance;
+      x += content.w - run.total_advance;
       break;
     default:
       break;
   }
 
   // Vertical center
-  y += (content_rect_.h - run.line_height) * 0.5f;
+  y += (content.h - run.line_height) * 0.5f;
 
   Color text_color = s.text_color.WithAlpha(s.text_color.a * alpha);
 
@@ -126,6 +141,28 @@ void Text::OnPaint(Renderer2D& renderer) {
       renderer.DrawRect({x, line_y, run.total_advance, thickness}, dec_color);
     }
   }
+}
+
+}  // namespace
+
+WidgetVTable TextVTable() {
+  WidgetVTable vt;
+  vt.draw = TextDraw;
+  vt.measure = TextMeasure;
+  return vt;
+}
+
+Widget* CreateText(u32 id) {
+  Widget* w = new Widget(id);
+  w->set_kind(WidgetKind::kText);
+  WidgetRegistry::Active()->Add<TextContent>(w->handle(), TextContent{});
+  return w;
+}
+
+void SetText(Widget* w, const String& text) {
+  if (!w || w->kind() != WidgetKind::kText || !w->registry()) return;
+  w->registry()->GetOrAdd<TextContent>(w->handle()).text = text;
+  w->MarkDirty();
 }
 
 }  // namespace ugui

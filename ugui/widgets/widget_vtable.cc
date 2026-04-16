@@ -1,6 +1,7 @@
 #include <ugui/widgets/widget_vtable.h>
 
 #include <ugui/widgets/image.h>
+#include <ugui/widgets/text.h>
 
 namespace ugui {
 namespace {
@@ -10,7 +11,10 @@ WidgetVTable g_table[static_cast<usize>(WidgetKind::kCount)];
 // Register the behaviour tables for converted built-in widgets. Listed here
 // (rather than self-registered per file) so a static library keeps the object
 // files: this function references each one, so the linker cannot drop them.
-void InstallBuiltins() { SetWidgetVTable(WidgetKind::kImage, ImageVTable()); }
+void InstallBuiltins() {
+  SetWidgetVTable(WidgetKind::kImage, ImageVTable());
+  SetWidgetVTable(WidgetKind::kText, TextVTable());
+}
 
 }  // namespace
 

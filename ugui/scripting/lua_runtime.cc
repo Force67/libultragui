@@ -671,8 +671,8 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
       return 0;
     }
   } else if (strcmp(prop, "text") == 0) {
-    if (auto* text = widget_cast<Text>(w)) {
-      text->set_text(luaL_checkstring(L, 3));
+    if (w && w->kind() == WidgetKind::kText) {
+      SetText(w, luaL_checkstring(L, 3));
       w->ClearAnimationStyle();
       return 0;
     }

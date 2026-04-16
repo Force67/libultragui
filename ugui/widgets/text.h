@@ -2,42 +2,26 @@
 #define ULTRAGUI_WIDGETS_TEXT_H_
 
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
-/// Text display widget.
-class Text : public Widget {
- public:
-  static constexpr WidgetKind kKind = WidgetKind::kText;
-  WidgetKind kind() const override { return kKind; }
-
- public:
-  using Widget::Widget;
-
-  void set_text(const String& text) {
-    text_ = text;
-    MarkDirty();
-  }
-  const String& text() const { return text_; }
-
-  void set_font(FontHandle font) { font_override_ = font; }
-  FontHandle font() const { return font_override_; }
-
-  void Measure(f32& out_width, f32& out_height) override;
-  void OnPaint(Renderer2D& renderer) override;
-
- private:
-  TextEngine* text_engine() const {
-    return context_ ? context_->text_engine : nullptr;
-  }
-  FontHandle effective_font() const {
-    if (font_override_ != kInvalidFont) return font_override_;
-    return context_ ? context_->default_font : kInvalidFont;
-  }
-
-  String text_;
-  FontHandle font_override_ = kInvalidFont;
+/// Text shown by a text widget (WidgetKind::kText). Its behaviour lives in
+/// TextVTable(); a text widget is a generic Widget carrying this component.
+struct TextContent {
+  String text;
+  FontHandle font = kInvalidFont;  // override; kInvalidFont -> context default
 };
+
+/// Behaviour table (draw + measure) for text widgets.
+WidgetVTable TextVTable();
+
+/// Create a text entity: a generic Widget tagged kText with a TextContent.
+Widget* CreateText(u32 id);
+
+/// Set the string a text widget displays. No-op if `w` is null or not a text
+/// widget. Component-based replacement for the old Text::set_text.
+void SetText(Widget* w, const String& text);
 
 }  // namespace ugui
 

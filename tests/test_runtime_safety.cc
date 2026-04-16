@@ -3,6 +3,7 @@
 #include <ugui/widgets/image.h>
 #include <ugui/widgets/panel.h>
 #include <ugui/widgets/scroll_view.h>
+#include <ugui/widgets/text.h>
 #include <ugui/widgets/widget_registry.h>
 
 #include <cstdio>
@@ -171,6 +172,16 @@ TEST(image_is_a_generic_widget_with_component) {
   ASSERT(w == 64 && h == 48);
 
   delete img;
+}
+
+TEST(text_is_a_generic_widget_with_component) {
+  ugui::Widget* t = ugui::CreateText(6);
+  ASSERT(t->kind() == ugui::WidgetKind::kText);
+  ASSERT(t->registry()->Has<ugui::TextContent>(t->handle()));
+
+  ugui::SetText(t, "hello");
+  ASSERT(t->registry()->Get<ugui::TextContent>(t->handle())->text == "hello");
+  delete t;
 }
 
 int main() {

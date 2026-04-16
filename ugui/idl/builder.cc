@@ -583,12 +583,11 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
              node.type == "container") {
     widget = new Panel(id);
   } else if (node.type == "text" || node.type == "label") {
-    auto* text = new Text(id);
+    widget = CreateText(id);
     auto text_it = node.properties.find("content");
     if (text_it == node.properties.end())
       text_it = node.properties.find("text");
-    if (text_it != node.properties.end()) text->set_text(text_it->second);
-    widget = text;
+    if (text_it != node.properties.end()) SetText(widget, text_it->second);
   } else if (node.type == "button") {
     auto* btn = new Button(id);
     auto text_it = node.properties.find("text");
