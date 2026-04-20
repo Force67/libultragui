@@ -1,5 +1,6 @@
 #include <ugui/widgets/widget_vtable.h>
 
+#include <ugui/widgets/button.h>
 #include <ugui/widgets/image.h>
 #include <ugui/widgets/text.h>
 
@@ -14,6 +15,7 @@ WidgetVTable g_table[static_cast<usize>(WidgetKind::kCount)];
 void InstallBuiltins() {
   SetWidgetVTable(WidgetKind::kImage, ImageVTable());
   SetWidgetVTable(WidgetKind::kText, TextVTable());
+  SetWidgetVTable(WidgetKind::kButton, ButtonVTable());
 }
 
 }  // namespace

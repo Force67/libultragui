@@ -676,8 +676,8 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
       w->ClearAnimationStyle();
       return 0;
     }
-    if (auto* btn = widget_cast<Button>(w)) {
-      btn->set_label(luaL_checkstring(L, 3));
+    if (w && w->kind() == WidgetKind::kButton) {
+      SetButtonLabel(w, luaL_checkstring(L, 3));
       w->ClearAnimationStyle();
       return 0;
     }

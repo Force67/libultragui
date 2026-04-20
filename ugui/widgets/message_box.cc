@@ -59,8 +59,8 @@ void MessageBox::Setup(const char* title, const char* message,
   buttonRow->set_style(rs);
 
   auto MakeBtn = [&](const char* label, MessageBoxResult result, bool primary) {
-    auto* btn = new Button(0);
-    btn->set_label(label);
+    auto* btn = CreateButton(0);
+    SetButtonLabel(btn, label);
     btn->set_tab_index(0);
     Style bs;
     bs.padding = EdgeInsets(10, 20);
@@ -81,7 +81,7 @@ void MessageBox::Setup(const char* title, const char* message,
     hover.background =
         primary ? Color::FromHex(0x60a5fa) : Color::FromRgba8(80, 80, 100, 255);
     btn->AddStateOverride(WidgetState::kHovered, hover, StyleMask::kBackground);
-    btn->set_on_click([this, result]() {
+    SetButtonClick(btn, [this, result]() {
       if (on_result_) on_result_(result);
     });
     buttonRow->AddChild(btn);

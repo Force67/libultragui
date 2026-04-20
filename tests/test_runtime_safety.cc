@@ -1,4 +1,5 @@
 #include <ugui/scripting/script_runtime.h>
+#include <ugui/widgets/button.h>
 #include <ugui/widgets/components.h>
 #include <ugui/widgets/image.h>
 #include <ugui/widgets/panel.h>
@@ -182,6 +183,19 @@ TEST(text_is_a_generic_widget_with_component) {
   ugui::SetText(t, "hello");
   ASSERT(t->registry()->Get<ugui::TextContent>(t->handle())->text == "hello");
   delete t;
+}
+
+TEST(button_click_dispatches_through_vtable) {
+  ugui::Widget* b = ugui::CreateButton(7);
+  ASSERT(b->kind() == ugui::WidgetKind::kButton);
+  ugui::SetButtonLabel(b, "OK");
+  ASSERT(b->registry()->Get<ugui::ButtonContent>(b->handle())->label == "OK");
+
+  int clicks = 0;
+  ugui::SetButtonClick(b, [&clicks]() { ++clicks; });
+  ASSERT(b->OnClick());  // base OnClick -> vtable.on_click -> component handler
+  ASSERT(clicks == 1);
+  delete b;
 }
 
 int main() {

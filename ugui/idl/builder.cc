@@ -589,12 +589,11 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
       text_it = node.properties.find("text");
     if (text_it != node.properties.end()) SetText(widget, text_it->second);
   } else if (node.type == "button") {
-    auto* btn = new Button(id);
+    widget = CreateButton(id);
     auto text_it = node.properties.find("text");
     if (text_it == node.properties.end())
       text_it = node.properties.find("label");
-    if (text_it != node.properties.end()) btn->set_label(text_it->second);
-    widget = btn;
+    if (text_it != node.properties.end()) SetButtonLabel(widget, text_it->second);
   } else if (node.type == "modal" || node.type == "dialog") {
     widget = new Modal(id);
   } else if (node.type == "image" || node.type == "img") {
