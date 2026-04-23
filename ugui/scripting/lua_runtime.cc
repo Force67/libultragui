@@ -204,8 +204,8 @@ void ScriptRuntime::Impl::PushWidgetTable(Widget* widget) {
   lua_setfield(L, -2, "id");
 
   // Type-specific fields so Lua handlers get w.checked, w.selected, w.value
-  if (auto* cb = widget_cast<Checkbox>(widget)) {
-    lua_pushboolean(L, cb->checked());
+  if (widget && widget->kind() == WidgetKind::kCheckbox) {
+    lua_pushboolean(L, IsChecked(widget));
     lua_setfield(L, -2, "checked");
   }
   if (auto* dd = widget_cast<Dropdown>(widget)) {
@@ -340,8 +340,8 @@ static void WireChangeHandlersRecursive(ScriptRuntime& rt, Widget* w) {
         rt.CallHandler(handler.c_str(), widget);
       });
     }
-    if (auto* cb = widget_cast<Checkbox>(w)) {
-      cb->set_on_change([&rt, widget = w](bool) {
+    if (w->kind() == WidgetKind::kCheckbox) {
+      SetCheckboxChange(w, [&rt, widget = w](bool) {
         std::string handler = "on_" + widget->name();
         rt.CallHandler(handler.c_str(), widget);
       });
@@ -661,8 +661,8 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
       return 0;
     }
   } else if (strcmp(prop, "checked") == 0) {
-    if (auto* cb = widget_cast<Checkbox>(w)) {
-      cb->set_checked(lua_toboolean(L, 3));
+    if (w && w->kind() == WidgetKind::kCheckbox) {
+      SetChecked(w, lua_toboolean(L, 3));
       return 0;
     }
   } else if (strcmp(prop, "value") == 0) {

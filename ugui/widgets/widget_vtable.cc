@@ -1,6 +1,7 @@
 #include <ugui/widgets/widget_vtable.h>
 
 #include <ugui/widgets/button.h>
+#include <ugui/widgets/checkbox.h>
 #include <ugui/widgets/image.h>
 #include <ugui/widgets/text.h>
 
@@ -16,6 +17,7 @@ void InstallBuiltins() {
   SetWidgetVTable(WidgetKind::kImage, ImageVTable());
   SetWidgetVTable(WidgetKind::kText, TextVTable());
   SetWidgetVTable(WidgetKind::kButton, ButtonVTable());
+  SetWidgetVTable(WidgetKind::kCheckbox, CheckboxVTable());
 }
 
 }  // namespace

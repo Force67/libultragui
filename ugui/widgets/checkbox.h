@@ -2,50 +2,39 @@
 #define ULTRAGUI_WIDGETS_CHECKBOX_H_
 
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
-/// Interactive checkbox widget with optional text label.
-class Checkbox : public Widget {
- public:
-  static constexpr WidgetKind kKind = WidgetKind::kCheckbox;
-  WidgetKind kind() const override { return kKind; }
-
- public:
-  using Widget::Widget;
-
-  bool checked() const { return HasState(state_, WidgetState::kChecked); }
-  void set_checked(bool v);
-
-  void set_label(const String& label) {
-    label_ = label;
-    MarkDirty();
-  }
-  const String& label() const { return label_; }
-
-  void set_font(FontHandle font) { font_override_ = font; }
-  FontHandle font() const { return font_override_; }
-
-  using ChangeHandler = Function<void(bool)>;
-  void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
-
-  bool OnClick() override;
-  void Measure(f32& out_width, f32& out_height) override;
-  void OnPaint(Renderer2D& renderer) override;
-
- private:
-  TextEngine* text_engine() const {
-    return context_ ? context_->text_engine : nullptr;
-  }
-  FontHandle effective_font() const {
-    if (font_override_ != kInvalidFont) return font_override_;
-    return context_ ? context_->default_font : kInvalidFont;
-  }
-
-  String label_;
-  FontHandle font_override_ = kInvalidFont;
-  ChangeHandler on_change_;
+/// Data for a checkbox widget (WidgetKind::kCheckbox): label, font and an
+/// on_change callback. The checked flag lives in the widget's state bit
+/// (WidgetState::kChecked), not here. Behaviour is in CheckboxVTable().
+struct CheckboxContent {
+  String label;
+  FontHandle font = kInvalidFont;  // override; kInvalidFont -> context default
+  Function<void(bool)> on_change;
 };
+
+/// Behaviour table (draw + measure + click) for checkbox widgets.
+WidgetVTable CheckboxVTable();
+
+/// Create a checkbox entity: a generic Widget tagged kCheckbox with a
+/// CheckboxContent component.
+Widget* CreateCheckbox(u32 id);
+
+/// Set the checkbox label. No-op if `w` is null or not a checkbox.
+void SetCheckboxLabel(Widget* w, const String& label);
+
+/// Set the checkbox on_change handler (run with the new checked value when the
+/// user toggles it). No-op if `w` is null or not a checkbox.
+void SetCheckboxChange(Widget* w, Function<void(bool)> handler);
+
+/// Set the checked state (toggles the kChecked state bit). Does not fire
+/// on_change (that fires only on a user click). Works on any widget.
+void SetChecked(Widget* w, bool checked);
+
+/// Whether the widget's kChecked state bit is set.
+bool IsChecked(const Widget* w);
 
 }  // namespace ugui
 

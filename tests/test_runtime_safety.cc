@@ -1,5 +1,6 @@
 #include <ugui/scripting/script_runtime.h>
 #include <ugui/widgets/button.h>
+#include <ugui/widgets/checkbox.h>
 #include <ugui/widgets/components.h>
 #include <ugui/widgets/image.h>
 #include <ugui/widgets/panel.h>
@@ -196,6 +197,27 @@ TEST(button_click_dispatches_through_vtable) {
   ASSERT(b->OnClick());  // base OnClick -> vtable.on_click -> component handler
   ASSERT(clicks == 1);
   delete b;
+}
+
+TEST(checkbox_toggles_and_fires_change_through_vtable) {
+  ugui::Widget* cb = ugui::CreateCheckbox(8);
+  ASSERT(cb->kind() == ugui::WidgetKind::kCheckbox);
+  ASSERT(!ugui::IsChecked(cb));
+
+  int changes = 0;
+  bool last = false;
+  ugui::SetCheckboxChange(cb, [&](bool v) {
+    ++changes;
+    last = v;
+  });
+  ASSERT(cb->OnClick());  // toggle on -> fires on_change
+  ASSERT(ugui::IsChecked(cb));
+  ASSERT(changes == 1 && last == true);
+
+  ugui::SetChecked(cb, false);  // programmatic: no on_change
+  ASSERT(!ugui::IsChecked(cb));
+  ASSERT(changes == 1);
+  delete cb;
 }
 
 int main() {

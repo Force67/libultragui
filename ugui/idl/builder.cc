@@ -610,15 +610,14 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     if (val_it != node.properties.end()) input->set_text(val_it->second);
     widget = input;
   } else if (node.type == "checkbox") {
-    auto* cb = new Checkbox(id);
+    widget = CreateCheckbox(id);
     auto text_it = node.properties.find("label");
     if (text_it == node.properties.end())
       text_it = node.properties.find("text");
-    if (text_it != node.properties.end()) cb->set_label(text_it->second);
+    if (text_it != node.properties.end()) SetCheckboxLabel(widget, text_it->second);
     auto checked_it = node.properties.find("checked");
     if (checked_it != node.properties.end() && checked_it->second == "true")
-      cb->set_checked(true);
-    widget = cb;
+      SetChecked(widget, true);
   } else if (node.type == "slider" || node.type == "range") {
     auto* sl = new Slider(id);
     auto min_it = node.properties.find("min");
