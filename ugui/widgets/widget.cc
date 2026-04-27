@@ -200,6 +200,44 @@ void Widget::OnLayout(const Rect& rect, const Rect& content_rect) {
   rect_ = rect;
   content_rect_ = content_rect;
   layout_dirty_ = false;
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.on_layout && registry_)
+    vt.on_layout(*registry_, *this, rect, content_rect);
+}
+
+void Widget::OnUpdate(f64 dt) {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.on_update && registry_) vt.on_update(*registry_, *this, dt);
+}
+
+bool Widget::OnScroll(Vec2 delta) {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.on_scroll && registry_) return vt.on_scroll(*registry_, *this, delta);
+  return false;
+}
+
+bool Widget::OnKeyDown(i32 key, i32 mods) {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.on_key_down && registry_)
+    return vt.on_key_down(*registry_, *this, key, mods);
+  return false;
+}
+
+bool Widget::OnCharInput(u32 codepoint) {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.on_char_input && registry_)
+    return vt.on_char_input(*registry_, *this, codepoint);
+  return false;
+}
+
+bool Widget::consumes_text_input() const {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  return vt.consumes_text_input ? vt.consumes_text_input(*this) : false;
+}
+
+void Widget::OnDismiss() {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.on_dismiss && registry_) vt.on_dismiss(*registry_, *this);
 }
 
 void Widget::OnPaint(Renderer2D& renderer) {

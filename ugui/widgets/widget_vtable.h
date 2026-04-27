@@ -22,6 +22,17 @@ struct WidgetVTable {
       nullptr;
   WidgetId (*hit_test)(WidgetRegistry& world, Widget& w, Vec2 point) = nullptr;
   bool (*on_click)(WidgetRegistry& world, Widget& w) = nullptr;
+  void (*on_update)(WidgetRegistry& world, Widget& w, f64 dt) = nullptr;
+  bool (*on_scroll)(WidgetRegistry& world, Widget& w, Vec2 delta) = nullptr;
+  // Runs after the base stored the layout result (rect/content_rect).
+  void (*on_layout)(WidgetRegistry& world, Widget& w, const Rect& rect,
+                    const Rect& content_rect) = nullptr;
+  bool (*on_key_down)(WidgetRegistry& world, Widget& w, i32 key, i32 mods) =
+      nullptr;
+  bool (*on_char_input)(WidgetRegistry& world, Widget& w, u32 codepoint) =
+      nullptr;
+  bool (*consumes_text_input)(const Widget& w) = nullptr;
+  void (*on_dismiss)(WidgetRegistry& world, Widget& w) = nullptr;
 };
 
 /// Resolve the behaviour table for a kind. Built-in tables are installed on

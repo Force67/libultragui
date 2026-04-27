@@ -151,10 +151,10 @@ class Widget {
   void SetContext(const WidgetContext* ctx);
   const WidgetContext* context() const { return context_; }
 
-  // --- Lifecycle (override in subclasses) ---
+  // --- Lifecycle (dispatch to the per-kind vtable; see widget_vtable.h) ---
   virtual void OnMount() {}
   virtual void OnUnmount() {}
-  virtual void OnUpdate(f64 dt) {}
+  virtual void OnUpdate(f64 dt);
   virtual void OnLayout(const Rect& rect, const Rect& content_rect);
   virtual void OnPaint(Renderer2D& renderer);
   virtual void Measure(f32& out_width, f32& out_height);
@@ -171,12 +171,12 @@ class Widget {
   /// Viewport scale factor (1.0 at the design resolution).
   f32 ui_scale() const { return context_ ? context_->ui_scale : 1.0f; }
 
-  // --- Event dispatch (override in subclasses) ---
+  // --- Event dispatch (dispatch to the per-kind vtable) ---
   virtual bool OnClick();
-  virtual bool OnScroll(Vec2 delta) { return false; }
-  virtual bool OnKeyDown(i32 key, i32 mods) { return false; }
+  virtual bool OnScroll(Vec2 delta);
+  virtual bool OnKeyDown(i32 key, i32 mods);
   virtual bool OnKeyUp(i32 key, i32 mods) { return false; }
-  virtual bool OnCharInput(u32 codepoint) { return false; }
+  virtual bool OnCharInput(u32 codepoint);
 
   /// Whether this widget swallows printable text while focused. Text
   /// inputs override this to true so the InputRouter doesn't treat
@@ -184,9 +184,9 @@ class Widget {
   /// keyboard/gamepad nav on buttons, and would otherwise call
   /// TextInput::OnClick which repositions the caret to the last
   /// mouse position whenever the user types a space.
-  virtual bool consumes_text_input() const { return false; }
+  virtual bool consumes_text_input() const;
   /// Called when an overlay is dismissed (click outside).
-  virtual void OnDismiss() {}
+  virtual void OnDismiss();
 
   // Drag-to-move now lives in the Movable / DragHandle components (see
   // components.h); attach them via the World and the input system handles it.
