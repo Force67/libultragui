@@ -2,43 +2,47 @@
 #define ULTRAGUI_WIDGETS_SLIDER_H_
 
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
-/// Horizontal slider widget for selecting a numeric value within a range.
-/// Supports mouse drag interaction and an on-change callback.
-class Slider : public Widget {
- public:
-  static constexpr WidgetKind kKind = WidgetKind::kSlider;
-  WidgetKind kind() const override { return kKind; }
-
- public:
-  using Widget::Widget;
-
-  f32 value() const { return value_; }
-  void set_value(f32 v);
-
-  f32 min() const { return min_; }
-  void set_min(f32 v) { min_ = v; }
-
-  f32 max() const { return max_; }
-  void set_max(f32 v) { max_ = v; }
-
-  using ChangeHandler = Function<void(f32)>;
-  void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
-
-  bool OnClick() override;
-  void Measure(f32& out_width, f32& out_height) override;
-  void OnPaint(Renderer2D& renderer) override;
-  void OnUpdate(f64 dt) override;
-
- private:
-  f32 value_ = 0.0f;
-  f32 min_ = 0.0f;
-  f32 max_ = 1.0f;
-  bool dragging_ = false;
-  ChangeHandler on_change_;
+/// Data for a horizontal slider widget (WidgetKind::kSlider): the current
+/// value, its range and an on_change callback. `dragging` is transient
+/// interaction state used while the user drags the thumb. Behaviour lives in
+/// SliderVTable().
+struct SliderContent {
+  f32 value = 0.0f;
+  f32 min = 0.0f;
+  f32 max = 1.0f;
+  bool dragging = false;
+  Function<void(f32)> on_change;
 };
+
+/// Behaviour table (draw + measure + click + update) for slider widgets.
+WidgetVTable SliderVTable();
+
+/// Create a slider entity: a generic Widget tagged kSlider with a
+/// SliderContent component.
+Widget* CreateSlider(u32 id);
+
+/// Set the slider value, clamped to [min, max]. Does not fire on_change (that
+/// fires only on user interaction). No-op if `w` is null or not a slider.
+void SetSliderValue(Widget* w, f32 value);
+
+/// The slider's current value, or 0 if `w` is null or not a slider.
+f32 SliderValue(const Widget* w);
+
+/// The slider's range minimum / maximum, or 0 if `w` is null or not a slider.
+f32 SliderMin(const Widget* w);
+f32 SliderMax(const Widget* w);
+
+/// Set the slider's range. No-op if `w` is null or not a slider.
+void SetSliderMin(Widget* w, f32 min);
+void SetSliderMax(Widget* w, f32 max);
+
+/// Set the slider's on_change handler (run with the new value when the user
+/// drags it). No-op if `w` is null or not a slider.
+void SetSliderChange(Widget* w, Function<void(f32)> handler);
 
 }  // namespace ugui
 

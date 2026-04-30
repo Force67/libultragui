@@ -2,8 +2,14 @@
 
 #include <ugui/widgets/button.h>
 #include <ugui/widgets/checkbox.h>
+#include <ugui/widgets/dropdown.h>
 #include <ugui/widgets/image.h>
+#include <ugui/widgets/radio.h>
+#include <ugui/widgets/rich_text.h>
+#include <ugui/widgets/slider.h>
 #include <ugui/widgets/text.h>
+#include <ugui/widgets/text_input.h>
+#include <ugui/widgets/toggle.h>
 
 namespace ugui {
 namespace {
@@ -18,6 +24,12 @@ void InstallBuiltins() {
   SetWidgetVTable(WidgetKind::kText, TextVTable());
   SetWidgetVTable(WidgetKind::kButton, ButtonVTable());
   SetWidgetVTable(WidgetKind::kCheckbox, CheckboxVTable());
+  SetWidgetVTable(WidgetKind::kRadio, RadioVTable());
+  SetWidgetVTable(WidgetKind::kToggle, ToggleVTable());
+  SetWidgetVTable(WidgetKind::kSlider, SliderVTable());
+  SetWidgetVTable(WidgetKind::kDropdown, DropdownVTable());
+  SetWidgetVTable(WidgetKind::kRichText, RichTextVTable());
+  SetWidgetVTable(WidgetKind::kTextInput, TextInputVTable());
 }
 
 }  // namespace

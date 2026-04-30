@@ -1,12 +1,14 @@
 #include <ugui/platform/platform.h>
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
+#include <ugui/text/text_engine.h>
 #include <ugui/widgets/text_input.h>
+#include <ugui/widgets/widget_registry.h>
 
 #include <algorithm>
 #include <cstring>
 
-// GLFW key codes (avoid including GLFW in widget code)
+// GLFW key codes (avoid including GLFW in widget code).
 namespace {
 constexpr int kKeyEnter = 257;
 constexpr int kKeyKpEnter = 335;
@@ -28,90 +30,90 @@ constexpr int kModControl = 0x0002;
 }  // namespace
 
 namespace ugui {
+namespace {
 
-// ---------------------------------------------------------------------------
-// UTF-8 navigation
-// ---------------------------------------------------------------------------
-
-u32 TextInput::NextPos(u32 pos) const {
-  if (pos >= text_.size()) return static_cast<u32>(text_.size());
-  u8 c = static_cast<u8>(text_[pos]);
-  if (c < 0x80) return pos + 1;
-  if ((c & 0xE0) == 0xC0)
-    return std::min(pos + 2, static_cast<u32>(text_.size()));
-  if ((c & 0xF0) == 0xE0)
-    return std::min(pos + 3, static_cast<u32>(text_.size()));
-  return std::min(pos + 4, static_cast<u32>(text_.size()));
+TextEngine* text_engine(const Widget& w) {
+  return w.context() ? w.context()->text_engine : nullptr;
 }
 
-u32 TextInput::PrevPos(u32 pos) const {
+FontHandle effective_font(const Widget& w, const TextInputContent& c) {
+  if (c.font != kInvalidFont) return c.font;
+  return w.context() ? w.context()->default_font : kInvalidFont;
+}
+
+// --- UTF-8 navigation -------------------------------------------------------
+
+u32 NextPos(const String& text, u32 pos) {
+  if (pos >= text.size()) return static_cast<u32>(text.size());
+  u8 c = static_cast<u8>(text[pos]);
+  if (c < 0x80) return pos + 1;
+  if ((c & 0xE0) == 0xC0) return std::min(pos + 2, static_cast<u32>(text.size()));
+  if ((c & 0xF0) == 0xE0) return std::min(pos + 3, static_cast<u32>(text.size()));
+  return std::min(pos + 4, static_cast<u32>(text.size()));
+}
+
+u32 PrevPos(const String& text, u32 pos) {
   if (pos == 0) return 0;
   --pos;
-  while (pos > 0 && (static_cast<u8>(text_[pos]) & 0xC0) == 0x80) --pos;
+  while (pos > 0 && (static_cast<u8>(text[pos]) & 0xC0) == 0x80) --pos;
   return pos;
 }
 
-// ---------------------------------------------------------------------------
-// Cursor <-> glyph position mapping
-// ---------------------------------------------------------------------------
+// --- Cursor <-> glyph mapping ----------------------------------------------
 
-f32 TextInput::CursorXFromPos(u32 byte_pos, const TextRun& run) const {
-  // Sum x_advances for glyphs whose source bytes precede byte_pos.
-  // For a simple implementation, assume 1 glyph per codepoint.
+f32 CursorXFromPos(const String& text, u32 byte_pos, const TextRun& run) {
   f32 x = 0.0f;
   u32 src_pos = 0;
   for (u32 i = 0; i < run.glyph_count && src_pos < byte_pos; ++i) {
     x += run.glyphs[i].x_advance;
-    src_pos = NextPos(src_pos);
+    src_pos = NextPos(text, src_pos);
   }
   return x;
 }
 
-u32 TextInput::PosFromX(f32 local_x, const TextRun& run) const {
+u32 PosFromX(const String& text, f32 local_x, const TextRun& run) {
   f32 x = 0.0f;
   u32 src_pos = 0;
   for (u32 i = 0; i < run.glyph_count; ++i) {
     f32 mid = x + run.glyphs[i].x_advance * 0.5f;
     if (local_x < mid) return src_pos;
     x += run.glyphs[i].x_advance;
-    src_pos = NextPos(src_pos);
+    src_pos = NextPos(text, src_pos);
   }
-  return static_cast<u32>(text_.size());
+  return static_cast<u32>(text.size());
 }
 
-// ---------------------------------------------------------------------------
-// Selection helpers
-// ---------------------------------------------------------------------------
+// --- Selection helpers ------------------------------------------------------
 
-void TextInput::DeleteSelection() {
-  if (sel_start_ == sel_end_) return;
-  u32 lo = std::min(sel_start_, sel_end_);
-  u32 hi = std::max(sel_start_, sel_end_);
-  text_.erase(lo, hi - lo);
-  cursor_ = lo;
-  sel_start_ = sel_end_ = cursor_;
+void DeleteSelection(TextInputContent& c) {
+  if (c.sel_start == c.sel_end) return;
+  u32 lo = std::min(c.sel_start, c.sel_end);
+  u32 hi = std::max(c.sel_start, c.sel_end);
+  c.text.erase(lo, hi - lo);
+  c.cursor = lo;
+  c.sel_start = c.sel_end = c.cursor;
 }
 
-void TextInput::ResetBlink() {
-  blink_timer_ = 0.0;
-  cursor_visible_ = true;
+void ResetBlink(TextInputContent& c) {
+  c.blink_timer = 0.0;
+  c.cursor_visible = true;
 }
 
-void TextInput::set_text(const String& text) {
-  text_ = text;
-  cursor_ = static_cast<u32>(text_.size());
-  sel_start_ = sel_end_ = cursor_;
-  MarkDirty();
+void SetValue(TextInputContent& c, const String& text) {
+  c.text = text;
+  c.cursor = static_cast<u32>(c.text.size());
+  c.sel_start = c.sel_end = c.cursor;
 }
 
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
+// --- Event handlers ---------------------------------------------------------
 
-bool TextInput::OnCharInput(u32 codepoint) {
-  DeleteSelection();
+bool TextInputCharInput(WidgetRegistry& world, Widget& w, u32 codepoint) {
+  TextInputContent* cp = world.Get<TextInputContent>(w.handle());
+  if (!cp) return false;
+  TextInputContent& c = *cp;
 
-  // Encode codepoint as UTF-8
+  DeleteSelection(c);
+
   char buf[4];
   u32 len = 0;
   if (codepoint < 0x80) {
@@ -134,71 +136,78 @@ bool TextInput::OnCharInput(u32 codepoint) {
     len = 4;
   }
 
-  text_.insert(cursor_, buf, len);
-  cursor_ += len;
-  sel_start_ = sel_end_ = cursor_;
-  ResetBlink();
-  MarkDirty();
-  if (on_change_) on_change_(text_);
+  c.text.insert(c.cursor, buf, len);
+  c.cursor += len;
+  c.sel_start = c.sel_end = c.cursor;
+  ResetBlink(c);
+  w.MarkDirty();
+  if (c.on_change) c.on_change(c.text);
   return true;
 }
 
-bool TextInput::OnKeyDown(i32 key, i32 mods) {
+bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
+  TextInputContent* cp = world.Get<TextInputContent>(w.handle());
+  if (!cp) return false;
+  TextInputContent& c = *cp;
+
   bool shift = (mods & kModShift) != 0;
   bool ctrl = (mods & kModControl) != 0;
+  const WidgetContext* ctx = w.context();
 
   auto move_cursor = [&](u32 new_pos) {
-    cursor_ = new_pos;
+    c.cursor = new_pos;
     if (!shift)
-      sel_start_ = sel_end_ = cursor_;
+      c.sel_start = c.sel_end = c.cursor;
     else
-      sel_end_ = cursor_;
-    ResetBlink();
-    MarkPaintDirty();
+      c.sel_end = c.cursor;
+    ResetBlink(c);
+    w.MarkPaintDirty();
   };
 
   switch (key) {
     case kKeyEnter:
     case kKeyKpEnter:
-      if (on_submit_) {
-        on_submit_(text_);
+      if (c.on_submit) {
+        c.on_submit(c.text);
         return true;
       }
       break;
 
     case kKeyEscape:
-      if (on_cancel_) {
-        on_cancel_();
+      if (c.on_cancel) {
+        c.on_cancel();
         return true;
       }
       break;
 
     case kKeyUp:
-      if (on_history_prev_) {
-        String repl = on_history_prev_();
-        if (repl.size() > 0 || repl != text_) {
-          set_text(repl);
-          if (on_change_) on_change_(text_);
+      if (c.on_history_prev) {
+        String repl = c.on_history_prev();
+        if (repl.size() > 0 || repl != c.text) {
+          SetValue(c, repl);
+          w.MarkDirty();
+          if (c.on_change) c.on_change(c.text);
         }
         return true;
       }
       break;
 
     case kKeyDown:
-      if (on_history_next_) {
-        String repl = on_history_next_();
-        set_text(repl);
-        if (on_change_) on_change_(text_);
+      if (c.on_history_next) {
+        String repl = c.on_history_next();
+        SetValue(c, repl);
+        w.MarkDirty();
+        if (c.on_change) c.on_change(c.text);
         return true;
       }
       break;
 
     case kKeyLeft:
-      move_cursor(PrevPos(cursor_));
+      move_cursor(PrevPos(c.text, c.cursor));
       return true;
 
     case kKeyRight:
-      move_cursor(NextPos(cursor_));
+      move_cursor(NextPos(c.text, c.cursor));
       return true;
 
     case kKeyHome:
@@ -206,77 +215,77 @@ bool TextInput::OnKeyDown(i32 key, i32 mods) {
       return true;
 
     case kKeyEnd:
-      move_cursor(static_cast<u32>(text_.size()));
+      move_cursor(static_cast<u32>(c.text.size()));
       return true;
 
     case kKeyBackspace:
-      if (sel_start_ != sel_end_) {
-        DeleteSelection();
-      } else if (cursor_ > 0) {
-        u32 prev = PrevPos(cursor_);
-        text_.erase(prev, cursor_ - prev);
-        cursor_ = prev;
-        sel_start_ = sel_end_ = cursor_;
+      if (c.sel_start != c.sel_end) {
+        DeleteSelection(c);
+      } else if (c.cursor > 0) {
+        u32 prev = PrevPos(c.text, c.cursor);
+        c.text.erase(prev, c.cursor - prev);
+        c.cursor = prev;
+        c.sel_start = c.sel_end = c.cursor;
       }
-      MarkDirty();
-      if (on_change_) on_change_(text_);
+      w.MarkDirty();
+      if (c.on_change) c.on_change(c.text);
       return true;
 
     case kKeyDelete:
-      if (sel_start_ != sel_end_) {
-        DeleteSelection();
-      } else if (cursor_ < text_.size()) {
-        u32 next = NextPos(cursor_);
-        text_.erase(cursor_, next - cursor_);
-        sel_start_ = sel_end_ = cursor_;
+      if (c.sel_start != c.sel_end) {
+        DeleteSelection(c);
+      } else if (c.cursor < c.text.size()) {
+        u32 next = NextPos(c.text, c.cursor);
+        c.text.erase(c.cursor, next - c.cursor);
+        c.sel_start = c.sel_end = c.cursor;
       }
-      MarkDirty();
-      if (on_change_) on_change_(text_);
+      w.MarkDirty();
+      if (c.on_change) c.on_change(c.text);
       return true;
 
     case kKeyA:
       if (ctrl) {
-        sel_start_ = 0;
-        sel_end_ = cursor_ = static_cast<u32>(text_.size());
-        MarkPaintDirty();
+        c.sel_start = 0;
+        c.sel_end = c.cursor = static_cast<u32>(c.text.size());
+        w.MarkPaintDirty();
         return true;
       }
       break;
 
     case kKeyC:
-      if (ctrl && sel_start_ != sel_end_ && context_ && context_->platform) {
-        u32 lo = std::min(sel_start_, sel_end_);
-        u32 hi = std::max(sel_start_, sel_end_);
-        String sel = text_.substr(lo, hi - lo);
-        context_->platform->set_clipboard_text(sel.c_str());
+      if (ctrl && c.sel_start != c.sel_end && ctx && ctx->platform) {
+        u32 lo = std::min(c.sel_start, c.sel_end);
+        u32 hi = std::max(c.sel_start, c.sel_end);
+        String sel = c.text.substr(lo, hi - lo);
+        ctx->platform->set_clipboard_text(sel.c_str());
         return true;
       }
       break;
 
     case kKeyX:
-      if (ctrl && sel_start_ != sel_end_ && context_ && context_->platform) {
-        u32 lo = std::min(sel_start_, sel_end_);
-        u32 hi = std::max(sel_start_, sel_end_);
-        String sel = text_.substr(lo, hi - lo);
-        context_->platform->set_clipboard_text(sel.c_str());
-        DeleteSelection();
-        MarkDirty();
-        if (on_change_) on_change_(text_);
+      if (ctrl && c.sel_start != c.sel_end && ctx && ctx->platform) {
+        u32 lo = std::min(c.sel_start, c.sel_end);
+        u32 hi = std::max(c.sel_start, c.sel_end);
+        String sel = c.text.substr(lo, hi - lo);
+        ctx->platform->set_clipboard_text(sel.c_str());
+        DeleteSelection(c);
+        w.MarkDirty();
+        if (c.on_change) c.on_change(c.text);
         return true;
       }
       break;
 
     case kKeyV:
-      if (ctrl && context_ && context_->platform) {
-        const char* clip = context_->platform->clipboard_text();
+      if (ctrl && ctx && ctx->platform) {
+        const char* clip = ctx->platform->clipboard_text();
         if (clip && clip[0]) {
-          DeleteSelection();
+          DeleteSelection(c);
           u32 len = static_cast<u32>(std::strlen(clip));
-          text_.insert(cursor_, clip, len);
-          cursor_ += len;
-          sel_start_ = sel_end_ = cursor_;
-          MarkDirty();
-          if (on_change_) on_change_(text_);
+          c.text.insert(c.cursor, clip, len);
+          c.cursor += len;
+          c.sel_start = c.sel_end = c.cursor;
+          w.MarkDirty();
+          if (c.on_change) c.on_change(c.text);
         }
         return true;
       }
@@ -286,130 +295,219 @@ bool TextInput::OnKeyDown(i32 key, i32 mods) {
   return false;
 }
 
-bool TextInput::OnClick() {
-  // Position cursor from mouse click
-  auto* te = text_engine();
-  FontHandle fh = effective_font();
+bool TextInputClick(WidgetRegistry& world, Widget& w) {
+  TextInputContent* cp = world.Get<TextInputContent>(w.handle());
+  if (!cp) return true;
+  TextInputContent& c = *cp;
+
+  TextEngine* te = text_engine(w);
+  FontHandle fh = effective_font(w, c);
   if (!te || fh == kInvalidFont) return true;
 
-  auto s = ComputedStyle();
-  s.Scale(ui_scale());
-  auto run = te->Shape(fh, text_.c_str(), static_cast<u32>(text_.size()),
+  Style s = w.ComputedStyle();
+  s.Scale(w.ui_scale());
+  auto run = te->Shape(fh, c.text.c_str(), static_cast<u32>(c.text.size()),
                        s.font_size, s.letter_spacing, s.line_height_multiplier);
 
-  // Mouse position relative to text origin
-  Vec2 mp =
-      context_ && context_->platform
-          ? InputToLayoutPoint(context_->platform->input_queue().mouse_pos)
-          : Vec2{0, 0};
-  f32 local_x = mp.x - content_rect_.x + scroll_x_;
-  cursor_ = PosFromX(local_x, run);
-  sel_start_ = sel_end_ = cursor_;
-  ResetBlink();
-  MarkPaintDirty();
+  const WidgetContext* ctx = w.context();
+  Vec2 mp = ctx && ctx->platform
+                ? w.InputToLayoutPoint(ctx->platform->input_queue().mouse_pos)
+                : Vec2{0, 0};
+  f32 local_x = mp.x - w.content_rect().x + c.scroll_x;
+  c.cursor = PosFromX(c.text, local_x, run);
+  c.sel_start = c.sel_end = c.cursor;
+  ResetBlink(c);
+  w.MarkPaintDirty();
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Measure & Paint
-// ---------------------------------------------------------------------------
+bool TextInputConsumesText(const Widget& w) {
+  (void)w;
+  return true;
+}
 
-void TextInput::Measure(f32& out_width, f32& out_height) {
-  auto* te = text_engine();
-  FontHandle fh = effective_font();
-  if (!te || fh == kInvalidFont) {
+// --- Measure & paint --------------------------------------------------------
+
+void TextInputMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+                      f32& out_height) {
+  TextInputContent* c = world.Get<TextInputContent>(w.handle());
+  const Style& st = w.style();
+  TextEngine* te = text_engine(w);
+  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  if (!c || !te || fh == kInvalidFont) {
     out_width = 0;
-    out_height = style_.font_size + style_.padding.vertical();
+    out_height = st.font_size + st.padding.vertical();
     return;
   }
 
-  f32 sc = ui_scale();
-  auto run = te->Shape(fh, text_.empty() ? "X" : text_.c_str(),
-                       text_.empty() ? 1 : static_cast<u32>(text_.size()),
-                       style_.font_size * sc, style_.letter_spacing * sc,
-                       style_.line_height_multiplier);
-  out_width = run.total_advance + style_.padding.horizontal();
-  out_height = run.line_height + style_.padding.vertical();
+  f32 sc = w.ui_scale();
+  auto run = te->Shape(fh, c->text.empty() ? "X" : c->text.c_str(),
+                       c->text.empty() ? 1 : static_cast<u32>(c->text.size()),
+                       st.font_size * sc, st.letter_spacing * sc,
+                       st.line_height_multiplier);
+  out_width = run.total_advance + st.padding.horizontal();
+  out_height = run.line_height + st.padding.vertical();
 }
 
-void TextInput::OnUpdate(f64 dt) {
-  // Cursor blink (only when focused)
-  if (HasState(state_, WidgetState::kFocused)) {
-    blink_timer_ += dt;
-    bool was_visible = cursor_visible_;
-    cursor_visible_ = static_cast<int>(blink_timer_ * 2.0) % 2 == 0;
-    if (was_visible != cursor_visible_) MarkPaintDirty();
-  }
+void TextInputUpdate(WidgetRegistry& world, Widget& w, f64 dt) {
+  if (!HasState(w.widget_state(), WidgetState::kFocused)) return;
+  TextInputContent* c = world.Get<TextInputContent>(w.handle());
+  if (!c) return;
+  c->blink_timer += dt;
+  bool was_visible = c->cursor_visible;
+  c->cursor_visible = static_cast<int>(c->blink_timer * 2.0) % 2 == 0;
+  if (was_visible != c->cursor_visible) w.MarkPaintDirty();
 }
 
-void TextInput::OnPaint(Renderer2D& renderer) {
-  Widget::OnPaint(renderer);  // Background, shadow, border
+void TextInputDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
+  // The base Widget::OnPaint already drew background / shadow / border.
+  TextInputContent* cp = world.Get<TextInputContent>(w.handle());
+  if (!cp) return;
+  TextInputContent& c = *cp;
 
-  auto* te = text_engine();
-  FontHandle fh = effective_font();
+  TextEngine* te = text_engine(w);
+  FontHandle fh = effective_font(w, c);
   if (!te || fh == kInvalidFont) return;
 
-  auto s = ComputedStyle();
-  s.Scale(ui_scale());
+  Style s = w.ComputedStyle();
+  s.Scale(w.ui_scale());
   f32 alpha = s.opacity;
-  bool focused = HasState(state_, WidgetState::kFocused);
-  bool show_placeholder = text_.empty() && !placeholder_.empty();
+  bool focused = HasState(w.widget_state(), WidgetState::kFocused);
+  bool show_placeholder = c.text.empty() && !c.placeholder.empty();
 
-  const String& display = show_placeholder ? placeholder_ : text_;
+  const String& display = show_placeholder ? c.placeholder : c.text;
   auto run = te->Shape(fh, display.c_str(), static_cast<u32>(display.size()),
                        s.font_size, s.letter_spacing, s.line_height_multiplier);
 
-  // Clip to content rect
-  renderer.PushScissor(content_rect_);
+  Rect content = w.content_rect();
+  renderer.PushScissor(content);
 
-  // Compute text origin
-  f32 text_y = content_rect_.y + (content_rect_.h - run.line_height) * 0.5f;
+  f32 text_y = content.y + (content.h - run.line_height) * 0.5f;
 
-  // Scroll to keep cursor visible
+  // Scroll to keep the caret visible.
   if (focused && !show_placeholder) {
-    f32 cursor_x = CursorXFromPos(cursor_, run);
-    f32 visible_w = content_rect_.w;
-    if (cursor_x - scroll_x_ > visible_w - 2.0f)
-      scroll_x_ = cursor_x - visible_w + 2.0f;
-    if (cursor_x - scroll_x_ < 0.0f) scroll_x_ = cursor_x;
-    if (scroll_x_ < 0.0f) scroll_x_ = 0.0f;
+    f32 cursor_x = CursorXFromPos(c.text, c.cursor, run);
+    f32 visible_w = content.w;
+    if (cursor_x - c.scroll_x > visible_w - 2.0f)
+      c.scroll_x = cursor_x - visible_w + 2.0f;
+    if (cursor_x - c.scroll_x < 0.0f) c.scroll_x = cursor_x;
+    if (c.scroll_x < 0.0f) c.scroll_x = 0.0f;
   }
 
-  f32 text_x = content_rect_.x - scroll_x_;
+  f32 text_x = content.x - c.scroll_x;
 
-  // Draw selection highlight
-  if (focused && sel_start_ != sel_end_ && !show_placeholder) {
-    // Shape the actual text for selection positioning
+  // Selection highlight.
+  if (focused && c.sel_start != c.sel_end && !show_placeholder) {
     auto text_run =
-        te->Shape(fh, text_.c_str(), static_cast<u32>(text_.size()),
+        te->Shape(fh, c.text.c_str(), static_cast<u32>(c.text.size()),
                   s.font_size, s.letter_spacing, s.line_height_multiplier);
-    u32 lo = std::min(sel_start_, sel_end_);
-    u32 hi = std::max(sel_start_, sel_end_);
-    f32 sel_x0 = CursorXFromPos(lo, text_run);
-    f32 sel_x1 = CursorXFromPos(hi, text_run);
+    u32 lo = std::min(c.sel_start, c.sel_end);
+    u32 hi = std::max(c.sel_start, c.sel_end);
+    f32 sel_x0 = CursorXFromPos(c.text, lo, text_run);
+    f32 sel_x1 = CursorXFromPos(c.text, hi, text_run);
     Color sel_color = {0.3f, 0.5f, 0.9f, 0.4f * alpha};
     renderer.DrawRect(
         {text_x + sel_x0, text_y, sel_x1 - sel_x0, run.line_height}, sel_color);
   }
 
-  // Draw text
   Color text_color = show_placeholder
                          ? Color{0.5f, 0.5f, 0.5f, 0.5f * alpha}
                          : s.text_color.WithAlpha(s.text_color.a * alpha);
   renderer.DrawText(Vec2{text_x, text_y}, run, text_color, te->atlas_texture());
 
-  // Draw cursor
-  if (focused && cursor_visible_ && !show_placeholder) {
+  // Caret.
+  if (focused && c.cursor_visible && !show_placeholder) {
     auto text_run =
-        te->Shape(fh, text_.c_str(), static_cast<u32>(text_.size()),
+        te->Shape(fh, c.text.c_str(), static_cast<u32>(c.text.size()),
                   s.font_size, s.letter_spacing, s.line_height_multiplier);
-    f32 cx = text_x + CursorXFromPos(cursor_, text_run);
+    f32 cx = text_x + CursorXFromPos(c.text, c.cursor, text_run);
     Color cursor_color = s.text_color.WithAlpha(s.text_color.a * alpha);
     renderer.DrawRect({cx, text_y + 1.0f, 1.5f, run.line_height - 2.0f},
                       cursor_color);
   }
 
   renderer.PopScissor();
+}
+
+}  // namespace
+
+WidgetVTable TextInputVTable() {
+  WidgetVTable vt;
+  vt.draw = TextInputDraw;
+  vt.measure = TextInputMeasure;
+  vt.on_click = TextInputClick;
+  vt.on_update = TextInputUpdate;
+  vt.on_key_down = TextInputKeyDown;
+  vt.on_char_input = TextInputCharInput;
+  vt.consumes_text_input = TextInputConsumesText;
+  return vt;
+}
+
+Widget* CreateTextInput(u32 id) {
+  Widget* w = new Widget(id);
+  w->set_kind(WidgetKind::kTextInput);
+  WidgetRegistry::Active()->Add<TextInputContent>(w->handle(),
+                                                  TextInputContent{});
+  return w;
+}
+
+void SetTextInputValue(Widget* w, const String& text) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
+  SetValue(w->registry()->GetOrAdd<TextInputContent>(w->handle()), text);
+  w->MarkDirty();
+}
+
+String TextInputValue(const Widget* w) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry())
+    return String();
+  TextInputContent* c =
+      w->registry()->Get<TextInputContent>(const_cast<Widget*>(w)->handle());
+  return c ? c->text : String();
+}
+
+void SetTextInputPlaceholder(Widget* w, const String& placeholder) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
+  w->registry()->GetOrAdd<TextInputContent>(w->handle()).placeholder =
+      placeholder;
+  w->MarkPaintDirty();
+}
+
+void SetTextInputFont(Widget* w, FontHandle font) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
+  w->registry()->GetOrAdd<TextInputContent>(w->handle()).font = font;
+  w->MarkDirty();
+}
+
+void SetTextInputChange(Widget* w, TextInputContent::ChangeHandler handler) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
+  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_change =
+      std::move(handler);
+}
+
+void SetTextInputSubmit(Widget* w, TextInputContent::SubmitHandler handler) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
+  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_submit =
+      std::move(handler);
+}
+
+void SetTextInputCancel(Widget* w, TextInputContent::CancelHandler handler) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
+  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_cancel =
+      std::move(handler);
+}
+
+void SetTextInputHistoryPrev(Widget* w,
+                             TextInputContent::HistoryHandler handler) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
+  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_history_prev =
+      std::move(handler);
+}
+
+void SetTextInputHistoryNext(Widget* w,
+                             TextInputContent::HistoryHandler handler) {
+  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
+  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_history_next =
+      std::move(handler);
 }
 
 }  // namespace ugui

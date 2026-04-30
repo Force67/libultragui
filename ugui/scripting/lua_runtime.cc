@@ -208,18 +208,18 @@ void ScriptRuntime::Impl::PushWidgetTable(Widget* widget) {
     lua_pushboolean(L, IsChecked(widget));
     lua_setfield(L, -2, "checked");
   }
-  if (auto* dd = widget_cast<Dropdown>(widget)) {
-    lua_pushinteger(L, dd->selected_index());
+  if (widget && widget->kind() == WidgetKind::kDropdown) {
+    lua_pushinteger(L, DropdownSelected(widget));
     lua_setfield(L, -2, "selected");
-    lua_pushstring(L, dd->selected_text().c_str());
+    lua_pushstring(L, DropdownSelectedText(widget).c_str());
     lua_setfield(L, -2, "selected_text");
   }
-  if (auto* sl = widget_cast<Slider>(widget)) {
-    lua_pushnumber(L, sl->value());
+  if (widget && widget->kind() == WidgetKind::kSlider) {
+    lua_pushnumber(L, SliderValue(widget));
     lua_setfield(L, -2, "value");
-    lua_pushnumber(L, sl->min());
+    lua_pushnumber(L, SliderMin(widget));
     lua_setfield(L, -2, "min");
-    lua_pushnumber(L, sl->max());
+    lua_pushnumber(L, SliderMax(widget));
     lua_setfield(L, -2, "max");
   }
 }
@@ -334,8 +334,8 @@ static void WireChangeHandlersRecursive(ScriptRuntime& rt, Widget* w) {
   if (!w) return;
   const auto& name = w->name();
   if (!name.empty()) {
-    if (auto* dd = widget_cast<Dropdown>(w)) {
-      dd->set_on_change([&rt, widget = w](i32, const String&) {
+    if (w->kind() == WidgetKind::kDropdown) {
+      SetDropdownChange(w, [&rt, widget = w](i32, const String&) {
         std::string handler = "on_" + widget->name();
         rt.CallHandler(handler.c_str(), widget);
       });
@@ -346,8 +346,8 @@ static void WireChangeHandlersRecursive(ScriptRuntime& rt, Widget* w) {
         rt.CallHandler(handler.c_str(), widget);
       });
     }
-    if (auto* sl = widget_cast<Slider>(w)) {
-      sl->set_on_change([&rt, widget = w](f32) {
+    if (w->kind() == WidgetKind::kSlider) {
+      SetSliderChange(w, [&rt, widget = w](f32) {
         std::string handler = "on_" + widget->name();
         rt.CallHandler(handler.c_str(), widget);
       });
@@ -656,8 +656,8 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
       s.height = Length::Px(static_cast<f32>(luaL_checknumber(L, 3)));
     }
   } else if (strcmp(prop, "selected") == 0) {
-    if (auto* dd = widget_cast<Dropdown>(w)) {
-      dd->set_selected_index(static_cast<i32>(luaL_checkinteger(L, 3)));
+    if (w && w->kind() == WidgetKind::kDropdown) {
+      SetDropdownSelected(w, static_cast<i32>(luaL_checkinteger(L, 3)));
       return 0;
     }
   } else if (strcmp(prop, "checked") == 0) {
@@ -666,8 +666,8 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
       return 0;
     }
   } else if (strcmp(prop, "value") == 0) {
-    if (auto* sl = widget_cast<Slider>(w)) {
-      sl->set_value(static_cast<f32>(luaL_checknumber(L, 3)));
+    if (w && w->kind() == WidgetKind::kSlider) {
+      SetSliderValue(w, static_cast<f32>(luaL_checknumber(L, 3)));
       return 0;
     }
   } else if (strcmp(prop, "text") == 0) {

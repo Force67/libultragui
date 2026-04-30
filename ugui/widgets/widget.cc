@@ -241,6 +241,13 @@ void Widget::OnDismiss() {
 }
 
 void Widget::OnPaint(Renderer2D& renderer) {
+  const WidgetVTable& vt = WidgetVTableFor(kind_);
+  if (vt.custom_paint) {
+    // The widget owns its entire paint; skip the base box.
+    if (vt.draw && registry_) vt.draw(*registry_, *this, renderer);
+    return;
+  }
+
   auto s = ComputedStyle();
   s.Scale(ui_scale());
   f32 alpha = s.opacity;
@@ -352,7 +359,6 @@ void Widget::OnPaint(Renderer2D& renderer) {
 
   // Kind-specific overlay (text glyphs, image texture, ...): the base draws the
   // box above, the vtable draws the content on top.
-  const WidgetVTable& vt = WidgetVTableFor(kind_);
   if (vt.draw && registry_) vt.draw(*registry_, *this, renderer);
 }
 

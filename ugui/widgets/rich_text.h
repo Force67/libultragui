@@ -3,10 +3,11 @@
 
 #include <ugui/style/enums.h>
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
-/// A styled inline text span within a RichText widget.
+/// A styled inline text span within a rich-text widget.
 struct TextSpan {
   String text;
   Color color = Color::White();
@@ -16,57 +17,37 @@ struct TextSpan {
   TextDecoration decoration = TextDecoration::kNone;
 };
 
-/// Rich text widget that renders multiple styled spans inline with wrapping.
-class RichText : public Widget {
- public:
-  using Widget::Widget;
-
-  void set_spans(const Vector<TextSpan>& spans) {
-    spans_ = spans;
-    MarkDirty();
-  }
-  const Vector<TextSpan>& spans() const { return spans_; }
-
-  void AddSpan(const TextSpan& span) {
-    spans_.push_back(span);
-    MarkDirty();
-  }
-  void ClearSpans() {
-    spans_.clear();
-    MarkDirty();
-  }
-
-  void set_font(FontHandle font) { font_override_ = font; }
-
-  void Measure(f32& out_width, f32& out_height) override;
-  void OnPaint(Renderer2D& renderer) override;
-
- private:
-  TextEngine* text_engine() const {
-    return context_ ? context_->text_engine : nullptr;
-  }
-  FontHandle effective_font() const {
-    if (font_override_ != kInvalidFont) return font_override_;
-    return context_ ? context_->default_font : kInvalidFont;
-  }
-
-  /// A shaped and positioned span ready for rendering.
-  struct ShapedSpan {
-    TextRun run;
-    Color color;
-    TextDecoration decoration;
-    f32 font_size;  // For decoration thickness calculation
-    f32 x;          // X position within the line
-    f32 y;          // Y position (accumulated line offset)
-  };
-
-  /// Shape all spans and lay them out inline with wrapping.
-  /// Returns total height of all lines.
-  f32 LayoutSpans(Vector<ShapedSpan>& out, f32 max_width) const;
-
-  Vector<TextSpan> spans_;
-  FontHandle font_override_ = kInvalidFont;
+/// Data for a rich-text widget (WidgetKind::kRichText): the inline spans and an
+/// optional font override. Behaviour (inline layout with wrapping) lives in
+/// RichTextVTable(); a rich-text widget is a generic Widget carrying this
+/// component.
+struct RichTextContent {
+  Vector<TextSpan> spans;
+  FontHandle font = kInvalidFont;  // override; kInvalidFont -> context default
 };
+
+/// Behaviour table (draw + measure) for rich-text widgets.
+WidgetVTable RichTextVTable();
+
+/// Create a rich-text entity: a generic Widget tagged kRichText with a
+/// RichTextContent component.
+Widget* CreateRichText(u32 id);
+
+/// Replace all spans of a rich-text widget. No-op if `w` is null or not a
+/// rich-text widget.
+void SetRichTextSpans(Widget* w, const Vector<TextSpan>& spans);
+
+/// Append a span to a rich-text widget. No-op if `w` is null or not a
+/// rich-text widget.
+void AddRichTextSpan(Widget* w, const TextSpan& span);
+
+/// Remove all spans from a rich-text widget. No-op if `w` is null or not a
+/// rich-text widget.
+void ClearRichTextSpans(Widget* w);
+
+/// Set the font override used to shape every span. No-op if `w` is null or not
+/// a rich-text widget.
+void SetRichTextFont(Widget* w, FontHandle font);
 
 }  // namespace ugui
 

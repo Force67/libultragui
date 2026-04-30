@@ -602,13 +602,12 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     widget = new ScrollView(id);
     widget->style().overflow = Overflow::kScroll;
   } else if (node.type == "text-input" || node.type == "input") {
-    auto* input = new TextInput(id);
+    widget = CreateTextInput(id);
     auto text_it = node.properties.find("placeholder");
     if (text_it != node.properties.end())
-      input->set_placeholder(text_it->second);
+      SetTextInputPlaceholder(widget, text_it->second);
     auto val_it = node.properties.find("value");
-    if (val_it != node.properties.end()) input->set_text(val_it->second);
-    widget = input;
+    if (val_it != node.properties.end()) SetTextInputValue(widget, val_it->second);
   } else if (node.type == "checkbox") {
     widget = CreateCheckbox(id);
     auto text_it = node.properties.find("label");
@@ -619,37 +618,35 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     if (checked_it != node.properties.end() && checked_it->second == "true")
       SetChecked(widget, true);
   } else if (node.type == "slider" || node.type == "range") {
-    auto* sl = new Slider(id);
+    widget = CreateSlider(id);
     auto min_it = node.properties.find("min");
     if (min_it != node.properties.end())
-      sl->set_min(parse_float(min_it->second));
+      SetSliderMin(widget, parse_float(min_it->second));
     auto max_it = node.properties.find("max");
     if (max_it != node.properties.end())
-      sl->set_max(parse_float(max_it->second));
+      SetSliderMax(widget, parse_float(max_it->second));
     auto val_it = node.properties.find("value");
     if (val_it != node.properties.end())
-      sl->set_value(parse_float(val_it->second));
-    widget = sl;
+      SetSliderValue(widget, parse_float(val_it->second));
   } else if (node.type == "radio") {
-    auto* radio = new Radio(id);
+    widget = CreateRadio(id);
     auto text_it = node.properties.find("label");
     if (text_it == node.properties.end())
       text_it = node.properties.find("text");
-    if (text_it != node.properties.end()) radio->set_label(text_it->second);
+    if (text_it != node.properties.end()) SetRadioLabel(widget, text_it->second);
     auto group_it = node.properties.find("group");
-    if (group_it != node.properties.end()) radio->set_group(group_it->second);
+    if (group_it != node.properties.end())
+      SetRadioGroup(widget, group_it->second);
     auto checked_it = node.properties.find("checked");
     if (checked_it != node.properties.end() && checked_it->second == "true")
-      radio->set_selected(true);
-    widget = radio;
+      SetRadioSelected(widget, true);
   } else if (node.type == "toggle" || node.type == "switch") {
-    auto* tog = new Toggle(id);
+    widget = CreateToggle(id);
     auto checked_it = node.properties.find("checked");
     if (checked_it != node.properties.end() && checked_it->second == "true")
-      tog->set_on(true);
-    widget = tog;
+      SetToggleOn(widget, true);
   } else if (node.type == "dropdown" || node.type == "select") {
-    auto* dd = new Dropdown(id);
+    widget = CreateDropdown(id);
     Vector<String> opts;
     for (auto& child_node : node.children) {
       auto text_it = child_node.properties.find("text");
@@ -660,11 +657,10 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
       else if (!child_node.name.empty())
         opts.push_back(child_node.name);
     }
-    dd->set_options(opts);
+    SetDropdownOptions(widget, opts);
     auto sel_it = node.properties.find("selected");
     if (sel_it != node.properties.end())
-      dd->set_selected_index(static_cast<i32>(parse_float(sel_it->second)));
-    widget = dd;
+      SetDropdownSelected(widget, static_cast<i32>(parse_float(sel_it->second)));
     // Return early: option children are data, not child widgets
     widget->set_id(id);
     widget->set_name(node.name);
@@ -691,7 +687,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     ApplyProperties(widget, node);
     return widget;
   } else if (node.type == "rich-text" || node.type == "richtext") {
-    auto* rt = new RichText(id);
+    Widget* rt = CreateRichText(id);
     // Parse child "span" elements as TextSpan data, not child widgets
     for (const auto& child_node : node.children) {
       if (child_node.type == "span") {
@@ -748,7 +744,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
                 TextDecoration::kUnderline | TextDecoration::kStrikethrough;
         }
 
-        rt->AddSpan(span);
+        AddRichTextSpan(rt, span);
       }
     }
     widget = rt;

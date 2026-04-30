@@ -2,29 +2,38 @@
 #define ULTRAGUI_WIDGETS_TOGGLE_H_
 
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
-/// Interactive toggle/switch widget with smooth thumb animation.
-class Toggle : public Widget {
- public:
-  using Widget::Widget;
-
-  bool on() const { return HasState(state_, WidgetState::kChecked); }
-  void set_on(bool v);
-
-  using ChangeHandler = Function<void(bool)>;
-  void set_on_change(ChangeHandler handler) { on_change_ = std::move(handler); }
-
-  bool OnClick() override;
-  void Measure(f32& out_width, f32& out_height) override;
-  void OnPaint(Renderer2D& renderer) override;
-  void OnUpdate(f64 dt) override;
-
- private:
-  f32 thumb_anim_ = 0.0f;  // 0 = off (left), 1 = on (right)
-  ChangeHandler on_change_;
+/// Data for a toggle/switch widget (WidgetKind::kToggle): an on_change callback
+/// and the thumb slide animation progress. The on/off flag lives in the
+/// widget's state bit (WidgetState::kChecked), not here. Behaviour is in
+/// ToggleVTable().
+struct ToggleContent {
+  Function<void(bool)> on_change;
+  f32 thumb_anim = 0.0f;  // 0 = off (left), 1 = on (right)
 };
+
+/// Behaviour table (draw + measure + click + update) for toggle widgets.
+WidgetVTable ToggleVTable();
+
+/// Create a toggle entity: a generic Widget tagged kToggle with a
+/// ToggleContent component.
+Widget* CreateToggle(u32 id);
+
+/// Set the on/off state (toggles the kChecked state bit) and snaps the thumb
+/// animation so external state restoration shows the correct visual
+/// immediately. Does not fire on_change (that fires only on a user click).
+/// No-op if `w` is null or not a toggle.
+void SetToggleOn(Widget* w, bool on);
+
+/// Whether the widget's kChecked state bit is set.
+bool IsToggleOn(const Widget* w);
+
+/// Set the toggle on_change handler (run with the new on/off value when the
+/// user toggles it). No-op if `w` is null or not a toggle.
+void SetToggleChange(Widget* w, Function<void(bool)> handler);
 
 }  // namespace ugui
 

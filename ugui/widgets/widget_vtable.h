@@ -33,6 +33,9 @@ struct WidgetVTable {
       nullptr;
   bool (*consumes_text_input)(const Widget& w) = nullptr;
   void (*on_dismiss)(WidgetRegistry& world, Widget& w) = nullptr;
+  // When true the base Widget::OnPaint draws nothing and `draw` paints the whole
+  // widget (for kinds that fully own their visuals, e.g. slider, toggle).
+  bool custom_paint = false;
 };
 
 /// Resolve the behaviour table for a kind. Built-in tables are installed on
