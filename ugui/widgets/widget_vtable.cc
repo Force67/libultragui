@@ -6,6 +6,7 @@
 #include <ugui/widgets/image.h>
 #include <ugui/widgets/radio.h>
 #include <ugui/widgets/rich_text.h>
+#include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/slider.h>
 #include <ugui/widgets/text.h>
 #include <ugui/widgets/text_input.h>
@@ -30,6 +31,7 @@ void InstallBuiltins() {
   SetWidgetVTable(WidgetKind::kDropdown, DropdownVTable());
   SetWidgetVTable(WidgetKind::kRichText, RichTextVTable());
   SetWidgetVTable(WidgetKind::kTextInput, TextInputVTable());
+  SetWidgetVTable(WidgetKind::kScrollView, ScrollViewVTable());
 }
 
 }  // namespace

@@ -599,7 +599,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
   } else if (node.type == "image" || node.type == "img") {
     widget = CreateImage(id);
   } else if (node.type == "scroll" || node.type == "scroll-view") {
-    widget = new ScrollView(id);
+    widget = CreateScrollView(id);
     widget->style().overflow = Overflow::kScroll;
   } else if (node.type == "text-input" || node.type == "input") {
     widget = CreateTextInput(id);

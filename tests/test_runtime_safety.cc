@@ -39,47 +39,49 @@ static int tests_passed = 0;
 
 TEST(scrollview_hit_test_respects_scroll_offset) {
   ugui::Panel root(1);
-  ugui::ScrollView scroll(2);
+  ugui::Widget* scroll = ugui::CreateScrollView(2);
   ugui::Panel child(3);
 
-  root.AddChild(&scroll);
-  scroll.AddChild(&child);
+  root.AddChild(scroll);
+  scroll->AddChild(&child);
 
   root.OnLayout({0, 0, 400, 400}, {0, 0, 400, 400});
-  scroll.OnLayout({0, 0, 200, 200}, {0, 0, 200, 200});
+  scroll->OnLayout({0, 0, 200, 200}, {0, 0, 200, 200});
   child.OnLayout({10, 80, 50, 40}, {10, 80, 50, 40});
-  scroll.set_scroll_offset({0, 50});
+  ugui::SetScrollOffset(scroll, {0, 50});
 
   ugui::wid hit = root.HitTest({20, 40});  // visual child y-range: 30..70
   ASSERT(hit == child.handle());
 
-  // These widgets are stack-allocated; detach them so the parents' owning
-  // destructors don't delete non-heap pointers as the stack unwinds.
-  scroll.RemoveChild(&child);
-  root.RemoveChild(&scroll);
+  // child is stack-allocated; detach it so scroll's destructor does not delete a
+  // non-heap pointer, then delete the heap scroll view.
+  scroll->RemoveChild(&child);
+  root.RemoveChild(scroll);
+  delete scroll;
 }
 
 TEST(widget_input_to_layout_point_accumulates_scroll_parents) {
   ugui::Panel root(1);
-  ugui::ScrollView a(2);
-  ugui::ScrollView b(3);
+  ugui::Widget* a = ugui::CreateScrollView(2);
+  ugui::Widget* b = ugui::CreateScrollView(3);
   ugui::Panel leaf(4);
 
-  root.AddChild(&a);
-  a.AddChild(&b);
-  b.AddChild(&leaf);
+  root.AddChild(a);
+  a->AddChild(b);
+  b->AddChild(&leaf);
 
-  a.set_scroll_offset({5, 10});
-  b.set_scroll_offset({0, 20});
+  ugui::SetScrollOffset(a, {5, 10});
+  ugui::SetScrollOffset(b, {0, 20});
 
   ugui::Vec2 p = leaf.InputToLayoutPoint({1, 2});
   ASSERT(p.x == 6.0f);
   ASSERT(p.y == 32.0f);
 
-  // Detach stack-allocated widgets before the parents' destructors run.
-  b.RemoveChild(&leaf);
-  a.RemoveChild(&b);
-  root.RemoveChild(&a);
+  // Detach the stack-allocated leaf, then delete the heap scroll views (delete a
+  // recursively deletes its child b).
+  b->RemoveChild(&leaf);
+  root.RemoveChild(a);
+  delete a;
 }
 
 TEST(script_runtime_widget_registry_can_be_cleared) {

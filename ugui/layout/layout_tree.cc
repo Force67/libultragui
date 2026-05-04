@@ -38,11 +38,11 @@ static void build_layout_nodes(Widget* widget, u32 parent_index,
   }
 }
 
-/// Walk up from `widget` to find the nearest ScrollView ancestor.
-static ScrollView* FindScrollParent(Widget* widget) {
+/// Walk up from `widget` to find the nearest scroll-view ancestor.
+static Widget* FindScrollParent(Widget* widget) {
   Widget* p = widget->parent_ptr();
   while (p) {
-    if (auto* sv = widget_cast<ScrollView>(p)) return sv;
+    if (p->kind() == WidgetKind::kScrollView) return p;
     p = p->parent_ptr();
   }
   return nullptr;
@@ -57,7 +57,7 @@ static void apply_layout_results(Widget* widget, u32& node_index,
   if (node.style.position == Position::kSticky) {
     if (auto* sv = FindScrollParent(widget)) {
       Rect visible = sv->rect();
-      Vec2 offset = sv->scroll_offset();
+      Vec2 offset = ScrollOffset(sv);
       f32 sticky_min_y = visible.y + offset.y;
       if (node.computed_rect.y < sticky_min_y) {
         node.computed_rect.y = sticky_min_y;

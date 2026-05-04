@@ -190,7 +190,7 @@ wid Widget::HitTest(Vec2 point) {
 Vec2 Widget::InputToLayoutPoint(Vec2 point) const {
   Widget* p = parent_ptr();
   while (p) {
-    if (auto* sv = widget_cast<ScrollView>(p)) point += sv->scroll_offset();
+    point += ScrollOffset(p);  // (0,0) for non-scroll-view ancestors
     p = p->parent_ptr();
   }
   return point;

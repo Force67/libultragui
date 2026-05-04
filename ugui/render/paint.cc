@@ -33,7 +33,7 @@ static void PaintWidgetTreeImpl(Widget* widget, Renderer2D& renderer,
     widget->ApplyLayoutResult(tmp);
   }
 
-  bool is_scroll_view = widget_cast<ScrollView>(widget) != nullptr;
+  bool is_scroll_view = widget->kind() == WidgetKind::kScrollView;
   bool clip = is_scroll_view || s.overflow == Overflow::kHidden ||
               s.overflow == Overflow::kScroll;
   Rect clip_rect = is_scroll_view ? widget->content_rect() : widget->rect();
@@ -42,9 +42,7 @@ static void PaintWidgetTreeImpl(Widget* widget, Renderer2D& renderer,
   widget->OnPaint(renderer);
 
   // If this widget is a ScrollView, add its scroll offset for children
-  Vec2 child_offset = scroll_offset;
-  if (auto* sv = widget_cast<ScrollView>(widget))
-    child_offset = child_offset + sv->scroll_offset();
+  Vec2 child_offset = scroll_offset + ScrollOffset(widget);
 
   for (auto* child : widget->child_ptrs())
     PaintWidgetTreeImpl(child, renderer, child_offset);
