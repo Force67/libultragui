@@ -10,7 +10,7 @@ void Modal::Show(UIContext* ctx) {
   visible_ = true;
 
   // Create a full-viewport backdrop panel with the backdrop color.
-  backdrop_ = new Panel(0);
+  backdrop_ = CreatePanel(0);
   backdrop_->set_name("_modal_backdrop");
   Style bs;
   bs.background = backdrop_color_;

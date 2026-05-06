@@ -50,7 +50,7 @@ void MessageBox::Setup(const char* title, const char* message,
   AddChild(messageWidget);
 
   // Button row
-  auto* buttonRow = new Panel(0);
+  auto* buttonRow = CreatePanel(0);
   Style rs;
   rs.flex_direction = FlexDirection::kRow;
   rs.justify_content = JustifyContent::kEnd;

@@ -524,7 +524,7 @@ Widget* UguiBuilder::Build(const UguiDocument& doc) {
   if (doc.roots.size() == 1) return BuildNode(doc.roots[0], id_counter);
 
   // Multiple roots: wrap in a panel
-  auto* root = new Panel(0);
+  auto* root = CreatePanel(0);
   root->set_name("_root");
   for (auto& node : doc.roots) {
     if (auto* child = BuildNode(node, id_counter)) root->AddChild(child);
@@ -581,7 +581,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     widget = it->second(node.name);
   } else if (node.type == "panel" || node.type == "div" ||
              node.type == "container") {
-    widget = new Panel(id);
+    widget = CreatePanel(id);
   } else if (node.type == "text" || node.type == "label") {
     widget = CreateText(id);
     auto text_it = node.properties.find("content");
@@ -757,7 +757,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     // Unknown type: treat as panel
     std::fprintf(stderr, "ultragui: unknown element type '%s' at line %u\n",
                  node.type.c_str(), node.source_line);
-    widget = new Panel(id);
+    widget = CreatePanel(id);
   }
 
   widget->set_id(id);

@@ -38,9 +38,9 @@ static int tests_passed = 0;
   } while (0)
 
 TEST(scrollview_hit_test_respects_scroll_offset) {
-  ugui::Panel root(1);
+  ugui::Widget root(1);
   ugui::Widget* scroll = ugui::CreateScrollView(2);
-  ugui::Panel child(3);
+  ugui::Widget child(3);
 
   root.AddChild(scroll);
   scroll->AddChild(&child);
@@ -61,10 +61,10 @@ TEST(scrollview_hit_test_respects_scroll_offset) {
 }
 
 TEST(widget_input_to_layout_point_accumulates_scroll_parents) {
-  ugui::Panel root(1);
+  ugui::Widget root(1);
   ugui::Widget* a = ugui::CreateScrollView(2);
   ugui::Widget* b = ugui::CreateScrollView(3);
-  ugui::Panel leaf(4);
+  ugui::Widget leaf(4);
 
   root.AddChild(a);
   a->AddChild(b);
@@ -88,7 +88,7 @@ TEST(script_runtime_widget_registry_can_be_cleared) {
   ugui::ScriptRuntime rt;
   ASSERT(rt.Init());
 
-  ugui::Panel w(1);
+  ugui::Widget w(1);
   w.set_name("root");
   rt.RegisterWidget(&w);
   ASSERT(rt.FindRegisteredWidget("root") == &w);
@@ -106,7 +106,7 @@ struct TestTag {
 }  // namespace
 
 TEST(component_store_add_get_remove) {
-  ugui::Panel w(1);
+  ugui::Widget w(1);
   ugui::World* world = ugui::WidgetRegistry::Active();
 
   world->Add<TestTag>(w.handle(), TestTag{42});
@@ -124,7 +124,7 @@ TEST(component_dropped_when_entity_released) {
   ugui::World* world = ugui::WidgetRegistry::Active();
   ugui::wid saved;
   {
-    ugui::Panel w(2);
+    ugui::Widget w(2);
     saved = w.handle();
     world->Add<TestTag>(saved, TestTag{99});
     ASSERT(world->Has<TestTag>(saved));
@@ -136,7 +136,7 @@ TEST(component_dropped_when_entity_released) {
 }
 
 TEST(tooltip_is_stored_as_component) {
-  ugui::Panel w(3);
+  ugui::Widget w(3);
   ASSERT(w.tooltip().empty());
   w.set_tooltip("help");
   ASSERT(w.tooltip() == "help");
@@ -144,7 +144,7 @@ TEST(tooltip_is_stored_as_component) {
 }
 
 TEST(state_styles_and_anim_live_in_components) {
-  ugui::Panel w(4);
+  ugui::Widget w(4);
   ugui::World* world = ugui::WidgetRegistry::Active();
   ugui::Style override_style;
 
