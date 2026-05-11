@@ -595,7 +595,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
       text_it = node.properties.find("label");
     if (text_it != node.properties.end()) SetButtonLabel(widget, text_it->second);
   } else if (node.type == "modal" || node.type == "dialog") {
-    widget = new Modal(id);
+    widget = CreateModal(id);
   } else if (node.type == "image" || node.type == "img") {
     widget = CreateImage(id);
   } else if (node.type == "scroll" || node.type == "scroll-view") {
@@ -667,17 +667,17 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     ApplyProperties(widget, node);
     return widget;
   } else if (node.type == "context-menu") {
-    auto* menu = new ContextMenu(id);
+    Widget* menu = CreateContextMenu(id);
     for (auto& child_node : node.children) {
       if (child_node.type == "separator") {
-        menu->AddSeparator();
+        AddContextMenuSeparator(menu);
       } else {
         auto text_it = child_node.properties.find("text");
         if (text_it == child_node.properties.end())
           text_it = child_node.properties.find("label");
         String label = text_it != child_node.properties.end() ? text_it->second
                                                               : child_node.name;
-        menu->AddItem(label, nullptr);
+        AddContextMenuItem(menu, label, nullptr);
       }
     }
     widget = menu;

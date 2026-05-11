@@ -2,50 +2,53 @@
 #define ULTRAGUI_WIDGETS_CONTEXT_MENU_H_
 
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
 class UIContext;
 
-/// Right-click context menu widget. Displayed as an overlay at the cursor
-/// position, dismissed on click outside or when an item is selected.
-class ContextMenu : public Widget {
- public:
-  using Widget::Widget;
-
-  struct MenuItem {
-    String label;
-    Function<void()> action;
-    bool separator = false;
-  };
-
-  void AddItem(const String& label, Function<void()> action);
-  void AddSeparator();
-  void ClearItems();
-
-  void ShowAt(UIContext* ctx, Vec2 position);
-  void Hide(UIContext* ctx);
-  bool visible() const { return visible_; }
-
-  const Vector<MenuItem>& items() const { return items_; }
-
-  bool OnClick() override;
-  void OnDismiss() override;
-  void Measure(f32& out_width, f32& out_height) override;
-  void OnPaint(Renderer2D& renderer) override;
-
- private:
-  TextEngine* text_engine() const {
-    return context_ ? context_->text_engine : nullptr;
-  }
-  FontHandle effective_font() const {
-    return context_ ? context_->default_font : kInvalidFont;
-  }
-
-  Vector<MenuItem> items_;
-  bool visible_ = false;
-  i32 hover_index_ = -1;
+/// A single entry in a context menu. A separator is a thin divider with no
+/// label or action.
+struct ContextMenuItem {
+  String label;
+  Function<void()> action;
+  bool separator = false;
 };
+
+/// Data for a context-menu widget (WidgetKind::kContextMenu): the item list and
+/// the menu's transient visibility / hover state. A context menu is a generic
+/// Widget carrying this component, displayed as an overlay at the cursor and
+/// dismissed on outside click or item selection. Behaviour is in
+/// ContextMenuVTable().
+struct ContextMenuContent {
+  Vector<ContextMenuItem> items;
+  bool visible = false;
+  i32 hover_index = -1;
+};
+
+/// Behaviour table (draw + measure + click + dismiss) for context menus.
+WidgetVTable ContextMenuVTable();
+
+/// Create a context-menu entity: a generic Widget tagged kContextMenu with a
+/// ContextMenuContent component.
+Widget* CreateContextMenu(u32 id);
+
+/// Append an item with a label and action. No-op if `w` is null or not a
+/// context menu.
+void AddContextMenuItem(Widget* w, const String& label, Function<void()> action);
+
+/// Append a separator. No-op if `w` is null or not a context menu.
+void AddContextMenuSeparator(Widget* w);
+
+/// Remove all items. No-op if `w` is null or not a context menu.
+void ClearContextMenuItems(Widget* w);
+
+/// Show the menu as an overlay at `position`, sizing it to fit its items.
+void ShowContextMenuAt(Widget* w, UIContext* ctx, Vec2 position);
+
+/// Hide the menu and clear its hover state.
+void HideContextMenu(Widget* w, UIContext* ctx);
 
 }  // namespace ugui
 

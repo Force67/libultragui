@@ -4,16 +4,52 @@
 #include <ugui/widgets/message_box.h>
 #include <ugui/widgets/panel.h>
 #include <ugui/widgets/text.h>
+#include <ugui/widgets/widget_registry.h>
+
+#include <utility>
 
 namespace ugui {
+namespace {
 
-MessageBox::~MessageBox() = default;
+MessageBoxContent* content(Widget* w) {
+  if (!w || w->kind() != WidgetKind::kMessageBox || !w->registry())
+    return nullptr;
+  return w->registry()->Get<MessageBoxContent>(w->handle());
+}
 
-void MessageBox::Setup(const char* title, const char* message,
-                       MessageBoxButtons buttons) {
-  buttons_ = buttons;
+bool MessageBoxKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 /*mods*/) {
+  if (key == 256) {  // GLFW_KEY_ESCAPE
+    MessageBoxContent* c = world.Get<MessageBoxContent>(w.handle());
+    if (c && c->on_result) c->on_result(MessageBoxResult::kDismissed);
+    return true;
+  }
+  return false;
+}
 
-  // Style the MessageBox itself as the dialog panel.
+}  // namespace
+
+WidgetVTable MessageBoxVTable() {
+  WidgetVTable vt;
+  vt.on_key_down = MessageBoxKeyDown;
+  return vt;
+}
+
+Widget* CreateMessageBox(u32 id) {
+  Widget* w = new Widget(id);
+  w->set_kind(WidgetKind::kMessageBox);
+  WidgetRegistry* world = WidgetRegistry::Active();
+  world->Add<ModalContent>(w->handle(), ModalContent{});
+  world->Add<MessageBoxContent>(w->handle(), MessageBoxContent{});
+  return w;
+}
+
+void SetupMessageBox(Widget* w, const char* title, const char* message,
+                     MessageBoxButtons buttons) {
+  MessageBoxContent* c = content(w);
+  if (!c) return;
+  c->buttons = buttons;
+
+  // Style the message box itself as the dialog panel.
   Style ds;
   ds.flex_direction = FlexDirection::kColumn;
   ds.padding = EdgeInsets(24);
@@ -28,9 +64,9 @@ void MessageBox::Setup(const char* title, const char* message,
       .blur = 24,
       .spread = 4,
   };
-  set_style(ds);
+  w->set_style(ds);
 
-  // Title
+  // Title.
   auto* titleWidget = CreateText(0);
   SetText(titleWidget, title);
   Style ts;
@@ -38,18 +74,18 @@ void MessageBox::Setup(const char* title, const char* message,
   ts.font_weight = FontWeight::kBold;
   ts.text_color = Color::White();
   titleWidget->set_style(ts);
-  AddChild(titleWidget);
+  w->AddChild(titleWidget);
 
-  // Message
+  // Message.
   auto* messageWidget = CreateText(0);
   SetText(messageWidget, message);
   Style ms;
   ms.font_size = 14;
   ms.text_color = Color::FromRgba8(200, 200, 210, 255);
   messageWidget->set_style(ms);
-  AddChild(messageWidget);
+  w->AddChild(messageWidget);
 
-  // Button row
+  // Button row.
   auto* buttonRow = CreatePanel(0);
   Style rs;
   rs.flex_direction = FlexDirection::kRow;
@@ -58,6 +94,7 @@ void MessageBox::Setup(const char* title, const char* message,
   rs.margin.top = 8;
   buttonRow->set_style(rs);
 
+  WidgetId self = w->handle();
   auto MakeBtn = [&](const char* label, MessageBoxResult result, bool primary) {
     auto* btn = CreateButton(0);
     SetButtonLabel(btn, label);
@@ -81,8 +118,10 @@ void MessageBox::Setup(const char* title, const char* message,
     hover.background =
         primary ? Color::FromHex(0x60a5fa) : Color::FromRgba8(80, 80, 100, 255);
     btn->AddStateOverride(WidgetState::kHovered, hover, StyleMask::kBackground);
-    SetButtonClick(btn, [this, result]() {
-      if (on_result_) on_result_(result);
+    SetButtonClick(btn, [self, result]() {
+      MessageBoxContent* mc =
+          WidgetRegistry::Active()->Get<MessageBoxContent>(self);
+      if (mc && mc->on_result) mc->on_result(result);
     });
     buttonRow->AddChild(btn);
   };
@@ -106,14 +145,19 @@ void MessageBox::Setup(const char* title, const char* message,
       break;
   }
 
-  AddChild(buttonRow);
+  w->AddChild(buttonRow);
 }
 
-void MessageBox::Show(UIContext* ctx) {
-  // Center the dialog on screen via margin (same pattern as ContextMenu).
-  // Measure to get intrinsic size, then offset.
+void SetMessageBoxResult(Widget* w, Function<void(MessageBoxResult)> handler) {
+  if (MessageBoxContent* c = content(w)) c->on_result = std::move(handler);
+}
+
+void ShowMessageBox(Widget* w, UIContext* ctx) {
+  if (!w || w->kind() != WidgetKind::kMessageBox || !ctx) return;
+
+  // Center the dialog: measure, then offset via margin.
   f32 mw = 0, mh = 0;
-  Measure(mw, mh);
+  w->Measure(mw, mh);
 
   Vec2 vp = ctx->platform()->window_size();
   f32 left = (vp.x - mw) * 0.5f;
@@ -121,24 +165,18 @@ void MessageBox::Show(UIContext* ctx) {
   if (left < 0) left = 0;
   if (top < 0) top = 0;
 
-  Style s = style_;
+  Style s = w->style();
   s.margin = EdgeInsets(top, 0, 0, left);
-  set_style(s);
+  w->set_style(s);
 
-  Modal::Show(ctx);
+  ShowModal(w, ctx);
 }
 
-void MessageBox::Dismiss(UIContext* ctx, MessageBoxResult result) {
-  if (on_result_) on_result_(result);
-  Hide(ctx);
-}
-
-bool MessageBox::OnKeyDown(i32 key, i32 /*mods*/) {
-  if (key == 256) {  // GLFW_KEY_ESCAPE
-    if (on_result_) on_result_(MessageBoxResult::kDismissed);
-    return true;
-  }
-  return false;
+void DismissMessageBox(Widget* w, UIContext* ctx, MessageBoxResult result) {
+  if (!w || w->kind() != WidgetKind::kMessageBox || !ctx) return;
+  if (MessageBoxContent* c = content(w))
+    if (c->on_result) c->on_result(result);
+  HideModal(w, ctx);
 }
 
 }  // namespace ugui

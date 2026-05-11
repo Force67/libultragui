@@ -2,6 +2,8 @@
 #define ULTRAGUI_WIDGETS_MESSAGE_BOX_H_
 
 #include <ugui/widgets/modal.h>
+#include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_vtable.h>
 
 namespace ugui {
 
@@ -24,39 +26,44 @@ enum class MessageBoxButtons : u8 {
   kYesNoCancel,
 };
 
-/// Pre-built modal dialog with title, message, and action buttons.
-/// Sits on top of all other UI via the overlay system.
+/// Data for a message-box widget (WidgetKind::kMessageBox): the result callback
+/// and which buttons it shows. A message box composes a modal: the same widget
+/// also carries a ModalContent component (for the backdrop), so it reuses
+/// ShowModal/HideModal instead of inheriting from Modal. Behaviour (ESC ->
+/// dismiss) lives in MessageBoxVTable().
+struct MessageBoxContent {
+  Function<void(MessageBoxResult)> on_result;
+  MessageBoxButtons buttons = MessageBoxButtons::kOk;
+};
+
+/// Behaviour table (on_key_down) for message-box widgets.
+WidgetVTable MessageBoxVTable();
+
+/// Create a message-box entity: a generic Widget tagged kMessageBox carrying
+/// both a ModalContent (for the backdrop) and a MessageBoxContent.
 ///
 /// Usage:
-///   auto* mb = new MessageBox(0);
-///   mb->Setup("Confirm", "Delete this entity?", MessageBoxButtons::kYesNo);
-///   mb->set_on_result([](MessageBoxResult r) { if (r ==
-///   MessageBoxResult::kYes) ... }); mb->Show(ctx);
-class MessageBox : public Modal {
- public:
-  using Modal::Modal;
-  ~MessageBox() override;
+///   auto* mb = CreateMessageBox(0);
+///   SetupMessageBox(mb, "Confirm", "Delete this entity?",
+///                   MessageBoxButtons::kYesNo);
+///   SetMessageBoxResult(mb, [](MessageBoxResult r) { ... });
+///   ShowMessageBox(mb, ctx);
+Widget* CreateMessageBox(u32 id);
 
-  /// Configure the message box content and buttons.
-  /// Call before Show().
-  void Setup(const char* title, const char* message,
-             MessageBoxButtons buttons = MessageBoxButtons::kOk);
+/// Configure the message-box style, title, message and buttons. Call before
+/// ShowMessageBox(). No-op if `w` is null or not a message box.
+void SetupMessageBox(Widget* w, const char* title, const char* message,
+                     MessageBoxButtons buttons = MessageBoxButtons::kOk);
 
-  using ResultHandler = Function<void(MessageBoxResult)>;
-  void set_on_result(ResultHandler handler) { on_result_ = std::move(handler); }
+/// Set the result handler (run when a button is clicked or on ESC).
+void SetMessageBoxResult(Widget* w, Function<void(MessageBoxResult)> handler);
 
-  /// Show the message box centered in the viewport.
-  void Show(UIContext* ctx) override;
+/// Show the message box centered in the viewport, then show it as a modal.
+void ShowMessageBox(Widget* w, UIContext* ctx);
 
-  /// Dismiss with a specific result.
-  void Dismiss(UIContext* ctx, MessageBoxResult result);
-
-  bool OnKeyDown(i32 key, i32 mods) override;
-
- private:
-  ResultHandler on_result_;
-  MessageBoxButtons buttons_ = MessageBoxButtons::kOk;
-};
+/// Dismiss with a specific result: fires on_result(result) then hides the
+/// modal.
+void DismissMessageBox(Widget* w, UIContext* ctx, MessageBoxResult result);
 
 }  // namespace ugui
 

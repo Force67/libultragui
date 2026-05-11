@@ -167,6 +167,7 @@ set(ULTRAGUI_SOURCES
     ugui/widgets/context_menu.cc
     ugui/widgets/dropdown.cc
     ugui/widgets/image.cc
+    ugui/widgets/message_box.cc
     ugui/widgets/modal.cc
     ugui/widgets/rich_text.cc
     ugui/widgets/scroll_view.cc

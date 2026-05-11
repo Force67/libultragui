@@ -2,8 +2,10 @@
 
 #include <ugui/widgets/button.h>
 #include <ugui/widgets/checkbox.h>
+#include <ugui/widgets/context_menu.h>
 #include <ugui/widgets/dropdown.h>
 #include <ugui/widgets/image.h>
+#include <ugui/widgets/message_box.h>
 #include <ugui/widgets/radio.h>
 #include <ugui/widgets/rich_text.h>
 #include <ugui/widgets/scroll_view.h>
@@ -32,6 +34,8 @@ void InstallBuiltins() {
   SetWidgetVTable(WidgetKind::kRichText, RichTextVTable());
   SetWidgetVTable(WidgetKind::kTextInput, TextInputVTable());
   SetWidgetVTable(WidgetKind::kScrollView, ScrollViewVTable());
+  SetWidgetVTable(WidgetKind::kContextMenu, ContextMenuVTable());
+  SetWidgetVTable(WidgetKind::kMessageBox, MessageBoxVTable());
 }
 
 }  // namespace

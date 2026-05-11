@@ -1,209 +1,124 @@
+#include <ugui/widgets/context_menu.h>
+
 #include <ugui/platform/platform.h>
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
+#include <ugui/text/text_engine.h>
 #include <ugui/ui_context.h>
-#include <ugui/widgets/context_menu.h>
+#include <ugui/widgets/widget_registry.h>
 
 #include <algorithm>
 
 namespace ugui {
-
 namespace {
 
-// Shared between Measure and OnPaint so the menu's intrinsic width
-// always matches where the text is actually drawn (and where the hover
-// highlight extends to). Splitting these used to give the highlight a
-// 12px-vs-24px asymmetry that looked broken on hover.
 constexpr f32 kRowHPadding = 16.0f;
 constexpr f32 kSeparatorHeight = 1.0f;
 constexpr f32 kSeparatorPad = 4.0f;
 
-}  // namespace
-
-void ContextMenu::AddItem(const String& label, Function<void()> action) {
-  items_.push_back({label, std::move(action), false});
-  MarkDirty();
+TextEngine* text_engine(const Widget& w) {
+  return w.context() ? w.context()->text_engine : nullptr;
 }
 
-void ContextMenu::AddSeparator() {
-  items_.push_back({"", nullptr, true});
-  MarkDirty();
+FontHandle effective_font(const Widget& w) {
+  return w.context() ? w.context()->default_font : kInvalidFont;
 }
 
-void ContextMenu::ClearItems() {
-  items_.clear();
-  MarkDirty();
-}
-
-void ContextMenu::ShowAt(UIContext* ctx, Vec2 position) {
-  visible_ = true;
-
-  // Library policy: ContextMenu has NO visual defaults. Application
-  // code is expected to set the widget's style (background, border,
-  // padding, font_size, text_color, shadow) once after construction
-  // - typically by applying a style class declared in a .ugui file.
-  // We only manage layout-affecting properties (intrinsic size +
-  // position via margin) here.
-
-  // Register the overlay first so the widget is bound to the UI
-  // context (ShowOverlay calls SetContext). Otherwise Measure would
-  // run with context_ == nullptr, the text_engine() is null, and the
-  // shaping branch in Measure is skipped - leaving max_width at 0.
-  ctx->ShowOverlay(this, position);
-
-  Style s = style_;
-
-  // Sensible fallback for font_size only - without a positive font
-  // size Measure can't shape any text. Everything else is the app's
-  // responsibility.
-  if (s.font_size <= 0.0f) s.font_size = 13.0f;
-  set_style(s);
-
-  // Now measure with the context (and font size) wired up.
-  f32 mw = 0, mh = 0;
-  Measure(mw, mh);
-  s.width = Length::Px(mw);
-  s.height = Length::Px(mh);
-  s.margin = EdgeInsets(position.y, 0, 0, position.x);
-  set_style(s);
-}
-
-void ContextMenu::Hide(UIContext* ctx) {
-  if (!visible_) return;
-  visible_ = false;
-  hover_index_ = -1;
-  ctx->HideOverlay(this);
-}
-
-void ContextMenu::OnDismiss() {
-  visible_ = false;
-  hover_index_ = -1;
-}
-
-bool ContextMenu::OnClick() {
-  if (!context_ || !context_->platform || items_.empty()) return false;
-
-  Vec2 mouse = InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
-
-  auto s = ComputedStyle();
-  f32 font_size = s.font_size > 0.0f ? s.font_size : 14.0f;
-  f32 row_height = font_size * 1.8f;
-
-  // Walk items to find which row was clicked
-  f32 y = content_rect_.y;
-  for (i32 i = 0; i < static_cast<i32>(items_.size()); ++i) {
-    f32 item_h = items_[i].separator ? (kSeparatorHeight + kSeparatorPad * 2.0f)
-                                     : row_height;
-    if (!items_[i].separator && mouse.y >= y && mouse.y < y + item_h &&
-        mouse.x >= rect_.x && mouse.x <= rect_.x + rect_.w) {
-      if (items_[i].action) {
-        items_[i].action();
-      }
-      return true;
-    }
-    y += item_h;
-  }
-
-  return true;  // Consume click even if nothing was hit
-}
-
-void ContextMenu::Measure(f32& out_width, f32& out_height) {
-  auto* te = text_engine();
-  FontHandle fh = effective_font();
-  f32 sc = ui_scale();
-  f32 font_size = (style_.font_size > 0.0f ? style_.font_size : 14.0f) * sc;
-  f32 letter_sp = style_.letter_spacing * sc;
+void ContextMenuMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+                        f32& out_height) {
+  ContextMenuContent* c = world.Get<ContextMenuContent>(w.handle());
+  const Style& st = w.style();
+  TextEngine* te = text_engine(w);
+  FontHandle fh = effective_font(w);
+  f32 sc = w.ui_scale();
+  f32 font_size = (st.font_size > 0.0f ? st.font_size : 14.0f) * sc;
+  f32 letter_sp = st.letter_spacing * sc;
   f32 row_height = font_size * 1.8f;
 
   f32 max_width = 0.0f;
   f32 total_height = 0.0f;
 
-  for (auto& item : items_) {
-    if (item.separator) {
-      total_height += kSeparatorHeight + kSeparatorPad * 2.0f;
-    } else {
-      total_height += row_height;
-      if (te && fh != kInvalidFont && !item.label.empty()) {
-        auto run = te->Shape(fh, item.label.c_str(),
-                             static_cast<u32>(item.label.size()), font_size,
-                             letter_sp, style_.line_height_multiplier);
-        max_width = std::max(max_width, run.total_advance);
+  if (c) {
+    for (auto& item : c->items) {
+      if (item.separator) {
+        total_height += kSeparatorHeight + kSeparatorPad * 2.0f;
+      } else {
+        total_height += row_height;
+        if (te && fh != kInvalidFont && !item.label.empty()) {
+          auto run = te->Shape(fh, item.label.c_str(),
+                               static_cast<u32>(item.label.size()), font_size,
+                               letter_sp, st.line_height_multiplier);
+          max_width = std::max(max_width, run.total_advance);
+        }
       }
     }
   }
 
-  out_width = max_width + kRowHPadding * 2.0f + style_.padding.horizontal();
-  out_height = total_height + style_.padding.vertical();
+  out_width = max_width + kRowHPadding * 2.0f + st.padding.horizontal();
+  out_height = total_height + st.padding.vertical();
 }
 
-void ContextMenu::OnPaint(Renderer2D& renderer) {
-  // Base widget draws shadow, background, border
-  Widget::OnPaint(renderer);
+void ContextMenuDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
+  // The base Widget::OnPaint already drew background / shadow / border.
+  ContextMenuContent* c = world.Get<ContextMenuContent>(w.handle());
+  TextEngine* te = text_engine(w);
+  FontHandle fh = effective_font(w);
+  if (!c || !te || fh == kInvalidFont) return;
 
-  auto* te = text_engine();
-  FontHandle fh = effective_font();
-  if (!te || fh == kInvalidFont) return;
-
-  auto s = ComputedStyle();
-  s.Scale(ui_scale());
+  Style s = w.ComputedStyle();
+  s.Scale(w.ui_scale());
   f32 alpha = s.opacity;
   f32 font_size = s.font_size > 0.0f ? s.font_size : 14.0f;
   f32 row_height = font_size * 1.8f;
 
-  // Determine hover index from mouse position
-  hover_index_ = -1;
-  if (context_ && context_->platform) {
+  Rect rect = w.rect();
+  Rect content = w.content_rect();
+
+  // Determine hover index from mouse position.
+  c->hover_index = -1;
+  if (w.context() && w.context()->platform) {
     Vec2 mouse =
-        InputToLayoutPoint(context_->platform->input_queue().mouse_pos);
-    f32 y = content_rect_.y;
-    for (i32 i = 0; i < static_cast<i32>(items_.size()); ++i) {
-      f32 item_h = items_[i].separator
+        w.InputToLayoutPoint(w.context()->platform->input_queue().mouse_pos);
+    f32 y = content.y;
+    for (i32 i = 0; i < static_cast<i32>(c->items.size()); ++i) {
+      f32 item_h = c->items[i].separator
                        ? (kSeparatorHeight + kSeparatorPad * 2.0f)
                        : row_height;
-      if (!items_[i].separator && mouse.y >= y && mouse.y < y + item_h &&
-          mouse.x >= rect_.x && mouse.x <= rect_.x + rect_.w) {
-        hover_index_ = i;
+      if (!c->items[i].separator && mouse.y >= y && mouse.y < y + item_h &&
+          mouse.x >= rect.x && mouse.x <= rect.x + rect.w) {
+        c->hover_index = i;
         break;
       }
       y += item_h;
     }
   }
 
-  // Theme-aware accent: derive hover/separator colors from text_color so
-  // light themes get a dark wash and dark themes get a light wash. This
-  // is what makes the menu look at home on Latte without looking washed
-  // out on a hypothetical dark theme.
   Color text_color = s.text_color.WithAlpha(s.text_color.a * alpha);
   Color highlight = s.text_color.WithAlpha(0.10f * alpha);
   Color sep_color = s.text_color.WithAlpha(0.18f * alpha);
 
-  // Draw each item
-  f32 y = content_rect_.y;
-  for (i32 i = 0; i < static_cast<i32>(items_.size()); ++i) {
-    if (items_[i].separator) {
+  f32 y = content.y;
+  for (i32 i = 0; i < static_cast<i32>(c->items.size()); ++i) {
+    if (c->items[i].separator) {
       f32 sep_y = y + kSeparatorPad;
-      renderer.DrawRect({content_rect_.x + kRowHPadding * 0.5f, sep_y,
-                         content_rect_.w - kRowHPadding, kSeparatorHeight},
+      renderer.DrawRect({content.x + kRowHPadding * 0.5f, sep_y,
+                         content.w - kRowHPadding, kSeparatorHeight},
                         sep_color);
       y += kSeparatorHeight + kSeparatorPad * 2.0f;
       continue;
     }
 
-    // Highlight hovered row - full content width so it covers the text
-    // edge to edge instead of stopping short.
-    if (i == hover_index_) {
+    if (i == c->hover_index) {
       u32 row_radii = Vertex2D::PackRadii(4.0f);
-      renderer.DrawRect({content_rect_.x, y, content_rect_.w, row_height},
-                        highlight, row_radii);
+      renderer.DrawRect({content.x, y, content.w, row_height}, highlight,
+                        row_radii);
     }
 
-    // Draw label text aligned with the same kRowHPadding the menu was
-    // measured against, so the menu's intrinsic width matches.
-    auto run = te->Shape(fh, items_[i].label.c_str(),
-                         static_cast<u32>(items_[i].label.size()), font_size,
+    auto run = te->Shape(fh, c->items[i].label.c_str(),
+                         static_cast<u32>(c->items[i].label.size()), font_size,
                          s.letter_spacing, s.line_height_multiplier);
 
-    f32 text_x = content_rect_.x + kRowHPadding;
+    f32 text_x = content.x + kRowHPadding;
     f32 text_y = y + (row_height - run.line_height) * 0.5f;
 
     renderer.DrawText(Vec2{text_x, text_y}, run, text_color,
@@ -211,6 +126,119 @@ void ContextMenu::OnPaint(Renderer2D& renderer) {
 
     y += row_height;
   }
+}
+
+bool ContextMenuClick(WidgetRegistry& world, Widget& w) {
+  ContextMenuContent* c = world.Get<ContextMenuContent>(w.handle());
+  if (!c || !w.context() || !w.context()->platform || c->items.empty())
+    return false;
+
+  Vec2 mouse =
+      w.InputToLayoutPoint(w.context()->platform->input_queue().mouse_pos);
+
+  Style s = w.ComputedStyle();
+  f32 font_size = s.font_size > 0.0f ? s.font_size : 14.0f;
+  f32 row_height = font_size * 1.8f;
+
+  Rect rect = w.rect();
+  Rect content = w.content_rect();
+
+  f32 y = content.y;
+  for (i32 i = 0; i < static_cast<i32>(c->items.size()); ++i) {
+    f32 item_h = c->items[i].separator
+                     ? (kSeparatorHeight + kSeparatorPad * 2.0f)
+                     : row_height;
+    if (!c->items[i].separator && mouse.y >= y && mouse.y < y + item_h &&
+        mouse.x >= rect.x && mouse.x <= rect.x + rect.w) {
+      if (c->items[i].action) c->items[i].action();
+      return true;
+    }
+    y += item_h;
+  }
+
+  return true;  // consume the click even if nothing was hit
+}
+
+void ContextMenuDismiss(WidgetRegistry& world, Widget& w) {
+  ContextMenuContent* c = world.Get<ContextMenuContent>(w.handle());
+  if (!c) return;
+  c->visible = false;
+  c->hover_index = -1;
+}
+
+}  // namespace
+
+WidgetVTable ContextMenuVTable() {
+  WidgetVTable vt;
+  vt.draw = ContextMenuDraw;
+  vt.measure = ContextMenuMeasure;
+  vt.on_click = ContextMenuClick;
+  vt.on_dismiss = ContextMenuDismiss;
+  return vt;
+}
+
+Widget* CreateContextMenu(u32 id) {
+  Widget* w = new Widget(id);
+  w->set_kind(WidgetKind::kContextMenu);
+  WidgetRegistry::Active()->Add<ContextMenuContent>(w->handle(),
+                                                    ContextMenuContent{});
+  return w;
+}
+
+void AddContextMenuItem(Widget* w, const String& label,
+                        Function<void()> action) {
+  if (!w || w->kind() != WidgetKind::kContextMenu || !w->registry()) return;
+  w->registry()->GetOrAdd<ContextMenuContent>(w->handle()).items.push_back(
+      {label, std::move(action), false});
+  w->MarkDirty();
+}
+
+void AddContextMenuSeparator(Widget* w) {
+  if (!w || w->kind() != WidgetKind::kContextMenu || !w->registry()) return;
+  w->registry()->GetOrAdd<ContextMenuContent>(w->handle()).items.push_back(
+      {"", nullptr, true});
+  w->MarkDirty();
+}
+
+void ClearContextMenuItems(Widget* w) {
+  if (!w || w->kind() != WidgetKind::kContextMenu || !w->registry()) return;
+  w->registry()->GetOrAdd<ContextMenuContent>(w->handle()).items.clear();
+  w->MarkDirty();
+}
+
+void ShowContextMenuAt(Widget* w, UIContext* ctx, Vec2 position) {
+  if (!w || !ctx || w->kind() != WidgetKind::kContextMenu || !w->registry())
+    return;
+  ContextMenuContent& c =
+      w->registry()->GetOrAdd<ContextMenuContent>(w->handle());
+  c.visible = true;
+
+  // Register the overlay first so the widget is bound to the UI context
+  // (ShowOverlay calls SetContext); otherwise Measure runs without a text
+  // engine and the shaping branch is skipped, leaving the width at 0.
+  ctx->ShowOverlay(w, position);
+
+  Style s = w->style();
+  if (s.font_size <= 0.0f) s.font_size = 13.0f;
+  w->set_style(s);
+
+  f32 mw = 0, mh = 0;
+  ContextMenuMeasure(*w->registry(), *w, mw, mh);
+  s.width = Length::Px(mw);
+  s.height = Length::Px(mh);
+  s.margin = EdgeInsets(position.y, 0, 0, position.x);
+  w->set_style(s);
+}
+
+void HideContextMenu(Widget* w, UIContext* ctx) {
+  if (!w || !ctx || w->kind() != WidgetKind::kContextMenu || !w->registry())
+    return;
+  ContextMenuContent& c =
+      w->registry()->GetOrAdd<ContextMenuContent>(w->handle());
+  if (!c.visible) return;
+  c.visible = false;
+  c.hover_index = -1;
+  ctx->HideOverlay(w);
 }
 
 }  // namespace ugui
