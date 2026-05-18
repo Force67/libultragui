@@ -15,7 +15,7 @@ class WidgetRegistry;
 struct LayoutNode;
 
 /// Stable type tag for every widget, enabling handle-safe downcasts without
-/// RTTI (see widget_cast). Subclasses set their own value via kKind/kind().
+/// RTTI and per-kind vtable dispatch. Lives in the WidgetNode component.
 enum class WidgetKind : u8 {
   kWidget,
   kPanel,
@@ -36,8 +36,47 @@ enum class WidgetKind : u8 {
   kCount,  // number of kinds; not a real widget
 };
 
-/// Base class for all UI widgets. Provides lifecycle, tree structure,
-/// hit-testing, and dirty-flag propagation.
+// Core components carried by every widget entity. The Widget handle (below)
+// holds no data of its own; all widget state lives in these component stores,
+// keyed by the entity's WidgetId.
+
+/// Geometry + dirty flags (written by layout, read by paint/hit-testing).
+struct Transform {
+  Rect rect;
+  Rect content_rect;
+  f32 intrinsic_w = 0;
+  f32 intrinsic_h = 0;
+  bool layout_dirty = true;
+  bool paint_dirty = true;
+};
+
+/// Tree links, stored as stable handles.
+struct Hierarchy {
+  wid parent;
+  Vector<wid> children;
+};
+
+/// Base style and current interaction-state bitset. State overrides and the
+/// animation override live in the StateStyle / AnimStyle components.
+struct StyleC {
+  Style style;
+  WidgetState state = WidgetState::kNone;
+};
+
+/// Identity + misc per-widget metadata.
+struct WidgetNode {
+  u32 id = 0;
+  WidgetKind kind = WidgetKind::kWidget;
+  String name;
+  i32 tab_index = -1;  // -1 = not focusable via tab, 0+ = tab order
+  const WidgetContext* context = nullptr;
+};
+
+/// Lightweight handle to a widget entity: just the stable id and its World.
+/// Carries no data (it all lives in components) and exists to give the existing
+/// call sites an object-oriented facade while the layer is data-oriented under
+/// the hood. Created on the heap by the Create<Kind> factories; the registry
+/// slot keeps the pointer so handles resolve back to it.
 class Widget {
   friend class WidgetRegistry;
 
@@ -49,178 +88,127 @@ class Widget {
     static u32 s_counter = 1;  // 0 is reserved / sentinel
     return s_counter++;
   }
-  virtual ~Widget();
+  ~Widget();
 
   // --- Tree management (links are stable handles, not raw pointers) ---
   void AddChild(Widget* child);
   void RemoveChild(Widget* child);
   void ClearChildren();
   wid ChildAt(u32 index) const;
-  u32 child_count() const { return static_cast<u32>(children_.size()); }
-  wid parent() const { return parent_; }
-  const Vector<wid>& children() const { return children_; }
+  u32 child_count() const;
+  wid parent() const;
+  const Vector<wid>& children() const;
 
-  /// Transient resolved views for traversal. The returned pointers are valid
-  /// only until the tree changes; never store them (store the wid instead).
+  /// Transient resolved views for traversal. Valid only until the tree changes.
   Widget* parent_ptr() const;
   Vector<Widget*> child_ptrs() const;
 
   // --- Identity ---
-  u32 id() const { return id_; }
-  void set_id(u32 id) { id_ = id; }
-  const String& name() const { return name_; }
-  void set_name(const String& name) { name_ = name; }
-
-  /// Stable type tag for handle-safe casts (no RTTI) and per-kind vtable
-  /// dispatch. Stored as a field so a generic Widget can be any kind; the
-  /// remaining subclasses still override this.
-  virtual WidgetKind kind() const { return kind_; }
-  void set_kind(WidgetKind k) { kind_ = k; }
+  u32 id() const;
+  void set_id(u32 id);
+  const String& name() const;
+  void set_name(const String& name);
+  WidgetKind kind() const;
+  void set_kind(WidgetKind k);
 
   /// The World this widget belongs to (resolves its handles and components).
   WidgetRegistry* registry() const { return registry_; }
 
-  /// Stable handle to this widget. Prefer storing this over a raw Widget*:
-  /// once the widget is destroyed the handle resolves to null instead of
-  /// dangling. The slot is allocated eagerly in the constructor.
-  WidgetId handle();
+  /// Stable handle to this widget entity.
+  WidgetId handle() const { return self_; }
 
   // --- Style ---
-  Style& style() { return style_; }
-  const Style& style() const { return style_; }
-  void set_style(const Style& s) {
-    style_ = s;
-    MarkDirty();
-  }
+  Style& style();
+  const Style& style() const;
+  void set_style(const Style& s);
 
   void AddStateOverride(WidgetState state, const Style& override_style,
                         u64 mask);
   void AddStateTransition(WidgetState state, const Transition& transition);
-  WidgetState widget_state() const { return state_; }
+  WidgetState widget_state() const;
   void set_widget_state(WidgetState state);
 
-  /// Toggle the kSelected bit on this widget. Use this for
-  /// application-driven highlighting (active sidebar entry, current
-  /// list selection, etc.) so the widget's :selected/:active style
-  /// override declared in the .ugui file kicks in. This keeps the
-  /// visual rules in the IDL instead of having C++ rewrite the base
-  /// style imperatively each time the active row changes.
-  void set_selected(bool v) {
-    WidgetState s = state_;
-    if (v)
-      s = s | WidgetState::kSelected;
-    else
-      s = static_cast<WidgetState>(static_cast<u16>(s) &
-                                   ~static_cast<u16>(WidgetState::kSelected));
-    set_widget_state(s);
-  }
-  bool selected() const { return HasState(state_, WidgetState::kSelected); }
+  /// Toggle the kSelected bit (application-driven highlighting; drives the
+  /// :selected/:active style override declared in the IDL).
+  void set_selected(bool v);
+  bool selected() const;
 
-  /// Get the effective style (base + active overrides + animation)
+  /// Effective style (base + active overrides + animation).
   Style ComputedStyle() const;
 
-  /// Set an animated style override (used by Animator callback)
+  /// Animated style override (used by the Animator callback).
   void SetAnimationStyle(const Style& s);
   void ClearAnimationStyle();
 
   // --- Layout ---
-  Rect rect() const { return rect_; }
-  Rect content_rect() const { return content_rect_; }
-
-  /// Set intrinsic content size (for text, images, etc.)
-  void set_intrinsic_size(f32 w, f32 h) {
-    intrinsic_w_ = w;
-    intrinsic_h_ = h;
-  }
+  Rect rect() const;
+  Rect content_rect() const;
+  void set_intrinsic_size(f32 w, f32 h);
 
   // --- Dirty flags ---
   void MarkDirty();
-  void MarkPaintDirty() { paint_dirty_ = true; }
-  bool IsDirty() const { return layout_dirty_; }
-  bool IsPaintDirty() const { return paint_dirty_; }
+  void MarkPaintDirty();
+  bool IsDirty() const;
+  bool IsPaintDirty() const;
 
   // --- Hit testing ---
-  bool contains(Vec2 point) const { return rect_.contains(point); }
-  virtual wid HitTest(Vec2 point);
+  bool contains(Vec2 point) const;
+  wid HitTest(Vec2 point);
 
-  /// Convert a screen/input point into this widget's layout space by
-  /// accounting for ancestor scroll offsets.
+  /// Convert a screen/input point into this widget's layout space by accounting
+  /// for ancestor scroll offsets.
   Vec2 InputToLayoutPoint(Vec2 point) const;
 
   // --- Context propagation ---
   void SetContext(const WidgetContext* ctx);
-  const WidgetContext* context() const { return context_; }
+  const WidgetContext* context() const;
 
   // --- Lifecycle (dispatch to the per-kind vtable; see widget_vtable.h) ---
-  virtual void OnMount() {}
-  virtual void OnUnmount() {}
-  virtual void OnUpdate(f64 dt);
-  virtual void OnLayout(const Rect& rect, const Rect& content_rect);
-  virtual void OnPaint(Renderer2D& renderer);
-  virtual void Measure(f32& out_width, f32& out_height);
+  void OnMount() {}
+  void OnUnmount() {}
+  void OnUpdate(f64 dt);
+  void OnLayout(const Rect& rect, const Rect& content_rect);
+  void OnPaint(Renderer2D& renderer);
+  void Measure(f32& out_width, f32& out_height);
 
   // --- Tooltip (stored as a Tooltip component on this entity) ---
   void set_tooltip(const String& text);
   const String& tooltip() const;
 
   // --- Tab navigation ---
-  void set_tab_index(i32 idx) { tab_index_ = idx; }
-  i32 tab_index() const { return tab_index_; }
-  bool focusable() const { return tab_index_ >= 0; }
+  void set_tab_index(i32 idx);
+  i32 tab_index() const;
+  bool focusable() const;
 
   /// Viewport scale factor (1.0 at the design resolution).
-  f32 ui_scale() const { return context_ ? context_->ui_scale : 1.0f; }
+  f32 ui_scale() const;
 
   // --- Event dispatch (dispatch to the per-kind vtable) ---
-  virtual bool OnClick();
-  virtual bool OnScroll(Vec2 delta);
-  virtual bool OnKeyDown(i32 key, i32 mods);
-  virtual bool OnKeyUp(i32 key, i32 mods) { return false; }
-  virtual bool OnCharInput(u32 codepoint);
-
-  /// Whether this widget swallows printable text while focused. Text
-  /// inputs override this to true so the InputRouter doesn't treat
-  /// Enter/Space as "activate focused widget" - that shim is for
-  /// keyboard/gamepad nav on buttons, and would otherwise call
-  /// TextInput::OnClick which repositions the caret to the last
-  /// mouse position whenever the user types a space.
-  virtual bool consumes_text_input() const;
-  /// Called when an overlay is dismissed (click outside).
-  virtual void OnDismiss();
-
-  // Drag-to-move now lives in the Movable / DragHandle components (see
-  // components.h); attach them via the World and the input system handles it.
+  bool OnClick();
+  bool OnScroll(Vec2 delta);
+  bool OnKeyDown(i32 key, i32 mods);
+  bool OnKeyUp(i32 key, i32 mods) { return false; }
+  bool OnCharInput(u32 codepoint);
+  bool consumes_text_input() const;
+  void OnDismiss();
 
   // --- Layout integration ---
   void PopulateLayoutNode(LayoutNode& node) const;
   void ApplyLayoutResult(const LayoutNode& node);
 
- protected:
-  u32 id_ = 0;
-  WidgetKind kind_ = WidgetKind::kWidget;  // drives vtable dispatch
+ private:
+  // Resolve this entity's core components (always present after construction).
+  Transform* xf() const;
+  Hierarchy* hier() const;
+  StyleC* sc() const;
+  WidgetNode* node() const;
+
   wid self_;                            // this widget's handle (set in ctor)
-  WidgetRegistry* registry_ = nullptr;  // owning registry (resolves links)
-  String name_;
-  wid parent_;
-  Vector<wid> children_;
-  const WidgetContext* context_ = nullptr;
-
-  Style style_;
-  WidgetState state_ = WidgetState::kNone;
-  // State overrides/transitions live in a StateStyle component, and the active
-  // animation override in an AnimStyle component (see components.h), so plain
-  // widgets carry neither.
-
-  Rect rect_;
-  Rect content_rect_;
-  f32 intrinsic_w_ = 0, intrinsic_h_ = 0;
-  i32 tab_index_ = -1;  // -1 = not focusable via tab, 0+ = tab order
-  bool layout_dirty_ = true;
-  bool paint_dirty_ = true;
+  WidgetRegistry* registry_ = nullptr;  // owning world (resolves components)
 };
 
 /// Handle-safe downcast: returns p as T* when its kind matches, else nullptr.
-/// Drop-in replacement for dynamic_cast that needs no RTTI.
+/// No-RTTI replacement for dynamic_cast (used by WidgetRegistry::GetAs).
 template <class T>
 T* widget_cast(Widget* p) {
   return (p && p->kind() == T::kKind) ? static_cast<T*>(p) : nullptr;
