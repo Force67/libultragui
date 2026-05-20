@@ -218,6 +218,39 @@ const T* widget_cast(const Widget* p) {
   return (p && p->kind() == T::kKind) ? static_cast<const T*>(p) : nullptr;
 }
 
+// --- Entity free-function API -----------------------------------------------
+// The widget layer is moving from `Widget*` + methods to plain entity ids
+// (wid) + free functions over the component World. These operate on an entity
+// by handle; data is read directly via world.Get<Component>(e). Behaviour and
+// dispatch live here. (During the migration these bridge to the Widget handle;
+// the handle type is removed once every caller uses these.)
+
+Style ComputedStyle(WidgetRegistry& world, wid e);
+void MarkDirty(WidgetRegistry& world, wid e);
+void MarkPaintDirty(WidgetRegistry& world, wid e);
+WidgetState WidgetStateOf(WidgetRegistry& world, wid e);
+void SetWidgetState(WidgetRegistry& world, wid e, WidgetState state);
+f32 UiScale(WidgetRegistry& world, wid e);
+const WidgetContext* WidgetContextOf(WidgetRegistry& world, wid e);
+void SetContext(WidgetRegistry& world, wid e, const WidgetContext* ctx);
+Vec2 InputToLayoutPoint(WidgetRegistry& world, wid e, Vec2 point);
+wid HitTest(WidgetRegistry& world, wid e, Vec2 point);
+void AddChild(WidgetRegistry& world, wid parent, wid child);
+void RemoveChild(WidgetRegistry& world, wid parent, wid child);
+
+// Per-kind dispatch (replaces the Widget::OnX virtuals).
+void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer);
+void MeasureWidget(WidgetRegistry& world, wid e, f32& out_w, f32& out_h);
+void LayoutWidget(WidgetRegistry& world, wid e, const Rect& rect,
+                  const Rect& content_rect);
+void UpdateWidget(WidgetRegistry& world, wid e, f64 dt);
+bool ClickWidget(WidgetRegistry& world, wid e);
+bool ScrollWidget(WidgetRegistry& world, wid e, Vec2 delta);
+bool KeyDownWidget(WidgetRegistry& world, wid e, i32 key, i32 mods);
+bool CharInputWidget(WidgetRegistry& world, wid e, u32 codepoint);
+bool ConsumesTextInput(WidgetRegistry& world, wid e);
+void DismissWidget(WidgetRegistry& world, wid e);
+
 }  // namespace ugui
 
 #endif  // ULTRAGUI_WIDGETS_WIDGET_H_

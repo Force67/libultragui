@@ -464,4 +464,95 @@ void Widget::ApplyLayoutResult(const LayoutNode& node) {
   t->paint_dirty = true;
 }
 
+// --- Entity free-function API (bridges to the handle during migration) ------
+
+Style ComputedStyle(WidgetRegistry& world, wid e) {
+  Widget* w = world.Get(e);
+  return w ? w->ComputedStyle() : Style{};
+}
+void MarkDirty(WidgetRegistry& world, wid e) {
+  if (Widget* w = world.Get(e)) w->MarkDirty();
+}
+void MarkPaintDirty(WidgetRegistry& world, wid e) {
+  if (Widget* w = world.Get(e)) w->MarkPaintDirty();
+}
+WidgetState WidgetStateOf(WidgetRegistry& world, wid e) {
+  Widget* w = world.Get(e);
+  return w ? w->widget_state() : WidgetState::kNone;
+}
+void SetWidgetState(WidgetRegistry& world, wid e, WidgetState state) {
+  if (Widget* w = world.Get(e)) w->set_widget_state(state);
+}
+f32 UiScale(WidgetRegistry& world, wid e) {
+  Widget* w = world.Get(e);
+  return w ? w->ui_scale() : 1.0f;
+}
+const WidgetContext* WidgetContextOf(WidgetRegistry& world, wid e) {
+  Widget* w = world.Get(e);
+  return w ? w->context() : nullptr;
+}
+void SetContext(WidgetRegistry& world, wid e, const WidgetContext* ctx) {
+  if (Widget* w = world.Get(e)) w->SetContext(ctx);
+}
+Vec2 InputToLayoutPoint(WidgetRegistry& world, wid e, Vec2 point) {
+  Widget* w = world.Get(e);
+  return w ? w->InputToLayoutPoint(point) : point;
+}
+wid HitTest(WidgetRegistry& world, wid e, Vec2 point) {
+  Widget* w = world.Get(e);
+  return w ? w->HitTest(point) : kNullWidget;
+}
+void AddChild(WidgetRegistry& world, wid parent, wid child) {
+  Widget* p = world.Get(parent);
+  Widget* c = world.Get(child);
+  if (p && c) p->AddChild(c);
+}
+void RemoveChild(WidgetRegistry& world, wid parent, wid child) {
+  Widget* p = world.Get(parent);
+  Widget* c = world.Get(child);
+  if (p && c) p->RemoveChild(c);
+}
+
+void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  if (Widget* w = world.Get(e)) w->OnPaint(renderer);
+}
+void MeasureWidget(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) {
+  if (Widget* w = world.Get(e)) {
+    w->Measure(out_w, out_h);
+  } else {
+    out_w = 0;
+    out_h = 0;
+  }
+}
+void LayoutWidget(WidgetRegistry& world, wid e, const Rect& rect,
+                  const Rect& content_rect) {
+  if (Widget* w = world.Get(e)) w->OnLayout(rect, content_rect);
+}
+void UpdateWidget(WidgetRegistry& world, wid e, f64 dt) {
+  if (Widget* w = world.Get(e)) w->OnUpdate(dt);
+}
+bool ClickWidget(WidgetRegistry& world, wid e) {
+  Widget* w = world.Get(e);
+  return w ? w->OnClick() : false;
+}
+bool ScrollWidget(WidgetRegistry& world, wid e, Vec2 delta) {
+  Widget* w = world.Get(e);
+  return w ? w->OnScroll(delta) : false;
+}
+bool KeyDownWidget(WidgetRegistry& world, wid e, i32 key, i32 mods) {
+  Widget* w = world.Get(e);
+  return w ? w->OnKeyDown(key, mods) : false;
+}
+bool CharInputWidget(WidgetRegistry& world, wid e, u32 codepoint) {
+  Widget* w = world.Get(e);
+  return w ? w->OnCharInput(codepoint) : false;
+}
+bool ConsumesTextInput(WidgetRegistry& world, wid e) {
+  Widget* w = world.Get(e);
+  return w ? w->consumes_text_input() : false;
+}
+void DismissWidget(WidgetRegistry& world, wid e) {
+  if (Widget* w = world.Get(e)) w->OnDismiss();
+}
+
 }  // namespace ugui
