@@ -554,5 +554,11 @@ bool ConsumesTextInput(WidgetRegistry& world, wid e) {
 void DismissWidget(WidgetRegistry& world, wid e) {
   if (Widget* w = world.Get(e)) w->OnDismiss();
 }
+void PopulateLayoutNode(WidgetRegistry& world, wid e, LayoutNode& node) {
+  if (Widget* w = world.Get(e)) w->PopulateLayoutNode(node);
+}
+void ApplyLayoutResult(WidgetRegistry& world, wid e, const LayoutNode& node) {
+  if (Widget* w = world.Get(e)) w->ApplyLayoutResult(node);
+}
 
 }  // namespace ugui

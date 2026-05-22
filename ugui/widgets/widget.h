@@ -250,6 +250,8 @@ bool KeyDownWidget(WidgetRegistry& world, wid e, i32 key, i32 mods);
 bool CharInputWidget(WidgetRegistry& world, wid e, u32 codepoint);
 bool ConsumesTextInput(WidgetRegistry& world, wid e);
 void DismissWidget(WidgetRegistry& world, wid e);
+void PopulateLayoutNode(WidgetRegistry& world, wid e, LayoutNode& node);
+void ApplyLayoutResult(WidgetRegistry& world, wid e, const LayoutNode& node);
 
 }  // namespace ugui
 

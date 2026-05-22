@@ -402,8 +402,9 @@ int main(int argc, char* argv[]) {
     ugui::Widget* root = ui.root();
     if (root) {
       ugui::LayoutViewport vp{ds.x, ds.y};
-      ugui::ComputeWidgetLayout(root, vp, layout_engine, layout_scratch);
-      ugui::PaintWidgetTree(root, r);
+      ugui::ComputeWidgetLayout(root->handle(), vp, layout_engine,
+                                layout_scratch);
+      ugui::PaintWidgetTree(root->handle(), r);
     }
   });
 

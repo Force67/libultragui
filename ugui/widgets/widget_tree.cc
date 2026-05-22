@@ -1,4 +1,5 @@
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_registry.h>
 #include <ugui/widgets/widget_tree.h>
 
 namespace ugui {
@@ -21,18 +22,23 @@ Widget* FindWidget(Widget* root, const char* name) {
   return nullptr;
 }
 
-void UpdateWidgetTree(Widget* root, f64 dt) {
-  if (!root) return;
-  root->OnUpdate(dt);
-  for (auto* child : root->child_ptrs()) UpdateWidgetTree(child, dt);
+void UpdateWidgetTree(wid root, f64 dt) {
+  if (!root.valid()) return;
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  UpdateWidget(world, root, dt);
+  for (wid child : world.Get<Hierarchy>(root)->children)
+    UpdateWidgetTree(child, dt);
 }
 
-void MeasureWidgetTree(Widget* root) {
-  if (!root) return;
-  for (auto* child : root->child_ptrs()) MeasureWidgetTree(child);
+void MeasureWidgetTree(wid root) {
+  if (!root.valid()) return;
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  for (wid child : world.Get<Hierarchy>(root)->children) MeasureWidgetTree(child);
   f32 w = 0, h = 0;
-  root->Measure(w, h);
-  root->set_intrinsic_size(w, h);
+  MeasureWidget(world, root, w, h);
+  Transform* t = world.Get<Transform>(root);
+  t->intrinsic_w = w;
+  t->intrinsic_h = h;
 }
 
 }  // namespace ugui

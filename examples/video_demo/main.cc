@@ -339,8 +339,8 @@ int main(int argc, char* argv[]) {
               ugui::LayoutViewport lv{vp.x, vp.y, 1.0f};
               ugui::LayoutEngine le;
               ugui::Vector<ugui::LayoutNode> nodes;
-              ugui::ComputeWidgetLayout(ui.root(), lv, le, nodes);
-              ugui::PaintWidgetTree(ui.root(), renderer);
+              ugui::ComputeWidgetLayout(ui.root()->handle(), lv, le, nodes);
+              ugui::PaintWidgetTree(ui.root()->handle(), renderer);
             }
           });
           break;

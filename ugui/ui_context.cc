@@ -379,7 +379,7 @@ void UIContext::Update() {
   }
 
   // Update widgets (scroll momentum, etc.)
-  if (root_) UpdateWidgetTree(root_, dt_);
+  if (root_) UpdateWidgetTree(root_->handle(), dt_);
 
   // Update all animations
   auto update_anim = [dt = dt_](auto* anim) {
@@ -415,12 +415,12 @@ void UIContext::Update() {
 
   // --- Text shaping and atlas management (BEFORE render pass) ---
   text_engine_.BeginFrame();
-  if (root_) MeasureWidgetTree(root_);
+  if (root_) MeasureWidgetTree(root_->handle());
   for (auto& pass : offscreen_queue_) {
-    if (pass.root) MeasureWidgetTree(pass.root);
+    if (pass.root) MeasureWidgetTree(pass.root->handle());
   }
   for (auto& overlay : overlays_) {
-    if (overlay.widget) MeasureWidgetTree(overlay.widget);
+    if (overlay.widget) MeasureWidgetTree(overlay.widget->handle());
   }
   text_engine_.FlushAtlas();
 
@@ -437,8 +437,9 @@ void UIContext::Update() {
 
       renderer_.BeginFrame();
       if (pass.root) {
-        ComputeWidgetLayout(pass.root, vp, layout_engine_, layout_nodes_);
-        PaintWidgetTree(pass.root, renderer_);
+        ComputeWidgetLayout(pass.root->handle(), vp, layout_engine_,
+                            layout_nodes_);
+        PaintWidgetTree(pass.root->handle(), renderer_);
       }
       text_engine_.FlushAtlas();
       renderer_.EndFrame();
@@ -456,16 +457,17 @@ void UIContext::Update() {
     on_paint_cb_(renderer_, &rhi_);
   } else if (root_) {
     LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
-    PaintWidgetTree(root_, renderer_);
+    ComputeWidgetLayout(root_->handle(), vp, layout_engine_, layout_nodes_);
+    PaintWidgetTree(root_->handle(), renderer_);
   }
 
   // Paint overlays on top of everything
   for (auto& overlay : overlays_) {
     if (overlay.widget) {
       LayoutViewport ovp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-      ComputeWidgetLayout(overlay.widget, ovp, layout_engine_, layout_nodes_);
-      PaintWidgetTree(overlay.widget, renderer_);
+      ComputeWidgetLayout(overlay.widget->handle(), ovp, layout_engine_,
+                          layout_nodes_);
+      PaintWidgetTree(overlay.widget->handle(), renderer_);
     }
   }
 
@@ -513,27 +515,28 @@ const DrawData& UIContext::RenderDrawData() {
           Widget* w = FindWidgetById(root, widget_id);
           if (w) w->ClearAnimationStyle();
         });
-    UpdateWidgetTree(root_, dt_);
+    UpdateWidgetTree(root_->handle(), dt_);
   }
 
   // Text shaping (no GPU upload: the host uploads from text_engine().)
   text_engine_.BeginFrame();
-  if (root_) MeasureWidgetTree(root_);
+  if (root_) MeasureWidgetTree(root_->handle());
   for (auto& overlay : overlays_) {
-    if (overlay.widget) MeasureWidgetTree(overlay.widget);
+    if (overlay.widget) MeasureWidgetTree(overlay.widget->handle());
   }
 
   // Paint into the renderer; collect as a draw list instead of submitting.
   renderer_.BeginFrame();
   LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
   if (root_) {
-    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
-    PaintWidgetTree(root_, renderer_);
+    ComputeWidgetLayout(root_->handle(), vp, layout_engine_, layout_nodes_);
+    PaintWidgetTree(root_->handle(), renderer_);
   }
   for (auto& overlay : overlays_) {
     if (overlay.widget) {
-      ComputeWidgetLayout(overlay.widget, vp, layout_engine_, layout_nodes_);
-      PaintWidgetTree(overlay.widget, renderer_);
+      ComputeWidgetLayout(overlay.widget->handle(), vp, layout_engine_,
+                          layout_nodes_);
+      PaintWidgetTree(overlay.widget->handle(), renderer_);
     }
   }
   DrawTooltip();

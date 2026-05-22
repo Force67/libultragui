@@ -1,14 +1,15 @@
 #ifndef ULTRAGUI_RENDER_PAINT_H_
 #define ULTRAGUI_RENDER_PAINT_H_
 
+#include <ugui/core/handle.h>
+
 namespace ugui {
 
-class Widget;
 class Renderer2D;
 
 /// Depth-first paint pass: render widget backgrounds/text, then children.
 /// Handles visibility culling and overflow scissoring.
-void PaintWidgetTree(Widget* root, Renderer2D& renderer);
+void PaintWidgetTree(wid root, Renderer2D& renderer);
 
 }  // namespace ugui
 
