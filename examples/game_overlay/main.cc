@@ -367,9 +367,11 @@ int main(int argc, char* argv[]) {
   ui.LoadScript((base + "/hud.lua").c_str());
 
   // Wire click handler for Lua
-  ui.input().set_on_click([&ui](ugui::Widget* widget, ugui::MouseButton btn) {
-    if (btn != ugui::MouseButton::kLeft || widget->name().empty()) return;
-    std::string handler = "on_" + widget->name();
+  ui.input().set_on_click([&ui](ugui::wid widget, ugui::MouseButton btn) {
+    if (btn != ugui::MouseButton::kLeft) return;
+    ugui::WidgetNode* n = ui.world().Get<ugui::WidgetNode>(widget);
+    if (!n || n->name.empty()) return;
+    std::string handler = "on_" + n->name;
     ui.script().CallHandler(handler.c_str(), widget);
   });
 
@@ -399,12 +401,11 @@ int main(int argc, char* argv[]) {
                        ugui::Color::FromHex(0x1a1a3a, 0.0f),
                        ugui::Color::FromHex(0x0a0a2a, 0.15f));
 
-    ugui::Widget* root = ui.root();
-    if (root) {
+    ugui::wid root = ui.root();
+    if (root.valid()) {
       ugui::LayoutViewport vp{ds.x, ds.y};
-      ugui::ComputeWidgetLayout(root->handle(), vp, layout_engine,
-                                layout_scratch);
-      ugui::PaintWidgetTree(root->handle(), r);
+      ugui::ComputeWidgetLayout(root, vp, layout_engine, layout_scratch);
+      ugui::PaintWidgetTree(root, r);
     }
   });
 
@@ -427,8 +428,7 @@ int main(int argc, char* argv[]) {
       if (!ui.script().Exec(
               ("ugui.set('fps_text', 'text', '" + fps_str + "')").c_str(),
               "fps"))
-        ugui::SetText(ui.widgets().Get(ui.FindWidget("fps_text")),
-                      fps_str.c_str());
+        ugui::SetText(ui.FindWidget("fps_text"), fps_str.c_str());
     }
 
     ui.Update();

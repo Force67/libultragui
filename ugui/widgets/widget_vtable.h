@@ -17,24 +17,22 @@ class WidgetRegistry;  // == World
 /// widget's components from the World. Entries left null mean "no custom
 /// behaviour" and the Widget base handles it (e.g. a plain panel).
 struct WidgetVTable {
-  void (*draw)(WidgetRegistry& world, Widget& w, Renderer2D& r) = nullptr;
-  void (*measure)(WidgetRegistry& world, Widget& w, f32& out_w, f32& out_h) =
+  void (*draw)(WidgetRegistry& world, wid e, Renderer2D& r) = nullptr;
+  void (*measure)(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) =
       nullptr;
-  WidgetId (*hit_test)(WidgetRegistry& world, Widget& w, Vec2 point) = nullptr;
-  bool (*on_click)(WidgetRegistry& world, Widget& w) = nullptr;
-  void (*on_update)(WidgetRegistry& world, Widget& w, f64 dt) = nullptr;
-  bool (*on_scroll)(WidgetRegistry& world, Widget& w, Vec2 delta) = nullptr;
-  // Runs after the base stored the layout result (rect/content_rect).
-  void (*on_layout)(WidgetRegistry& world, Widget& w, const Rect& rect,
+  WidgetId (*hit_test)(WidgetRegistry& world, wid e, Vec2 point) = nullptr;
+  bool (*on_click)(WidgetRegistry& world, wid e) = nullptr;
+  void (*on_update)(WidgetRegistry& world, wid e, f64 dt) = nullptr;
+  bool (*on_scroll)(WidgetRegistry& world, wid e, Vec2 delta) = nullptr;
+  // Runs after PaintWidget stored the layout result (rect/content_rect).
+  void (*on_layout)(WidgetRegistry& world, wid e, const Rect& rect,
                     const Rect& content_rect) = nullptr;
-  bool (*on_key_down)(WidgetRegistry& world, Widget& w, i32 key, i32 mods) =
-      nullptr;
-  bool (*on_char_input)(WidgetRegistry& world, Widget& w, u32 codepoint) =
-      nullptr;
-  bool (*consumes_text_input)(const Widget& w) = nullptr;
-  void (*on_dismiss)(WidgetRegistry& world, Widget& w) = nullptr;
-  // When true the base Widget::OnPaint draws nothing and `draw` paints the whole
-  // widget (for kinds that fully own their visuals, e.g. slider, toggle).
+  bool (*on_key_down)(WidgetRegistry& world, wid e, i32 key, i32 mods) = nullptr;
+  bool (*on_char_input)(WidgetRegistry& world, wid e, u32 codepoint) = nullptr;
+  bool (*consumes_text_input)(WidgetRegistry& world, wid e) = nullptr;
+  void (*on_dismiss)(WidgetRegistry& world, wid e) = nullptr;
+  // When true PaintWidget draws nothing and `draw` paints the whole widget (for
+  // kinds that fully own their visuals, e.g. slider, toggle, scroll view).
   bool custom_paint = false;
 };
 

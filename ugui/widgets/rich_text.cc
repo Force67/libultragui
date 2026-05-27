@@ -8,13 +8,16 @@
 namespace ugui {
 namespace {
 
-TextEngine* text_engine(const Widget& w) {
-  return w.context() ? w.context()->text_engine : nullptr;
+TextEngine* text_engine(WidgetRegistry& world, wid e) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->text_engine : nullptr;
 }
 
-FontHandle effective_font(const Widget& w, const RichTextContent& c) {
+FontHandle effective_font(WidgetRegistry& world, wid e,
+                          const RichTextContent& c) {
   if (c.font != kInvalidFont) return c.font;
-  return w.context() ? w.context()->default_font : kInvalidFont;
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->default_font : kInvalidFont;
 }
 
 /// A shaped and positioned span ready for rendering.
@@ -28,14 +31,14 @@ struct ShapedSpan {
 };
 
 /// Shape all spans and lay them out inline with wrapping. Returns total height.
-f32 LayoutSpans(const Widget& w, const RichTextContent& c,
+f32 LayoutSpans(WidgetRegistry& world, wid e, const RichTextContent& c,
                 Vector<ShapedSpan>& out, f32 max_width) {
-  TextEngine* te = text_engine(w);
-  FontHandle base_fh = effective_font(w, c);
+  TextEngine* te = text_engine(world, e);
+  FontHandle base_fh = effective_font(world, e, c);
   if (!te || base_fh == kInvalidFont) return 0.0f;
 
-  const Style& s = w.style();
-  f32 sc = w.ui_scale();
+  const Style& s = world.Get<StyleC>(e)->style;
+  f32 sc = UiScale(world, e);
   f32 line_x = 0.0f;
   f32 line_y = 0.0f;
   f32 line_height = 0.0f;
@@ -53,8 +56,6 @@ f32 LayoutSpans(const Widget& w, const RichTextContent& c,
         te->Shape(fh, span.text.c_str(), static_cast<u32>(span.text.size()),
                   size, s.letter_spacing * sc, s.line_height_multiplier);
 
-    // Wrap to the next line if this span exceeds the available width (only when
-    // not already at the start of a line).
     if (line_x > 0.0f && max_width > 0.0f &&
         line_x + run.total_advance > max_width) {
       line_y += line_height;
@@ -62,8 +63,8 @@ f32 LayoutSpans(const Widget& w, const RichTextContent& c,
       line_height = 0.0f;
     }
 
-    out.push_back(ShapedSpan{run, span.color, span.decoration, size, line_x,
-                             line_y});
+    out.push_back(
+        ShapedSpan{run, span.color, span.decoration, size, line_x, line_y});
 
     line_x += run.total_advance;
     line_height = std::max(line_height, run.line_height);
@@ -72,18 +73,19 @@ f32 LayoutSpans(const Widget& w, const RichTextContent& c,
   return line_y + line_height;
 }
 
-void RichTextMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void RichTextMeasure(WidgetRegistry& world, wid e, f32& out_width,
                      f32& out_height) {
-  RichTextContent* c = world.Get<RichTextContent>(w.handle());
-  TextEngine* te = text_engine(w);
-  if (!c || !te || effective_font(w, *c) == kInvalidFont || c->spans.empty()) {
+  RichTextContent* c = world.Get<RichTextContent>(e);
+  TextEngine* te = text_engine(world, e);
+  if (!c || !te || effective_font(world, e, *c) == kInvalidFont ||
+      c->spans.empty()) {
     out_width = 0;
     out_height = 0;
     return;
   }
 
   Vector<ShapedSpan> shaped;
-  f32 total_h = LayoutSpans(w, *c, shaped, 1e6f);  // measure without wrapping
+  f32 total_h = LayoutSpans(world, e, *c, shaped, 1e6f);  // measure no wrapping
 
   f32 max_w = 0;
   for (const auto& ss : shaped)
@@ -92,20 +94,20 @@ void RichTextMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
   out_height = total_h;
 }
 
-void RichTextDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  // The base Widget::OnPaint already drew background / shadow / border.
-  RichTextContent* c = world.Get<RichTextContent>(w.handle());
-  TextEngine* te = text_engine(w);
+void RichTextDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  // PaintWidget already drew background / shadow / border.
+  RichTextContent* c = world.Get<RichTextContent>(e);
+  TextEngine* te = text_engine(world, e);
   if (!c || !te || c->spans.empty()) return;
 
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
 
-  Rect content = w.content_rect();
+  Rect content = world.Get<Transform>(e)->content_rect;
 
   Vector<ShapedSpan> shaped;
-  LayoutSpans(w, *c, shaped, content.w);
+  LayoutSpans(world, e, *c, shaped, content.w);
 
   for (const auto& ss : shaped) {
     f32 x = content.x + ss.x;
@@ -139,34 +141,43 @@ WidgetVTable RichTextVTable() {
   return vt;
 }
 
-Widget* CreateRichText(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kRichText);
-  WidgetRegistry::Active()->Add<RichTextContent>(w->handle(), RichTextContent{});
-  return w;
+wid CreateRichText(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kRichText;
+  world.Add<RichTextContent>(e, RichTextContent{});
+  return e;
 }
 
-void SetRichTextSpans(Widget* w, const Vector<TextSpan>& spans) {
-  if (!w || w->kind() != WidgetKind::kRichText || !w->registry()) return;
-  w->registry()->GetOrAdd<RichTextContent>(w->handle()).spans = spans;
-  w->MarkDirty();
+void SetRichTextSpans(wid e, const Vector<TextSpan>& spans) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (!world.Alive(e) || world.Get<WidgetNode>(e)->kind != WidgetKind::kRichText)
+    return;
+  world.GetOrAdd<RichTextContent>(e).spans = spans;
+  MarkDirty(world, e);
 }
 
-void AddRichTextSpan(Widget* w, const TextSpan& span) {
-  if (!w || w->kind() != WidgetKind::kRichText || !w->registry()) return;
-  w->registry()->GetOrAdd<RichTextContent>(w->handle()).spans.push_back(span);
-  w->MarkDirty();
+void AddRichTextSpan(wid e, const TextSpan& span) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (!world.Alive(e) || world.Get<WidgetNode>(e)->kind != WidgetKind::kRichText)
+    return;
+  world.GetOrAdd<RichTextContent>(e).spans.push_back(span);
+  MarkDirty(world, e);
 }
 
-void ClearRichTextSpans(Widget* w) {
-  if (!w || w->kind() != WidgetKind::kRichText || !w->registry()) return;
-  w->registry()->GetOrAdd<RichTextContent>(w->handle()).spans.clear();
-  w->MarkDirty();
+void ClearRichTextSpans(wid e) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (!world.Alive(e) || world.Get<WidgetNode>(e)->kind != WidgetKind::kRichText)
+    return;
+  world.GetOrAdd<RichTextContent>(e).spans.clear();
+  MarkDirty(world, e);
 }
 
-void SetRichTextFont(Widget* w, FontHandle font) {
-  if (!w || w->kind() != WidgetKind::kRichText || !w->registry()) return;
-  w->registry()->GetOrAdd<RichTextContent>(w->handle()).font = font;
+void SetRichTextFont(wid e, FontHandle font) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (!world.Alive(e) || world.Get<WidgetNode>(e)->kind != WidgetKind::kRichText)
+    return;
+  world.GetOrAdd<RichTextContent>(e).font = font;
 }
 
 }  // namespace ugui

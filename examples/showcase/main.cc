@@ -176,16 +176,18 @@ static void load_scene(ugui::UIContext& ui, int idx) {
   std::string ugui_path = base + "/" + s.ugui_file;
   std::string lua_path = base + "/" + s.lua_file;
 
-  if (!ui.LoadUi(ugui_path.c_str())) {
+  if (!ui.LoadUi(ugui_path.c_str()).valid()) {
     std::fprintf(stderr, "Failed to load scene '%s'\n", s.name);
     return;
   }
   ui.LoadScript(lua_path.c_str());
 
   // Wire click handler
-  ui.input().set_on_click([&ui](ugui::Widget* widget, ugui::MouseButton btn) {
-    if (btn != ugui::MouseButton::kLeft || widget->name().empty()) return;
-    std::string handler = "on_" + widget->name();
+  ui.input().set_on_click([&ui](ugui::wid widget, ugui::MouseButton btn) {
+    if (btn != ugui::MouseButton::kLeft) return;
+    ugui::WidgetNode* n = ui.world().Get<ugui::WidgetNode>(widget);
+    if (!n || n->name.empty()) return;
+    std::string handler = "on_" + n->name;
     ui.script().CallHandler(handler.c_str(), widget);
   });
 

@@ -9,36 +9,38 @@
 namespace ugui {
 namespace {
 
-TextEngine* text_engine(const Widget& w) {
-  return w.context() ? w.context()->text_engine : nullptr;
+TextEngine* text_engine(WidgetRegistry& world, wid e) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->text_engine : nullptr;
 }
 
-FontHandle effective_font(const Widget& w, const RadioContent& c) {
+FontHandle effective_font(WidgetRegistry& world, wid e, const RadioContent& c) {
   if (c.font != kInvalidFont) return c.font;
-  return w.context() ? w.context()->default_font : kInvalidFont;
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->default_font : kInvalidFont;
 }
 
-void DeselectSiblings(WidgetRegistry& world, Widget& w, const RadioContent& c) {
-  Widget* parent = w.parent_ptr();
-  if (!parent) return;
-  for (Widget* sib : parent->child_ptrs()) {
-    if (sib == &w) continue;
-    if (sib->kind() != WidgetKind::kRadio) continue;
-    RadioContent* sc = world.Get<RadioContent>(sib->handle());
+void DeselectSiblings(WidgetRegistry& world, wid e, const RadioContent& c) {
+  wid parent = world.Get<Hierarchy>(e)->parent;
+  if (!parent.valid()) return;
+  for (wid sib : world.Get<Hierarchy>(parent)->children) {
+    if (sib == e) continue;
+    if (world.Get<WidgetNode>(sib)->kind != WidgetKind::kRadio) continue;
+    RadioContent* sc = world.Get<RadioContent>(sib);
     if (sc && sc->group == c.group) SetRadioSelected(sib, false);
   }
 }
 
-void RadioMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void RadioMeasure(WidgetRegistry& world, wid e, f32& out_width,
                   f32& out_height) {
-  RadioContent* c = world.Get<RadioContent>(w.handle());
-  const Style& st = w.style();
-  f32 sc = w.ui_scale();
+  RadioContent* c = world.Get<RadioContent>(e);
+  const Style& st = world.Get<StyleC>(e)->style;
+  f32 sc = UiScale(world, e);
   f32 circle_size = st.font_size * 1.2f;
   constexpr f32 kGap = 8.0f;
 
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
   if (c && te && fh != kInvalidFont && !c->label.empty()) {
     auto run = te->Shape(fh, c->label.c_str(), static_cast<u32>(c->label.size()),
                          st.font_size * sc, st.letter_spacing * sc,
@@ -51,22 +53,22 @@ void RadioMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
   }
 }
 
-void RadioDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  // The base Widget::OnPaint already drew background / shadow / border.
-  RadioContent* c = world.Get<RadioContent>(w.handle());
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+void RadioDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  // PaintWidget already drew background / shadow / border.
+  RadioContent* c = world.Get<RadioContent>(e);
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
   f32 circle_size = s.font_size * 1.0f;
   constexpr f32 kGap = 8.0f;
   f32 radius = circle_size * 0.5f;
   u32 radii = Vertex2D::PackRadii(radius);
 
-  Rect content = w.content_rect();
+  Rect content = world.Get<Transform>(e)->content_rect;
   f32 circle_x = content.x;
   f32 circle_y = content.y + (content.h - circle_size) * 0.5f;
 
-  bool is_selected = IsRadioSelected(&w);
+  bool is_selected = IsRadioSelected(e);
 
   Color border_color = (s.border_color.a > 0.0f)
                            ? s.border_color.WithAlpha(s.border_color.a * alpha)
@@ -92,8 +94,8 @@ void RadioDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
   }
 
   // Label to the right of the circle.
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
   if (c && te && fh != kInvalidFont && !c->label.empty()) {
     auto run =
         te->Shape(fh, c->label.c_str(), static_cast<u32>(c->label.size()),
@@ -117,10 +119,10 @@ void RadioDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
   }
 }
 
-bool RadioClick(WidgetRegistry& world, Widget& w) {
-  RadioContent* c = world.Get<RadioContent>(w.handle());
-  if (c) DeselectSiblings(world, w, *c);
-  SetRadioSelected(&w, true);
+bool RadioClick(WidgetRegistry& world, wid e) {
+  RadioContent* c = world.Get<RadioContent>(e);
+  if (c) DeselectSiblings(world, e, *c);
+  SetRadioSelected(e, true);
   if (c && c->on_change) c->on_change(true);
   return true;
 }
@@ -135,43 +137,44 @@ WidgetVTable RadioVTable() {
   return vt;
 }
 
-Widget* CreateRadio(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kRadio);
-  WidgetRegistry::Active()->Add<RadioContent>(w->handle(), RadioContent{});
-  return w;
+wid CreateRadio(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kRadio;
+  world.Add<RadioContent>(e, RadioContent{});
+  return e;
 }
 
-void SetRadioLabel(Widget* w, const String& label) {
-  if (!w || w->kind() != WidgetKind::kRadio || !w->registry()) return;
-  w->registry()->GetOrAdd<RadioContent>(w->handle()).label = label;
-  w->MarkDirty();
+void SetRadioLabel(wid e, const String& label) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  world.GetOrAdd<RadioContent>(e).label = label;
+  MarkDirty(world, e);
 }
 
-void SetRadioGroup(Widget* w, const String& group) {
-  if (!w || w->kind() != WidgetKind::kRadio || !w->registry()) return;
-  w->registry()->GetOrAdd<RadioContent>(w->handle()).group = group;
+void SetRadioGroup(wid e, const String& group) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  world.GetOrAdd<RadioContent>(e).group = group;
 }
 
-void SetRadioChange(Widget* w, Function<void(bool)> handler) {
-  if (!w || w->kind() != WidgetKind::kRadio || !w->registry()) return;
-  w->registry()->GetOrAdd<RadioContent>(w->handle()).on_change =
-      std::move(handler);
+void SetRadioChange(wid e, Function<void(bool)> handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  world.GetOrAdd<RadioContent>(e).on_change = std::move(handler);
 }
 
-void SetRadioSelected(Widget* w, bool selected) {
-  if (!w) return;
-  WidgetState s = w->widget_state();
+void SetRadioSelected(wid e, bool selected) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetState s = WidgetStateOf(world, e);
   if (selected)
     s = s | WidgetState::kChecked;
   else
     s = static_cast<WidgetState>(static_cast<u16>(s) &
                                  ~static_cast<u16>(WidgetState::kChecked));
-  w->set_widget_state(s);
+  SetWidgetState(world, e, s);
 }
 
-bool IsRadioSelected(const Widget* w) {
-  return w && HasState(w->widget_state(), WidgetState::kChecked);
+bool IsRadioSelected(wid e) {
+  return HasState(WidgetStateOf(*WidgetRegistry::Active(), e),
+                  WidgetState::kChecked);
 }
 
 }  // namespace ugui

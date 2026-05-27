@@ -94,11 +94,11 @@ class UIContext {
   /// Set the default font used by the builder for text/button widgets.
   void set_default_font(FontHandle font);
 
-  /// Load a .ugui layout file. Builds the widget tree. Returns the root widget.
-  Widget* LoadUi(const char* path);
+  /// Load a .ugui layout file. Builds the widget tree. Returns the root entity.
+  wid LoadUi(const char* path);
 
   /// Load a .ugui layout from a string.
-  Widget* LoadUiString(const char* source, const char* name = "inline");
+  wid LoadUiString(const char* source, const char* name = "inline");
 
   /// Load and execute a script file. No-op if no scripting runtime is set.
   bool LoadScript(const char* path);
@@ -110,10 +110,10 @@ class UIContext {
   ScriptRuntime& script() { return script_; }
 
   /// Set the root widget directly (takes ownership for painting, not deletion).
-  void set_root(Widget* root);
+  void set_root(wid root);
 
-  /// Get the current root widget.
-  Widget* root() const { return root_; }
+  /// Get the current root entity.
+  wid root() const { return root_; }
 
   /// Returns true while the window is open.
   bool Running() const;
@@ -182,8 +182,8 @@ class UIContext {
   /// pointer so a stale reference safely becomes null after a tree rebuild.
   WidgetId FindWidget(const char* name) const;
 
-  /// The widget handle registry: widgets().Get(id) resolves a WidgetId to a
-  /// live Widget* (or nullptr), GetAs<T>(id) does a kind-checked downcast.
+  /// The entity-and-component world. widgets().Get<C>(e) resolves a component
+  /// on entity e (or nullptr); widgets().Alive(e) checks liveness.
   WidgetRegistry& widgets() { return widget_registry_; }
 
   /// The entity-and-component world (same object as widgets()). Attach custom
@@ -221,16 +221,16 @@ class UIContext {
 
   /// Queue a widget tree to be rendered to an offscreen target during the
   /// next Update() call, before the main swapchain pass.
-  void QueueOffscreen(RHITextureHandle target, Widget* root, Color clear_color);
+  void QueueOffscreen(RHITextureHandle target, wid root, Color clear_color);
 
   // --- Overlay system ---
 
   /// Show a widget as an overlay at the given screen position.
   /// The widget floats above the normal widget tree.
-  void ShowOverlay(Widget* widget, Vec2 position);
+  void ShowOverlay(wid widget, Vec2 position);
 
   /// Hide a previously shown overlay widget.
-  void HideOverlay(Widget* widget);
+  void HideOverlay(wid widget);
 
   /// Custom paint callback for the swapchain pass. When set, replaces the
   /// default compute_layout() + paint_tree() with the callback.
@@ -266,7 +266,7 @@ class UIContext {
   Vector<VideoPlayer*> video_players_;
 #endif
 
-  Widget* root_ = nullptr;
+  wid root_;
   FontHandle default_font_ = kInvalidFont;
   UIConfig config_;
   WidgetRegistry widget_registry_;
@@ -276,8 +276,8 @@ class UIContext {
   WidgetRegistry::ScopedActive registry_scope_{&widget_registry_};
   WidgetContext widget_ctx_;
 
-  /// Resolve a cached widget name to a live pointer (transient, internal use).
-  Widget* FindWidgetPtr(const char* name) const;
+  /// Resolve a cached widget name to a live entity (transient, internal use).
+  wid FindWidgetEntity(const char* name) const;
 
   f64 last_time_ = 0.0;
   f64 dt_ = 0.0;
@@ -293,26 +293,26 @@ class UIContext {
 
   struct OffscreenPass {
     RHITextureHandle target;
-    Widget* root;
+    wid root;
     Color clear_color;
   };
   Vector<OffscreenPass> offscreen_queue_;
   PaintCallback on_paint_cb_;
 
   struct OverlayEntry {
-    Widget* widget = nullptr;
+    wid widget;
     Vec2 position;
   };
   Vector<OverlayEntry> overlays_;
 
-  // Widget name -> pointer cache (O(1) lookup, rebuilt lazily).
-  mutable HashMap<String, Widget*> widget_cache_;
+  // Widget name -> entity cache (O(1) lookup, rebuilt lazily).
+  mutable HashMap<String, wid> widget_cache_;
   mutable bool widget_cache_dirty_ = true;
   void RebuildWidgetCache() const;
-  static void CacheWidgetTree(Widget* w, HashMap<String, Widget*>& cache);
+  static void CacheWidgetTree(wid w, HashMap<String, wid>& cache);
 
   // Tooltip state
-  Widget* tooltip_target_ = nullptr;
+  wid tooltip_target_;
   bool tooltip_visible_ = false;
   f64 tooltip_hover_start_ = 0.0;
   static constexpr f64 kTooltipDelay = 0.5;

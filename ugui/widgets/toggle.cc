@@ -9,24 +9,24 @@
 namespace ugui {
 namespace {
 
-void ToggleMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void ToggleMeasure(WidgetRegistry& world, wid e, f32& out_width,
                    f32& out_height) {
-  const Style& st = w.style();
+  const Style& st = world.Get<StyleC>(e)->style;
   f32 track_w = 44.0f;
   f32 track_h = 24.0f;
   out_width = track_w + st.padding.horizontal();
   out_height = track_h + st.padding.vertical();
 }
 
-void ToggleDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  ToggleContent* c = world.Get<ToggleContent>(w.handle());
-  f32 anim = c ? c->thumb_anim : (IsToggleOn(&w) ? 1.0f : 0.0f);
+void ToggleDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  ToggleContent* c = world.Get<ToggleContent>(e);
+  f32 anim = c ? c->thumb_anim : (IsToggleOn(e) ? 1.0f : 0.0f);
 
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
 
-  Rect content = w.content_rect();
+  Rect content = world.Get<Transform>(e)->content_rect;
   f32 track_x = content.x;
   f32 track_y = content.y;
   f32 track_w = content.w;
@@ -61,26 +61,26 @@ void ToggleDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
                     thumb_radii);
 }
 
-bool ToggleClick(WidgetRegistry& world, Widget& w) {
-  bool now = !IsToggleOn(&w);
-  SetToggleOn(&w, now);
-  ToggleContent* c = world.Get<ToggleContent>(w.handle());
+bool ToggleClick(WidgetRegistry& world, wid e) {
+  bool now = !IsToggleOn(e);
+  SetToggleOn(e, now);
+  ToggleContent* c = world.Get<ToggleContent>(e);
   if (c && c->on_change) c->on_change(now);
   return true;
 }
 
-void ToggleUpdate(WidgetRegistry& world, Widget& w, f64 dt) {
-  ToggleContent* c = world.Get<ToggleContent>(w.handle());
+void ToggleUpdate(WidgetRegistry& world, wid e, f64 dt) {
+  ToggleContent* c = world.Get<ToggleContent>(e);
   if (!c) return;
 
-  f32 target = IsToggleOn(&w) ? 1.0f : 0.0f;
+  f32 target = IsToggleOn(e) ? 1.0f : 0.0f;
   f32 prev = c->thumb_anim;
   f32 speed = Clamp(static_cast<f32>(dt) * 12.0f, 0.0f, 1.0f);
   c->thumb_anim += (target - c->thumb_anim) * speed;
 
   if (std::abs(c->thumb_anim - target) < 0.001f) c->thumb_anim = target;
 
-  if (c->thumb_anim != prev) w.MarkPaintDirty();
+  if (c->thumb_anim != prev) MarkPaintDirty(world, e);
 }
 
 }  // namespace
@@ -95,38 +95,40 @@ WidgetVTable ToggleVTable() {
   return vt;
 }
 
-Widget* CreateToggle(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kToggle);
-  WidgetRegistry::Active()->Add<ToggleContent>(w->handle(), ToggleContent{});
-  return w;
+wid CreateToggle(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kToggle;
+  world.Add<ToggleContent>(e, ToggleContent{});
+  return e;
 }
 
-void SetToggleOn(Widget* w, bool on) {
-  if (!w || w->kind() != WidgetKind::kToggle) return;
-  WidgetState s = w->widget_state();
+void SetToggleOn(wid e, bool on) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* node = world.Get<WidgetNode>(e);
+  if (!node || node->kind != WidgetKind::kToggle) return;
+  WidgetState s = WidgetStateOf(world, e);
   if (on)
     s = s | WidgetState::kChecked;
   else
     s = static_cast<WidgetState>(static_cast<u16>(s) &
                                  ~static_cast<u16>(WidgetState::kChecked));
-  w->set_widget_state(s);
-  // Snap the thumb so external state restoration (e.g. a settings panel
-  // re-applying the bool on every rebuild) shows the correct visual at once.
-  if (w->registry())
-    w->registry()->GetOrAdd<ToggleContent>(w->handle()).thumb_anim =
-        on ? 1.0f : 0.0f;
-  w->MarkPaintDirty();
+  SetWidgetState(world, e, s);
+  // Snap the thumb so external state restoration shows the correct visual.
+  world.GetOrAdd<ToggleContent>(e).thumb_anim = on ? 1.0f : 0.0f;
+  MarkPaintDirty(world, e);
 }
 
-bool IsToggleOn(const Widget* w) {
-  return w && HasState(w->widget_state(), WidgetState::kChecked);
+bool IsToggleOn(wid e) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  return HasState(WidgetStateOf(world, e), WidgetState::kChecked);
 }
 
-void SetToggleChange(Widget* w, Function<void(bool)> handler) {
-  if (!w || w->kind() != WidgetKind::kToggle || !w->registry()) return;
-  w->registry()->GetOrAdd<ToggleContent>(w->handle()).on_change =
-      std::move(handler);
+void SetToggleChange(wid e, Function<void(bool)> handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* node = world.Get<WidgetNode>(e);
+  if (!node || node->kind != WidgetKind::kToggle) return;
+  world.GetOrAdd<ToggleContent>(e).on_change = std::move(handler);
 }
 
 }  // namespace ugui

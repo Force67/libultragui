@@ -16,21 +16,23 @@ constexpr f32 kRowHPadding = 16.0f;
 constexpr f32 kSeparatorHeight = 1.0f;
 constexpr f32 kSeparatorPad = 4.0f;
 
-TextEngine* text_engine(const Widget& w) {
-  return w.context() ? w.context()->text_engine : nullptr;
+TextEngine* text_engine(WidgetRegistry& world, wid e) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->text_engine : nullptr;
 }
 
-FontHandle effective_font(const Widget& w) {
-  return w.context() ? w.context()->default_font : kInvalidFont;
+FontHandle effective_font(WidgetRegistry& world, wid e) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->default_font : kInvalidFont;
 }
 
-void ContextMenuMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void ContextMenuMeasure(WidgetRegistry& world, wid e, f32& out_width,
                         f32& out_height) {
-  ContextMenuContent* c = world.Get<ContextMenuContent>(w.handle());
-  const Style& st = w.style();
-  TextEngine* te = text_engine(w);
-  FontHandle fh = effective_font(w);
-  f32 sc = w.ui_scale();
+  ContextMenuContent* c = world.Get<ContextMenuContent>(e);
+  const Style& st = world.Get<StyleC>(e)->style;
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = effective_font(world, e);
+  f32 sc = UiScale(world, e);
   f32 font_size = (st.font_size > 0.0f ? st.font_size : 14.0f) * sc;
   f32 letter_sp = st.letter_spacing * sc;
   f32 row_height = font_size * 1.8f;
@@ -58,27 +60,28 @@ void ContextMenuMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
   out_height = total_height + st.padding.vertical();
 }
 
-void ContextMenuDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  // The base Widget::OnPaint already drew background / shadow / border.
-  ContextMenuContent* c = world.Get<ContextMenuContent>(w.handle());
-  TextEngine* te = text_engine(w);
-  FontHandle fh = effective_font(w);
+void ContextMenuDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  // PaintWidget already drew background / shadow / border.
+  ContextMenuContent* c = world.Get<ContextMenuContent>(e);
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = effective_font(world, e);
   if (!c || !te || fh == kInvalidFont) return;
 
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
   f32 font_size = s.font_size > 0.0f ? s.font_size : 14.0f;
   f32 row_height = font_size * 1.8f;
 
-  Rect rect = w.rect();
-  Rect content = w.content_rect();
+  Rect rect = world.Get<Transform>(e)->rect;
+  Rect content = world.Get<Transform>(e)->content_rect;
 
   // Determine hover index from mouse position.
   c->hover_index = -1;
-  if (w.context() && w.context()->platform) {
+  const WidgetContext* wctx = WidgetContextOf(world, e);
+  if (wctx && wctx->platform) {
     Vec2 mouse =
-        w.InputToLayoutPoint(w.context()->platform->input_queue().mouse_pos);
+        InputToLayoutPoint(world, e, wctx->platform->input_queue().mouse_pos);
     f32 y = content.y;
     for (i32 i = 0; i < static_cast<i32>(c->items.size()); ++i) {
       f32 item_h = c->items[i].separator
@@ -128,20 +131,20 @@ void ContextMenuDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
   }
 }
 
-bool ContextMenuClick(WidgetRegistry& world, Widget& w) {
-  ContextMenuContent* c = world.Get<ContextMenuContent>(w.handle());
-  if (!c || !w.context() || !w.context()->platform || c->items.empty())
-    return false;
+bool ContextMenuClick(WidgetRegistry& world, wid e) {
+  ContextMenuContent* c = world.Get<ContextMenuContent>(e);
+  const WidgetContext* wctx = WidgetContextOf(world, e);
+  if (!c || !wctx || !wctx->platform || c->items.empty()) return false;
 
   Vec2 mouse =
-      w.InputToLayoutPoint(w.context()->platform->input_queue().mouse_pos);
+      InputToLayoutPoint(world, e, wctx->platform->input_queue().mouse_pos);
 
-  Style s = w.ComputedStyle();
+  Style s = ComputedStyle(world, e);
   f32 font_size = s.font_size > 0.0f ? s.font_size : 14.0f;
   f32 row_height = font_size * 1.8f;
 
-  Rect rect = w.rect();
-  Rect content = w.content_rect();
+  Rect rect = world.Get<Transform>(e)->rect;
+  Rect content = world.Get<Transform>(e)->content_rect;
 
   f32 y = content.y;
   for (i32 i = 0; i < static_cast<i32>(c->items.size()); ++i) {
@@ -159,8 +162,8 @@ bool ContextMenuClick(WidgetRegistry& world, Widget& w) {
   return true;  // consume the click even if nothing was hit
 }
 
-void ContextMenuDismiss(WidgetRegistry& world, Widget& w) {
-  ContextMenuContent* c = world.Get<ContextMenuContent>(w.handle());
+void ContextMenuDismiss(WidgetRegistry& world, wid e) {
+  ContextMenuContent* c = world.Get<ContextMenuContent>(e);
   if (!c) return;
   c->visible = false;
   c->hover_index = -1;
@@ -177,68 +180,69 @@ WidgetVTable ContextMenuVTable() {
   return vt;
 }
 
-Widget* CreateContextMenu(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kContextMenu);
-  WidgetRegistry::Active()->Add<ContextMenuContent>(w->handle(),
-                                                    ContextMenuContent{});
-  return w;
+wid CreateContextMenu(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kContextMenu;
+  world.Add<ContextMenuContent>(e, ContextMenuContent{});
+  return e;
 }
 
-void AddContextMenuItem(Widget* w, const String& label,
-                        Function<void()> action) {
-  if (!w || w->kind() != WidgetKind::kContextMenu || !w->registry()) return;
-  w->registry()->GetOrAdd<ContextMenuContent>(w->handle()).items.push_back(
+void AddContextMenuItem(wid e, const String& label, Function<void()> action) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kContextMenu) return;
+  world.GetOrAdd<ContextMenuContent>(e).items.push_back(
       {label, std::move(action), false});
-  w->MarkDirty();
+  MarkDirty(world, e);
 }
 
-void AddContextMenuSeparator(Widget* w) {
-  if (!w || w->kind() != WidgetKind::kContextMenu || !w->registry()) return;
-  w->registry()->GetOrAdd<ContextMenuContent>(w->handle()).items.push_back(
-      {"", nullptr, true});
-  w->MarkDirty();
+void AddContextMenuSeparator(wid e) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kContextMenu) return;
+  world.GetOrAdd<ContextMenuContent>(e).items.push_back({"", nullptr, true});
+  MarkDirty(world, e);
 }
 
-void ClearContextMenuItems(Widget* w) {
-  if (!w || w->kind() != WidgetKind::kContextMenu || !w->registry()) return;
-  w->registry()->GetOrAdd<ContextMenuContent>(w->handle()).items.clear();
-  w->MarkDirty();
+void ClearContextMenuItems(wid e) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kContextMenu) return;
+  world.GetOrAdd<ContextMenuContent>(e).items.clear();
+  MarkDirty(world, e);
 }
 
-void ShowContextMenuAt(Widget* w, UIContext* ctx, Vec2 position) {
-  if (!w || !ctx || w->kind() != WidgetKind::kContextMenu || !w->registry())
-    return;
-  ContextMenuContent& c =
-      w->registry()->GetOrAdd<ContextMenuContent>(w->handle());
+void ShowContextMenuAt(wid e, UIContext* ctx, Vec2 position) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!ctx || !n || n->kind != WidgetKind::kContextMenu) return;
+  ContextMenuContent& c = world.GetOrAdd<ContextMenuContent>(e);
   c.visible = true;
 
   // Register the overlay first so the widget is bound to the UI context
-  // (ShowOverlay calls SetContext); otherwise Measure runs without a text
-  // engine and the shaping branch is skipped, leaving the width at 0.
-  ctx->ShowOverlay(w, position);
+  // (ShowOverlay sets context); otherwise Measure runs without a text engine.
+  ctx->ShowOverlay(e, position);
 
-  Style s = w->style();
+  Style& s = world.Get<StyleC>(e)->style;
   if (s.font_size <= 0.0f) s.font_size = 13.0f;
-  w->set_style(s);
 
   f32 mw = 0, mh = 0;
-  ContextMenuMeasure(*w->registry(), *w, mw, mh);
+  ContextMenuMeasure(world, e, mw, mh);
   s.width = Length::Px(mw);
   s.height = Length::Px(mh);
   s.margin = EdgeInsets(position.y, 0, 0, position.x);
-  w->set_style(s);
 }
 
-void HideContextMenu(Widget* w, UIContext* ctx) {
-  if (!w || !ctx || w->kind() != WidgetKind::kContextMenu || !w->registry())
-    return;
-  ContextMenuContent& c =
-      w->registry()->GetOrAdd<ContextMenuContent>(w->handle());
+void HideContextMenu(wid e, UIContext* ctx) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!ctx || !n || n->kind != WidgetKind::kContextMenu) return;
+  ContextMenuContent& c = world.GetOrAdd<ContextMenuContent>(e);
   if (!c.visible) return;
   c.visible = false;
   c.hover_index = -1;
-  ctx->HideOverlay(w);
+  ctx->HideOverlay(e);
 }
 
 }  // namespace ugui

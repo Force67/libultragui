@@ -9,25 +9,25 @@
 namespace ugui {
 namespace {
 
-bool ScrollViewScroll(WidgetRegistry& world, Widget& w, Vec2 delta) {
-  ScrollViewContent* c = world.Get<ScrollViewContent>(w.handle());
+bool ScrollViewScroll(WidgetRegistry& world, wid e, Vec2 delta) {
+  ScrollViewContent* c = world.Get<ScrollViewContent>(e);
   if (!c) return false;
   // Apply immediately for zero-latency feel, then kick velocity for momentum.
   c->offset += delta;
   c->velocity = delta * 6.0f;
-  w.MarkDirty();
+  MarkDirty(world, e);
   return true;
 }
 
-void ScrollViewLayout(WidgetRegistry& world, Widget& w, const Rect& rect,
+void ScrollViewLayout(WidgetRegistry& world, wid e, const Rect& rect,
                       const Rect& content_rect) {
-  ScrollViewContent* c = world.Get<ScrollViewContent>(w.handle());
+  ScrollViewContent* c = world.Get<ScrollViewContent>(e);
   if (!c) return;
 
   // Total content size from children.
   c->content_size = Vec2{0, 0};
-  for (const Widget* child : w.child_ptrs()) {
-    Rect cr = child->rect();
+  for (wid child : world.Get<Hierarchy>(e)->children) {
+    Rect cr = world.Get<Transform>(child)->rect;
     c->content_size.x = std::max(c->content_size.x, cr.x + cr.w - content_rect.x);
     c->content_size.y = std::max(c->content_size.y, cr.y + cr.h - content_rect.y);
   }
@@ -38,27 +38,25 @@ void ScrollViewLayout(WidgetRegistry& world, Widget& w, const Rect& rect,
   c->offset.y = std::clamp(c->offset.y, 0.0f, max_scroll_y);
 }
 
-WidgetId ScrollViewHitTest(WidgetRegistry& world, Widget& w, Vec2 point) {
-  if (!w.rect().contains(point)) return kNullWidget;
-  ScrollViewContent* c = world.Get<ScrollViewContent>(w.handle());
+WidgetId ScrollViewHitTest(WidgetRegistry& world, wid e, Vec2 point) {
+  if (!world.Get<Transform>(e)->rect.contains(point)) return kNullWidget;
+  ScrollViewContent* c = world.Get<ScrollViewContent>(e);
 
   // Children are visually translated by the offset in the paint pass; translate
   // input coordinates back into the children's layout space.
-  if (w.content_rect().contains(point)) {
+  if (world.Get<Transform>(e)->content_rect.contains(point)) {
     Vec2 child_point = point + (c ? c->offset : Vec2::Zero());
-    const Vector<wid>& children = w.children();
+    const Vector<wid>& children = world.Get<Hierarchy>(e)->children;
     for (auto it = children.rbegin(); it != children.rend(); ++it) {
-      if (Widget* child = world.Get(*it)) {
-        wid hit = child->HitTest(child_point);
-        if (hit.valid()) return hit;
-      }
+      wid hit = HitTest(world, *it, child_point);
+      if (hit.valid()) return hit;
     }
   }
-  return w.handle();
+  return e;
 }
 
-void ScrollViewUpdate(WidgetRegistry& world, Widget& w, f64 dt) {
-  ScrollViewContent* c = world.Get<ScrollViewContent>(w.handle());
+void ScrollViewUpdate(WidgetRegistry& world, wid e, f64 dt) {
+  ScrollViewContent* c = world.Get<ScrollViewContent>(e);
   if (!c) return;
 
   if (c->velocity.LengthSq() > 0.5f) {
@@ -68,7 +66,7 @@ void ScrollViewUpdate(WidgetRegistry& world, Widget& w, f64 dt) {
     f32 decay = std::pow(c->deceleration, static_cast<f32>(dt) * 60.0f);
     c->velocity *= decay;
 
-    Rect content = w.content_rect();
+    Rect content = world.Get<Transform>(e)->content_rect;
     f32 max_scroll_x = std::max(0.0f, c->content_size.x - content.w);
     f32 max_scroll_y = std::max(0.0f, c->content_size.y - content.h);
     c->offset.x = std::clamp(c->offset.x, 0.0f, max_scroll_x);
@@ -78,18 +76,18 @@ void ScrollViewUpdate(WidgetRegistry& world, Widget& w, f64 dt) {
     if (c->offset.y <= 0.0f || c->offset.y >= max_scroll_y) c->velocity.y = 0.0f;
     if (c->offset.x <= 0.0f || c->offset.x >= max_scroll_x) c->velocity.x = 0.0f;
 
-    w.MarkPaintDirty();
+    MarkPaintDirty(world, e);
   } else {
     c->velocity = Vec2::Zero();
   }
 }
 
-void ScrollViewDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
+void ScrollViewDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   // custom_paint: this widget owns its whole paint (background + scrollbar).
-  ScrollViewContent* c = world.Get<ScrollViewContent>(w.handle());
-  Style s = w.ComputedStyle();
-  Rect rect = w.rect();
-  Rect content = w.content_rect();
+  ScrollViewContent* c = world.Get<ScrollViewContent>(e);
+  Style s = ComputedStyle(world, e);
+  Rect rect = world.Get<Transform>(e)->rect;
+  Rect content = world.Get<Transform>(e)->content_rect;
 
   if (s.background.a > 0.0f) {
     u32 radii =
@@ -133,39 +131,46 @@ WidgetVTable ScrollViewVTable() {
   return vt;
 }
 
-Widget* CreateScrollView(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kScrollView);
-  WidgetRegistry::Active()->Add<ScrollViewContent>(w->handle(),
-                                                   ScrollViewContent{});
-  return w;
+wid CreateScrollView(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kScrollView;
+  world.Add<ScrollViewContent>(e, ScrollViewContent{});
+  return e;
 }
 
-Vec2 ScrollOffset(const Widget* w) {
-  if (!w || w->kind() != WidgetKind::kScrollView || !w->registry())
+Vec2 ScrollOffset(WidgetRegistry& world, wid e) {
+  if (!world.Alive(e) ||
+      world.Get<WidgetNode>(e)->kind != WidgetKind::kScrollView)
     return Vec2::Zero();
-  ScrollViewContent* c =
-      w->registry()->Get<ScrollViewContent>(const_cast<Widget*>(w)->handle());
+  ScrollViewContent* c = world.Get<ScrollViewContent>(e);
   return c ? c->offset : Vec2::Zero();
 }
 
-void SetScrollOffset(Widget* w, Vec2 offset) {
-  if (!w || w->kind() != WidgetKind::kScrollView || !w->registry()) return;
-  w->registry()->GetOrAdd<ScrollViewContent>(w->handle()).offset = offset;
-  w->MarkDirty();
+void SetScrollOffset(wid e, Vec2 offset) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (!world.Alive(e) ||
+      world.Get<WidgetNode>(e)->kind != WidgetKind::kScrollView)
+    return;
+  world.GetOrAdd<ScrollViewContent>(e).offset = offset;
+  MarkDirty(world, e);
 }
 
-void ScrollBy(Widget* w, Vec2 delta) {
-  if (!w || w->kind() != WidgetKind::kScrollView || !w->registry()) return;
-  w->registry()->GetOrAdd<ScrollViewContent>(w->handle()).offset += delta;
-  w->MarkDirty();
+void ScrollBy(wid e, Vec2 delta) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (!world.Alive(e) ||
+      world.Get<WidgetNode>(e)->kind != WidgetKind::kScrollView)
+    return;
+  world.GetOrAdd<ScrollViewContent>(e).offset += delta;
+  MarkDirty(world, e);
 }
 
-Vec2 ScrollContentSize(const Widget* w) {
-  if (!w || w->kind() != WidgetKind::kScrollView || !w->registry())
+Vec2 ScrollContentSize(wid e) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (!world.Alive(e) ||
+      world.Get<WidgetNode>(e)->kind != WidgetKind::kScrollView)
     return Vec2::Zero();
-  ScrollViewContent* c =
-      w->registry()->Get<ScrollViewContent>(const_cast<Widget*>(w)->handle());
+  ScrollViewContent* c = world.Get<ScrollViewContent>(e);
   return c ? c->content_size : Vec2::Zero();
 }
 

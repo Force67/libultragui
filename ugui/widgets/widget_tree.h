@@ -6,13 +6,11 @@
 
 namespace ugui {
 
-class Widget;
+/// Find a widget by name in a tree. Returns kNullWidget if not found.
+wid FindWidget(wid root, const char* name);
 
-/// Find a widget by name in a tree. Returns nullptr if not found.
-Widget* FindWidget(Widget* root, const char* name);
-
-/// Find a widget by ID in a tree. Returns nullptr if not found.
-Widget* FindWidgetById(Widget* root, u32 id);
+/// Find a widget by ID in a tree. Returns kNullWidget if not found.
+wid FindWidgetById(wid root, u32 id);
 
 /// Recursively update all widgets (scroll momentum, animations, etc.)
 void UpdateWidgetTree(wid root, f64 dt);

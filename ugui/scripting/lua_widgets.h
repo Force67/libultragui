@@ -1,13 +1,14 @@
 #ifndef ULTRAGUI_SCRIPTING_LUA_WIDGETS_H_
 #define ULTRAGUI_SCRIPTING_LUA_WIDGETS_H_
 
+#include <ugui/core/handle.h>
+
 namespace ugui {
 
 class ScriptRuntime;
-class Widget;
 
 /// Register all named widgets in a tree with a scripting runtime.
-void RegisterWidgetTree(ScriptRuntime& rt, Widget* root);
+void RegisterWidgetTree(ScriptRuntime& rt, wid root);
 
 }  // namespace ugui
 

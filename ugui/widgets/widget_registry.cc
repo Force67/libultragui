@@ -9,7 +9,7 @@ thread_local WidgetRegistry* t_active = nullptr;
 
 WidgetRegistry* WidgetRegistry::Active() {
   if (t_active) return t_active;
-  static WidgetRegistry s_default;  // for widgets created without a UIContext
+  static WidgetRegistry s_default;  // for entities created without a UIContext
   return &s_default;
 }
 
@@ -18,16 +18,7 @@ WidgetRegistry::ScopedActive::ScopedActive(WidgetRegistry* r) : prev_(t_active) 
 }
 WidgetRegistry::ScopedActive::~ScopedActive() { t_active = prev_; }
 
-WidgetId WidgetRegistry::Acquire(Widget* w) {
-  if (!w) return kNullWidget;
-
-  // Already has a live slot pointing at this widget.
-  if (w->self_.valid() && w->self_.index < slots_.size()) {
-    Slot& s = slots_[w->self_.index];
-    if (s.alive && s.ptr == w && s.generation == w->self_.generation)
-      return w->self_;
-  }
-
+wid WidgetRegistry::New(u32 id) {
   if (slots_.empty()) slots_.push_back(Slot{});  // reserve index 0 as null
 
   u32 index;
@@ -40,31 +31,30 @@ WidgetId WidgetRegistry::Acquire(Widget* w) {
   }
 
   Slot& s = slots_[index];
-  s.ptr = w;
   s.alive = true;
-  WidgetId id{index, s.generation};
-  w->self_ = id;
-  w->registry_ = this;
-  return id;
+  wid e{index, s.generation};
+
+  // Attach the core components every widget entity carries.
+  Add<WidgetNode>(e, WidgetNode{id == 0 ? NextWidgetId() : id});
+  Add<Transform>(e, Transform{});
+  Add<StyleC>(e, StyleC{});
+  Add<Hierarchy>(e, Hierarchy{});
+  return e;
 }
 
-Widget* WidgetRegistry::Get(WidgetId id) const {
-  if (id.index == 0 || id.index >= slots_.size()) return nullptr;
+bool WidgetRegistry::Alive(WidgetId id) const {
+  if (id.index == 0 || id.index >= slots_.size()) return false;
   const Slot& s = slots_[id.index];
-  if (!s.alive || s.generation != id.generation) return nullptr;
-  return s.ptr;
+  return s.alive && s.generation == id.generation;
 }
 
 void WidgetRegistry::Release(WidgetId id) {
   if (id.index == 0 || id.index >= slots_.size()) return;
   Slot& s = slots_[id.index];
   if (!s.alive || s.generation != id.generation) return;
-  // Drop any components attached to this entity (id still matches its slot
-  // generation here, so the stores find and erase them).
   for (auto& store : stores_)
     if (store) store->Remove(id);
   s.alive = false;
-  s.ptr = nullptr;
   ++s.generation;
   if (s.generation == 0) s.generation = 1;
   free_.push_back(id.index);

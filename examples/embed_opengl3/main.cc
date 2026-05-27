@@ -166,8 +166,9 @@ int main() {
   ui.LoadUiString(kUi, "embed");
 
   int clicks = 0;
-  ui.input().set_on_click([&](ugui::Widget* w, ugui::MouseButton) {
-    if (w && w->name() == "btn_hello")
+  ui.input().set_on_click([&](ugui::wid w, ugui::MouseButton) {
+    ugui::WidgetNode* n = ui.world().Get<ugui::WidgetNode>(w);
+    if (n && n->name == "btn_hello")
       std::printf("embed_opengl3: button clicked (%d)\n", ++clicks);
   });
 

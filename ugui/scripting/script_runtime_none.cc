@@ -11,16 +11,16 @@ bool ScriptRuntime::Init() { return true; }
 void ScriptRuntime::Shutdown() {}
 bool ScriptRuntime::Exec(const char*, const char*) { return false; }
 bool ScriptRuntime::ExecFile(const char*) { return false; }
-void ScriptRuntime::RegisterWidget(Widget*) {}
-void ScriptRuntime::UnregisterWidget(Widget*) {}
+void ScriptRuntime::RegisterWidget(wid) {}
+void ScriptRuntime::UnregisterWidget(wid) {}
 void ScriptRuntime::ClearWidgetRegistry() {}
-bool ScriptRuntime::CallHandler(const char*, Widget*) { return false; }
-Widget* ScriptRuntime::FindRegisteredWidget(const char*) const {
-  return nullptr;
+bool ScriptRuntime::CallHandler(const char*, wid) { return false; }
+wid ScriptRuntime::FindRegisteredWidget(const char*) const {
+  return kNullWidget;
 }
 void ScriptRuntime::UpdateTimers(double) {}
 void ScriptRuntime::SyncTimerClock(double) {}
-void ScriptRuntime::WireChangeHandlers(Widget*) {}
+void ScriptRuntime::WireChangeHandlers(wid) {}
 void ScriptRuntime::ClearTimersAndTweens() {}
 
 }  // namespace ugui

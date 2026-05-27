@@ -14,7 +14,7 @@ namespace ugui {
 void RegisterLottieLua(
     ScriptRuntime& lua,
     Function<LottieAnimation*(const char*, unsigned, unsigned)> loader,
-    Function<Widget*(const char*)> find_widget) {
+    Function<wid(const char*)> find_widget) {
   // ugui.LoadLottie(path, width, height) -> anim lightuserdata
   lua.RegisterFunction("load_lottie", [loader](lua_State* L) -> int {
     const char* path = luaL_checkstring(L, 1);
@@ -96,9 +96,10 @@ void RegisterLottieLua(
     auto* a = static_cast<LottieAnimation*>(lua_touserdata(L, 1));
     const char* name = luaL_checkstring(L, 2);
     if (a) {
-      Widget* w = find_widget(name);
-      SetImageTexture(w, a->texture(), static_cast<f32>(a->width()),
-                      static_cast<f32>(a->height()));
+      wid w = find_widget(name);
+      if (w.valid())
+        SetImageTexture(w, a->texture(), static_cast<f32>(a->width()),
+                        static_cast<f32>(a->height()));
     }
     return 0;
   });

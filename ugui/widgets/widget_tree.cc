@@ -4,22 +4,26 @@
 
 namespace ugui {
 
-Widget* FindWidgetById(Widget* root, u32 id) {
-  if (!root) return nullptr;
-  if (root->id() == id) return root;
-  for (auto* child : root->child_ptrs()) {
-    if (auto* found = FindWidgetById(child, id)) return found;
+wid FindWidgetById(wid root, u32 id) {
+  if (!root.valid()) return kNullWidget;
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (world.Get<WidgetNode>(root)->id == id) return root;
+  for (wid c : world.Get<Hierarchy>(root)->children) {
+    wid found = FindWidgetById(c, id);
+    if (found.valid()) return found;
   }
-  return nullptr;
+  return kNullWidget;
 }
 
-Widget* FindWidget(Widget* root, const char* name) {
-  if (!root) return nullptr;
-  if (root->name() == name) return root;
-  for (auto* child : root->child_ptrs()) {
-    if (auto* found = FindWidget(child, name)) return found;
+wid FindWidget(wid root, const char* name) {
+  if (!root.valid()) return kNullWidget;
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (world.Get<WidgetNode>(root)->name == name) return root;
+  for (wid c : world.Get<Hierarchy>(root)->children) {
+    wid found = FindWidget(c, name);
+    if (found.valid()) return found;
   }
-  return nullptr;
+  return kNullWidget;
 }
 
 void UpdateWidgetTree(wid root, f64 dt) {

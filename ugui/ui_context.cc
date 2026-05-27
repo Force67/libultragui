@@ -121,19 +121,19 @@ bool UIContext::Init(const UIConfig& config) {
         [this](const char* path, unsigned w, unsigned h) -> LottieAnimation* {
           return LoadLottie(path, w, h);
         },
-        [this](const char* name) -> Widget* { return FindWidgetPtr(name); });
+        [this](const char* name) -> wid { return FindWidgetEntity(name); });
 #endif
     RegisterAnimLua(
         script_,
         [this](const char* path, unsigned w, unsigned h) -> VectorAnimation* {
           return LoadAnim(path, w, h);
         },
-        [this](const char* name) -> Widget* { return FindWidgetPtr(name); });
+        [this](const char* name) -> wid { return FindWidgetEntity(name); });
 #if ULTRAGUI_VIDEO
     RegisterVideoLua(
         script_,
         [this](const char* path) -> VideoPlayer* { return LoadVideo(path); },
-        [this](const char* name) -> Widget* { return FindWidgetPtr(name); });
+        [this](const char* name) -> wid { return FindWidgetEntity(name); });
 #endif
   }
 #endif
@@ -177,7 +177,7 @@ void UIContext::set_default_font(FontHandle font) {
   widget_ctx_.default_font = font;
 }
 
-Widget* UIContext::LoadUi(const char* path) {
+wid UIContext::LoadUi(const char* path) {
   UguiDocument doc;
   Vector<ParseError> errors;
 
@@ -186,23 +186,23 @@ Widget* UIContext::LoadUi(const char* path) {
       std::fprintf(stderr, "ultragui: parse error in %s:%u:%u: %s\n",
                    e.file.c_str(), e.line, e.column, e.message.c_str());
     }
-    return nullptr;
+    return kNullWidget;
   }
 
-  if (root_) {
+  if (root_.valid()) {
     input_.ResetState();
-    tooltip_target_ = nullptr;
+    tooltip_target_ = kNullWidget;
     tooltip_visible_ = false;
     script_.ClearTimersAndTweens();
     script_.ClearWidgetRegistry();
-    if (owns_root_) delete root_;
+    if (owns_root_) DestroyWidget(widget_registry_, root_);
   }
 
   root_ = builder_.Build(doc);
   owns_root_ = true;
 
-  if (root_) {
-    root_->SetContext(&widget_ctx_);
+  if (root_.valid()) {
+    SetContext(widget_registry_, root_, &widget_ctx_);
     RegisterWidgetTree(script_, root_);
     script_.WireChangeHandlers(root_);
   }
@@ -211,7 +211,7 @@ Widget* UIContext::LoadUi(const char* path) {
   return root_;
 }
 
-Widget* UIContext::LoadUiString(const char* source, const char* name) {
+wid UIContext::LoadUiString(const char* source, const char* name) {
   UguiDocument doc;
   Vector<ParseError> errors;
 
@@ -220,23 +220,23 @@ Widget* UIContext::LoadUiString(const char* source, const char* name) {
       std::fprintf(stderr, "ultragui: parse error in %s:%u:%u: %s\n",
                    e.file.c_str(), e.line, e.column, e.message.c_str());
     }
-    return nullptr;
+    return kNullWidget;
   }
 
-  if (root_) {
+  if (root_.valid()) {
     input_.ResetState();
-    tooltip_target_ = nullptr;
+    tooltip_target_ = kNullWidget;
     tooltip_visible_ = false;
     script_.ClearTimersAndTweens();
     script_.ClearWidgetRegistry();
-    if (owns_root_) delete root_;
+    if (owns_root_) DestroyWidget(widget_registry_, root_);
   }
 
   root_ = builder_.Build(doc);
   owns_root_ = true;
 
-  if (root_) {
-    root_->SetContext(&widget_ctx_);
+  if (root_.valid()) {
+    SetContext(widget_registry_, root_, &widget_ctx_);
     RegisterWidgetTree(script_, root_);
     script_.WireChangeHandlers(root_);
   }
@@ -255,18 +255,18 @@ bool UIContext::ExecScript(const char* script, const char* name) {
   return script_.Exec(script, name);
 }
 
-void UIContext::set_root(Widget* root) {
+void UIContext::set_root(wid root) {
   input_.ResetState();
-  tooltip_target_ = nullptr;
+  tooltip_target_ = kNullWidget;
   tooltip_visible_ = false;
   script_.ClearTimersAndTweens();
   script_.ClearWidgetRegistry();
 
-  if (owns_root_) delete root_;
+  if (owns_root_ && root_.valid()) DestroyWidget(widget_registry_, root_);
   root_ = root;
   owns_root_ = false;
-  if (root_) {
-    root_->SetContext(&widget_ctx_);
+  if (root_.valid()) {
+    SetContext(widget_registry_, root_, &widget_ctx_);
     RegisterWidgetTree(script_, root_);
   }
   widget_cache_dirty_ = true;
@@ -301,20 +301,20 @@ void UIContext::PumpInput() {
       auto& evt = queue.button_events[i];
       if (!evt.pressed) continue;
 
-      Widget* hit = nullptr;
+      wid hit;
       for (i32 j = static_cast<i32>(overlays_.size()) - 1; j >= 0; --j) {
-        auto* w = overlays_[j].widget;
-        if (!w) continue;
-        Widget* deepest = widget_registry_.Get(w->HitTest(evt.position));
-        if (deepest) {
+        wid w = overlays_[j].widget;
+        if (!w.valid()) continue;
+        wid deepest = HitTest(widget_registry_, w, evt.position);
+        if (deepest.valid()) {
           hit = deepest;
           break;
         }
       }
 
-      if (hit) {
+      if (hit.valid()) {
         // Dispatch click to overlay widget, then consume the event.
-        hit->OnClick();
+        ClickWidget(widget_registry_, hit);
         for (u32 k = i + 1; k < queue.button_count; ++k)
           queue.button_events[k - 1] = queue.button_events[k];
         --queue.button_count;
@@ -326,7 +326,7 @@ void UIContext::PumpInput() {
         auto snap = overlays_;
         overlays_.clear();
         for (auto& entry : snap) {
-          if (entry.widget) entry.widget->OnDismiss();
+          if (entry.widget.valid()) DismissWidget(widget_registry_, entry.widget);
         }
         for (u32 k = i + 1; k < queue.button_count; ++k)
           queue.button_events[k - 1] = queue.button_events[k];
@@ -336,7 +336,7 @@ void UIContext::PumpInput() {
     }
   }
 
-  if (root_) input_.Process(root_);
+  if (root_.valid()) input_.Process(root_);
 }
 
 void UIContext::Update() {
@@ -362,24 +362,25 @@ void UIContext::Update() {
   UpdateTooltip();
 
   // Update animations
-  if (root_) {
+  if (root_.valid()) {
     animator_.Update(
         now,
         [](u32 widget_id, const Style& animated_style, void* user_data) {
-          auto* root = static_cast<Widget*>(user_data);
-          Widget* w = FindWidgetById(root, widget_id);
-          if (w) w->SetAnimationStyle(animated_style);
+          auto* ctx = static_cast<UIContext*>(user_data);
+          wid w = FindWidgetById(ctx->root_, widget_id);
+          if (w.valid())
+            SetAnimationStyle(ctx->widget_registry_, w, animated_style);
         },
-        root_,
+        this,
         [](u32 widget_id, void* user_data) {
-          auto* root = static_cast<Widget*>(user_data);
-          Widget* w = FindWidgetById(root, widget_id);
-          if (w) w->ClearAnimationStyle();
+          auto* ctx = static_cast<UIContext*>(user_data);
+          wid w = FindWidgetById(ctx->root_, widget_id);
+          if (w.valid()) ClearAnimationStyle(ctx->widget_registry_, w);
         });
   }
 
   // Update widgets (scroll momentum, etc.)
-  if (root_) UpdateWidgetTree(root_->handle(), dt_);
+  if (root_.valid()) UpdateWidgetTree(root_, dt_);
 
   // Update all animations
   auto update_anim = [dt = dt_](auto* anim) {
@@ -415,12 +416,12 @@ void UIContext::Update() {
 
   // --- Text shaping and atlas management (BEFORE render pass) ---
   text_engine_.BeginFrame();
-  if (root_) MeasureWidgetTree(root_->handle());
+  if (root_.valid()) MeasureWidgetTree(root_);
   for (auto& pass : offscreen_queue_) {
-    if (pass.root) MeasureWidgetTree(pass.root->handle());
+    if (pass.root.valid()) MeasureWidgetTree(pass.root);
   }
   for (auto& overlay : overlays_) {
-    if (overlay.widget) MeasureWidgetTree(overlay.widget->handle());
+    if (overlay.widget.valid()) MeasureWidgetTree(overlay.widget);
   }
   text_engine_.FlushAtlas();
 
@@ -436,10 +437,9 @@ void UIContext::Update() {
       if (!rhi_.BeginOffscreen(pass.target, pass.clear_color)) continue;
 
       renderer_.BeginFrame();
-      if (pass.root) {
-        ComputeWidgetLayout(pass.root->handle(), vp, layout_engine_,
-                            layout_nodes_);
-        PaintWidgetTree(pass.root->handle(), renderer_);
+      if (pass.root.valid()) {
+        ComputeWidgetLayout(pass.root, vp, layout_engine_, layout_nodes_);
+        PaintWidgetTree(pass.root, renderer_);
       }
       text_engine_.FlushAtlas();
       renderer_.EndFrame();
@@ -455,19 +455,18 @@ void UIContext::Update() {
 
   if (on_paint_cb_) {
     on_paint_cb_(renderer_, &rhi_);
-  } else if (root_) {
+  } else if (root_.valid()) {
     LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-    ComputeWidgetLayout(root_->handle(), vp, layout_engine_, layout_nodes_);
-    PaintWidgetTree(root_->handle(), renderer_);
+    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
+    PaintWidgetTree(root_, renderer_);
   }
 
   // Paint overlays on top of everything
   for (auto& overlay : overlays_) {
-    if (overlay.widget) {
+    if (overlay.widget.valid()) {
       LayoutViewport ovp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-      ComputeWidgetLayout(overlay.widget->handle(), ovp, layout_engine_,
-                          layout_nodes_);
-      PaintWidgetTree(overlay.widget->handle(), renderer_);
+      ComputeWidgetLayout(overlay.widget, ovp, layout_engine_, layout_nodes_);
+      PaintWidgetTree(overlay.widget, renderer_);
     }
   }
 
@@ -501,42 +500,42 @@ const DrawData& UIContext::RenderDrawData() {
 
   // Animations + per-widget update (texture-backed anims (lottie/video) are not
   // produced in draw-data mode, since the host owns the GPU).
-  if (root_) {
+  if (root_.valid()) {
     animator_.Update(
         now,
         [](u32 widget_id, const Style& animated_style, void* user_data) {
-          auto* root = static_cast<Widget*>(user_data);
-          Widget* w = FindWidgetById(root, widget_id);
-          if (w) w->SetAnimationStyle(animated_style);
+          auto* ctx = static_cast<UIContext*>(user_data);
+          wid w = FindWidgetById(ctx->root_, widget_id);
+          if (w.valid())
+            SetAnimationStyle(ctx->widget_registry_, w, animated_style);
         },
-        root_,
+        this,
         [](u32 widget_id, void* user_data) {
-          auto* root = static_cast<Widget*>(user_data);
-          Widget* w = FindWidgetById(root, widget_id);
-          if (w) w->ClearAnimationStyle();
+          auto* ctx = static_cast<UIContext*>(user_data);
+          wid w = FindWidgetById(ctx->root_, widget_id);
+          if (w.valid()) ClearAnimationStyle(ctx->widget_registry_, w);
         });
-    UpdateWidgetTree(root_->handle(), dt_);
+    UpdateWidgetTree(root_, dt_);
   }
 
   // Text shaping (no GPU upload: the host uploads from text_engine().)
   text_engine_.BeginFrame();
-  if (root_) MeasureWidgetTree(root_->handle());
+  if (root_.valid()) MeasureWidgetTree(root_);
   for (auto& overlay : overlays_) {
-    if (overlay.widget) MeasureWidgetTree(overlay.widget->handle());
+    if (overlay.widget.valid()) MeasureWidgetTree(overlay.widget);
   }
 
   // Paint into the renderer; collect as a draw list instead of submitting.
   renderer_.BeginFrame();
   LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-  if (root_) {
-    ComputeWidgetLayout(root_->handle(), vp, layout_engine_, layout_nodes_);
-    PaintWidgetTree(root_->handle(), renderer_);
+  if (root_.valid()) {
+    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
+    PaintWidgetTree(root_, renderer_);
   }
   for (auto& overlay : overlays_) {
-    if (overlay.widget) {
-      ComputeWidgetLayout(overlay.widget->handle(), vp, layout_engine_,
-                          layout_nodes_);
-      PaintWidgetTree(overlay.widget->handle(), renderer_);
+    if (overlay.widget.valid()) {
+      ComputeWidgetLayout(overlay.widget, vp, layout_engine_, layout_nodes_);
+      PaintWidgetTree(overlay.widget, renderer_);
     }
   }
   DrawTooltip();
@@ -546,12 +545,15 @@ const DrawData& UIContext::RenderDrawData() {
 }
 
 void UIContext::UpdateTooltip() {
-  Widget* hovered = input_.hovered_widget();
+  wid hovered = input_.hovered_widget();
 
   // Find the nearest ancestor with a tooltip (walk up the tree)
-  Widget* tip_target = hovered;
-  while (tip_target && tip_target->tooltip().empty())
-    tip_target = tip_target->parent_ptr();
+  wid tip_target = hovered;
+  while (tip_target.valid() &&
+         TooltipText(widget_registry_, tip_target).empty()) {
+    Hierarchy* h = widget_registry_.Get<Hierarchy>(tip_target);
+    tip_target = h ? h->parent : kNullWidget;
+  }
 
   if (tip_target != tooltip_target_) {
     tooltip_target_ = tip_target;
@@ -560,18 +562,17 @@ void UIContext::UpdateTooltip() {
   }
 
   // Show tooltip after delay: we set a flag; actual drawing happens in Update()
-  if (tooltip_target_ && !tooltip_visible_ &&
+  if (tooltip_target_.valid() && !tooltip_visible_ &&
       (last_time_ - tooltip_hover_start_) >= kTooltipDelay) {
     tooltip_visible_ = true;
   }
 }
 
 void UIContext::DrawTooltip() {
-  if (!tooltip_visible_ || !tooltip_target_ ||
-      tooltip_target_->tooltip().empty())
-    return;
+  if (!tooltip_visible_ || !tooltip_target_.valid()) return;
+  const String& tip = TooltipText(widget_registry_, tooltip_target_);
+  if (tip.empty()) return;
 
-  const auto& tip = tooltip_target_->tooltip();
   FontHandle fh = default_font_;
   if (fh == kInvalidFont) return;
 
@@ -584,7 +585,7 @@ void UIContext::DrawTooltip() {
   f32 w = run.total_advance + pad_x * 2.0f;
   f32 h = run.line_height + pad_y * 2.0f;
 
-  Rect target_rect = tooltip_target_->rect();
+  Rect target_rect = widget_registry_.Get<Transform>(tooltip_target_)->rect;
   f32 x = target_rect.x;
   f32 y = target_rect.y + target_rect.h + 6.0f;
 
@@ -611,16 +612,14 @@ void UIContext::Shutdown() {
   if (!initialized_) return;
 
   input_.ResetState();
-  tooltip_target_ = nullptr;
+  tooltip_target_ = kNullWidget;
   tooltip_visible_ = false;
   overlays_.clear();
   script_.ClearWidgetRegistry();
 
-  if (owns_root_) {
-    delete root_;
-    root_ = nullptr;
-    owns_root_ = false;
-  }
+  if (owns_root_ && root_.valid()) DestroyWidget(widget_registry_, root_);
+  root_ = kNullWidget;
+  owns_root_ = false;
 
   for (auto* anim : vector_anims_) delete anim;
   vector_anims_.clear();
@@ -698,19 +697,19 @@ RHITextureHandle UIContext::CreateRenderTarget(u32 width, u32 height) {
   return rhi_.CreateRenderTarget(width, height);
 }
 
-void UIContext::QueueOffscreen(RHITextureHandle target, Widget* root,
+void UIContext::QueueOffscreen(RHITextureHandle target, wid root,
                                Color clear_color) {
   offscreen_queue_.push_back({target, root, clear_color});
 }
 
-void UIContext::ShowOverlay(Widget* widget, Vec2 position) {
+void UIContext::ShowOverlay(wid widget, Vec2 position) {
   // Remove if already shown
   HideOverlay(widget);
-  widget->SetContext(&widget_ctx_);
+  SetContext(widget_registry_, widget, &widget_ctx_);
   overlays_.push_back({widget, position});
 }
 
-void UIContext::HideOverlay(Widget* widget) {
+void UIContext::HideOverlay(wid widget) {
   overlays_.erase(std::remove_if(overlays_.begin(), overlays_.end(),
                                  [widget](const OverlayEntry& e) {
                                    return e.widget == widget;
@@ -732,22 +731,24 @@ void UIContext::SetTheme(const Theme& theme) {
   // A full hot-reload would require re-parsing and rebuilding the tree.
 }
 
-Widget* UIContext::FindWidgetPtr(const char* name) const {
+wid UIContext::FindWidgetEntity(const char* name) const {
   if (widget_cache_dirty_) RebuildWidgetCache();
   auto it = widget_cache_.find(name);
   if (it != widget_cache_.end()) return it->second;
-  return nullptr;
+  return kNullWidget;
 }
 
 WidgetId UIContext::FindWidget(const char* name) const {
-  Widget* w = FindWidgetPtr(name);
-  return w ? w->handle() : kNullWidget;
+  return FindWidgetEntity(name);
 }
 
-void UIContext::CacheWidgetTree(Widget* w, HashMap<String, Widget*>& cache) {
-  if (!w) return;
-  if (!w->name().empty()) cache[w->name()] = w;
-  for (auto* child : w->child_ptrs()) CacheWidgetTree(child, cache);
+void UIContext::CacheWidgetTree(wid w, HashMap<String, wid>& cache) {
+  if (!w.valid()) return;
+  World& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(w);
+  if (n && !n->name.empty()) cache[n->name] = w;
+  if (Hierarchy* h = world.Get<Hierarchy>(w))
+    for (wid child : h->children) CacheWidgetTree(child, cache);
 }
 
 void UIContext::RebuildWidgetCache() const {

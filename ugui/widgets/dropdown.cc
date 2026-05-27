@@ -11,73 +11,73 @@
 namespace ugui {
 namespace {
 
-TextEngine* text_engine(const Widget& w) {
-  return w.context() ? w.context()->text_engine : nullptr;
+TextEngine* text_engine(WidgetRegistry& world, wid e) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->text_engine : nullptr;
 }
 
-FontHandle effective_font(const Widget& w, const DropdownContent& c) {
+FontHandle effective_font(WidgetRegistry& world, wid e,
+                          const DropdownContent& c) {
   if (c.font != kInvalidFont) return c.font;
-  return w.context() ? w.context()->default_font : kInvalidFont;
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->default_font : kInvalidFont;
 }
 
-WidgetId DropdownHitTest(WidgetRegistry& world, Widget& w, Vec2 point) {
-  DropdownContent* c = world.Get<DropdownContent>(w.handle());
+WidgetId DropdownHitTest(WidgetRegistry& world, wid e, Vec2 point) {
+  DropdownContent* c = world.Get<DropdownContent>(e);
 
   // When open, expand the hit area to include the option list below.
   if (c && c->open && !c->options.empty()) {
-    Style s = w.ComputedStyle();
-    s.Scale(w.ui_scale());
+    Style s = ComputedStyle(world, e);
+    s.Scale(UiScale(world, e));
     f32 row_height = s.font_size * 1.5f;
     f32 list_h = row_height * static_cast<f32>(c->options.size());
-    Rect r = w.rect();
+    Rect r = world.Get<Transform>(e)->rect;
     Rect expanded = {r.x, r.y, r.w, r.h + list_h};
-    if (expanded.contains(point)) return w.handle();
+    if (expanded.contains(point)) return e;
   }
 
-  // Default hit test (replicates Widget::HitTest's non-vtable path; calling the
-  // base directly would re-enter this vtable entry and recurse forever).
-  if (!w.rect().contains(point)) return kNullWidget;
-  const Vector<wid>& children = w.children();
+  // Default hit test (replicates HitTest's non-vtable path; calling HitTest on
+  // `e` directly would re-enter this vtable entry and recurse forever).
+  if (!world.Get<Transform>(e)->rect.contains(point)) return kNullWidget;
+  const Vector<wid>& children = world.Get<Hierarchy>(e)->children;
   for (auto it = children.rbegin(); it != children.rend(); ++it) {
-    if (Widget* child = world.Get(*it)) {
-      wid hit = child->HitTest(point);
-      if (hit.valid()) return hit;
-    }
+    wid hit = HitTest(world, *it, point);
+    if (hit.valid()) return hit;
   }
-  return w.handle();
+  return e;
 }
 
-bool DropdownClick(WidgetRegistry& world, Widget& w) {
-  DropdownContent* c = world.Get<DropdownContent>(w.handle());
+bool DropdownClick(WidgetRegistry& world, wid e) {
+  DropdownContent* c = world.Get<DropdownContent>(e);
   if (!c) return false;
   // Toggle: open when closed, close when clicking the header while open.
   c->open = !c->open;
-  w.MarkPaintDirty();
+  MarkPaintDirty(world, e);
   return true;
 }
 
-void DropdownUpdate(WidgetRegistry& world, Widget& w, f64) {
-  DropdownContent* c = world.Get<DropdownContent>(w.handle());
-  if (!c || !c->open || c->options.empty() || !w.context() ||
-      !w.context()->platform)
-    return;
+void DropdownUpdate(WidgetRegistry& world, wid e, f64) {
+  DropdownContent* c = world.Get<DropdownContent>(e);
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  if (!c || !c->open || c->options.empty() || !ctx || !ctx->platform) return;
 
-  auto& queue = w.context()->platform->input_queue();
+  auto& queue = ctx->platform->input_queue();
 
   // Handle the first mouse press while open: pick a row, then close.
   for (u32 i = 0; i < queue.button_count; ++i) {
     auto& evt = queue.button_events[i];
     if (!evt.pressed) continue;
 
-    Style s = w.ComputedStyle();
-    s.Scale(w.ui_scale());
+    Style s = ComputedStyle(world, e);
+    s.Scale(UiScale(world, e));
     f32 row_height = s.font_size * 1.5f;
-    Rect r = w.rect();
+    Rect r = world.Get<Transform>(e)->rect;
     f32 list_top = r.y + r.h;
     f32 list_bottom =
         list_top + row_height * static_cast<f32>(c->options.size());
 
-    Vec2 pos = w.InputToLayoutPoint(evt.position);
+    Vec2 pos = InputToLayoutPoint(world, e, evt.position);
     if (pos.y >= list_top && pos.y < list_bottom && pos.x >= r.x &&
         pos.x <= r.x + r.w) {
       i32 idx = static_cast<i32>((pos.y - list_top) / row_height);
@@ -88,18 +88,18 @@ void DropdownUpdate(WidgetRegistry& world, Widget& w, f64) {
     }
     // Close on any click while open.
     c->open = false;
-    w.MarkPaintDirty();
+    MarkPaintDirty(world, e);
     return;
   }
 }
 
-void DropdownMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void DropdownMeasure(WidgetRegistry& world, wid e, f32& out_width,
                      f32& out_height) {
-  DropdownContent* c = world.Get<DropdownContent>(w.handle());
-  const Style& st = w.style();
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
-  f32 sc = w.ui_scale();
+  DropdownContent* c = world.Get<DropdownContent>(e);
+  const Style& st = world.Get<StyleC>(e)->style;
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
+  f32 sc = UiScale(world, e);
   f32 font_size = st.font_size * sc;
   f32 letter_sp = st.letter_spacing * sc;
   constexpr f32 kChevronWidth = 24.0f;
@@ -128,28 +128,29 @@ void DropdownMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
   out_height = font_size * 1.5f + st.padding.vertical();
 }
 
-void DropdownDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  // The base Widget::OnPaint already drew background / shadow / border.
-  DropdownContent* c = world.Get<DropdownContent>(w.handle());
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+void DropdownDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  // PaintWidget already drew background / shadow / border.
+  DropdownContent* c = world.Get<DropdownContent>(e);
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
   if (!c || !te || fh == kInvalidFont) return;
 
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
   f32 font_size = s.font_size;
   f32 row_height = font_size * 1.5f;
   constexpr f32 kChevronWidth = 24.0f;
   constexpr f32 kHPadding = 8.0f;
 
-  Rect rect = w.rect();
-  Rect content = w.content_rect();
+  Rect rect = world.Get<Transform>(e)->rect;
+  Rect content = world.Get<Transform>(e)->content_rect;
 
   // Determine hover index from mouse position when open.
-  if (c->open && w.context() && w.context()->platform) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  if (c->open && ctx && ctx->platform) {
     Vec2 mouse =
-        w.InputToLayoutPoint(w.context()->platform->input_queue().mouse_pos);
+        InputToLayoutPoint(world, e, ctx->platform->input_queue().mouse_pos);
     f32 list_top = rect.y + rect.h;
     f32 list_bottom =
         list_top + row_height * static_cast<f32>(c->options.size());
@@ -273,22 +274,27 @@ WidgetVTable DropdownVTable() {
   return vt;
 }
 
-Widget* CreateDropdown(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kDropdown);
-  WidgetRegistry::Active()->Add<DropdownContent>(w->handle(), DropdownContent{});
-  return w;
+wid CreateDropdown(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kDropdown;
+  world.Add<DropdownContent>(e, DropdownContent{});
+  return e;
 }
 
-void SetDropdownOptions(Widget* w, const Vector<String>& options) {
-  if (!w || w->kind() != WidgetKind::kDropdown || !w->registry()) return;
-  w->registry()->GetOrAdd<DropdownContent>(w->handle()).options = options;
-  w->MarkDirty();
+void SetDropdownOptions(wid e, const Vector<String>& options) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kDropdown) return;
+  world.GetOrAdd<DropdownContent>(e).options = options;
+  MarkDirty(world, e);
 }
 
-void SetDropdownSelected(Widget* w, i32 index) {
-  if (!w || w->kind() != WidgetKind::kDropdown || !w->registry()) return;
-  DropdownContent& c = w->registry()->GetOrAdd<DropdownContent>(w->handle());
+void SetDropdownSelected(wid e, i32 index) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kDropdown) return;
+  DropdownContent& c = world.GetOrAdd<DropdownContent>(e);
   if (c.options.empty()) {
     c.selected = -1;
   } else {
@@ -296,30 +302,33 @@ void SetDropdownSelected(Widget* w, i32 index) {
         Clamp(static_cast<f32>(index), 0.0f,
               static_cast<f32>(static_cast<i32>(c.options.size()) - 1)));
   }
-  w->MarkDirty();
+  MarkDirty(world, e);
 }
 
-i32 DropdownSelected(const Widget* w) {
-  if (!w || w->kind() != WidgetKind::kDropdown || !w->registry()) return -1;
-  DropdownContent* c =
-      w->registry()->Get<DropdownContent>(const_cast<Widget*>(w)->handle());
+i32 DropdownSelected(wid e) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kDropdown) return -1;
+  DropdownContent* c = world.Get<DropdownContent>(e);
   return c ? c->selected : -1;
 }
 
-String DropdownSelectedText(const Widget* w) {
-  if (!w || w->kind() != WidgetKind::kDropdown || !w->registry()) return "";
-  DropdownContent* c =
-      w->registry()->Get<DropdownContent>(const_cast<Widget*>(w)->handle());
+String DropdownSelectedText(wid e) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kDropdown) return "";
+  DropdownContent* c = world.Get<DropdownContent>(e);
   if (!c || c->selected < 0 ||
       c->selected >= static_cast<i32>(c->options.size()))
     return "";
   return c->options[c->selected];
 }
 
-void SetDropdownChange(Widget* w, Function<void(i32, const String&)> handler) {
-  if (!w || w->kind() != WidgetKind::kDropdown || !w->registry()) return;
-  w->registry()->GetOrAdd<DropdownContent>(w->handle()).on_change =
-      std::move(handler);
+void SetDropdownChange(wid e, Function<void(i32, const String&)> handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kDropdown) return;
+  world.GetOrAdd<DropdownContent>(e).on_change = std::move(handler);
 }
 
 }  // namespace ugui

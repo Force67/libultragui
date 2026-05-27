@@ -37,40 +37,37 @@ struct TextInputContent {
 /// for text input widgets.
 WidgetVTable TextInputVTable();
 
-/// Create a text input entity: a generic Widget tagged kTextInput with a
+/// Create a text input entity: a generic widget tagged kTextInput with a
 /// TextInputContent component.
-Widget* CreateTextInput(u32 id);
+wid CreateTextInput(u32 id);
 
 /// Set the text value (caret moves to the end, selection collapses). No-op if
-/// `w` is null or not a text input. Replacement for the old TextInput::set_text.
-void SetTextInputValue(Widget* w, const String& text);
+/// `e` is not a text input. Replacement for the old TextInput::set_text.
+void SetTextInputValue(wid e, const String& text);
 
-/// The current text value, or an empty string if `w` is null or not a text
-/// input. Replacement for the old TextInput::text().
-String TextInputValue(const Widget* w);
+/// The current text value, or an empty string if `e` is not a text input.
+String TextInputValue(wid e);
 
-/// Set the placeholder shown when the text is empty. No-op if `w` is null or not
-/// a text input.
-void SetTextInputPlaceholder(Widget* w, const String& placeholder);
+/// Set the placeholder shown when the text is empty. No-op if `e` is not a text
+/// input.
+void SetTextInputPlaceholder(wid e, const String& placeholder);
 
-/// Override the font (kInvalidFont -> context default). No-op if `w` is null or
-/// not a text input.
-void SetTextInputFont(Widget* w, FontHandle font);
+/// Override the font (kInvalidFont -> context default). No-op if `e` is not a
+/// text input.
+void SetTextInputFont(wid e, FontHandle font);
 
 /// Fired on every edit with the new text.
-void SetTextInputChange(Widget* w, TextInputContent::ChangeHandler handler);
+void SetTextInputChange(wid e, TextInputContent::ChangeHandler handler);
 
 /// Fired when the user presses Enter / Keypad Enter, with the current text.
-void SetTextInputSubmit(Widget* w, TextInputContent::SubmitHandler handler);
+void SetTextInputSubmit(wid e, TextInputContent::SubmitHandler handler);
 
 /// Fired when the user presses Escape.
-void SetTextInputCancel(Widget* w, TextInputContent::CancelHandler handler);
+void SetTextInputCancel(wid e, TextInputContent::CancelHandler handler);
 
 /// Fired on Up / Down; the handler returns the replacement text.
-void SetTextInputHistoryPrev(Widget* w,
-                             TextInputContent::HistoryHandler handler);
-void SetTextInputHistoryNext(Widget* w,
-                             TextInputContent::HistoryHandler handler);
+void SetTextInputHistoryPrev(wid e, TextInputContent::HistoryHandler handler);
+void SetTextInputHistoryNext(wid e, TextInputContent::HistoryHandler handler);
 
 }  // namespace ugui
 

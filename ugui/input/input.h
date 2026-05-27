@@ -8,9 +8,7 @@
 
 namespace ugui {
 
-class Widget;
 class Platform;
-class WidgetRegistry;
 
 /// Routes input events from an InputQueue to the widget tree.
 /// Manages hover, press, and focus state. Platform-agnostic.
@@ -20,14 +18,14 @@ class InputRouter {
 
   /// Process all pending input from the queue. Call once per frame.
   /// Returns true if any input was consumed.
-  bool Process(Widget* root);
+  bool Process(wid root);
 
   /// Clear cached hover/press/focus state. Call when replacing the widget tree.
   void ResetState();
 
-  Widget* hovered_widget() const { return Resolve(hovered_); }
-  Widget* focused_widget() const { return Resolve(focused_); }
-  Widget* pressed_widget() const { return Resolve(pressed_); }
+  wid hovered_widget() const { return hovered_; }
+  wid focused_widget() const { return focused_; }
+  wid pressed_widget() const { return pressed_; }
   /// True between OnDragStart and OnDragEnd. The application can use
   /// this to defer destructive widget-tree rebuilds while a drag is
   /// in flight (otherwise the drag target gets destroyed mid-move).
@@ -39,20 +37,20 @@ class InputRouter {
   /// - otherwise stationary cursors lose their hover styling until
   /// the user wiggles the mouse, which appears as flicker on
   /// FPS/animation-driven dirty rebuilds.
-  void RefreshHover(Widget* root);
+  void RefreshHover(wid root);
 
-  void set_focus(Widget* widget);
+  void set_focus(wid widget);
   /// Set the hovered widget directly. Mirrors set_focus - used by
   /// applications that destroy + rebuild the widget tree on a dirty
   /// flag and want hover state to survive without waiting for the
   /// next mouse-move event. Updates the kHovered widget-state bit on
   /// both the old and new widgets and updates the cursor.
-  void set_hover(Widget* widget);
+  void set_hover(wid widget);
   Vec2 mouse_position() const { return mouse_pos_; }
 
   // Event callbacks (optional, for the application layer)
-  using ClickHandler = Function<void(Widget*, MouseButton)>;
-  using HoverHandler = Function<void(Widget*, bool)>;
+  using ClickHandler = Function<void(wid, MouseButton)>;
+  using HoverHandler = Function<void(wid, bool)>;
   void set_on_click(ClickHandler handler) { on_click_ = std::move(handler); }
   void set_on_hover(HoverHandler handler) { on_hover_ = std::move(handler); }
 
@@ -74,7 +72,6 @@ class InputRouter {
 
  private:
   Platform* platform_ = nullptr;
-  WidgetRegistry* registry_ = nullptr;  // resolves the handles below
 
   // Persistent widget references are stored as generation-checked handles, not
   // raw pointers, so a tree rebuild that destroys these widgets leaves the
@@ -86,8 +83,6 @@ class InputRouter {
   /// ancestor if the press landed on a drag handle (see input.cc).
   WidgetId drag_target_;
 
-  /// Resolve a stored handle to a live widget (or nullptr).
-  Widget* Resolve(WidgetId id) const;
   Vec2 mouse_pos_ = Vec2::Zero();
   Vec2 drag_start_ = Vec2::Zero();
   Vec2 drag_prev_ = Vec2::Zero();
@@ -114,8 +109,8 @@ class InputRouter {
   HoverHandler on_hover_;
   GamepadBackHandler on_gamepad_back_;
 
-  void ProcessGamepadNavigation(Widget* root, f32 delta_time);
-  void NavigateFocus(Widget* root, i8 dir_x, i8 dir_y);
+  void ProcessGamepadNavigation(wid root, f32 delta_time);
+  void NavigateFocus(wid root, i8 dir_x, i8 dir_y);
 };
 
 }  // namespace ugui

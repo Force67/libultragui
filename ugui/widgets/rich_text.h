@@ -19,7 +19,7 @@ struct TextSpan {
 
 /// Data for a rich-text widget (WidgetKind::kRichText): the inline spans and an
 /// optional font override. Behaviour (inline layout with wrapping) lives in
-/// RichTextVTable(); a rich-text widget is a generic Widget carrying this
+/// RichTextVTable(); a rich-text widget is a generic widget carrying this
 /// component.
 struct RichTextContent {
   Vector<TextSpan> spans;
@@ -29,25 +29,24 @@ struct RichTextContent {
 /// Behaviour table (draw + measure) for rich-text widgets.
 WidgetVTable RichTextVTable();
 
-/// Create a rich-text entity: a generic Widget tagged kRichText with a
+/// Create a rich-text entity: a generic widget tagged kRichText with a
 /// RichTextContent component.
-Widget* CreateRichText(u32 id);
+wid CreateRichText(u32 id);
 
-/// Replace all spans of a rich-text widget. No-op if `w` is null or not a
+/// Replace all spans of a rich-text widget. No-op if `e` is not a rich-text
+/// widget.
+void SetRichTextSpans(wid e, const Vector<TextSpan>& spans);
+
+/// Append a span to a rich-text widget. No-op if `e` is not a rich-text widget.
+void AddRichTextSpan(wid e, const TextSpan& span);
+
+/// Remove all spans from a rich-text widget. No-op if `e` is not a rich-text
+/// widget.
+void ClearRichTextSpans(wid e);
+
+/// Set the font override used to shape every span. No-op if `e` is not a
 /// rich-text widget.
-void SetRichTextSpans(Widget* w, const Vector<TextSpan>& spans);
-
-/// Append a span to a rich-text widget. No-op if `w` is null or not a
-/// rich-text widget.
-void AddRichTextSpan(Widget* w, const TextSpan& span);
-
-/// Remove all spans from a rich-text widget. No-op if `w` is null or not a
-/// rich-text widget.
-void ClearRichTextSpans(Widget* w);
-
-/// Set the font override used to shape every span. No-op if `w` is null or not
-/// a rich-text widget.
-void SetRichTextFont(Widget* w, FontHandle font);
+void SetRichTextFont(wid e, FontHandle font);
 
 }  // namespace ugui
 

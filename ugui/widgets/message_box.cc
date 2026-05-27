@@ -4,6 +4,7 @@
 #include <ugui/widgets/message_box.h>
 #include <ugui/widgets/panel.h>
 #include <ugui/widgets/text.h>
+#include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
 
 #include <utility>
@@ -11,15 +12,15 @@
 namespace ugui {
 namespace {
 
-MessageBoxContent* content(Widget* w) {
-  if (!w || w->kind() != WidgetKind::kMessageBox || !w->registry())
-    return nullptr;
-  return w->registry()->Get<MessageBoxContent>(w->handle());
+MessageBoxContent* content(WidgetRegistry& world, wid e) {
+  WidgetNode* node = world.Get<WidgetNode>(e);
+  if (!node || node->kind != WidgetKind::kMessageBox) return nullptr;
+  return world.Get<MessageBoxContent>(e);
 }
 
-bool MessageBoxKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 /*mods*/) {
+bool MessageBoxKeyDown(WidgetRegistry& world, wid e, i32 key, i32 /*mods*/) {
   if (key == 256) {  // GLFW_KEY_ESCAPE
-    MessageBoxContent* c = world.Get<MessageBoxContent>(w.handle());
+    MessageBoxContent* c = world.Get<MessageBoxContent>(e);
     if (c && c->on_result) c->on_result(MessageBoxResult::kDismissed);
     return true;
   }
@@ -34,18 +35,19 @@ WidgetVTable MessageBoxVTable() {
   return vt;
 }
 
-Widget* CreateMessageBox(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kMessageBox);
-  WidgetRegistry* world = WidgetRegistry::Active();
-  world->Add<ModalContent>(w->handle(), ModalContent{});
-  world->Add<MessageBoxContent>(w->handle(), MessageBoxContent{});
-  return w;
+wid CreateMessageBox(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kMessageBox;
+  world.Add<ModalContent>(e, ModalContent{});
+  world.Add<MessageBoxContent>(e, MessageBoxContent{});
+  return e;
 }
 
-void SetupMessageBox(Widget* w, const char* title, const char* message,
+void SetupMessageBox(wid e, const char* title, const char* message,
                      MessageBoxButtons buttons) {
-  MessageBoxContent* c = content(w);
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  MessageBoxContent* c = content(world, e);
   if (!c) return;
   c->buttons = buttons;
 
@@ -64,41 +66,41 @@ void SetupMessageBox(Widget* w, const char* title, const char* message,
       .blur = 24,
       .spread = 4,
   };
-  w->set_style(ds);
+  SetStyle(world, e, ds);
 
   // Title.
-  auto* titleWidget = CreateText(0);
-  SetText(titleWidget, title);
+  wid t = CreateText(0);
+  SetText(t, title);
   Style ts;
   ts.font_size = 18;
   ts.font_weight = FontWeight::kBold;
   ts.text_color = Color::White();
-  titleWidget->set_style(ts);
-  w->AddChild(titleWidget);
+  SetStyle(world, t, ts);
+  AddChild(world, e, t);
 
   // Message.
-  auto* messageWidget = CreateText(0);
-  SetText(messageWidget, message);
+  wid m = CreateText(0);
+  SetText(m, message);
   Style ms;
   ms.font_size = 14;
   ms.text_color = Color::FromRgba8(200, 200, 210, 255);
-  messageWidget->set_style(ms);
-  w->AddChild(messageWidget);
+  SetStyle(world, m, ms);
+  AddChild(world, e, m);
 
   // Button row.
-  auto* buttonRow = CreatePanel(0);
+  wid row = CreatePanel(0);
   Style rs;
   rs.flex_direction = FlexDirection::kRow;
   rs.justify_content = JustifyContent::kEnd;
   rs.gap = 8;
   rs.margin.top = 8;
-  buttonRow->set_style(rs);
+  SetStyle(world, row, rs);
 
-  WidgetId self = w->handle();
+  wid self = e;
   auto MakeBtn = [&](const char* label, MessageBoxResult result, bool primary) {
-    auto* btn = CreateButton(0);
+    wid btn = CreateButton(0);
     SetButtonLabel(btn, label);
-    btn->set_tab_index(0);
+    world.Get<WidgetNode>(btn)->tab_index = 0;
     Style bs;
     bs.padding = EdgeInsets(10, 20);
     bs.corner_radius = 4;
@@ -113,17 +115,18 @@ void SetupMessageBox(Widget* w, const char* title, const char* message,
       bs.border_color = Color::FromRgba8(100, 100, 120, 255);
       bs.border_width = 1;
     }
-    btn->set_style(bs);
+    SetStyle(world, btn, bs);
     Style hover = bs;
     hover.background =
         primary ? Color::FromHex(0x60a5fa) : Color::FromRgba8(80, 80, 100, 255);
-    btn->AddStateOverride(WidgetState::kHovered, hover, StyleMask::kBackground);
+    AddStateOverride(world, btn, WidgetState::kHovered, hover,
+                     StyleMask::kBackground);
     SetButtonClick(btn, [self, result]() {
       MessageBoxContent* mc =
           WidgetRegistry::Active()->Get<MessageBoxContent>(self);
       if (mc && mc->on_result) mc->on_result(result);
     });
-    buttonRow->AddChild(btn);
+    AddChild(world, row, btn);
   };
 
   switch (buttons) {
@@ -145,19 +148,23 @@ void SetupMessageBox(Widget* w, const char* title, const char* message,
       break;
   }
 
-  w->AddChild(buttonRow);
+  AddChild(world, e, row);
 }
 
-void SetMessageBoxResult(Widget* w, Function<void(MessageBoxResult)> handler) {
-  if (MessageBoxContent* c = content(w)) c->on_result = std::move(handler);
+void SetMessageBoxResult(wid e, Function<void(MessageBoxResult)> handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (MessageBoxContent* c = content(world, e))
+    c->on_result = std::move(handler);
 }
 
-void ShowMessageBox(Widget* w, UIContext* ctx) {
-  if (!w || w->kind() != WidgetKind::kMessageBox || !ctx) return;
+void ShowMessageBox(wid e, UIContext* ctx) {
+  if (!ctx) return;
+  WidgetRegistry& world = ctx->world();
+  if (!content(world, e)) return;
 
   // Center the dialog: measure, then offset via margin.
   f32 mw = 0, mh = 0;
-  w->Measure(mw, mh);
+  MeasureWidget(world, e, mw, mh);
 
   Vec2 vp = ctx->platform()->window_size();
   f32 left = (vp.x - mw) * 0.5f;
@@ -165,18 +172,18 @@ void ShowMessageBox(Widget* w, UIContext* ctx) {
   if (left < 0) left = 0;
   if (top < 0) top = 0;
 
-  Style s = w->style();
-  s.margin = EdgeInsets(top, 0, 0, left);
-  w->set_style(s);
+  if (StyleC* sc = world.Get<StyleC>(e))
+    sc->style.margin = EdgeInsets(top, 0, 0, left);
 
-  ShowModal(w, ctx);
+  ShowModal(e, ctx);
 }
 
-void DismissMessageBox(Widget* w, UIContext* ctx, MessageBoxResult result) {
-  if (!w || w->kind() != WidgetKind::kMessageBox || !ctx) return;
-  if (MessageBoxContent* c = content(w))
+void DismissMessageBox(wid e, UIContext* ctx, MessageBoxResult result) {
+  if (!ctx) return;
+  WidgetRegistry& world = ctx->world();
+  if (MessageBoxContent* c = content(world, e))
     if (c->on_result) c->on_result(result);
-  HideModal(w, ctx);
+  HideModal(e, ctx);
 }
 
 }  // namespace ugui

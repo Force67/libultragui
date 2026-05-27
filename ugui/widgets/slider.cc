@@ -8,13 +8,13 @@ namespace ugui {
 namespace {
 
 // Map the current mouse position onto the slider track and, if the value
-// changed, store it and fire on_change. Used by both the initial click and the
-// per-frame drag update.
-void UpdateValueFromMouse(Widget& w, SliderContent& c) {
-  if (!w.context() || !w.context()->platform) return;
+// changed, store it and fire on_change.
+void UpdateValueFromMouse(WidgetRegistry& world, wid e, SliderContent& c) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  if (!ctx || !ctx->platform) return;
   f32 mouse_x =
-      w.InputToLayoutPoint(w.context()->platform->input_queue().mouse_pos).x;
-  Rect content = w.content_rect();
+      InputToLayoutPoint(world, e, ctx->platform->input_queue().mouse_pos).x;
+  Rect content = world.Get<Transform>(e)->content_rect;
   f32 track_x = content.x;
   f32 track_w = content.w;
   if (track_w <= 0.0f) return;
@@ -23,24 +23,24 @@ void UpdateValueFromMouse(Widget& w, SliderContent& c) {
   f32 new_value = c.min + t * (c.max - c.min);
   if (new_value != c.value) {
     c.value = new_value;
-    w.MarkPaintDirty();
+    MarkPaintDirty(world, e);
     if (c.on_change) c.on_change(c.value);
   }
 }
 
-void SliderMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void SliderMeasure(WidgetRegistry& world, wid e, f32& out_width,
                    f32& out_height) {
-  const Style& st = w.style();
+  const Style& st = world.Get<StyleC>(e)->style;
   out_width = 200.0f + st.padding.horizontal();
   out_height = 24.0f + st.padding.vertical();
 }
 
-void SliderDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  SliderContent* c = world.Get<SliderContent>(w.handle());
+void SliderDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  SliderContent* c = world.Get<SliderContent>(e);
   if (!c) return;
 
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
 
   f32 range = c->max - c->min;
@@ -52,7 +52,7 @@ void SliderDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
   constexpr f32 kThumbSize = 16.0f;
   constexpr f32 kThumbRadius = 8.0f;
 
-  Rect content = w.content_rect();
+  Rect content = world.Get<Transform>(e)->content_rect;
   f32 track_x = content.x;
   f32 track_w = content.w;
   f32 track_y = content.y + (content.h - kTrackHeight) * 0.5f;
@@ -82,20 +82,21 @@ void SliderDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
                     thumb_radii);
 }
 
-bool SliderClick(WidgetRegistry& world, Widget& w) {
-  SliderContent* c = world.Get<SliderContent>(w.handle());
+bool SliderClick(WidgetRegistry& world, wid e) {
+  SliderContent* c = world.Get<SliderContent>(e);
   if (!c) return true;
   c->dragging = true;
-  UpdateValueFromMouse(w, *c);
+  UpdateValueFromMouse(world, e, *c);
   return true;
 }
 
-void SliderUpdate(WidgetRegistry& world, Widget& w, f64 dt) {
-  SliderContent* c = world.Get<SliderContent>(w.handle());
+void SliderUpdate(WidgetRegistry& world, wid e, f64 dt) {
+  SliderContent* c = world.Get<SliderContent>(e);
   if (!c) return;
-  if (HasState(w.widget_state(), WidgetState::kPressed) && w.context() &&
-      w.context()->platform) {
-    UpdateValueFromMouse(w, *c);
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  if (HasState(WidgetStateOf(world, e), WidgetState::kPressed) && ctx &&
+      ctx->platform) {
+    UpdateValueFromMouse(world, e, *c);
   } else if (c->dragging) {
     c->dragging = false;
   }
@@ -113,54 +114,46 @@ WidgetVTable SliderVTable() {
   return vt;
 }
 
-Widget* CreateSlider(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kSlider);
-  WidgetRegistry::Active()->Add<SliderContent>(w->handle(), SliderContent{});
-  return w;
+wid CreateSlider(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kSlider;
+  world.Add<SliderContent>(e, SliderContent{});
+  return e;
 }
 
-void SetSliderValue(Widget* w, f32 value) {
-  if (!w || w->kind() != WidgetKind::kSlider || !w->registry()) return;
-  SliderContent& c = w->registry()->GetOrAdd<SliderContent>(w->handle());
+void SetSliderValue(wid e, f32 value) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  SliderContent& c = world.GetOrAdd<SliderContent>(e);
   c.value = Clamp(value, c.min, c.max);
-  w->MarkPaintDirty();
+  MarkPaintDirty(world, e);
 }
 
-f32 SliderValue(const Widget* w) {
-  if (!w || w->kind() != WidgetKind::kSlider || !w->registry()) return 0.0f;
-  SliderContent* c =
-      w->registry()->Get<SliderContent>(const_cast<Widget*>(w)->handle());
+f32 SliderValue(wid e) {
+  SliderContent* c = WidgetRegistry::Active()->Get<SliderContent>(e);
   return c ? c->value : 0.0f;
 }
 
-f32 SliderMin(const Widget* w) {
-  if (!w || w->kind() != WidgetKind::kSlider || !w->registry()) return 0.0f;
-  SliderContent* c =
-      w->registry()->Get<SliderContent>(const_cast<Widget*>(w)->handle());
+f32 SliderMin(wid e) {
+  SliderContent* c = WidgetRegistry::Active()->Get<SliderContent>(e);
   return c ? c->min : 0.0f;
 }
 
-f32 SliderMax(const Widget* w) {
-  if (!w || w->kind() != WidgetKind::kSlider || !w->registry()) return 0.0f;
-  SliderContent* c =
-      w->registry()->Get<SliderContent>(const_cast<Widget*>(w)->handle());
+f32 SliderMax(wid e) {
+  SliderContent* c = WidgetRegistry::Active()->Get<SliderContent>(e);
   return c ? c->max : 0.0f;
 }
 
-void SetSliderMin(Widget* w, f32 min) {
-  if (!w || w->kind() != WidgetKind::kSlider || !w->registry()) return;
-  w->registry()->GetOrAdd<SliderContent>(w->handle()).min = min;
+void SetSliderMin(wid e, f32 min) {
+  WidgetRegistry::Active()->GetOrAdd<SliderContent>(e).min = min;
 }
 
-void SetSliderMax(Widget* w, f32 max) {
-  if (!w || w->kind() != WidgetKind::kSlider || !w->registry()) return;
-  w->registry()->GetOrAdd<SliderContent>(w->handle()).max = max;
+void SetSliderMax(wid e, f32 max) {
+  WidgetRegistry::Active()->GetOrAdd<SliderContent>(e).max = max;
 }
 
-void SetSliderChange(Widget* w, Function<void(f32)> handler) {
-  if (!w || w->kind() != WidgetKind::kSlider || !w->registry()) return;
-  w->registry()->GetOrAdd<SliderContent>(w->handle()).on_change =
+void SetSliderChange(wid e, Function<void(f32)> handler) {
+  WidgetRegistry::Active()->GetOrAdd<SliderContent>(e).on_change =
       std::move(handler);
 }
 

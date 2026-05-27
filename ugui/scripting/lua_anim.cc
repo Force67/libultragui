@@ -14,7 +14,7 @@ namespace ugui {
 void RegisterAnimLua(
     ScriptRuntime& lua,
     Function<VectorAnimation*(const char*, unsigned, unsigned)> loader,
-    Function<Widget*(const char*)> find_widget) {
+    Function<wid(const char*)> find_widget) {
   lua.RegisterFunction("load_anim", [loader](lua_State* L) -> int {
     const char* path = luaL_checkstring(L, 1);
     u32 w = static_cast<u32>(luaL_checkinteger(L, 2));
@@ -85,9 +85,10 @@ void RegisterAnimLua(
     auto* a = static_cast<VectorAnimation*>(lua_touserdata(L, 1));
     const char* name = luaL_checkstring(L, 2);
     if (a) {
-      Widget* w = find_widget(name);
-      SetImageTexture(w, a->texture(), static_cast<f32>(a->width()),
-                      static_cast<f32>(a->height()));
+      wid w = find_widget(name);
+      if (w.valid())
+        SetImageTexture(w, a->texture(), static_cast<f32>(a->width()),
+                        static_cast<f32>(a->height()));
     }
     return 0;
   });

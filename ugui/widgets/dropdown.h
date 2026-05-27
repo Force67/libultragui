@@ -9,7 +9,7 @@ namespace ugui {
 /// Data for a dropdown/select widget (WidgetKind::kDropdown): the option list,
 /// current selection, open/hover state, font override and an on_change
 /// callback. Behaviour lives in DropdownVTable(); a dropdown is a generic
-/// Widget carrying this component, not a subclass.
+/// widget entity carrying this component, not a subclass.
 struct DropdownContent {
   Vector<String> options;
   i32 selected = -1;
@@ -22,26 +22,26 @@ struct DropdownContent {
 /// Behaviour table (draw + measure + hit-test + click + update) for dropdowns.
 WidgetVTable DropdownVTable();
 
-/// Create a dropdown entity: a generic Widget tagged kDropdown with a
+/// Create a dropdown entity: a generic widget tagged kDropdown with a
 /// DropdownContent component.
-Widget* CreateDropdown(u32 id);
+wid CreateDropdown(u32 id);
 
-/// Set the option list. No-op if `w` is null or not a dropdown.
-void SetDropdownOptions(Widget* w, const Vector<String>& options);
+/// Set the option list. No-op if `e` is not a dropdown.
+void SetDropdownOptions(wid e, const Vector<String>& options);
 
 /// Set the selected index, clamped to [0, options-1] (or -1 when empty). No-op
-/// if `w` is null or not a dropdown.
-void SetDropdownSelected(Widget* w, i32 index);
+/// if `e` is not a dropdown.
+void SetDropdownSelected(wid e, i32 index);
 
 /// Currently selected index, or -1 if none / not a dropdown.
-i32 DropdownSelected(const Widget* w);
+i32 DropdownSelected(wid e);
 
 /// Text of the currently selected option, or "" if none / not a dropdown.
-String DropdownSelectedText(const Widget* w);
+String DropdownSelectedText(wid e);
 
 /// Set the on_change handler (run with the new index and text when the user
-/// picks an option). No-op if `w` is null or not a dropdown.
-void SetDropdownChange(Widget* w, Function<void(i32, const String&)> handler);
+/// picks an option). No-op if `e` is not a dropdown.
+void SetDropdownChange(wid e, Function<void(i32, const String&)> handler);
 
 }  // namespace ugui
 

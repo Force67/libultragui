@@ -18,7 +18,7 @@ struct ContextMenuItem {
 
 /// Data for a context-menu widget (WidgetKind::kContextMenu): the item list and
 /// the menu's transient visibility / hover state. A context menu is a generic
-/// Widget carrying this component, displayed as an overlay at the cursor and
+/// widget carrying this component, displayed as an overlay at the cursor and
 /// dismissed on outside click or item selection. Behaviour is in
 /// ContextMenuVTable().
 struct ContextMenuContent {
@@ -30,25 +30,24 @@ struct ContextMenuContent {
 /// Behaviour table (draw + measure + click + dismiss) for context menus.
 WidgetVTable ContextMenuVTable();
 
-/// Create a context-menu entity: a generic Widget tagged kContextMenu with a
+/// Create a context-menu entity: a generic widget tagged kContextMenu with a
 /// ContextMenuContent component.
-Widget* CreateContextMenu(u32 id);
+wid CreateContextMenu(u32 id);
 
-/// Append an item with a label and action. No-op if `w` is null or not a
-/// context menu.
-void AddContextMenuItem(Widget* w, const String& label, Function<void()> action);
+/// Append an item with a label and action. No-op if `e` is not a context menu.
+void AddContextMenuItem(wid e, const String& label, Function<void()> action);
 
-/// Append a separator. No-op if `w` is null or not a context menu.
-void AddContextMenuSeparator(Widget* w);
+/// Append a separator. No-op if `e` is not a context menu.
+void AddContextMenuSeparator(wid e);
 
-/// Remove all items. No-op if `w` is null or not a context menu.
-void ClearContextMenuItems(Widget* w);
+/// Remove all items. No-op if `e` is not a context menu.
+void ClearContextMenuItems(wid e);
 
 /// Show the menu as an overlay at `position`, sizing it to fit its items.
-void ShowContextMenuAt(Widget* w, UIContext* ctx, Vec2 position);
+void ShowContextMenuAt(wid e, UIContext* ctx, Vec2 position);
 
 /// Hide the menu and clear its hover state.
-void HideContextMenu(Widget* w, UIContext* ctx);
+void HideContextMenu(wid e, UIContext* ctx);
 
 }  // namespace ugui
 

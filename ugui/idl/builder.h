@@ -13,7 +13,7 @@ class Animator;
 /// Maps element types to widget constructors, resolves properties to styles.
 class UguiBuilder {
  public:
-  using WidgetFactory = Function<Widget*(const String& name)>;
+  using WidgetFactory = Function<wid(const String& name)>;
 
   void RegisterType(const String& type_name, WidgetFactory factory);
   void set_animator(Animator* a) { animator_ = a; }
@@ -24,26 +24,26 @@ class UguiBuilder {
     variables_[name] = value;
   }
 
-  /// Build a widget tree from a document. Caller owns the returned widgets.
-  Widget* Build(const UguiDocument& doc);
+  /// Build a widget tree from a document. Returns the root entity.
+  wid Build(const UguiDocument& doc);
 
   /// Rebuild: diff against previous tree and patch in-place.
-  /// Returns the root widget (may be the same or new).
-  Widget* Rebuild(const UguiDocument& doc, Widget* existing_root);
+  /// Returns the root entity (may be the same or new).
+  wid Rebuild(const UguiDocument& doc, wid existing_root);
 
   /// Apply a top-level `class <name> { ... }` style class to an
   /// already-constructed widget. Used by application code to style
   /// dynamically-spawned widgets (chat bubbles, list rows, etc.)
   /// without rebuilding their style in C++. Returns true if the
   /// class was found.
-  bool ApplyStyleClass(Widget* widget, const String& class_name) const;
+  bool ApplyStyleClass(wid widget, const String& class_name) const;
 
   /// Look up a style class by name; returns nullptr if not found.
   const UguiDocument::StyleClass* FindStyleClass(const String& name) const;
 
  private:
-  Widget* BuildNode(const UguiNode& node, u32& id_counter);
-  void ApplyProperties(Widget* widget, const UguiNode& node);
+  wid BuildNode(const UguiNode& node, u32& id_counter);
+  void ApplyProperties(wid widget, const UguiNode& node);
   Style ParseStyle(const HashMap<String, String>& props) const;
 
   void CollectVariables(const UguiNode& node);

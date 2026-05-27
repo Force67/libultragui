@@ -32,13 +32,16 @@ constexpr int kModControl = 0x0002;
 namespace ugui {
 namespace {
 
-TextEngine* text_engine(const Widget& w) {
-  return w.context() ? w.context()->text_engine : nullptr;
+TextEngine* text_engine(WidgetRegistry& world, wid e) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->text_engine : nullptr;
 }
 
-FontHandle effective_font(const Widget& w, const TextInputContent& c) {
+FontHandle effective_font(WidgetRegistry& world, wid e,
+                          const TextInputContent& c) {
   if (c.font != kInvalidFont) return c.font;
-  return w.context() ? w.context()->default_font : kInvalidFont;
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->default_font : kInvalidFont;
 }
 
 // --- UTF-8 navigation -------------------------------------------------------
@@ -107,8 +110,8 @@ void SetValue(TextInputContent& c, const String& text) {
 
 // --- Event handlers ---------------------------------------------------------
 
-bool TextInputCharInput(WidgetRegistry& world, Widget& w, u32 codepoint) {
-  TextInputContent* cp = world.Get<TextInputContent>(w.handle());
+bool TextInputCharInput(WidgetRegistry& world, wid e, u32 codepoint) {
+  TextInputContent* cp = world.Get<TextInputContent>(e);
   if (!cp) return false;
   TextInputContent& c = *cp;
 
@@ -140,19 +143,19 @@ bool TextInputCharInput(WidgetRegistry& world, Widget& w, u32 codepoint) {
   c.cursor += len;
   c.sel_start = c.sel_end = c.cursor;
   ResetBlink(c);
-  w.MarkDirty();
+  MarkDirty(world, e);
   if (c.on_change) c.on_change(c.text);
   return true;
 }
 
-bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
-  TextInputContent* cp = world.Get<TextInputContent>(w.handle());
+bool TextInputKeyDown(WidgetRegistry& world, wid e, i32 key, i32 mods) {
+  TextInputContent* cp = world.Get<TextInputContent>(e);
   if (!cp) return false;
   TextInputContent& c = *cp;
 
   bool shift = (mods & kModShift) != 0;
   bool ctrl = (mods & kModControl) != 0;
-  const WidgetContext* ctx = w.context();
+  const WidgetContext* ctx = WidgetContextOf(world, e);
 
   auto move_cursor = [&](u32 new_pos) {
     c.cursor = new_pos;
@@ -161,7 +164,7 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
     else
       c.sel_end = c.cursor;
     ResetBlink(c);
-    w.MarkPaintDirty();
+    MarkPaintDirty(world, e);
   };
 
   switch (key) {
@@ -185,7 +188,7 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
         String repl = c.on_history_prev();
         if (repl.size() > 0 || repl != c.text) {
           SetValue(c, repl);
-          w.MarkDirty();
+          MarkDirty(world, e);
           if (c.on_change) c.on_change(c.text);
         }
         return true;
@@ -196,7 +199,7 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
       if (c.on_history_next) {
         String repl = c.on_history_next();
         SetValue(c, repl);
-        w.MarkDirty();
+        MarkDirty(world, e);
         if (c.on_change) c.on_change(c.text);
         return true;
       }
@@ -227,7 +230,7 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
         c.cursor = prev;
         c.sel_start = c.sel_end = c.cursor;
       }
-      w.MarkDirty();
+      MarkDirty(world, e);
       if (c.on_change) c.on_change(c.text);
       return true;
 
@@ -239,7 +242,7 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
         c.text.erase(c.cursor, next - c.cursor);
         c.sel_start = c.sel_end = c.cursor;
       }
-      w.MarkDirty();
+      MarkDirty(world, e);
       if (c.on_change) c.on_change(c.text);
       return true;
 
@@ -247,7 +250,7 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
       if (ctrl) {
         c.sel_start = 0;
         c.sel_end = c.cursor = static_cast<u32>(c.text.size());
-        w.MarkPaintDirty();
+        MarkPaintDirty(world, e);
         return true;
       }
       break;
@@ -269,7 +272,7 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
         String sel = c.text.substr(lo, hi - lo);
         ctx->platform->set_clipboard_text(sel.c_str());
         DeleteSelection(c);
-        w.MarkDirty();
+        MarkDirty(world, e);
         if (c.on_change) c.on_change(c.text);
         return true;
       }
@@ -284,7 +287,7 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
           c.text.insert(c.cursor, clip, len);
           c.cursor += len;
           c.sel_start = c.sel_end = c.cursor;
-          w.MarkDirty();
+          MarkDirty(world, e);
           if (c.on_change) c.on_change(c.text);
         }
         return true;
@@ -295,52 +298,55 @@ bool TextInputKeyDown(WidgetRegistry& world, Widget& w, i32 key, i32 mods) {
   return false;
 }
 
-bool TextInputClick(WidgetRegistry& world, Widget& w) {
-  TextInputContent* cp = world.Get<TextInputContent>(w.handle());
+bool TextInputClick(WidgetRegistry& world, wid e) {
+  TextInputContent* cp = world.Get<TextInputContent>(e);
   if (!cp) return true;
   TextInputContent& c = *cp;
 
-  TextEngine* te = text_engine(w);
-  FontHandle fh = effective_font(w, c);
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = effective_font(world, e, c);
   if (!te || fh == kInvalidFont) return true;
 
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   auto run = te->Shape(fh, c.text.c_str(), static_cast<u32>(c.text.size()),
                        s.font_size, s.letter_spacing, s.line_height_multiplier);
 
-  const WidgetContext* ctx = w.context();
+  const WidgetContext* ctx = WidgetContextOf(world, e);
   Vec2 mp = ctx && ctx->platform
-                ? w.InputToLayoutPoint(ctx->platform->input_queue().mouse_pos)
+                ? InputToLayoutPoint(world, e,
+                                     ctx->platform->input_queue().mouse_pos)
                 : Vec2{0, 0};
-  f32 local_x = mp.x - w.content_rect().x + c.scroll_x;
+  Rect content = world.Get<Transform>(e)->content_rect;
+  f32 local_x = mp.x - content.x + c.scroll_x;
   c.cursor = PosFromX(c.text, local_x, run);
   c.sel_start = c.sel_end = c.cursor;
   ResetBlink(c);
-  w.MarkPaintDirty();
+  MarkPaintDirty(world, e);
   return true;
 }
 
-bool TextInputConsumesText(const Widget& w) {
-  (void)w;
+bool TextInputConsumesText(WidgetRegistry& world, wid e) {
+  (void)world;
+  (void)e;
   return true;
 }
 
 // --- Measure & paint --------------------------------------------------------
 
-void TextInputMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void TextInputMeasure(WidgetRegistry& world, wid e, f32& out_width,
                       f32& out_height) {
-  TextInputContent* c = world.Get<TextInputContent>(w.handle());
-  const Style& st = w.style();
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  TextInputContent* c = world.Get<TextInputContent>(e);
+  const Style& st = world.Get<StyleC>(e)->style;
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
   if (!c || !te || fh == kInvalidFont) {
     out_width = 0;
     out_height = st.font_size + st.padding.vertical();
     return;
   }
 
-  f32 sc = w.ui_scale();
+  f32 sc = UiScale(world, e);
   auto run = te->Shape(fh, c->text.empty() ? "X" : c->text.c_str(),
                        c->text.empty() ? 1 : static_cast<u32>(c->text.size()),
                        st.font_size * sc, st.letter_spacing * sc,
@@ -349,37 +355,37 @@ void TextInputMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
   out_height = run.line_height + st.padding.vertical();
 }
 
-void TextInputUpdate(WidgetRegistry& world, Widget& w, f64 dt) {
-  if (!HasState(w.widget_state(), WidgetState::kFocused)) return;
-  TextInputContent* c = world.Get<TextInputContent>(w.handle());
+void TextInputUpdate(WidgetRegistry& world, wid e, f64 dt) {
+  if (!HasState(WidgetStateOf(world, e), WidgetState::kFocused)) return;
+  TextInputContent* c = world.Get<TextInputContent>(e);
   if (!c) return;
   c->blink_timer += dt;
   bool was_visible = c->cursor_visible;
   c->cursor_visible = static_cast<int>(c->blink_timer * 2.0) % 2 == 0;
-  if (was_visible != c->cursor_visible) w.MarkPaintDirty();
+  if (was_visible != c->cursor_visible) MarkPaintDirty(world, e);
 }
 
-void TextInputDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  // The base Widget::OnPaint already drew background / shadow / border.
-  TextInputContent* cp = world.Get<TextInputContent>(w.handle());
+void TextInputDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  // PaintWidget already drew background / shadow / border.
+  TextInputContent* cp = world.Get<TextInputContent>(e);
   if (!cp) return;
   TextInputContent& c = *cp;
 
-  TextEngine* te = text_engine(w);
-  FontHandle fh = effective_font(w, c);
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = effective_font(world, e, c);
   if (!te || fh == kInvalidFont) return;
 
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
-  bool focused = HasState(w.widget_state(), WidgetState::kFocused);
+  bool focused = HasState(WidgetStateOf(world, e), WidgetState::kFocused);
   bool show_placeholder = c.text.empty() && !c.placeholder.empty();
 
   const String& display = show_placeholder ? c.placeholder : c.text;
   auto run = te->Shape(fh, display.c_str(), static_cast<u32>(display.size()),
                        s.font_size, s.letter_spacing, s.line_height_multiplier);
 
-  Rect content = w.content_rect();
+  Rect content = world.Get<Transform>(e)->content_rect;
   renderer.PushScissor(content);
 
   f32 text_y = content.y + (content.h - run.line_height) * 0.5f;
@@ -443,71 +449,79 @@ WidgetVTable TextInputVTable() {
   return vt;
 }
 
-Widget* CreateTextInput(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kTextInput);
-  WidgetRegistry::Active()->Add<TextInputContent>(w->handle(),
-                                                  TextInputContent{});
-  return w;
+wid CreateTextInput(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kTextInput;
+  world.Add<TextInputContent>(e, TextInputContent{});
+  return e;
 }
 
-void SetTextInputValue(Widget* w, const String& text) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
-  SetValue(w->registry()->GetOrAdd<TextInputContent>(w->handle()), text);
-  w->MarkDirty();
+void SetTextInputValue(wid e, const String& text) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return;
+  SetValue(world.GetOrAdd<TextInputContent>(e), text);
+  MarkDirty(world, e);
 }
 
-String TextInputValue(const Widget* w) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry())
-    return String();
-  TextInputContent* c =
-      w->registry()->Get<TextInputContent>(const_cast<Widget*>(w)->handle());
+String TextInputValue(wid e) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return String();
+  TextInputContent* c = world.Get<TextInputContent>(e);
   return c ? c->text : String();
 }
 
-void SetTextInputPlaceholder(Widget* w, const String& placeholder) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
-  w->registry()->GetOrAdd<TextInputContent>(w->handle()).placeholder =
-      placeholder;
-  w->MarkPaintDirty();
+void SetTextInputPlaceholder(wid e, const String& placeholder) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return;
+  world.GetOrAdd<TextInputContent>(e).placeholder = placeholder;
+  MarkPaintDirty(world, e);
 }
 
-void SetTextInputFont(Widget* w, FontHandle font) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
-  w->registry()->GetOrAdd<TextInputContent>(w->handle()).font = font;
-  w->MarkDirty();
+void SetTextInputFont(wid e, FontHandle font) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return;
+  world.GetOrAdd<TextInputContent>(e).font = font;
+  MarkDirty(world, e);
 }
 
-void SetTextInputChange(Widget* w, TextInputContent::ChangeHandler handler) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
-  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_change =
-      std::move(handler);
+void SetTextInputChange(wid e, TextInputContent::ChangeHandler handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return;
+  world.GetOrAdd<TextInputContent>(e).on_change = std::move(handler);
 }
 
-void SetTextInputSubmit(Widget* w, TextInputContent::SubmitHandler handler) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
-  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_submit =
-      std::move(handler);
+void SetTextInputSubmit(wid e, TextInputContent::SubmitHandler handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return;
+  world.GetOrAdd<TextInputContent>(e).on_submit = std::move(handler);
 }
 
-void SetTextInputCancel(Widget* w, TextInputContent::CancelHandler handler) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
-  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_cancel =
-      std::move(handler);
+void SetTextInputCancel(wid e, TextInputContent::CancelHandler handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return;
+  world.GetOrAdd<TextInputContent>(e).on_cancel = std::move(handler);
 }
 
-void SetTextInputHistoryPrev(Widget* w,
-                             TextInputContent::HistoryHandler handler) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
-  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_history_prev =
-      std::move(handler);
+void SetTextInputHistoryPrev(wid e, TextInputContent::HistoryHandler handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return;
+  world.GetOrAdd<TextInputContent>(e).on_history_prev = std::move(handler);
 }
 
-void SetTextInputHistoryNext(Widget* w,
-                             TextInputContent::HistoryHandler handler) {
-  if (!w || w->kind() != WidgetKind::kTextInput || !w->registry()) return;
-  w->registry()->GetOrAdd<TextInputContent>(w->handle()).on_history_next =
-      std::move(handler);
+void SetTextInputHistoryNext(wid e, TextInputContent::HistoryHandler handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kTextInput) return;
+  world.GetOrAdd<TextInputContent>(e).on_history_next = std::move(handler);
 }
 
 }  // namespace ugui

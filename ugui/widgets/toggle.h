@@ -18,22 +18,22 @@ struct ToggleContent {
 /// Behaviour table (draw + measure + click + update) for toggle widgets.
 WidgetVTable ToggleVTable();
 
-/// Create a toggle entity: a generic Widget tagged kToggle with a
+/// Create a toggle entity: a generic widget tagged kToggle with a
 /// ToggleContent component.
-Widget* CreateToggle(u32 id);
+wid CreateToggle(u32 id);
 
 /// Set the on/off state (toggles the kChecked state bit) and snaps the thumb
 /// animation so external state restoration shows the correct visual
 /// immediately. Does not fire on_change (that fires only on a user click).
-/// No-op if `w` is null or not a toggle.
-void SetToggleOn(Widget* w, bool on);
+/// No-op if `e` is not a toggle.
+void SetToggleOn(wid e, bool on);
 
 /// Whether the widget's kChecked state bit is set.
-bool IsToggleOn(const Widget* w);
+bool IsToggleOn(wid e);
 
 /// Set the toggle on_change handler (run with the new on/off value when the
-/// user toggles it). No-op if `w` is null or not a toggle.
-void SetToggleChange(Widget* w, Function<void(bool)> handler);
+/// user toggles it). No-op if `e` is not a toggle.
+void SetToggleChange(wid e, Function<void(bool)> handler);
 
 }  // namespace ugui
 

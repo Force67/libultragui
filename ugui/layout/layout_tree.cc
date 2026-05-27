@@ -56,7 +56,7 @@ static void apply_layout_results(WidgetRegistry& world, wid e, u32& node_index,
   if (node.style.position == Position::kSticky) {
     if (wid sv = FindScrollParent(world, e); sv.valid()) {
       Rect visible = world.Get<Transform>(sv)->rect;
-      Vec2 offset = ScrollOffset(world.Get(sv));
+      Vec2 offset = ScrollOffset(world, sv);
       f32 sticky_min_y = visible.y + offset.y;
       if (node.computed_rect.y < sticky_min_y) {
         node.computed_rect.y = sticky_min_y;

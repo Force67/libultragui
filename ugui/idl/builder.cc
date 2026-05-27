@@ -14,6 +14,7 @@
 #include <ugui/widgets/text.h>
 #include <ugui/widgets/text_input.h>
 #include <ugui/widgets/toggle.h>
+#include <ugui/widgets/widget_registry.h>
 
 #include <algorithm>
 #include <charconv>
@@ -504,8 +505,8 @@ String UguiBuilder::ResolveValue(const String& value) const {
 // Build
 // ---------------------------------------------------------------------------
 
-Widget* UguiBuilder::Build(const UguiDocument& doc) {
-  if (doc.roots.empty() && doc.style_classes.empty()) return nullptr;
+wid UguiBuilder::Build(const UguiDocument& doc) {
+  if (doc.roots.empty() && doc.style_classes.empty()) return kNullWidget;
 
   // Collect CSS custom properties from all nodes
   for (auto& root : doc.roots) CollectVariables(root);
@@ -518,16 +519,18 @@ Widget* UguiBuilder::Build(const UguiDocument& doc) {
     style_classes_[sc.name] = sc;
   }
 
-  if (doc.roots.empty()) return nullptr;
+  if (doc.roots.empty()) return kNullWidget;
 
   u32 id_counter = 1;
   if (doc.roots.size() == 1) return BuildNode(doc.roots[0], id_counter);
 
   // Multiple roots: wrap in a panel
-  auto* root = CreatePanel(0);
-  root->set_name("_root");
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid root = CreatePanel(0);
+  world.Get<WidgetNode>(root)->name = "_root";
   for (auto& node : doc.roots) {
-    if (auto* child = BuildNode(node, id_counter)) root->AddChild(child);
+    if (wid child = BuildNode(node, id_counter); child.valid())
+      AddChild(world, root, child);
   }
   return root;
 }
@@ -538,23 +541,25 @@ const UguiDocument::StyleClass* UguiBuilder::FindStyleClass(
   return it == style_classes_.end() ? nullptr : &it->second;
 }
 
-bool UguiBuilder::ApplyStyleClass(Widget* widget,
+bool UguiBuilder::ApplyStyleClass(wid widget,
                                   const String& class_name) const {
-  if (!widget) return false;
+  if (!widget.valid()) return false;
   const auto* sc = FindStyleClass(class_name);
   if (!sc) return false;
+
+  WidgetRegistry& world = *WidgetRegistry::Active();
 
   // Merge the class's base properties on top of the widget's current
   // base style. The class wins for any property it explicitly sets;
   // unspecified properties are left untouched.
-  Style merged = widget->style();
+  Style merged = world.Get<StyleC>(widget)->style;
   for (auto& [key, val] : sc->properties) {
     if (auto setter = FindPropertySetter(key)) {
       String resolved = ResolveValue(val);
       setter(merged, resolved);
     }
   }
-  widget->set_style(merged);
+  SetStyle(world, widget, merged);
 
   // Class state-blocks (`:hover { ... }` etc.) are appended as state
   // overrides - same machinery the inline element state blocks use.
@@ -566,13 +571,14 @@ bool UguiBuilder::ApplyStyleClass(Widget* widget,
                                u64{0}, [](u64 acc, const auto& kv) {
                                  return acc | LookupStyleMask(kv.first);
                                });
-    widget->AddStateOverride(state, override_style, mask);
+    AddStateOverride(world, widget, state, override_style, mask);
   }
   return true;
 }
 
-Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
-  Widget* widget = nullptr;
+wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid widget = kNullWidget;
   u32 id = id_counter++;
 
   // Try registered factory
@@ -600,7 +606,7 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     widget = CreateImage(id);
   } else if (node.type == "scroll" || node.type == "scroll-view") {
     widget = CreateScrollView(id);
-    widget->style().overflow = Overflow::kScroll;
+    world.Get<StyleC>(widget)->style.overflow = Overflow::kScroll;
   } else if (node.type == "text-input" || node.type == "input") {
     widget = CreateTextInput(id);
     auto text_it = node.properties.find("placeholder");
@@ -662,12 +668,12 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     if (sel_it != node.properties.end())
       SetDropdownSelected(widget, static_cast<i32>(parse_float(sel_it->second)));
     // Return early: option children are data, not child widgets
-    widget->set_id(id);
-    widget->set_name(node.name);
+    world.Get<WidgetNode>(widget)->id = id;
+    world.Get<WidgetNode>(widget)->name = node.name;
     ApplyProperties(widget, node);
     return widget;
   } else if (node.type == "context-menu") {
-    Widget* menu = CreateContextMenu(id);
+    wid menu = CreateContextMenu(id);
     for (auto& child_node : node.children) {
       if (child_node.type == "separator") {
         AddContextMenuSeparator(menu);
@@ -682,12 +688,12 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     }
     widget = menu;
     // Return early: item children are data, not child widgets
-    widget->set_id(id);
-    widget->set_name(node.name);
+    world.Get<WidgetNode>(widget)->id = id;
+    world.Get<WidgetNode>(widget)->name = node.name;
     ApplyProperties(widget, node);
     return widget;
   } else if (node.type == "rich-text" || node.type == "richtext") {
-    Widget* rt = CreateRichText(id);
+    wid rt = CreateRichText(id);
     // Parse child "span" elements as TextSpan data, not child widgets
     for (const auto& child_node : node.children) {
       if (child_node.type == "span") {
@@ -749,8 +755,8 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     }
     widget = rt;
     // Return early: span children are data, not child widgets
-    widget->set_id(id);
-    widget->set_name(node.name);
+    world.Get<WidgetNode>(widget)->id = id;
+    world.Get<WidgetNode>(widget)->name = node.name;
     ApplyProperties(widget, node);
     return widget;
   } else {
@@ -760,20 +766,21 @@ Widget* UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     widget = CreatePanel(id);
   }
 
-  widget->set_id(id);
-  widget->set_name(node.name);
+  world.Get<WidgetNode>(widget)->id = id;
+  world.Get<WidgetNode>(widget)->name = node.name;
 
   ApplyProperties(widget, node);
 
   for (auto& child_node : node.children) {
-    if (auto* child = BuildNode(child_node, id_counter))
-      widget->AddChild(child);
+    if (wid child = BuildNode(child_node, id_counter); child.valid())
+      AddChild(world, widget, child);
   }
 
   return widget;
 }
 
-void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
+void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
   // Apply a top-level style class first if the element opted in via
   // `class: name;`. The class is the BASE; inline properties below
   // win over class properties. State blocks from the class are
@@ -786,23 +793,24 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
 
   // Apply inline properties on top of any class defaults. Properties
   // not set inline keep whatever the class supplied.
-  Style merged = widget->style();
+  Style merged = world.Get<StyleC>(widget)->style;
   for (auto& [key, val] : node.properties) {
     if (auto setter = FindPropertySetter(key)) {
       setter(merged, ResolveValue(val));
     }
   }
-  widget->set_style(merged);
+  SetStyle(world, widget, merged);
 
   // Tooltip
   auto tooltip_it = node.properties.find("tooltip");
   if (tooltip_it != node.properties.end())
-    widget->set_tooltip(tooltip_it->second);
+    SetTooltip(world, widget, tooltip_it->second);
 
   // Tab navigation
   auto tab_it = node.properties.find("tab-index");
   if (tab_it != node.properties.end())
-    widget->set_tab_index(static_cast<i32>(parse_float(tab_it->second)));
+    world.Get<WidgetNode>(widget)->tab_index =
+        static_cast<i32>(parse_float(tab_it->second));
 
   // State overrides
   for (auto& sb : node.state_blocks) {
@@ -816,7 +824,7 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
                                  return acc | LookupStyleMask(kv.first);
                                });
 
-    widget->AddStateOverride(state, override_style, mask);
+    AddStateOverride(world, widget, state, override_style, mask);
 
     // Parse transition
     Transition trans;
@@ -851,7 +859,7 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
       trans.spring_mass = parse_float(sm_it->second);
 
     if (has_transition && state != WidgetState::kNone)
-      widget->AddStateTransition(state, trans);
+      AddStateTransition(world, widget, state, trans);
   }
 
   // Media query overrides: apply matching conditions on top of the base style
@@ -867,7 +875,7 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
       matches = viewport_size_.y <= mq.value;
 
     if (matches) {
-      Style& style = widget->style();
+      Style& style = world.Get<StyleC>(widget)->style;
       for (auto& [key, val] : mq.properties) {
         if (auto setter = FindPropertySetter(key)) {
           String resolved = ResolveValue(val);
@@ -882,7 +890,7 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
     if (!animator_ || kb.stops.empty()) continue;
 
     KeyframeAnimation anim;
-    anim.widget_id = widget->id();
+    anim.widget_id = world.Get<WidgetNode>(widget)->id;
 
     // Parse top-level properties
     if (auto d_it = kb.properties.find("duration"); d_it != kb.properties.end())
@@ -910,10 +918,11 @@ void UguiBuilder::ApplyProperties(Widget* widget, const UguiNode& node) {
   }
 }
 
-Widget* UguiBuilder::Rebuild(const UguiDocument& doc, Widget* existing_root) {
-  // Simple rebuild: delete old tree and build new one
+wid UguiBuilder::Rebuild(const UguiDocument& doc, wid existing_root) {
+  // Simple rebuild: destroy old tree and build new one
   // TODO: diff-based patching for hot reload
-  delete existing_root;
+  if (existing_root.valid())
+    DestroyWidget(*WidgetRegistry::Active(), existing_root);
   return Build(doc);
 }
 

@@ -335,12 +335,12 @@ int main(int argc, char* argv[]) {
                         static_cast<float>(ui.time()));
             }
             // Then draw the widget tree (title/footer text overlaid)
-            if (ui.root()) {
+            if (ui.root().valid()) {
               ugui::LayoutViewport lv{vp.x, vp.y, 1.0f};
               ugui::LayoutEngine le;
               ugui::Vector<ugui::LayoutNode> nodes;
-              ugui::ComputeWidgetLayout(ui.root()->handle(), lv, le, nodes);
-              ugui::PaintWidgetTree(ui.root()->handle(), renderer);
+              ugui::ComputeWidgetLayout(ui.root(), lv, le, nodes);
+              ugui::PaintWidgetTree(ui.root(), renderer);
             }
           });
           break;
@@ -383,13 +383,13 @@ int main(int argc, char* argv[]) {
     // Attach video texture to Image widgets
     if (scene == 0) {
       if (video->texture() != ugui::kInvalidTexture)
-        ugui::SetImageTexture(ui.widgets().Get(ui.FindWidget("video_frame")),
+        ugui::SetImageTexture(ui.FindWidget("video_frame"),
                               video->texture(),
                               static_cast<float>(video->width()),
                               static_cast<float>(video->height()));
       // Time display
-      ugui::Widget* td = ui.widgets().Get(ui.FindWidget("time_display"));
-      if (td) {
+      ugui::wid td = ui.FindWidget("time_display");
+      if (td.valid()) {
         double pos = video->position(), dur = video->duration();
         char buf[64];
         std::snprintf(buf, sizeof(buf), "%d:%02d / %d:%02d%s%s", (int)pos / 60,
@@ -402,7 +402,7 @@ int main(int argc, char* argv[]) {
       const char* names[] = {"vid1", "vid2", "vid3", "vid4"};
       for (auto* name : names) {
         if (video->texture() != ugui::kInvalidTexture)
-          ugui::SetImageTexture(ui.widgets().Get(ui.FindWidget(name)),
+          ugui::SetImageTexture(ui.FindWidget(name),
                                 video->texture(),
                                 static_cast<float>(video->width()),
                                 static_cast<float>(video->height()));

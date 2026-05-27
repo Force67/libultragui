@@ -8,8 +8,8 @@
 namespace ugui {
 
 /// Texture shown by an image widget (WidgetKind::kImage). This is the widget's
-/// data; its behaviour lives in ImageVTable(). An image is a generic Widget
-/// carrying this component, not a subclass.
+/// data; its behaviour lives in ImageVTable(). An image is a generic widget
+/// entity carrying this component, not a subclass.
 struct ImageContent {
   RHITextureHandle texture = kInvalidTexture;
   f32 natural_w = 0;
@@ -19,14 +19,13 @@ struct ImageContent {
 /// Behaviour table (draw + measure) for image widgets.
 WidgetVTable ImageVTable();
 
-/// Create an image entity: a generic Widget tagged kImage with an empty
+/// Create an image entity: a generic widget tagged kImage with an empty
 /// ImageContent component.
-Widget* CreateImage(u32 id);
+wid CreateImage(u32 id);
 
-/// Set (or replace) the texture an image widget shows. No-op if `w` is null or
-/// is not an image. Component-based replacement for the old Image::set_texture.
-void SetImageTexture(Widget* w, RHITextureHandle texture, f32 width,
-                     f32 height);
+/// Set (or replace) the texture an image widget shows. No-op if `e` is not an
+/// image. Component-based replacement for the old Image::set_texture.
+void SetImageTexture(wid e, RHITextureHandle texture, f32 width, f32 height);
 
 }  // namespace ugui
 

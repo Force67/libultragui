@@ -15,18 +15,18 @@ u32 image_radii(const Style& s) {
   return Vertex2D::PackRadii(s.corner_radius);
 }
 
-void ImageMeasure(WidgetRegistry& world, Widget& w, f32& out_w, f32& out_h) {
-  ImageContent* c = world.Get<ImageContent>(w.handle());
+void ImageMeasure(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) {
+  ImageContent* c = world.Get<ImageContent>(e);
   out_w = c ? c->natural_w : 0.0f;
   out_h = c ? c->natural_h : 0.0f;
 }
 
-void ImageDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  ImageContent* c = world.Get<ImageContent>(w.handle());
+void ImageDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  ImageContent* c = world.Get<ImageContent>(e);
   if (!c || c->texture == kInvalidTexture) return;
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
-  renderer.DrawTexturedRect(w.rect(), c->texture,
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
+  renderer.DrawTexturedRect(world.Get<Transform>(e)->rect, c->texture,
                             Color::White().WithAlpha(s.opacity), image_radii(s));
 }
 
@@ -39,21 +39,23 @@ WidgetVTable ImageVTable() {
   return vt;
 }
 
-Widget* CreateImage(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kImage);
-  WidgetRegistry::Active()->Add<ImageContent>(w->handle(), ImageContent{});
-  return w;
+wid CreateImage(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kImage;
+  world.Add<ImageContent>(e, ImageContent{});
+  return e;
 }
 
-void SetImageTexture(Widget* w, RHITextureHandle texture, f32 width,
-                     f32 height) {
-  if (!w || w->kind() != WidgetKind::kImage || !w->registry()) return;
-  ImageContent& c = w->registry()->GetOrAdd<ImageContent>(w->handle());
+void SetImageTexture(wid e, RHITextureHandle texture, f32 width, f32 height) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kImage) return;
+  ImageContent& c = world.GetOrAdd<ImageContent>(e);
   c.texture = texture;
   c.natural_w = width;
   c.natural_h = height;
-  w->MarkDirty();
+  MarkDirty(world, e);
 }
 
 }  // namespace ugui

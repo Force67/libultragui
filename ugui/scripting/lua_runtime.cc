@@ -6,6 +6,7 @@
 #include <ugui/widgets/slider.h>
 #include <ugui/widgets/text.h>
 #include <ugui/widgets/widget.h>
+#include <ugui/widgets/widget_registry.h>
 
 extern "C" {
 #include <lauxlib.h>
@@ -25,7 +26,7 @@ static const char* const REGISTRY_KEY = "ugui_runtime";
 
 struct ScriptRuntime::Impl {
   lua_State* L = nullptr;
-  HashMap<String, Widget*> widget_registry;
+  HashMap<String, wid> widget_registry;
   Vector<ScriptRuntime::NativeFunction*> native_functions;
 
   struct TimerEntry {
@@ -105,7 +106,7 @@ struct ScriptRuntime::Impl {
   static int LuaUguiOpenUrl(lua_State* L);
 
   // Push widget table with type-specific fields onto Lua stack.
-  void PushWidgetTable(Widget* widget);
+  void PushWidgetTable(wid widget);
 };
 
 ScriptRuntime::ScriptRuntime() : impl_(new Impl()) {}
@@ -177,44 +178,51 @@ bool ScriptRuntime::ExecFile(const char* path) {
   return true;
 }
 
-void ScriptRuntime::RegisterWidget(Widget* widget) {
-  if (!widget->name().empty()) {
-    impl_->widget_registry[widget->name()] = widget;
+void ScriptRuntime::RegisterWidget(wid widget) {
+  World& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(widget);
+  if (n && !n->name.empty()) {
+    impl_->widget_registry[n->name] = widget;
   }
 }
 
-void ScriptRuntime::UnregisterWidget(Widget* widget) {
-  if (!widget->name().empty()) {
-    impl_->widget_registry.erase(widget->name());
+void ScriptRuntime::UnregisterWidget(wid widget) {
+  World& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(widget);
+  if (n && !n->name.empty()) {
+    impl_->widget_registry.erase(n->name);
   }
 }
 
 void ScriptRuntime::ClearWidgetRegistry() { impl_->widget_registry.clear(); }
 
-Widget* ScriptRuntime::FindRegisteredWidget(const char* name) const {
+wid ScriptRuntime::FindRegisteredWidget(const char* name) const {
   auto it = impl_->widget_registry.find(name);
-  return it != impl_->widget_registry.end() ? it->second : nullptr;
+  return it != impl_->widget_registry.end() ? it->second : kNullWidget;
 }
 
-void ScriptRuntime::Impl::PushWidgetTable(Widget* widget) {
+void ScriptRuntime::Impl::PushWidgetTable(wid widget) {
+  World& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(widget);
   lua_newtable(L);
-  lua_pushstring(L, widget->name().c_str());
+  lua_pushstring(L, n ? n->name.c_str() : "");
   lua_setfield(L, -2, "name");
-  lua_pushinteger(L, widget->id());
+  lua_pushinteger(L, n ? n->id : 0);
   lua_setfield(L, -2, "id");
+  if (!n) return;
 
   // Type-specific fields so Lua handlers get w.checked, w.selected, w.value
-  if (widget && widget->kind() == WidgetKind::kCheckbox) {
+  if (n->kind == WidgetKind::kCheckbox) {
     lua_pushboolean(L, IsChecked(widget));
     lua_setfield(L, -2, "checked");
   }
-  if (widget && widget->kind() == WidgetKind::kDropdown) {
+  if (n->kind == WidgetKind::kDropdown) {
     lua_pushinteger(L, DropdownSelected(widget));
     lua_setfield(L, -2, "selected");
     lua_pushstring(L, DropdownSelectedText(widget).c_str());
     lua_setfield(L, -2, "selected_text");
   }
-  if (widget && widget->kind() == WidgetKind::kSlider) {
+  if (n->kind == WidgetKind::kSlider) {
     lua_pushnumber(L, SliderValue(widget));
     lua_setfield(L, -2, "value");
     lua_pushnumber(L, SliderMin(widget));
@@ -224,7 +232,7 @@ void ScriptRuntime::Impl::PushWidgetTable(Widget* widget) {
   }
 }
 
-bool ScriptRuntime::CallHandler(const char* func_name, Widget* widget) {
+bool ScriptRuntime::CallHandler(const char* func_name, wid widget) {
   lua_getglobal(impl_->L, func_name);
   if (!lua_isfunction(impl_->L, -1)) {
     lua_pop(impl_->L, 1);
@@ -330,34 +338,39 @@ void ScriptRuntime::UpdateTimers(double current_time) {
   }
 }
 
-static void WireChangeHandlersRecursive(ScriptRuntime& rt, Widget* w) {
-  if (!w) return;
-  const auto& name = w->name();
-  if (!name.empty()) {
-    if (w->kind() == WidgetKind::kDropdown) {
-      SetDropdownChange(w, [&rt, widget = w](i32, const String&) {
-        std::string handler = "on_" + widget->name();
-        rt.CallHandler(handler.c_str(), widget);
+static void WireChangeHandlersRecursive(ScriptRuntime& rt, wid w) {
+  if (!w.valid()) return;
+  World& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(w);
+  if (!n) return;
+  if (!n->name.empty()) {
+    if (n->kind == WidgetKind::kDropdown) {
+      SetDropdownChange(w, [&rt, w](i32, const String&) {
+        World& wr = *WidgetRegistry::Active();
+        std::string handler = "on_" + wr.Get<WidgetNode>(w)->name;
+        rt.CallHandler(handler.c_str(), w);
       });
     }
-    if (w->kind() == WidgetKind::kCheckbox) {
-      SetCheckboxChange(w, [&rt, widget = w](bool) {
-        std::string handler = "on_" + widget->name();
-        rt.CallHandler(handler.c_str(), widget);
+    if (n->kind == WidgetKind::kCheckbox) {
+      SetCheckboxChange(w, [&rt, w](bool) {
+        World& wr = *WidgetRegistry::Active();
+        std::string handler = "on_" + wr.Get<WidgetNode>(w)->name;
+        rt.CallHandler(handler.c_str(), w);
       });
     }
-    if (w->kind() == WidgetKind::kSlider) {
-      SetSliderChange(w, [&rt, widget = w](f32) {
-        std::string handler = "on_" + widget->name();
-        rt.CallHandler(handler.c_str(), widget);
+    if (n->kind == WidgetKind::kSlider) {
+      SetSliderChange(w, [&rt, w](f32) {
+        World& wr = *WidgetRegistry::Active();
+        std::string handler = "on_" + wr.Get<WidgetNode>(w)->name;
+        rt.CallHandler(handler.c_str(), w);
       });
     }
   }
-  for (Widget* child : w->child_ptrs())
+  for (wid child : world.Get<Hierarchy>(w)->children)
     WireChangeHandlersRecursive(rt, child);
 }
 
-void ScriptRuntime::WireChangeHandlers(Widget* root) {
+void ScriptRuntime::WireChangeHandlers(wid root) {
   WireChangeHandlersRecursive(*this, root);
 }
 
@@ -482,18 +495,20 @@ int ScriptRuntime::Impl::LuaUguiOpenUrl(lua_State* L) {
 int ScriptRuntime::Impl::LuaUguiFind(lua_State* L) {
   auto* rt = FromState(L);
   const char* name = luaL_checkstring(L, 1);
+  World& world = *WidgetRegistry::Active();
 
   auto it = rt->widget_registry.find(name);
-  Widget* w = (it != rt->widget_registry.end()) ? it->second : nullptr;
-  if (!w) {
+  wid w = (it != rt->widget_registry.end()) ? it->second : kNullWidget;
+  WidgetNode* n = w.valid() ? world.Get<WidgetNode>(w) : nullptr;
+  if (!n) {
     lua_pushnil(L);
     return 1;
   }
 
   lua_newtable(L);
-  lua_pushstring(L, w->name().c_str());
+  lua_pushstring(L, n->name.c_str());
   lua_setfield(L, -2, "name");
-  lua_pushinteger(L, w->id());
+  lua_pushinteger(L, n->id);
   lua_setfield(L, -2, "id");
 
   return 1;
@@ -503,15 +518,16 @@ int ScriptRuntime::Impl::LuaUguiGetProp(lua_State* L) {
   auto* rt = FromState(L);
   const char* name = luaL_checkstring(L, 1);
   const char* prop = luaL_checkstring(L, 2);
+  World& world = *WidgetRegistry::Active();
 
   auto it = rt->widget_registry.find(name);
-  Widget* w = (it != rt->widget_registry.end()) ? it->second : nullptr;
-  if (!w) {
+  wid w = (it != rt->widget_registry.end()) ? it->second : kNullWidget;
+  if (!w.valid() || !world.Get<StyleC>(w)) {
     lua_pushnil(L);
     return 1;
   }
 
-  const Style& s = w->style();
+  const Style& s = world.Get<StyleC>(w)->style;
 
   if (strcmp(prop, "opacity") == 0)
     lua_pushnumber(L, s.opacity);
@@ -531,23 +547,25 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
   auto* rt = FromState(L);
   const char* name = luaL_checkstring(L, 1);
   const char* prop = luaL_checkstring(L, 2);
+  World& world = *WidgetRegistry::Active();
 
   auto it = rt->widget_registry.find(name);
-  Widget* w = (it != rt->widget_registry.end()) ? it->second : nullptr;
-  if (!w) {
+  wid w = (it != rt->widget_registry.end()) ? it->second : kNullWidget;
+  WidgetNode* n = w.valid() ? world.Get<WidgetNode>(w) : nullptr;
+  if (!n) {
     std::fprintf(stderr, "ugui/lua: ugui.set: widget '%s' not found\n", name);
     return 0;
   }
 
-  Style s = w->style();
+  Style s = world.Get<StyleC>(w)->style;
 
   if (strcmp(prop, "opacity") == 0) {
     s.opacity = static_cast<f32>(luaL_checknumber(L, 3));
   } else if (strcmp(prop, "visible") == 0) {
     s.visibility =
         lua_toboolean(L, 3) ? Visibility::kVisible : Visibility::kHidden;
-    w->set_style(s);
-    w->ClearAnimationStyle();
+    SetStyle(world, w, s);
+    ClearAnimationStyle(world, w);
     return 0;
   } else if (strcmp(prop, "font-size") == 0) {
     s.font_size = static_cast<f32>(luaL_checknumber(L, 3));
@@ -656,38 +674,38 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
       s.height = Length::Px(static_cast<f32>(luaL_checknumber(L, 3)));
     }
   } else if (strcmp(prop, "selected") == 0) {
-    if (w && w->kind() == WidgetKind::kDropdown) {
+    if (n->kind == WidgetKind::kDropdown) {
       SetDropdownSelected(w, static_cast<i32>(luaL_checkinteger(L, 3)));
       return 0;
     }
   } else if (strcmp(prop, "checked") == 0) {
-    if (w && w->kind() == WidgetKind::kCheckbox) {
+    if (n->kind == WidgetKind::kCheckbox) {
       SetChecked(w, lua_toboolean(L, 3));
       return 0;
     }
   } else if (strcmp(prop, "value") == 0) {
-    if (w && w->kind() == WidgetKind::kSlider) {
+    if (n->kind == WidgetKind::kSlider) {
       SetSliderValue(w, static_cast<f32>(luaL_checknumber(L, 3)));
       return 0;
     }
   } else if (strcmp(prop, "text") == 0) {
-    if (w && w->kind() == WidgetKind::kText) {
+    if (n->kind == WidgetKind::kText) {
       SetText(w, luaL_checkstring(L, 3));
-      w->ClearAnimationStyle();
+      ClearAnimationStyle(world, w);
       return 0;
     }
-    if (w && w->kind() == WidgetKind::kButton) {
+    if (n->kind == WidgetKind::kButton) {
       SetButtonLabel(w, luaL_checkstring(L, 3));
-      w->ClearAnimationStyle();
+      ClearAnimationStyle(world, w);
       return 0;
     }
   }
 
-  w->set_style(s);
+  SetStyle(world, w, s);
   // Cancel any active CSS transition so the scripted change is visible
   // immediately. Without this, animation_style_ overrides the base style
   // and the change appears to not take effect until the transition ends.
-  w->ClearAnimationStyle();
+  ClearAnimationStyle(world, w);
   return 0;
 }
 

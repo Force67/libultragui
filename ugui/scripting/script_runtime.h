@@ -1,6 +1,7 @@
 #ifndef ULTRAGUI_SCRIPTING_SCRIPT_RUNTIME_H_
 #define ULTRAGUI_SCRIPTING_SCRIPT_RUNTIME_H_
 
+#include <ugui/core/handle.h>
 #include <ugui/ultragui_config.h>
 
 #if ULTRAGUI_LUA
@@ -9,8 +10,6 @@ struct lua_State;
 #endif
 
 namespace ugui {
-
-class Widget;
 
 /// Concrete scripting runtime with link-time swappable implementation.
 /// The default implementation uses Lua 5.4 (when ULTRAGUI_LUA=1);
@@ -34,17 +33,17 @@ class ScriptRuntime {
   bool ExecFile(const char* path);
 
   /// Register a widget so the scripting layer can find it by name.
-  void RegisterWidget(Widget* widget);
-  void UnregisterWidget(Widget* widget);
+  void RegisterWidget(wid widget);
+  void UnregisterWidget(wid widget);
   void ClearWidgetRegistry();
 
   /// Call a named handler function, passing the widget as context.
   /// The widget table includes type-specific fields (checked, selected, value).
   /// Returns true if the handler existed and ran successfully.
-  bool CallHandler(const char* func_name, Widget* widget);
+  bool CallHandler(const char* func_name, wid widget);
 
   /// Look up a registered widget by name.
-  Widget* FindRegisteredWidget(const char* name) const;
+  wid FindRegisteredWidget(const char* name) const;
 
   /// Schedule a Lua callback to fire after `delay_seconds`.
   /// The callback is a Lua function reference stored via luaL_ref.
@@ -62,7 +61,7 @@ class ScriptRuntime {
 
   /// Auto-wire on_change callbacks for Dropdown/Checkbox/Slider widgets
   /// in the tree so they dispatch to Lua on_<name>(w) handlers.
-  void WireChangeHandlers(Widget* root);
+  void WireChangeHandlers(wid root);
 
 #if ULTRAGUI_LUA
   /// Expose a C++ function to Lua under ugui.{name}. Lua-specific.

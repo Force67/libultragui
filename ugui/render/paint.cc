@@ -40,7 +40,7 @@ static void PaintWidgetTreeImpl(WidgetRegistry& world, wid e,
   PaintWidget(world, e, renderer);
 
   // If this widget is a scroll view, add its scroll offset for children.
-  Vec2 child_offset = scroll_offset + ScrollOffset(world.Get(e));
+  Vec2 child_offset = scroll_offset + ScrollOffset(world, e);
 
   for (wid child : world.Get<Hierarchy>(e)->children)
     PaintWidgetTreeImpl(world, child, renderer, child_offset);

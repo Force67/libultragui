@@ -12,17 +12,15 @@ namespace ugui {
 
 void InputRouter::Init(Platform* platform) { platform_ = platform; }
 
-Widget* InputRouter::Resolve(WidgetId id) const {
-  return registry_ ? registry_->Get(id) : nullptr;
-}
-
-static void SetHoverBit(Widget* w, bool on) {
-  auto state = w->widget_state();
+static void SetHoverBit(World& world, wid w, bool on) {
+  auto state = WidgetStateOf(world, w);
   if (on)
-    w->set_widget_state(state | WidgetState::kHovered);
+    SetWidgetState(world, w, state | WidgetState::kHovered);
   else
-    w->set_widget_state(static_cast<WidgetState>(
-        static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kHovered)));
+    SetWidgetState(world, w,
+                   static_cast<WidgetState>(static_cast<u16>(state) &
+                                            ~static_cast<u16>(
+                                                WidgetState::kHovered)));
 }
 
 // --- Drag-to-move system ----------------------------------------------------
@@ -31,36 +29,38 @@ static void SetHoverBit(Widget* w, bool on) {
 // the widget to its current rect via style.left/top in pixels (clearing any
 // right/bottom anchoring), then each move offsets that anchor by cursor-press.
 
-static void DragStart(World& world, Widget* w, Vec2 pos) {
-  Movable* m = world.Get<Movable>(w->handle());
+static void DragStart(World& world, wid w, Vec2 pos) {
+  Movable* m = world.Get<Movable>(w);
   if (!m) return;
-  m->origin_x = w->rect().x;
-  m->origin_y = w->rect().y;
+  Rect r = world.Get<Transform>(w)->rect;
+  m->origin_x = r.x;
+  m->origin_y = r.y;
   m->press = pos;
-  Style& s = w->style();
-  s.left_offset = Length::Px(w->rect().x);
-  s.top = Length::Px(w->rect().y);
+  Style& s = world.Get<StyleC>(w)->style;
+  s.left_offset = Length::Px(r.x);
+  s.top = Length::Px(r.y);
   s.right_offset = Length::Auto();
   s.bottom = Length::Auto();
   if (s.position != Position::kAbsolute) s.position = Position::kAbsolute;
-  w->MarkDirty();
+  MarkDirty(world, w);
 }
 
-static void DragMove(World& world, Widget* w, Vec2 pos) {
-  Movable* m = world.Get<Movable>(w->handle());
+static void DragMove(World& world, wid w, Vec2 pos) {
+  Movable* m = world.Get<Movable>(w);
   if (!m) return;
   f32 nx = m->origin_x + (pos.x - m->press.x);
   f32 ny = m->origin_y + (pos.y - m->press.y);
-  Style& s = w->style();
+  Style& s = world.Get<StyleC>(w)->style;
   s.left_offset = Length::Px(nx);
   s.top = Length::Px(ny);
-  w->MarkDirty();
+  MarkDirty(world, w);
   if (m->on_drag) m->on_drag(Vec2{nx, ny});
 }
 
-bool InputRouter::Process(Widget* root) {
-  if (!root || !platform_) return false;
-  registry_ = root->context() ? root->context()->registry : nullptr;
+bool InputRouter::Process(wid root) {
+  WidgetRegistry* reg = WidgetRegistry::Active();
+  if (!root.valid() || !platform_ || !reg) return false;
+  World& world = *reg;
 
   auto& queue = platform_->input_queue();
   bool consumed = false;
@@ -72,19 +72,18 @@ bool InputRouter::Process(Widget* root) {
   if (queue.move_count > 0) {
     Vec2 pos = queue.move_events[queue.move_count - 1].position;  // latest
     mouse_pos_ = pos;
-    Widget* hovered = Resolve(hovered_);
-    Widget* new_hover = Resolve(root->HitTest(pos));
+    wid new_hover = HitTest(world, root, pos);
 
-    if (new_hover != hovered) {
-      if (hovered) {
-        SetHoverBit(hovered, false);
-        if (on_hover_) on_hover_(hovered, false);
+    if (new_hover != hovered_) {
+      if (hovered_.valid()) {
+        SetHoverBit(world, hovered_, false);
+        if (on_hover_) on_hover_(hovered_, false);
       }
-      hovered_ = new_hover ? new_hover->handle() : kNullWidget;
-      if (new_hover) {
-        SetHoverBit(new_hover, true);
+      hovered_ = new_hover;
+      if (new_hover.valid()) {
+        SetHoverBit(world, new_hover, true);
         if (on_hover_) on_hover_(new_hover, true);
-        platform_->SetCursor(new_hover->ComputedStyle().cursor);
+        platform_->SetCursor(ComputedStyle(world, new_hover).cursor);
       } else {
         platform_->SetCursor(Cursor::kAuto);
       }
@@ -94,37 +93,35 @@ bool InputRouter::Process(Widget* root) {
     // Drag detection: only enter drag mode if there's a draggable target
     // reachable from the pressed widget, otherwise leave drag_target_ null so
     // the release path still fires a click.
-    Widget* pressed = Resolve(pressed_);
-    if (pressed) {
+    if (pressed_.valid()) {
       Vec2 diff = {pos.x - drag_start_.x, pos.y - drag_start_.y};
       f32 dist2 = diff.x * diff.x + diff.y * diff.y;
       if (!dragging_ && dist2 > kDragThreshold * kDragThreshold) {
         // If the pressed widget (or an ancestor) has a DragHandle, climb to the
         // nearest Movable ancestor so "drag the header moves the panel".
-        Widget* dt = nullptr;
-        Widget* w = pressed;
-        while (w && !registry_->Has<DragHandle>(w->handle()))
-          w = w->parent_ptr();
-        if (w) {
-          Widget* anc = w->parent_ptr();
-          while (anc && !registry_->Has<Movable>(anc->handle()))
-            anc = anc->parent_ptr();
-          if (anc)
+        wid dt;
+        wid w = pressed_;
+        while (w.valid() && !world.Has<DragHandle>(w))
+          w = world.Get<Hierarchy>(w)->parent;
+        if (w.valid()) {
+          wid anc = world.Get<Hierarchy>(w)->parent;
+          while (anc.valid() && !world.Has<Movable>(anc))
+            anc = world.Get<Hierarchy>(anc)->parent;
+          if (anc.valid())
             dt = anc;
-          else if (registry_->Has<Movable>(w->handle()))
+          else if (world.Has<Movable>(w))
             dt = w;
-        } else if (registry_->Has<Movable>(pressed->handle())) {
-          dt = pressed;
+        } else if (world.Has<Movable>(pressed_)) {
+          dt = pressed_;
         }
-        if (dt) {
+        if (dt.valid()) {
           dragging_ = true;
-          drag_target_ = dt->handle();
-          DragStart(*registry_, dt, drag_start_);
+          drag_target_ = dt;
+          DragStart(world, dt, drag_start_);
         }
       }
-      Widget* drag_target = Resolve(drag_target_);
-      if (dragging_ && drag_target) {
-        DragMove(*registry_, drag_target, pos);
+      if (dragging_ && drag_target_.valid()) {
+        DragMove(world, drag_target_, pos);
         drag_prev_ = pos;
         consumed = true;
       }
@@ -134,38 +131,36 @@ bool InputRouter::Process(Widget* root) {
   // Process mouse buttons -> press/click
   for (u32 i = 0; i < queue.button_count; ++i) {
     auto& evt = queue.button_events[i];
-    Widget* target = Resolve(root->HitTest(evt.position));
+    wid target = HitTest(world, root, evt.position);
 
     if (evt.pressed) {
-      pressed_ = target ? target->handle() : kNullWidget;
+      pressed_ = target;
       drag_start_ = evt.position;
       drag_prev_ = evt.position;
       dragging_ = false;
       drag_target_ = kNullWidget;
-      if (target) {
-        target->set_widget_state(target->widget_state() |
-                                 WidgetState::kPressed);
-      }
+      if (target.valid())
+        SetWidgetState(world, target,
+                       WidgetStateOf(world, target) | WidgetState::kPressed);
       set_focus(target);
       consumed = true;
     } else {
       // Release. Drag end is a no-op: the position was already committed by
       // DragMove during the drag.
-      Widget* drag_target = Resolve(drag_target_);
+      bool was_dragging = drag_target_.valid() && world.Alive(drag_target_);
       dragging_ = false;
-      bool was_dragging = (drag_target != nullptr);
       drag_target_ = kNullWidget;
-      Widget* pressed = Resolve(pressed_);
-      if (pressed) {
-        auto state = pressed->widget_state();
-        pressed->set_widget_state(
-            static_cast<WidgetState>(static_cast<u16>(state) &
-                                     ~static_cast<u16>(WidgetState::kPressed)));
+      if (pressed_.valid()) {
+        auto state = WidgetStateOf(world, pressed_);
+        SetWidgetState(world, pressed_,
+                       static_cast<WidgetState>(
+                           static_cast<u16>(state) &
+                           ~static_cast<u16>(WidgetState::kPressed)));
 
         // Click: press and release on same widget (only if not dragging)
-        if (!was_dragging && pressed == target && target) {
+        if (!was_dragging && pressed_ == target && target.valid()) {
           if (on_click_) on_click_(target, evt.button);
-          target->OnClick();
+          ClickWidget(world, target);
         }
       }
       pressed_ = kNullWidget;
@@ -176,13 +171,13 @@ bool InputRouter::Process(Widget* root) {
   // Process scroll -> bubble up to find a handler
   for (u32 i = 0; i < queue.scroll_count; ++i) {
     auto& evt = queue.scroll_events[i];
-    Widget* w = Resolve(root->HitTest(evt.position));
-    while (w) {
-      if (w->OnScroll(Vec2{-evt.delta.x * 40.0f, -evt.delta.y * 40.0f})) {
+    wid w = HitTest(world, root, evt.position);
+    while (w.valid()) {
+      if (ScrollWidget(world, w, Vec2{-evt.delta.x * 40.0f, -evt.delta.y * 40.0f})) {
         consumed = true;
         break;
       }
-      w = w->parent_ptr();
+      w = world.Get<Hierarchy>(w)->parent;
     }
   }
 
@@ -191,18 +186,18 @@ bool InputRouter::Process(Widget* root) {
     auto& evt = queue.key_events[i];
     if (evt.pressed && evt.key == 258 /* GLFW_KEY_TAB */) {
       bool reverse = (evt.mods & 0x0001 /* GLFW_MOD_SHIFT */) != 0;
-      Vector<Widget*> focusable;
-      Function<void(Widget*)> collect = [&](Widget* w) {
-        if (w->focusable()) focusable.push_back(w);
-        for (auto* child : w->child_ptrs()) collect(child);
+      Vector<wid> focusable;
+      Function<void(wid)> collect = [&](wid w) {
+        if (world.Get<WidgetNode>(w)->tab_index >= 0) focusable.push_back(w);
+        for (wid child : world.Get<Hierarchy>(w)->children) collect(child);
       };
       collect(root);
       if (focusable.empty()) continue;
-      std::sort(focusable.begin(), focusable.end(), [](Widget* a, Widget* b) {
-        return a->tab_index() < b->tab_index();
+      std::sort(focusable.begin(), focusable.end(), [&world](wid a, wid b) {
+        return world.Get<WidgetNode>(a)->tab_index <
+               world.Get<WidgetNode>(b)->tab_index;
       });
-      auto it =
-          std::find(focusable.begin(), focusable.end(), Resolve(focused_));
+      auto it = std::find(focusable.begin(), focusable.end(), focused_);
       if (reverse) {
         if (it == focusable.begin() || it == focusable.end())
           set_focus(focusable.back());
@@ -235,30 +230,25 @@ bool InputRouter::Process(Widget* root) {
 
       // Enter or Space activates the focused widget (keyboard/gamepad nav),
       // unless it consumes text input (then Space is a literal character).
-      Widget* focused = Resolve(focused_);
-      if (focused && !focused->consumes_text_input() &&
+      if (focused_.valid() && !ConsumesTextInput(world, focused_) &&
           (evt.key == 257 /* GLFW_KEY_ENTER */ ||
            evt.key == 335 /* GLFW_KEY_KP_ENTER */ ||
            evt.key == 32 /* GLFW_KEY_SPACE */)) {
-        if (on_click_) on_click_(focused, MouseButton::kLeft);
-        focused->OnClick();
+        if (on_click_) on_click_(focused_, MouseButton::kLeft);
+        ClickWidget(world, focused_);
         consumed = true;
         continue;
       }
     }
-    // Dispatch to focused widget
-    if (Widget* focused = Resolve(focused_)) {
-      if (evt.pressed || evt.repeat)
-        consumed |= focused->OnKeyDown(evt.key, evt.mods);
-      else
-        consumed |= focused->OnKeyUp(evt.key, evt.mods);
-    }
+    // Dispatch to focused widget (key-down / repeat only; no key-up handler).
+    if (focused_.valid() && (evt.pressed || evt.repeat))
+      consumed |= KeyDownWidget(world, focused_, evt.key, evt.mods);
   }
 
   // Dispatch character input to focused widget
   for (u32 i = 0; i < queue.char_count; ++i) {
-    if (Widget* focused = Resolve(focused_))
-      consumed |= focused->OnCharInput(queue.char_events[i].codepoint);
+    if (focused_.valid())
+      consumed |= CharInputWidget(world, focused_, queue.char_events[i].codepoint);
   }
 
   // Process gamepad button events
@@ -269,9 +259,9 @@ bool InputRouter::Process(Widget* root) {
     gamepad_nav_active_ = true;
 
     if (evt.button == GamepadButton::kA) {
-      if (Widget* focused = Resolve(focused_)) {
-        if (on_click_) on_click_(focused, MouseButton::kLeft);
-        focused->OnClick();
+      if (focused_.valid()) {
+        if (on_click_) on_click_(focused_, MouseButton::kLeft);
+        ClickWidget(world, focused_);
         consumed = true;
       }
     } else if (evt.button == GamepadButton::kB) {
@@ -338,72 +328,87 @@ bool InputRouter::Process(Widget* root) {
   return consumed;
 }
 
-void InputRouter::RefreshHover(Widget* root) {
-  if (!root || !platform_) return;
-  registry_ = root->context() ? root->context()->registry : nullptr;
-  Widget* hovered = Resolve(hovered_);
-  Widget* new_hover = Resolve(root->HitTest(mouse_pos_));
-  if (new_hover == hovered) return;
-  if (hovered) {
-    SetHoverBit(hovered, false);
-    if (on_hover_) on_hover_(hovered, false);
+void InputRouter::RefreshHover(wid root) {
+  WidgetRegistry* reg = WidgetRegistry::Active();
+  if (!root.valid() || !platform_ || !reg) return;
+  World& world = *reg;
+  wid new_hover = HitTest(world, root, mouse_pos_);
+  if (new_hover == hovered_) return;
+  if (hovered_.valid()) {
+    SetHoverBit(world, hovered_, false);
+    if (on_hover_) on_hover_(hovered_, false);
   }
-  hovered_ = new_hover ? new_hover->handle() : kNullWidget;
-  if (new_hover) {
-    SetHoverBit(new_hover, true);
+  hovered_ = new_hover;
+  if (new_hover.valid()) {
+    SetHoverBit(world, new_hover, true);
     if (on_hover_) on_hover_(new_hover, true);
-    platform_->SetCursor(new_hover->ComputedStyle().cursor);
+    platform_->SetCursor(ComputedStyle(world, new_hover).cursor);
   } else {
     platform_->SetCursor(Cursor::kAuto);
   }
 }
 
-void InputRouter::set_hover(Widget* widget) {
-  if (widget && widget->context() && !registry_)
-    registry_ = widget->context()->registry;
-  Widget* hovered = Resolve(hovered_);
-  if (hovered == widget) return;
-  if (hovered) {
-    SetHoverBit(hovered, false);
-    if (on_hover_) on_hover_(hovered, false);
+void InputRouter::set_hover(wid widget) {
+  WidgetRegistry* reg = WidgetRegistry::Active();
+  if (!reg) {
+    hovered_ = widget;
+    return;
   }
-  hovered_ = widget ? widget->handle() : kNullWidget;
-  if (widget) {
-    SetHoverBit(widget, true);
+  World& world = *reg;
+  if (hovered_ == widget) return;
+  if (hovered_.valid()) {
+    SetHoverBit(world, hovered_, false);
+    if (on_hover_) on_hover_(hovered_, false);
+  }
+  hovered_ = widget;
+  if (widget.valid()) {
+    SetHoverBit(world, widget, true);
     if (on_hover_) on_hover_(widget, true);
-    if (platform_) platform_->SetCursor(widget->ComputedStyle().cursor);
+    if (platform_) platform_->SetCursor(ComputedStyle(world, widget).cursor);
   } else if (platform_) {
     platform_->SetCursor(Cursor::kAuto);
   }
 }
 
-void InputRouter::set_focus(Widget* widget) {
-  if (widget && widget->context() && !registry_)
-    registry_ = widget->context()->registry;
-  Widget* focused = Resolve(focused_);
-  if (focused == widget) return;
-  if (focused) {
-    auto state = focused->widget_state();
-    focused->set_widget_state(static_cast<WidgetState>(
-        static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kFocused)));
+void InputRouter::set_focus(wid widget) {
+  WidgetRegistry* reg = WidgetRegistry::Active();
+  if (!reg) {
+    focused_ = widget;
+    return;
   }
-  focused_ = widget ? widget->handle() : kNullWidget;
-  if (widget) {
-    widget->set_widget_state(widget->widget_state() | WidgetState::kFocused);
+  World& world = *reg;
+  if (focused_ == widget) return;
+  if (focused_.valid()) {
+    auto state = WidgetStateOf(world, focused_);
+    SetWidgetState(world, focused_,
+                   static_cast<WidgetState>(
+                       static_cast<u16>(state) &
+                       ~static_cast<u16>(WidgetState::kFocused)));
   }
+  focused_ = widget;
+  if (widget.valid())
+    SetWidgetState(world, widget,
+                   WidgetStateOf(world, widget) | WidgetState::kFocused);
 }
 
 void InputRouter::ResetState() {
-  if (Widget* w = Resolve(hovered_)) SetHoverBit(w, false);
-  if (Widget* w = Resolve(pressed_)) {
-    auto state = w->widget_state();
-    w->set_widget_state(static_cast<WidgetState>(
-        static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kPressed)));
-  }
-  if (Widget* w = Resolve(focused_)) {
-    auto state = w->widget_state();
-    w->set_widget_state(static_cast<WidgetState>(
-        static_cast<u16>(state) & ~static_cast<u16>(WidgetState::kFocused)));
+  if (WidgetRegistry* reg = WidgetRegistry::Active()) {
+    World& world = *reg;
+    if (hovered_.valid()) SetHoverBit(world, hovered_, false);
+    if (pressed_.valid()) {
+      auto state = WidgetStateOf(world, pressed_);
+      SetWidgetState(world, pressed_,
+                     static_cast<WidgetState>(
+                         static_cast<u16>(state) &
+                         ~static_cast<u16>(WidgetState::kPressed)));
+    }
+    if (focused_.valid()) {
+      auto state = WidgetStateOf(world, focused_);
+      SetWidgetState(world, focused_,
+                     static_cast<WidgetState>(
+                         static_cast<u16>(state) &
+                         ~static_cast<u16>(WidgetState::kFocused)));
+    }
   }
 
   hovered_ = kNullWidget;
@@ -424,34 +429,36 @@ void InputRouter::RegisterShortcut(i32 key, i32 mods, ShortcutHandler handler) {
 
 void InputRouter::ClearShortcuts() { shortcuts_.clear(); }
 
-void InputRouter::ProcessGamepadNavigation(Widget* root, f32 /*delta_time*/) {
+void InputRouter::ProcessGamepadNavigation(wid root, f32 /*delta_time*/) {
   (void)root;
 }
 
-void InputRouter::NavigateFocus(Widget* root, i8 dir_x, i8 dir_y) {
-  if (!root) return;
+void InputRouter::NavigateFocus(wid root, i8 dir_x, i8 dir_y) {
+  WidgetRegistry* reg = WidgetRegistry::Active();
+  if (!root.valid() || !reg) return;
+  World& world = *reg;
 
-  Vector<Widget*> focusable;
-  Function<void(Widget*)> collect = [&](Widget* w) {
-    if (w->focusable()) focusable.push_back(w);
-    for (auto* child : w->child_ptrs()) collect(child);
+  Vector<wid> focusable;
+  Function<void(wid)> collect = [&](wid w) {
+    if (world.Get<WidgetNode>(w)->tab_index >= 0) focusable.push_back(w);
+    for (wid child : world.Get<Hierarchy>(w)->children) collect(child);
   };
   collect(root);
   if (focusable.empty()) return;
 
-  std::sort(focusable.begin(), focusable.end(), [](Widget* a, Widget* b) {
-    return a->tab_index() < b->tab_index();
+  std::sort(focusable.begin(), focusable.end(), [&world](wid a, wid b) {
+    return world.Get<WidgetNode>(a)->tab_index <
+           world.Get<WidgetNode>(b)->tab_index;
   });
 
-  Widget* focused = Resolve(focused_);
-  if (!focused) {
+  if (!focused_.valid()) {
     set_focus(focusable.front());
     if (on_hover_) on_hover_(focusable.front(), true);
     return;
   }
 
   if (dir_y != 0) {
-    auto it = std::find(focusable.begin(), focusable.end(), focused);
+    auto it = std::find(focusable.begin(), focusable.end(), focused_);
     if (dir_y > 0) {
       if (it == focusable.end() || std::next(it) == focusable.end())
         set_focus(focusable.front());
@@ -466,7 +473,7 @@ void InputRouter::NavigateFocus(Widget* root, i8 dir_x, i8 dir_y) {
   }
 
   if (dir_x != 0) {
-    auto it = std::find(focusable.begin(), focusable.end(), focused);
+    auto it = std::find(focusable.begin(), focusable.end(), focused_);
     if (dir_x > 0) {
       if (it == focusable.end() || std::next(it) == focusable.end())
         set_focus(focusable.front());
@@ -480,8 +487,8 @@ void InputRouter::NavigateFocus(Widget* root, i8 dir_x, i8 dir_y) {
     }
   }
 
-  if (Widget* nf = Resolve(focused_)) {
-    if (on_hover_) on_hover_(nf, true);
+  if (focused_.valid()) {
+    if (on_hover_) on_hover_(focused_, true);
   }
 }
 

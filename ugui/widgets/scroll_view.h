@@ -17,25 +17,27 @@ struct ScrollViewContent {
   f32 deceleration = 0.88f;
 };
 
-/// Behaviour table (draw + layout + scroll + hit-test + update) for scroll views.
+/// Behaviour table (draw + layout + scroll + hit-test + update) for scroll
+/// views.
 WidgetVTable ScrollViewVTable();
 
-/// Create a scroll-view entity: a generic Widget tagged kScrollView with a
+/// Create a scroll-view entity: a widget entity tagged kScrollView with a
 /// ScrollViewContent component.
-Widget* CreateScrollView(u32 id);
+wid CreateScrollView(u32 id);
 
-/// The scroll offset of a scroll view, or (0,0) if `w` is null / not a scroll
-/// view. Used by the paint and layout passes to translate descendants.
-Vec2 ScrollOffset(const Widget* w);
+/// The scroll offset of a scroll view, or (0,0) if `e` is not a scroll view.
+/// Used by the paint and layout passes to translate descendants, so it takes
+/// the world explicitly.
+Vec2 ScrollOffset(WidgetRegistry& world, wid e);
 
-/// Set the scroll offset. No-op if `w` is null or not a scroll view.
-void SetScrollOffset(Widget* w, Vec2 offset);
+/// Set the scroll offset. No-op if `e` is not a scroll view.
+void SetScrollOffset(wid e, Vec2 offset);
 
-/// Add to the scroll offset. No-op if `w` is null or not a scroll view.
-void ScrollBy(Widget* w, Vec2 delta);
+/// Add to the scroll offset. No-op if `e` is not a scroll view.
+void ScrollBy(wid e, Vec2 delta);
 
-/// Measured total content size, or (0,0) if `w` is null / not a scroll view.
-Vec2 ScrollContentSize(const Widget* w);
+/// Measured total content size, or (0,0) if `e` is not a scroll view.
+Vec2 ScrollContentSize(wid e);
 
 }  // namespace ugui
 

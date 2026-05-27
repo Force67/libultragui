@@ -9,25 +9,28 @@
 namespace ugui {
 namespace {
 
-TextEngine* text_engine(const Widget& w) {
-  return w.context() ? w.context()->text_engine : nullptr;
+TextEngine* text_engine(WidgetRegistry& world, wid e) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->text_engine : nullptr;
 }
 
-FontHandle effective_font(const Widget& w, const CheckboxContent& c) {
+FontHandle effective_font(WidgetRegistry& world, wid e,
+                          const CheckboxContent& c) {
   if (c.font != kInvalidFont) return c.font;
-  return w.context() ? w.context()->default_font : kInvalidFont;
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->default_font : kInvalidFont;
 }
 
-void CheckboxMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void CheckboxMeasure(WidgetRegistry& world, wid e, f32& out_width,
                      f32& out_height) {
-  CheckboxContent* c = world.Get<CheckboxContent>(w.handle());
-  const Style& st = w.style();
-  f32 sc = w.ui_scale();
+  CheckboxContent* c = world.Get<CheckboxContent>(e);
+  const Style& st = world.Get<StyleC>(e)->style;
+  f32 sc = UiScale(world, e);
   f32 box_size = st.font_size * 1.2f;
   constexpr f32 kGap = 8.0f;
 
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
   if (c && te && fh != kInvalidFont && !c->label.empty()) {
     auto run = te->Shape(fh, c->label.c_str(), static_cast<u32>(c->label.size()),
                          st.font_size * sc, st.letter_spacing * sc,
@@ -40,22 +43,22 @@ void CheckboxMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
   }
 }
 
-void CheckboxDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  // The base Widget::OnPaint already drew background / shadow / border.
-  CheckboxContent* c = world.Get<CheckboxContent>(w.handle());
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+void CheckboxDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  // PaintWidget already drew background / shadow / border.
+  CheckboxContent* c = world.Get<CheckboxContent>(e);
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
   f32 box_size = s.font_size * 1.0f;
   constexpr f32 kGap = 8.0f;
   f32 corner = std::min(box_size * 0.2f, 4.0f);
   u32 radii = Vertex2D::PackRadii(corner);
 
-  Rect content = w.content_rect();
+  Rect content = world.Get<Transform>(e)->content_rect;
   f32 box_x = content.x;
   f32 box_y = content.y + (content.h - box_size) * 0.5f;
 
-  bool is_checked = IsChecked(&w);
+  bool is_checked = IsChecked(e);
 
   if (is_checked) {
     Color accent = (s.background.a > 0.0f)
@@ -85,8 +88,8 @@ void CheckboxDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
   }
 
   // Label to the right of the box.
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
   if (c && te && fh != kInvalidFont && !c->label.empty()) {
     auto run =
         te->Shape(fh, c->label.c_str(), static_cast<u32>(c->label.size()),
@@ -110,10 +113,10 @@ void CheckboxDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
   }
 }
 
-bool CheckboxClick(WidgetRegistry& world, Widget& w) {
-  bool now = !IsChecked(&w);
-  SetChecked(&w, now);
-  CheckboxContent* c = world.Get<CheckboxContent>(w.handle());
+bool CheckboxClick(WidgetRegistry& world, wid e) {
+  bool now = !IsChecked(e);
+  SetChecked(e, now);
+  CheckboxContent* c = world.Get<CheckboxContent>(e);
   if (c && c->on_change) c->on_change(now);
   return true;
 }
@@ -128,38 +131,43 @@ WidgetVTable CheckboxVTable() {
   return vt;
 }
 
-Widget* CreateCheckbox(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kCheckbox);
-  WidgetRegistry::Active()->Add<CheckboxContent>(w->handle(), CheckboxContent{});
-  return w;
+wid CreateCheckbox(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kCheckbox;
+  world.Add<CheckboxContent>(e, CheckboxContent{});
+  return e;
 }
 
-void SetCheckboxLabel(Widget* w, const String& label) {
-  if (!w || w->kind() != WidgetKind::kCheckbox || !w->registry()) return;
-  w->registry()->GetOrAdd<CheckboxContent>(w->handle()).label = label;
-  w->MarkDirty();
+void SetCheckboxLabel(wid e, const String& label) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kCheckbox) return;
+  world.GetOrAdd<CheckboxContent>(e).label = label;
+  MarkDirty(world, e);
 }
 
-void SetCheckboxChange(Widget* w, Function<void(bool)> handler) {
-  if (!w || w->kind() != WidgetKind::kCheckbox || !w->registry()) return;
-  w->registry()->GetOrAdd<CheckboxContent>(w->handle()).on_change =
-      std::move(handler);
+void SetCheckboxChange(wid e, Function<void(bool)> handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n || n->kind != WidgetKind::kCheckbox) return;
+  world.GetOrAdd<CheckboxContent>(e).on_change = std::move(handler);
 }
 
-void SetChecked(Widget* w, bool checked) {
-  if (!w) return;
-  WidgetState s = w->widget_state();
+void SetChecked(wid e, bool checked) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetState s = WidgetStateOf(world, e);
   if (checked)
     s = s | WidgetState::kChecked;
   else
     s = static_cast<WidgetState>(static_cast<u16>(s) &
                                  ~static_cast<u16>(WidgetState::kChecked));
-  w->set_widget_state(s);
+  SetWidgetState(world, e, s);
 }
 
-bool IsChecked(const Widget* w) {
-  return w && HasState(w->widget_state(), WidgetState::kChecked);
+bool IsChecked(wid e) {
+  return HasState(WidgetStateOf(*WidgetRegistry::Active(), e),
+                  WidgetState::kChecked);
 }
 
 }  // namespace ugui

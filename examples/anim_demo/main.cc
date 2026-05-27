@@ -199,7 +199,7 @@ int main(int argc, char* argv[]) {
       anim->set_loop(true);
 
       ugui::SetImageTexture(
-          ui.widgets().Get(ui.FindWidget(anims[i].widget_name)),
+          ui.FindWidget(anims[i].widget_name),
           anim->texture(), 128, 128);
 
       loaded[i] = anim;
@@ -214,7 +214,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < ANIM_COUNT; ++i) {
       if (!loaded[i]) continue;
       ugui::SetImageTexture(
-          ui.widgets().Get(ui.FindWidget(anims[i].widget_name)),
+          ui.FindWidget(anims[i].widget_name),
           loaded[i]->texture(), 128, 128);
     }
     ui.Update();

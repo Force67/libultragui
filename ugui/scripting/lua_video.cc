@@ -13,7 +13,7 @@ namespace ugui {
 
 void RegisterVideoLua(ScriptRuntime& lua,
                       Function<VideoPlayer*(const char*)> loader,
-                      Function<Widget*(const char*)> find_widget) {
+                      Function<wid(const char*)> find_widget) {
   // ugui.load_video(path) -> video lightuserdata
   lua.RegisterFunction("load_video", [loader](lua_State* L) -> int {
     const char* path = luaL_checkstring(L, 1);
@@ -114,9 +114,10 @@ void RegisterVideoLua(ScriptRuntime& lua,
     auto* v = static_cast<VideoPlayer*>(lua_touserdata(L, 1));
     const char* name = luaL_checkstring(L, 2);
     if (v) {
-      Widget* w = find_widget(name);
-      SetImageTexture(w, v->texture(), static_cast<f32>(v->width()),
-                      static_cast<f32>(v->height()));
+      wid w = find_widget(name);
+      if (w.valid())
+        SetImageTexture(w, v->texture(), static_cast<f32>(v->width()),
+                        static_cast<f32>(v->height()));
     }
     return 0;
   });

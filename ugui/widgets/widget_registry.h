@@ -7,35 +7,29 @@
 #include <ugui/core/config.h>
 #include <ugui/core/handle.h>
 #include <ugui/core/types.h>
-#include <ugui/widgets/widget.h>
 
 namespace ugui {
 
-/// Generation-checked slot map that hands out stable WidgetId handles for live
-/// widgets. The widget tree still owns its widgets (destruction is unchanged),
-/// but parent/child links are stored as handles that resolve through this
-/// registry, so any stored reference safely resolves to null once the widget is
-/// gone. Every widget Acquire()s a slot eagerly in its constructor (via the
-/// active registry), and the slot is freed (generation bumped) in the
-/// destructor.
+/// The entity-and-component world: a generation-checked slot map of widget
+/// entities plus their component stores. An entity (WidgetId / wid) owns no
+/// object; its data lives in components. New() allocates an entity with the
+/// core widget components; Release() frees it (dropping all its components and
+/// bumping the generation so stale handles resolve to dead).
 class WidgetRegistry {
  public:
-  /// Return the widget's handle, allocating a slot on first use. Idempotent.
-  WidgetId Acquire(Widget* w);
+  /// Allocate a new widget entity with the core components (WidgetNode,
+  /// Transform, StyleC, Hierarchy). `id` is the application id (0 = auto).
+  wid New(u32 id = 0);
 
-  /// Resolve a handle to a live widget, or nullptr if it was destroyed.
-  Widget* Get(WidgetId id) const;
+  /// True if the handle still refers to a live entity.
+  bool Alive(WidgetId id) const;
 
-  /// Resolve + kind-checked downcast (no RTTI). Null if stale or wrong kind.
-  template <class T>
-  T* GetAs(WidgetId id) const {
-    return widget_cast<T>(Get(id));
-  }
+  /// Free an entity: drop its components and bump the generation.
+  void Release(WidgetId id);
 
   // --- Components (composition-lite ECS) ---------------------------------
-  // An entity (WidgetId) can carry any set of component structs. Built-in
-  // widget data is migrating into components; host engines can attach their
-  // own types the same way, no core changes needed:
+  // An entity can carry any set of component structs. Host engines attach
+  // their own types the same way, no core changes needed:
   //   world.Add<MyComponent>(id, {...});
   //   if (auto* c = world.Get<MyComponent>(id)) ...
   // Components are dropped automatically when the entity is released.
@@ -72,21 +66,12 @@ class WidgetRegistry {
     Store<C>().Remove(id);
   }
 
-  /// True if the handle still refers to a live widget.
-  bool Alive(WidgetId id) const { return Get(id) != nullptr; }
-
-  /// Release a slot (called from ~Widget). Bumps the generation so outstanding
-  /// handles to this slot become stale.
-  void Release(WidgetId id);
-
-  /// Registry that new widgets register themselves into: the active context's,
-  /// or a process-global default for widgets created without a UIContext.
-  /// Every Widget acquires a handle from this in its constructor, so the tree
-  /// can reference children/parents by handle instead of raw pointers.
+  /// Registry that new entities are created into: the active context's, or a
+  /// process-global default for entities created without a UIContext.
   static WidgetRegistry* Active();
 
   /// RAII scope that makes `r` the active registry on this thread. UIContext
-  /// wraps tree creation/update in one of these.
+  /// wraps its whole lifetime in one of these.
   struct ScopedActive {
     explicit ScopedActive(WidgetRegistry* r);
     ~ScopedActive();
@@ -99,7 +84,6 @@ class WidgetRegistry {
 
  private:
   struct Slot {
-    Widget* ptr = nullptr;
     u32 generation = 1;  // never 0 so a live handle is always valid()
     bool alive = false;
   };
@@ -108,8 +92,7 @@ class WidgetRegistry {
   Vector<std::unique_ptr<IComponentStore>> stores_;  // indexed by component id
 };
 
-/// The registry is the entity-and-component world; `World` is the preferred
-/// spelling as the widget layer migrates to composition-lite ECS.
+/// The registry is the entity-and-component world.
 using World = WidgetRegistry;
 
 }  // namespace ugui

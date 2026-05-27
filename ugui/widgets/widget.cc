@@ -11,6 +11,11 @@
 
 namespace ugui {
 
+u32 NextWidgetId() {
+  static u32 s_counter = 1;  // 0 is reserved / sentinel
+  return s_counter++;
+}
+
 /// Compute packed per-corner radii from a resolved style.
 static u32 style_corner_radii(const Style& s) {
   if (s.corner_radius_tl > 0.0f || s.corner_radius_tr > 0.0f ||
@@ -21,322 +26,256 @@ static u32 style_corner_radii(const Style& s) {
   return Vertex2D::PackRadii(s.corner_radius);
 }
 
-Widget::Widget(u32 id) {
-  // Register eagerly so the entity has a stable handle from birth, then attach
-  // the core components that hold all of its data.
-  registry_ = WidgetRegistry::Active();
-  registry_->Acquire(this);  // sets self_ (and registry_)
-  registry_->Add<WidgetNode>(self_, WidgetNode{id == 0 ? NextAutoId() : id});
-  registry_->Add<Transform>(self_, Transform{});
-  registry_->Add<StyleC>(self_, StyleC{});
-  registry_->Add<Hierarchy>(self_, Hierarchy{});
-}
-
-Widget::~Widget() {
-  for (wid c : hier()->children) {
-    if (Widget* child = registry_->Get(c)) delete child;
+void DestroyWidget(WidgetRegistry& world, wid e) {
+  if (!world.Alive(e)) return;
+  if (Hierarchy* h = world.Get<Hierarchy>(e)) {
+    Vector<wid> kids = h->children;  // copy: Release mutates the stores
+    for (wid c : kids) DestroyWidget(world, c);
   }
-  // Invalidate outstanding handles (and drop all components) for this entity.
-  if (self_.valid()) registry_->Release(self_);
-}
-
-Transform* Widget::xf() const { return registry_->Get<Transform>(self_); }
-Hierarchy* Widget::hier() const { return registry_->Get<Hierarchy>(self_); }
-StyleC* Widget::sc() const { return registry_->Get<StyleC>(self_); }
-WidgetNode* Widget::node() const { return registry_->Get<WidgetNode>(self_); }
-
-// --- Identity ---------------------------------------------------------------
-
-u32 Widget::id() const { return node()->id; }
-void Widget::set_id(u32 id) { node()->id = id; }
-const String& Widget::name() const { return node()->name; }
-void Widget::set_name(const String& name) { node()->name = name; }
-WidgetKind Widget::kind() const { return node()->kind; }
-void Widget::set_kind(WidgetKind k) { node()->kind = k; }
-
-const WidgetContext* Widget::context() const { return node()->context; }
-f32 Widget::ui_scale() const {
-  const WidgetContext* c = context();
-  return c ? c->ui_scale : 1.0f;
-}
-void Widget::set_tab_index(i32 idx) { node()->tab_index = idx; }
-i32 Widget::tab_index() const { return node()->tab_index; }
-bool Widget::focusable() const { return tab_index() >= 0; }
-
-// --- Tooltip ----------------------------------------------------------------
-
-void Widget::set_tooltip(const String& text) {
-  registry_->Add<Tooltip>(self_, Tooltip{text});
-}
-
-const String& Widget::tooltip() const {
-  static const String kEmpty;
-  Tooltip* t = registry_->Get<Tooltip>(self_);
-  return t ? t->text : kEmpty;
+  world.Release(e);
 }
 
 // --- Tree -------------------------------------------------------------------
 
-Widget* Widget::parent_ptr() const { return registry_->Get(hier()->parent); }
-
-Vector<Widget*> Widget::child_ptrs() const {
-  Vector<Widget*> out;
-  const Vector<wid>& kids = hier()->children;
-  out.reserve(kids.size());
-  for (wid c : kids) {
-    if (Widget* w = registry_->Get(c)) out.push_back(w);
-  }
-  return out;
-}
-
-void Widget::SetContext(const WidgetContext* ctx) {
-  node()->context = ctx;
-  for (Widget* child : child_ptrs()) child->SetContext(ctx);
-}
-
-void Widget::AddChild(Widget* child) {
-  if (!child) return;
-  if (Widget* old = child->parent_ptr()) old->RemoveChild(child);
-  child->hier()->parent = self_;
-  hier()->children.push_back(child->self_);
-  if (context()) child->SetContext(context());
-  MarkDirty();
-}
-
-void Widget::RemoveChild(Widget* child) {
-  if (!child) return;
-  Vector<wid>& kids = hier()->children;
-  auto it = std::find(kids.begin(), kids.end(), child->self_);
+void RemoveChild(WidgetRegistry& world, wid parent, wid child) {
+  Hierarchy* ph = world.Get<Hierarchy>(parent);
+  if (!ph) return;
+  auto& kids = ph->children;
+  auto it = std::find(kids.begin(), kids.end(), child);
   if (it != kids.end()) {
-    child->hier()->parent = kNullWidget;
+    if (Hierarchy* ch = world.Get<Hierarchy>(child)) ch->parent = kNullWidget;
     kids.erase(it);
-    MarkDirty();
+    MarkDirty(world, parent);
   }
 }
 
-void Widget::ClearChildren() {
-  for (wid c : hier()->children) {
-    if (Widget* child = registry_->Get(c)) {
-      child->hier()->parent = kNullWidget;
-      delete child;
-    }
-  }
-  hier()->children.clear();
-  MarkDirty();
+void AddChild(WidgetRegistry& world, wid parent, wid child) {
+  if (!parent.valid() || !child.valid()) return;
+  Hierarchy* ch = world.Get<Hierarchy>(child);
+  if (!ch || !world.Get<Hierarchy>(parent)) return;
+  if (ch->parent.valid()) RemoveChild(world, ch->parent, child);
+  world.Get<Hierarchy>(child)->parent = parent;
+  world.Get<Hierarchy>(parent)->children.push_back(child);
+  if (const WidgetContext* ctx = world.Get<WidgetNode>(parent)->context)
+    SetContext(world, child, ctx);
+  MarkDirty(world, parent);
 }
 
-wid Widget::ChildAt(u32 index) const {
-  const Vector<wid>& kids = hier()->children;
-  return index < kids.size() ? kids[index] : kNullWidget;
+void SetContext(WidgetRegistry& world, wid e, const WidgetContext* ctx) {
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  if (!n) return;
+  n->context = ctx;
+  Vector<wid> kids = world.Get<Hierarchy>(e)->children;  // copy: recursion safe
+  for (wid c : kids) SetContext(world, c, ctx);
 }
 
-u32 Widget::child_count() const {
-  return static_cast<u32>(hier()->children.size());
+const WidgetContext* WidgetContextOf(WidgetRegistry& world, wid e) {
+  WidgetNode* n = world.Get<WidgetNode>(e);
+  return n ? n->context : nullptr;
 }
 
-wid Widget::parent() const { return hier()->parent; }
-
-const Vector<wid>& Widget::children() const { return hier()->children; }
-
-// --- Style ------------------------------------------------------------------
-
-Style& Widget::style() { return sc()->style; }
-const Style& Widget::style() const { return sc()->style; }
-void Widget::set_style(const Style& s) {
-  sc()->style = s;
-  MarkDirty();
+f32 UiScale(WidgetRegistry& world, wid e) {
+  const WidgetContext* c = WidgetContextOf(world, e);
+  return c ? c->ui_scale : 1.0f;
 }
 
-WidgetState Widget::widget_state() const { return sc()->state; }
+// --- Tooltip ----------------------------------------------------------------
 
-void Widget::set_selected(bool v) {
-  WidgetState s = widget_state();
-  if (v)
-    s = s | WidgetState::kSelected;
-  else
-    s = static_cast<WidgetState>(static_cast<u16>(s) &
-                                 ~static_cast<u16>(WidgetState::kSelected));
-  set_widget_state(s);
+void SetTooltip(WidgetRegistry& world, wid e, const String& text) {
+  world.Add<Tooltip>(e, Tooltip{text});
 }
-bool Widget::selected() const {
-  return HasState(widget_state(), WidgetState::kSelected);
+const String& TooltipText(WidgetRegistry& world, wid e) {
+  static const String kEmpty;
+  Tooltip* t = world.Get<Tooltip>(e);
+  return t ? t->text : kEmpty;
 }
 
-void Widget::AddStateOverride(WidgetState state, const Style& override_style,
-                              u64 mask) {
-  registry_->GetOrAdd<StateStyle>(self_).overrides.push_back(
+// --- Style / state ----------------------------------------------------------
+
+void SetStyle(WidgetRegistry& world, wid e, const Style& s) {
+  world.Get<StyleC>(e)->style = s;
+  MarkDirty(world, e);
+}
+
+WidgetState WidgetStateOf(WidgetRegistry& world, wid e) {
+  return world.Get<StyleC>(e)->state;
+}
+
+void AddStateOverride(WidgetRegistry& world, wid e, WidgetState state,
+                      const Style& override_style, u64 mask) {
+  world.GetOrAdd<StateStyle>(e).overrides.push_back(
       {state, override_style, mask});
 }
 
-void Widget::AddStateTransition(WidgetState state,
-                                const Transition& transition) {
-  registry_->GetOrAdd<StateStyle>(self_).transitions.push_back(
-      {state, transition});
+void AddStateTransition(WidgetRegistry& world, wid e, WidgetState state,
+                        const Transition& transition) {
+  world.GetOrAdd<StateStyle>(e).transitions.push_back({state, transition});
 }
 
-void Widget::set_widget_state(WidgetState state) {
-  StyleC* style_c = sc();
-  if (style_c->state == state) return;
-  WidgetState old_state = style_c->state;
-  style_c->state = state;
+void SetWidgetState(WidgetRegistry& world, wid e, WidgetState state) {
+  StyleC* sc = world.Get<StyleC>(e);
+  if (sc->state == state) return;
+  WidgetState old_state = sc->state;
+  sc->state = state;
 
-  // Trigger transitions if configured.
-  const WidgetContext* ctx = context();
-  StateStyle* ss = registry_->Get<StateStyle>(self_);
+  const WidgetContext* ctx = world.Get<WidgetNode>(e)->context;
+  StateStyle* ss = world.Get<StateStyle>(e);
   if (ctx && ctx->animator && ctx->current_time && ss &&
       !ss->transitions.empty()) {
-    const Style& base = style_c->style;
+    sc = world.Get<StyleC>(e);
     u32 n = static_cast<u32>(ss->overrides.size());
-    Style from = ResolveStyle(base, ss->overrides.data(), n, old_state);
-    Style to = ResolveStyle(base, ss->overrides.data(), n, state);
-
+    Style from = ResolveStyle(sc->style, ss->overrides.data(), n, old_state);
+    Style to = ResolveStyle(sc->style, ss->overrides.data(), n, state);
     for (auto& stc : ss->transitions) {
       u16 activated = static_cast<u16>(state) & ~static_cast<u16>(old_state);
       u16 deactivated = static_cast<u16>(old_state) & ~static_cast<u16>(state);
       bool relevant =
           (static_cast<u16>(stc.state) & (activated | deactivated)) != 0;
       if (relevant && !stc.transition.IsInstant()) {
-        ctx->animator->StartTransition(id(), from, to, stc.transition,
-                                       *ctx->current_time);
+        ctx->animator->StartTransition(world.Get<WidgetNode>(e)->id, from, to,
+                                       stc.transition, *ctx->current_time);
         break;
       }
     }
   }
-
-  MarkPaintDirty();
+  MarkPaintDirty(world, e);
 }
 
-void Widget::SetAnimationStyle(const Style& s) {
-  registry_->Add<AnimStyle>(self_, AnimStyle{s});
-  MarkPaintDirty();
+void SetSelected(WidgetRegistry& world, wid e, bool v) {
+  WidgetState s = WidgetStateOf(world, e);
+  if (v)
+    s = s | WidgetState::kSelected;
+  else
+    s = static_cast<WidgetState>(static_cast<u16>(s) &
+                                 ~static_cast<u16>(WidgetState::kSelected));
+  SetWidgetState(world, e, s);
 }
 
-void Widget::ClearAnimationStyle() {
-  registry_->Remove<AnimStyle>(self_);
-  MarkPaintDirty();
+void SetAnimationStyle(WidgetRegistry& world, wid e, const Style& s) {
+  world.Add<AnimStyle>(e, AnimStyle{s});
+  MarkPaintDirty(world, e);
+}
+void ClearAnimationStyle(WidgetRegistry& world, wid e) {
+  world.Remove<AnimStyle>(e);
+  MarkPaintDirty(world, e);
 }
 
-Style Widget::ComputedStyle() const {
-  if (AnimStyle* a = registry_->Get<AnimStyle>(self_)) return a->style;
-  StyleC* style_c = sc();
-  StateStyle* ss = registry_->Get<StateStyle>(self_);
-  if (!ss || ss->overrides.empty()) return style_c->style;
-  return ResolveStyle(style_c->style, ss->overrides.data(),
-                      static_cast<u32>(ss->overrides.size()), style_c->state);
+Style ComputedStyle(WidgetRegistry& world, wid e) {
+  if (AnimStyle* a = world.Get<AnimStyle>(e)) return a->style;
+  StyleC* sc = world.Get<StyleC>(e);
+  StateStyle* ss = world.Get<StateStyle>(e);
+  if (!ss || ss->overrides.empty()) return sc->style;
+  return ResolveStyle(sc->style, ss->overrides.data(),
+                      static_cast<u32>(ss->overrides.size()), sc->state);
 }
 
-// --- Layout / dirty ---------------------------------------------------------
+// --- Dirty / hit-testing ----------------------------------------------------
 
-Rect Widget::rect() const { return xf()->rect; }
-Rect Widget::content_rect() const { return xf()->content_rect; }
-void Widget::set_intrinsic_size(f32 w, f32 h) {
-  Transform* t = xf();
-  t->intrinsic_w = w;
-  t->intrinsic_h = h;
-}
-
-void Widget::MarkDirty() {
-  Transform* t = xf();
+void MarkDirty(WidgetRegistry& world, wid e) {
+  Transform* t = world.Get<Transform>(e);
+  if (!t) return;
   t->layout_dirty = true;
   t->paint_dirty = true;
-  if (Widget* p = parent_ptr()) p->MarkDirty();
+  wid p = world.Get<Hierarchy>(e)->parent;
+  if (p.valid()) MarkDirty(world, p);
 }
-void Widget::MarkPaintDirty() { xf()->paint_dirty = true; }
-bool Widget::IsDirty() const { return xf()->layout_dirty; }
-bool Widget::IsPaintDirty() const { return xf()->paint_dirty; }
-
-bool Widget::contains(Vec2 point) const { return rect().contains(point); }
-
-wid Widget::HitTest(Vec2 point) {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.hit_test) return vt.hit_test(*registry_, *this, point);
-
-  if (!rect().contains(point)) return kNullWidget;
-
-  // Check children in reverse (top-most first).
-  const Vector<wid>& kids = hier()->children;
-  for (auto it = kids.rbegin(); it != kids.rend(); ++it) {
-    if (Widget* child = registry_->Get(*it)) {
-      wid hit = child->HitTest(point);
-      if (hit.valid()) return hit;
-    }
-  }
-  return self_;
+void MarkPaintDirty(WidgetRegistry& world, wid e) {
+  if (Transform* t = world.Get<Transform>(e)) t->paint_dirty = true;
 }
 
-Vec2 Widget::InputToLayoutPoint(Vec2 point) const {
-  Widget* p = parent_ptr();
-  while (p) {
-    point += ScrollOffset(p);  // (0,0) for non-scroll-view ancestors
-    p = p->parent_ptr();
+Vec2 InputToLayoutPoint(WidgetRegistry& world, wid e, Vec2 point) {
+  wid p = world.Get<Hierarchy>(e)->parent;
+  while (p.valid()) {
+    point += ScrollOffset(world, p);  // (0,0) for non-scroll-view ancestors
+    p = world.Get<Hierarchy>(p)->parent;
   }
   return point;
 }
 
-void Widget::OnLayout(const Rect& rect, const Rect& content_rect) {
-  Transform* t = xf();
+wid HitTest(WidgetRegistry& world, wid e, Vec2 point) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  if (vt.hit_test) return vt.hit_test(world, e, point);
+
+  if (!world.Get<Transform>(e)->rect.contains(point)) return kNullWidget;
+  const Vector<wid>& kids = world.Get<Hierarchy>(e)->children;
+  for (auto it = kids.rbegin(); it != kids.rend(); ++it) {
+    wid hit = HitTest(world, *it, point);
+    if (hit.valid()) return hit;
+  }
+  return e;
+}
+
+// --- Lifecycle dispatch -----------------------------------------------------
+
+void LayoutWidget(WidgetRegistry& world, wid e, const Rect& rect,
+                  const Rect& content_rect) {
+  Transform* t = world.Get<Transform>(e);
   t->rect = rect;
   t->content_rect = content_rect;
   t->layout_dirty = false;
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.on_layout) vt.on_layout(*registry_, *this, rect, content_rect);
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  if (vt.on_layout) vt.on_layout(world, e, rect, content_rect);
 }
 
-void Widget::OnUpdate(f64 dt) {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.on_update) vt.on_update(*registry_, *this, dt);
+void UpdateWidget(WidgetRegistry& world, wid e, f64 dt) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  if (vt.on_update) vt.on_update(world, e, dt);
+}
+bool ScrollWidget(WidgetRegistry& world, wid e, Vec2 delta) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  return vt.on_scroll ? vt.on_scroll(world, e, delta) : false;
+}
+bool KeyDownWidget(WidgetRegistry& world, wid e, i32 key, i32 mods) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  return vt.on_key_down ? vt.on_key_down(world, e, key, mods) : false;
+}
+bool CharInputWidget(WidgetRegistry& world, wid e, u32 codepoint) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  return vt.on_char_input ? vt.on_char_input(world, e, codepoint) : false;
+}
+bool ConsumesTextInput(WidgetRegistry& world, wid e) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  return vt.consumes_text_input ? vt.consumes_text_input(world, e) : false;
+}
+void DismissWidget(WidgetRegistry& world, wid e) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  if (vt.on_dismiss) vt.on_dismiss(world, e);
+}
+bool ClickWidget(WidgetRegistry& world, wid e) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  return vt.on_click ? vt.on_click(world, e) : false;
 }
 
-bool Widget::OnScroll(Vec2 delta) {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.on_scroll) return vt.on_scroll(*registry_, *this, delta);
-  return false;
+void MeasureWidget(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
+  if (vt.measure) {
+    vt.measure(world, e, out_w, out_h);
+    return;
+  }
+  Transform* t = world.Get<Transform>(e);
+  out_w = t->intrinsic_w;
+  out_h = t->intrinsic_h;
 }
 
-bool Widget::OnKeyDown(i32 key, i32 mods) {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.on_key_down) return vt.on_key_down(*registry_, *this, key, mods);
-  return false;
-}
-
-bool Widget::OnCharInput(u32 codepoint) {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.on_char_input) return vt.on_char_input(*registry_, *this, codepoint);
-  return false;
-}
-
-bool Widget::consumes_text_input() const {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  return vt.consumes_text_input ? vt.consumes_text_input(*this) : false;
-}
-
-void Widget::OnDismiss() {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.on_dismiss) vt.on_dismiss(*registry_, *this);
-}
-
-void Widget::OnPaint(Renderer2D& renderer) {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
+void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
   if (vt.custom_paint) {
-    // The widget owns its entire paint; skip the base box.
-    if (vt.draw) vt.draw(*registry_, *this, renderer);
+    if (vt.draw) vt.draw(world, e, renderer);
     return;
   }
 
-  Rect rect = this->rect();
-  auto s = ComputedStyle();
-  s.Scale(ui_scale());
+  Rect rect = world.Get<Transform>(e)->rect;
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
   u32 radii = style_corner_radii(s);
 
-  // Outer box shadow (drawn before background).
   if (s.HasShadow() && !s.shadow.inset) {
     Color sc = s.shadow.color.WithAlpha(s.shadow.color.a * alpha);
     renderer.DrawShadow(rect, sc, s.shadow.blur, s.shadow.spread,
                         s.shadow.offset, radii);
   }
 
-  // Backdrop blur (frosted-glass approximation).
   if (s.backdrop_blur > 0.0f) {
     f32 blur_alpha = Clamp(s.backdrop_blur / 40.0f, 0.1f, 0.6f);
     Color frost =
@@ -345,7 +284,6 @@ void Widget::OnPaint(Renderer2D& renderer) {
     renderer.DrawRect(rect, frost, radii);
   }
 
-  // Background (with optional gradient and border).
   if (s.background.a > 0.0f || s.border_width > 0.0f ||
       s.HasMultiStopGradient()) {
     Color bg = s.background.WithAlpha(s.background.a * alpha);
@@ -405,7 +343,6 @@ void Widget::OnPaint(Renderer2D& renderer) {
     }
   }
 
-  // Inset shadow (drawn after background).
   if (s.HasShadow() && s.shadow.inset) {
     Color sc = s.shadow.color.WithAlpha(s.shadow.color.a * alpha);
     renderer.PushScissor(rect);
@@ -414,9 +351,9 @@ void Widget::OnPaint(Renderer2D& renderer) {
     renderer.PopScissor();
   }
 
-  // Focus ring (only for tab-focusable widgets).
-  if (HasState(widget_state(), WidgetState::kFocused) && tab_index() >= 0) {
-    f32 sc = ui_scale();
+  if (HasState(WidgetStateOf(world, e), WidgetState::kFocused) &&
+      world.Get<WidgetNode>(e)->tab_index >= 0) {
+    f32 sc = UiScale(world, e);
     Rect focus_rect = {rect.x - 2.0f * sc, rect.y - 2.0f * sc,
                        rect.w + 4.0f * sc, rect.h + 4.0f * sc};
     Color base = s.border_color.a > 0.1f ? s.border_color
@@ -427,138 +364,23 @@ void Widget::OnPaint(Renderer2D& renderer) {
                               2.0f * sc, radii);
   }
 
-  // Kind-specific overlay (text glyphs, image texture, ...).
-  if (vt.draw) vt.draw(*registry_, *this, renderer);
+  if (vt.draw) vt.draw(world, e, renderer);
 }
 
-void Widget::Measure(f32& out_width, f32& out_height) {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.measure) {
-    vt.measure(*registry_, *this, out_width, out_height);
-    return;
-  }
-  Transform* t = xf();
-  out_width = t->intrinsic_w;
-  out_height = t->intrinsic_h;
-}
-
-bool Widget::OnClick() {
-  const WidgetVTable& vt = WidgetVTableFor(kind());
-  if (vt.on_click) return vt.on_click(*registry_, *this);
-  return false;
-}
-
-void Widget::PopulateLayoutNode(LayoutNode& node) const {
-  Transform* t = xf();
-  node.style = sc()->style;
-  node.id = this->node()->id;
+void PopulateLayoutNode(WidgetRegistry& world, wid e, LayoutNode& node) {
+  Transform* t = world.Get<Transform>(e);
+  node.style = world.Get<StyleC>(e)->style;
+  node.id = world.Get<WidgetNode>(e)->id;
   node.intrinsic_width = t->intrinsic_w;
   node.intrinsic_height = t->intrinsic_h;
 }
 
-void Widget::ApplyLayoutResult(const LayoutNode& node) {
-  Transform* t = xf();
+void ApplyLayoutResult(WidgetRegistry& world, wid e, const LayoutNode& node) {
+  Transform* t = world.Get<Transform>(e);
   t->rect = node.computed_rect;
   t->content_rect = node.content_rect;
   t->layout_dirty = false;
   t->paint_dirty = true;
-}
-
-// --- Entity free-function API (bridges to the handle during migration) ------
-
-Style ComputedStyle(WidgetRegistry& world, wid e) {
-  Widget* w = world.Get(e);
-  return w ? w->ComputedStyle() : Style{};
-}
-void MarkDirty(WidgetRegistry& world, wid e) {
-  if (Widget* w = world.Get(e)) w->MarkDirty();
-}
-void MarkPaintDirty(WidgetRegistry& world, wid e) {
-  if (Widget* w = world.Get(e)) w->MarkPaintDirty();
-}
-WidgetState WidgetStateOf(WidgetRegistry& world, wid e) {
-  Widget* w = world.Get(e);
-  return w ? w->widget_state() : WidgetState::kNone;
-}
-void SetWidgetState(WidgetRegistry& world, wid e, WidgetState state) {
-  if (Widget* w = world.Get(e)) w->set_widget_state(state);
-}
-f32 UiScale(WidgetRegistry& world, wid e) {
-  Widget* w = world.Get(e);
-  return w ? w->ui_scale() : 1.0f;
-}
-const WidgetContext* WidgetContextOf(WidgetRegistry& world, wid e) {
-  Widget* w = world.Get(e);
-  return w ? w->context() : nullptr;
-}
-void SetContext(WidgetRegistry& world, wid e, const WidgetContext* ctx) {
-  if (Widget* w = world.Get(e)) w->SetContext(ctx);
-}
-Vec2 InputToLayoutPoint(WidgetRegistry& world, wid e, Vec2 point) {
-  Widget* w = world.Get(e);
-  return w ? w->InputToLayoutPoint(point) : point;
-}
-wid HitTest(WidgetRegistry& world, wid e, Vec2 point) {
-  Widget* w = world.Get(e);
-  return w ? w->HitTest(point) : kNullWidget;
-}
-void AddChild(WidgetRegistry& world, wid parent, wid child) {
-  Widget* p = world.Get(parent);
-  Widget* c = world.Get(child);
-  if (p && c) p->AddChild(c);
-}
-void RemoveChild(WidgetRegistry& world, wid parent, wid child) {
-  Widget* p = world.Get(parent);
-  Widget* c = world.Get(child);
-  if (p && c) p->RemoveChild(c);
-}
-
-void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
-  if (Widget* w = world.Get(e)) w->OnPaint(renderer);
-}
-void MeasureWidget(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) {
-  if (Widget* w = world.Get(e)) {
-    w->Measure(out_w, out_h);
-  } else {
-    out_w = 0;
-    out_h = 0;
-  }
-}
-void LayoutWidget(WidgetRegistry& world, wid e, const Rect& rect,
-                  const Rect& content_rect) {
-  if (Widget* w = world.Get(e)) w->OnLayout(rect, content_rect);
-}
-void UpdateWidget(WidgetRegistry& world, wid e, f64 dt) {
-  if (Widget* w = world.Get(e)) w->OnUpdate(dt);
-}
-bool ClickWidget(WidgetRegistry& world, wid e) {
-  Widget* w = world.Get(e);
-  return w ? w->OnClick() : false;
-}
-bool ScrollWidget(WidgetRegistry& world, wid e, Vec2 delta) {
-  Widget* w = world.Get(e);
-  return w ? w->OnScroll(delta) : false;
-}
-bool KeyDownWidget(WidgetRegistry& world, wid e, i32 key, i32 mods) {
-  Widget* w = world.Get(e);
-  return w ? w->OnKeyDown(key, mods) : false;
-}
-bool CharInputWidget(WidgetRegistry& world, wid e, u32 codepoint) {
-  Widget* w = world.Get(e);
-  return w ? w->OnCharInput(codepoint) : false;
-}
-bool ConsumesTextInput(WidgetRegistry& world, wid e) {
-  Widget* w = world.Get(e);
-  return w ? w->consumes_text_input() : false;
-}
-void DismissWidget(WidgetRegistry& world, wid e) {
-  if (Widget* w = world.Get(e)) w->OnDismiss();
-}
-void PopulateLayoutNode(WidgetRegistry& world, wid e, LayoutNode& node) {
-  if (Widget* w = world.Get(e)) w->PopulateLayoutNode(node);
-}
-void ApplyLayoutResult(WidgetRegistry& world, wid e, const LayoutNode& node) {
-  if (Widget* w = world.Get(e)) w->ApplyLayoutResult(node);
 }
 
 }  // namespace ugui

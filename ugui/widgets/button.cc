@@ -32,21 +32,23 @@ String apply_transform(const String& s, TextTransform t) {
   return out;
 }
 
-TextEngine* text_engine(const Widget& w) {
-  return w.context() ? w.context()->text_engine : nullptr;
+TextEngine* text_engine(WidgetRegistry& world, wid e) {
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->text_engine : nullptr;
 }
 
-FontHandle effective_font(const Widget& w, const ButtonContent& c) {
+FontHandle effective_font(WidgetRegistry& world, wid e, const ButtonContent& c) {
   if (c.font != kInvalidFont) return c.font;
-  return w.context() ? w.context()->default_font : kInvalidFont;
+  const WidgetContext* ctx = WidgetContextOf(world, e);
+  return ctx ? ctx->default_font : kInvalidFont;
 }
 
-void ButtonMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
+void ButtonMeasure(WidgetRegistry& world, wid e, f32& out_width,
                    f32& out_height) {
-  ButtonContent* c = world.Get<ButtonContent>(w.handle());
-  const Style& st = w.style();
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+  ButtonContent* c = world.Get<ButtonContent>(e);
+  const Style& st = world.Get<StyleC>(e)->style;
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
   if (!c || !te || fh == kInvalidFont || c->label.empty()) {
     out_width = 0;
     out_height = st.font_size + st.padding.vertical();
@@ -59,7 +61,7 @@ void ButtonMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
     resolved = te->ResolveFont(fh, st.font_weight, st.font_style);
 
   String display_label = apply_transform(c->label, st.text_transform);
-  f32 sc = w.ui_scale();
+  f32 sc = UiScale(world, e);
   auto run =
       te->Shape(resolved, display_label.c_str(),
                 static_cast<u32>(display_label.size()), st.font_size * sc,
@@ -68,15 +70,15 @@ void ButtonMeasure(WidgetRegistry& world, Widget& w, f32& out_width,
   out_height = run.line_height + st.padding.vertical();
 }
 
-void ButtonDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
-  // The base Widget::OnPaint already drew background / shadow / border.
-  ButtonContent* c = world.Get<ButtonContent>(w.handle());
-  TextEngine* te = text_engine(w);
-  FontHandle fh = c ? effective_font(w, *c) : kInvalidFont;
+void ButtonDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  // PaintWidget already drew background / shadow / border.
+  ButtonContent* c = world.Get<ButtonContent>(e);
+  TextEngine* te = text_engine(world, e);
+  FontHandle fh = c ? effective_font(world, e, *c) : kInvalidFont;
   if (!c || !te || fh == kInvalidFont || c->label.empty()) return;
 
-  Style s = w.ComputedStyle();
-  s.Scale(w.ui_scale());
+  Style s = ComputedStyle(world, e);
+  s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
 
   FontHandle resolved = fh;
@@ -89,8 +91,7 @@ void ButtonDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
                        static_cast<u32>(display_label.size()), s.font_size,
                        s.letter_spacing, s.line_height_multiplier);
 
-  // Center the label in the content rect.
-  Rect content = w.content_rect();
+  Rect content = world.Get<Transform>(e)->content_rect;
   f32 x = content.x + (content.w - run.total_advance) * 0.5f;
   f32 y = content.y + (content.h - run.line_height) * 0.5f;
 
@@ -124,8 +125,8 @@ void ButtonDraw(WidgetRegistry& world, Widget& w, Renderer2D& renderer) {
   }
 }
 
-bool ButtonClick(WidgetRegistry& world, Widget& w) {
-  ButtonContent* c = world.Get<ButtonContent>(w.handle());
+bool ButtonClick(WidgetRegistry& world, wid e) {
+  ButtonContent* c = world.Get<ButtonContent>(e);
   if (c && c->on_click) {
     c->on_click();
     return true;
@@ -143,23 +144,27 @@ WidgetVTable ButtonVTable() {
   return vt;
 }
 
-Widget* CreateButton(u32 id) {
-  Widget* w = new Widget(id);
-  w->set_kind(WidgetKind::kButton);
-  WidgetRegistry::Active()->Add<ButtonContent>(w->handle(), ButtonContent{});
-  return w;
+wid CreateButton(u32 id) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  wid e = world.New(id);
+  world.Get<WidgetNode>(e)->kind = WidgetKind::kButton;
+  world.Add<ButtonContent>(e, ButtonContent{});
+  return e;
 }
 
-void SetButtonLabel(Widget* w, const String& label) {
-  if (!w || w->kind() != WidgetKind::kButton || !w->registry()) return;
-  w->registry()->GetOrAdd<ButtonContent>(w->handle()).label = label;
-  w->MarkDirty();
+void SetButtonLabel(wid e, const String& label) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* node = world.Get<WidgetNode>(e);
+  if (!node || node->kind != WidgetKind::kButton) return;
+  world.GetOrAdd<ButtonContent>(e).label = label;
+  MarkDirty(world, e);
 }
 
-void SetButtonClick(Widget* w, Function<void()> handler) {
-  if (!w || w->kind() != WidgetKind::kButton || !w->registry()) return;
-  w->registry()->GetOrAdd<ButtonContent>(w->handle()).on_click =
-      std::move(handler);
+void SetButtonClick(wid e, Function<void()> handler) {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  WidgetNode* node = world.Get<WidgetNode>(e);
+  if (!node || node->kind != WidgetKind::kButton) return;
+  world.GetOrAdd<ButtonContent>(e).on_click = std::move(handler);
 }
 
 }  // namespace ugui

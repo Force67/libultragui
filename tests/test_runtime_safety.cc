@@ -6,6 +6,7 @@
 #include <ugui/widgets/panel.h>
 #include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/text.h>
+#include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
 
 #include <cstdio>
@@ -38,65 +39,61 @@ static int tests_passed = 0;
   } while (0)
 
 TEST(scrollview_hit_test_respects_scroll_offset) {
-  ugui::Widget root(1);
-  ugui::Widget* scroll = ugui::CreateScrollView(2);
-  ugui::Widget child(3);
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid root = world.New(1);
+  ugui::wid scroll = ugui::CreateScrollView(2);
+  ugui::wid child = world.New(3);
 
-  root.AddChild(scroll);
-  scroll->AddChild(&child);
+  ugui::AddChild(world, root, scroll);
+  ugui::AddChild(world, scroll, child);
 
-  root.OnLayout({0, 0, 400, 400}, {0, 0, 400, 400});
-  scroll->OnLayout({0, 0, 200, 200}, {0, 0, 200, 200});
-  child.OnLayout({10, 80, 50, 40}, {10, 80, 50, 40});
+  ugui::LayoutWidget(world, root, {0, 0, 400, 400}, {0, 0, 400, 400});
+  ugui::LayoutWidget(world, scroll, {0, 0, 200, 200}, {0, 0, 200, 200});
+  ugui::LayoutWidget(world, child, {10, 80, 50, 40}, {10, 80, 50, 40});
   ugui::SetScrollOffset(scroll, {0, 50});
 
-  ugui::wid hit = root.HitTest({20, 40});  // visual child y-range: 30..70
-  ASSERT(hit == child.handle());
+  ugui::wid hit = ugui::HitTest(world, root, {20, 40});  // visual y-range 30..70
+  ASSERT(hit == child);
 
-  // child is stack-allocated; detach it so scroll's destructor does not delete a
-  // non-heap pointer, then delete the heap scroll view.
-  scroll->RemoveChild(&child);
-  root.RemoveChild(scroll);
-  delete scroll;
+  ugui::DestroyWidget(world, root);
 }
 
 TEST(widget_input_to_layout_point_accumulates_scroll_parents) {
-  ugui::Widget root(1);
-  ugui::Widget* a = ugui::CreateScrollView(2);
-  ugui::Widget* b = ugui::CreateScrollView(3);
-  ugui::Widget leaf(4);
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid root = world.New(1);
+  ugui::wid a = ugui::CreateScrollView(2);
+  ugui::wid b = ugui::CreateScrollView(3);
+  ugui::wid leaf = world.New(4);
 
-  root.AddChild(a);
-  a->AddChild(b);
-  b->AddChild(&leaf);
+  ugui::AddChild(world, root, a);
+  ugui::AddChild(world, a, b);
+  ugui::AddChild(world, b, leaf);
 
   ugui::SetScrollOffset(a, {5, 10});
   ugui::SetScrollOffset(b, {0, 20});
 
-  ugui::Vec2 p = leaf.InputToLayoutPoint({1, 2});
+  ugui::Vec2 p = ugui::InputToLayoutPoint(world, leaf, {1, 2});
   ASSERT(p.x == 6.0f);
   ASSERT(p.y == 32.0f);
 
-  // Detach the stack-allocated leaf, then delete the heap scroll views (delete a
-  // recursively deletes its child b).
-  b->RemoveChild(&leaf);
-  root.RemoveChild(a);
-  delete a;
+  ugui::DestroyWidget(world, root);
 }
 
 TEST(script_runtime_widget_registry_can_be_cleared) {
   ugui::ScriptRuntime rt;
   ASSERT(rt.Init());
 
-  ugui::Widget w(1);
-  w.set_name("root");
-  rt.RegisterWidget(&w);
-  ASSERT(rt.FindRegisteredWidget("root") == &w);
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid w = world.New(1);
+  world.Get<ugui::WidgetNode>(w)->name = "root";
+  rt.RegisterWidget(w);
+  ASSERT(rt.FindRegisteredWidget("root") == w);
 
   rt.ClearWidgetRegistry();
-  ASSERT(rt.FindRegisteredWidget("root") == nullptr);
+  ASSERT(!rt.FindRegisteredWidget("root").valid());
 
   rt.Shutdown();
+  ugui::DestroyWidget(world, w);
 }
 
 namespace {
@@ -106,104 +103,114 @@ struct TestTag {
 }  // namespace
 
 TEST(component_store_add_get_remove) {
-  ugui::Widget w(1);
-  ugui::World* world = ugui::WidgetRegistry::Active();
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid w = world.New(1);
 
-  world->Add<TestTag>(w.handle(), TestTag{42});
-  ASSERT(world->Has<TestTag>(w.handle()));
-  ASSERT(world->Get<TestTag>(w.handle())->v == 42);
+  world.Add<TestTag>(w, TestTag{42});
+  ASSERT(world.Has<TestTag>(w));
+  ASSERT(world.Get<TestTag>(w)->v == 42);
 
-  world->Add<TestTag>(w.handle(), TestTag{7});  // overwrite
-  ASSERT(world->Get<TestTag>(w.handle())->v == 7);
+  world.Add<TestTag>(w, TestTag{7});  // overwrite
+  ASSERT(world.Get<TestTag>(w)->v == 7);
 
-  world->Remove<TestTag>(w.handle());
-  ASSERT(!world->Has<TestTag>(w.handle()));
+  world.Remove<TestTag>(w);
+  ASSERT(!world.Has<TestTag>(w));
+
+  ugui::DestroyWidget(world, w);
 }
 
 TEST(component_dropped_when_entity_released) {
-  ugui::World* world = ugui::WidgetRegistry::Active();
-  ugui::wid saved;
-  {
-    ugui::Widget w(2);
-    saved = w.handle();
-    world->Add<TestTag>(saved, TestTag{99});
-    ASSERT(world->Has<TestTag>(saved));
-  }
-  // The widget is gone: its handle resolves to null and the component was
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid w = world.New(2);
+  ugui::wid saved = w;
+  world.Add<TestTag>(saved, TestTag{99});
+  ASSERT(world.Has<TestTag>(saved));
+
+  ugui::DestroyWidget(world, w);
+
+  // The widget is gone: its handle resolves to dead and the component was
   // dropped during release (no leak, no stale read).
-  ASSERT(world->Get(saved) == nullptr);
-  ASSERT(!world->Has<TestTag>(saved));
+  ASSERT(!world.Alive(saved));
+  ASSERT(!world.Has<TestTag>(saved));
 }
 
 TEST(tooltip_is_stored_as_component) {
-  ugui::Widget w(3);
-  ASSERT(w.tooltip().empty());
-  w.set_tooltip("help");
-  ASSERT(w.tooltip() == "help");
-  ASSERT(ugui::WidgetRegistry::Active()->Has<ugui::Tooltip>(w.handle()));
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid w = world.New(3);
+  ASSERT(ugui::TooltipText(world, w).empty());
+  ugui::SetTooltip(world, w, "help");
+  ASSERT(ugui::TooltipText(world, w) == "help");
+  ASSERT(world.Has<ugui::Tooltip>(w));
+  ugui::DestroyWidget(world, w);
 }
 
 TEST(state_styles_and_anim_live_in_components) {
-  ugui::Widget w(4);
-  ugui::World* world = ugui::WidgetRegistry::Active();
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid w = world.New(4);
   ugui::Style override_style;
 
   // Plain widget carries neither component.
-  ASSERT(!world->Has<ugui::StateStyle>(w.handle()));
-  w.AddStateOverride(ugui::WidgetState::kHovered, override_style, 0);
-  ASSERT(world->Has<ugui::StateStyle>(w.handle()));
+  ASSERT(!world.Has<ugui::StateStyle>(w));
+  ugui::AddStateOverride(world, w, ugui::WidgetState::kHovered, override_style, 0);
+  ASSERT(world.Has<ugui::StateStyle>(w));
 
-  ASSERT(!world->Has<ugui::AnimStyle>(w.handle()));
-  w.SetAnimationStyle(override_style);
-  ASSERT(world->Has<ugui::AnimStyle>(w.handle()));
-  w.ClearAnimationStyle();
-  ASSERT(!world->Has<ugui::AnimStyle>(w.handle()));
+  ASSERT(!world.Has<ugui::AnimStyle>(w));
+  ugui::SetAnimationStyle(world, w, override_style);
+  ASSERT(world.Has<ugui::AnimStyle>(w));
+  ugui::ClearAnimationStyle(world, w);
+  ASSERT(!world.Has<ugui::AnimStyle>(w));
+
+  ugui::DestroyWidget(world, w);
 }
 
 TEST(image_is_a_generic_widget_with_component) {
-  ugui::Widget* img = ugui::CreateImage(5);
-  ASSERT(img->kind() == ugui::WidgetKind::kImage);
-  ASSERT(img->registry()->Has<ugui::ImageContent>(img->handle()));
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid img = ugui::CreateImage(5);
+  ASSERT(world.Get<ugui::WidgetNode>(img)->kind == ugui::WidgetKind::kImage);
+  ASSERT(world.Has<ugui::ImageContent>(img));
 
   ugui::SetImageTexture(img, 42, 64, 48);
-  ugui::ImageContent* c = img->registry()->Get<ugui::ImageContent>(img->handle());
+  ugui::ImageContent* c = world.Get<ugui::ImageContent>(img);
   ASSERT(c->texture == 42);
   ASSERT(c->natural_w == 64);
 
   // Measure dispatches through the vtable to read the component.
   float w = 0, h = 0;
-  img->Measure(w, h);
+  ugui::MeasureWidget(world, img, w, h);
   ASSERT(w == 64 && h == 48);
 
-  delete img;
+  ugui::DestroyWidget(world, img);
 }
 
 TEST(text_is_a_generic_widget_with_component) {
-  ugui::Widget* t = ugui::CreateText(6);
-  ASSERT(t->kind() == ugui::WidgetKind::kText);
-  ASSERT(t->registry()->Has<ugui::TextContent>(t->handle()));
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid t = ugui::CreateText(6);
+  ASSERT(world.Get<ugui::WidgetNode>(t)->kind == ugui::WidgetKind::kText);
+  ASSERT(world.Has<ugui::TextContent>(t));
 
   ugui::SetText(t, "hello");
-  ASSERT(t->registry()->Get<ugui::TextContent>(t->handle())->text == "hello");
-  delete t;
+  ASSERT(world.Get<ugui::TextContent>(t)->text == "hello");
+  ugui::DestroyWidget(world, t);
 }
 
 TEST(button_click_dispatches_through_vtable) {
-  ugui::Widget* b = ugui::CreateButton(7);
-  ASSERT(b->kind() == ugui::WidgetKind::kButton);
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid b = ugui::CreateButton(7);
+  ASSERT(world.Get<ugui::WidgetNode>(b)->kind == ugui::WidgetKind::kButton);
   ugui::SetButtonLabel(b, "OK");
-  ASSERT(b->registry()->Get<ugui::ButtonContent>(b->handle())->label == "OK");
+  ASSERT(world.Get<ugui::ButtonContent>(b)->label == "OK");
 
   int clicks = 0;
   ugui::SetButtonClick(b, [&clicks]() { ++clicks; });
-  ASSERT(b->OnClick());  // base OnClick -> vtable.on_click -> component handler
+  ASSERT(ugui::ClickWidget(world, b));  // dispatch -> vtable.on_click -> handler
   ASSERT(clicks == 1);
-  delete b;
+  ugui::DestroyWidget(world, b);
 }
 
 TEST(checkbox_toggles_and_fires_change_through_vtable) {
-  ugui::Widget* cb = ugui::CreateCheckbox(8);
-  ASSERT(cb->kind() == ugui::WidgetKind::kCheckbox);
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid cb = ugui::CreateCheckbox(8);
+  ASSERT(world.Get<ugui::WidgetNode>(cb)->kind == ugui::WidgetKind::kCheckbox);
   ASSERT(!ugui::IsChecked(cb));
 
   int changes = 0;
@@ -212,14 +219,14 @@ TEST(checkbox_toggles_and_fires_change_through_vtable) {
     ++changes;
     last = v;
   });
-  ASSERT(cb->OnClick());  // toggle on -> fires on_change
+  ASSERT(ugui::ClickWidget(world, cb));  // toggle on -> fires on_change
   ASSERT(ugui::IsChecked(cb));
   ASSERT(changes == 1 && last == true);
 
   ugui::SetChecked(cb, false);  // programmatic: no on_change
   ASSERT(!ugui::IsChecked(cb));
   ASSERT(changes == 1);
-  delete cb;
+  ugui::DestroyWidget(world, cb);
 }
 
 int main() {
