@@ -248,6 +248,14 @@ target_compile_definitions(ultragui PRIVATE
     ULTRAGUI_SHADER_DIR="${SHADER_OUT_DIR}"
 )
 
+# Public-API export macro (ugui/core/export.h). No-op for the static library;
+# when ultragui is built SHARED, UGUI_SHARED is seen by everyone and UGUI_BUILD
+# only while compiling the library, so annotated symbols are exported/imported.
+target_compile_definitions(ultragui
+    PUBLIC  $<$<STREQUAL:$<TARGET_PROPERTY:ultragui,TYPE>,SHARED_LIBRARY>:UGUI_SHARED>
+    PRIVATE $<$<STREQUAL:$<TARGET_PROPERTY:ultragui,TYPE>,SHARED_LIBRARY>:UGUI_BUILD>
+)
+
 target_link_libraries(ultragui
     PUBLIC
         ultragui_warnings

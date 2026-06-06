@@ -17,15 +17,16 @@ struct ImageContent {
 };
 
 /// Behaviour table (draw + measure) for image widgets.
-WidgetVTable ImageVTable();
+UGUI_API WidgetVTable ImageVTable();
 
 /// Create an image entity: a generic widget tagged kImage with an empty
 /// ImageContent component.
-wid CreateImage(u32 id);
+UGUI_API wid CreateImage(u32 id);
 
 /// Set (or replace) the texture an image widget shows. No-op if `e` is not an
 /// image. Component-based replacement for the old Image::set_texture.
-void SetImageTexture(wid e, RHITextureHandle texture, f32 width, f32 height);
+UGUI_API void SetImageTexture(wid e, RHITextureHandle texture, f32 width,
+                              f32 height);
 
 }  // namespace ugui
 

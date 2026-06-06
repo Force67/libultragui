@@ -15,13 +15,13 @@ struct TextContent {
 };
 
 /// Behaviour table (draw + measure) for text widgets.
-WidgetVTable TextVTable();
+UGUI_API WidgetVTable TextVTable();
 
 /// Create a text entity: a widget entity tagged kText with a TextContent.
-wid CreateText(u32 id);
+UGUI_API wid CreateText(u32 id);
 
 /// Set the string a text widget displays. No-op if `e` is not a text widget.
-void SetText(wid e, const String& text);
+UGUI_API void SetText(wid e, const String& text);
 
 }  // namespace ugui
 

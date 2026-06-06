@@ -35,39 +35,44 @@ struct TextInputContent {
 
 /// Behaviour table (draw, measure, click, key/char input, blink, text capture)
 /// for text input widgets.
-WidgetVTable TextInputVTable();
+UGUI_API WidgetVTable TextInputVTable();
 
 /// Create a text input entity: a generic widget tagged kTextInput with a
 /// TextInputContent component.
-wid CreateTextInput(u32 id);
+UGUI_API wid CreateTextInput(u32 id);
 
 /// Set the text value (caret moves to the end, selection collapses). No-op if
 /// `e` is not a text input. Replacement for the old TextInput::set_text.
-void SetTextInputValue(wid e, const String& text);
+UGUI_API void SetTextInputValue(wid e, const String& text);
 
 /// The current text value, or an empty string if `e` is not a text input.
-String TextInputValue(wid e);
+UGUI_API String TextInputValue(wid e);
 
 /// Set the placeholder shown when the text is empty. No-op if `e` is not a text
 /// input.
-void SetTextInputPlaceholder(wid e, const String& placeholder);
+UGUI_API void SetTextInputPlaceholder(wid e, const String& placeholder);
 
 /// Override the font (kInvalidFont -> context default). No-op if `e` is not a
 /// text input.
-void SetTextInputFont(wid e, FontHandle font);
+UGUI_API void SetTextInputFont(wid e, FontHandle font);
 
 /// Fired on every edit with the new text.
-void SetTextInputChange(wid e, TextInputContent::ChangeHandler handler);
+UGUI_API void SetTextInputChange(wid e,
+                                 TextInputContent::ChangeHandler handler);
 
 /// Fired when the user presses Enter / Keypad Enter, with the current text.
-void SetTextInputSubmit(wid e, TextInputContent::SubmitHandler handler);
+UGUI_API void SetTextInputSubmit(wid e,
+                                 TextInputContent::SubmitHandler handler);
 
 /// Fired when the user presses Escape.
-void SetTextInputCancel(wid e, TextInputContent::CancelHandler handler);
+UGUI_API void SetTextInputCancel(wid e,
+                                 TextInputContent::CancelHandler handler);
 
 /// Fired on Up / Down; the handler returns the replacement text.
-void SetTextInputHistoryPrev(wid e, TextInputContent::HistoryHandler handler);
-void SetTextInputHistoryNext(wid e, TextInputContent::HistoryHandler handler);
+UGUI_API void SetTextInputHistoryPrev(wid e,
+                                      TextInputContent::HistoryHandler handler);
+UGUI_API void SetTextInputHistoryNext(wid e,
+                                      TextInputContent::HistoryHandler handler);
 
 }  // namespace ugui
 

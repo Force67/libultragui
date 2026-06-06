@@ -37,7 +37,7 @@ struct MessageBoxContent {
 };
 
 /// Behaviour table (on_key_down) for message-box widgets.
-WidgetVTable MessageBoxVTable();
+UGUI_API WidgetVTable MessageBoxVTable();
 
 /// Create a message-box entity: a generic widget tagged kMessageBox carrying
 /// both a ModalContent (for the backdrop) and a MessageBoxContent.
@@ -48,22 +48,24 @@ WidgetVTable MessageBoxVTable();
 ///                   MessageBoxButtons::kYesNo);
 ///   SetMessageBoxResult(mb, [](MessageBoxResult r) { ... });
 ///   ShowMessageBox(mb, ctx);
-wid CreateMessageBox(u32 id);
+UGUI_API wid CreateMessageBox(u32 id);
 
 /// Configure the message-box style, title, message and buttons. Call before
 /// ShowMessageBox(). No-op if `e` is not a message box.
-void SetupMessageBox(wid e, const char* title, const char* message,
-                     MessageBoxButtons buttons = MessageBoxButtons::kOk);
+UGUI_API void SetupMessageBox(
+    wid e, const char* title, const char* message,
+    MessageBoxButtons buttons = MessageBoxButtons::kOk);
 
 /// Set the result handler (run when a button is clicked or on ESC).
-void SetMessageBoxResult(wid e, Function<void(MessageBoxResult)> handler);
+UGUI_API void SetMessageBoxResult(wid e,
+                                  Function<void(MessageBoxResult)> handler);
 
 /// Show the message box centered in the viewport, then show it as a modal.
-void ShowMessageBox(wid e, UIContext* ctx);
+UGUI_API void ShowMessageBox(wid e, UIContext* ctx);
 
 /// Dismiss with a specific result: fires on_result(result) then hides the
 /// modal.
-void DismissMessageBox(wid e, UIContext* ctx, MessageBoxResult result);
+UGUI_API void DismissMessageBox(wid e, UIContext* ctx, MessageBoxResult result);
 
 }  // namespace ugui
 

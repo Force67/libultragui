@@ -24,25 +24,25 @@ struct ModalContent {
 
 /// Create a modal entity: a generic widget tagged kModal with a ModalContent
 /// component. No vtable: paint and measure use the base widget.
-wid CreateModal(u32 id);
+UGUI_API wid CreateModal(u32 id);
 
 /// Show the modal: creates a full-viewport backdrop overlay and shows the
 /// widget on top of it. Works on any widget carrying a ModalContent.
-void ShowModal(wid e, UIContext* ctx);
+UGUI_API void ShowModal(wid e, UIContext* ctx);
 
 /// Hide the modal: removes the widget and backdrop from the overlay system,
 /// destroys the backdrop, and fires on_dismiss.
-void HideModal(wid e, UIContext* ctx);
+UGUI_API void HideModal(wid e, UIContext* ctx);
 
 /// Set the backdrop color. No-op if `e` has no ModalContent.
-void SetModalBackdropColor(wid e, Color c);
+UGUI_API void SetModalBackdropColor(wid e, Color c);
 
 /// Set the on_dismiss handler (run from HideModal). No-op if `e` has no
 /// ModalContent.
-void SetModalDismiss(wid e, Function<void()> handler);
+UGUI_API void SetModalDismiss(wid e, Function<void()> handler);
 
 /// Whether the modal is currently shown.
-bool ModalVisible(wid e);
+UGUI_API bool ModalVisible(wid e);
 
 }  // namespace ugui
 

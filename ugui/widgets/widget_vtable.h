@@ -18,8 +18,8 @@ class WidgetRegistry;  // == World
 /// behaviour" and the Widget base handles it (e.g. a plain panel).
 struct WidgetVTable {
   void (*draw)(WidgetRegistry& world, wid e, Renderer2D& r) = nullptr;
-  void (*measure)(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) =
-      nullptr;
+  void (*measure)(WidgetRegistry& world, wid e, f32& out_w,
+                  f32& out_h) = nullptr;
   WidgetId (*hit_test)(WidgetRegistry& world, wid e, Vec2 point) = nullptr;
   bool (*on_click)(WidgetRegistry& world, wid e) = nullptr;
   void (*on_update)(WidgetRegistry& world, wid e, f64 dt) = nullptr;
@@ -27,7 +27,8 @@ struct WidgetVTable {
   // Runs after PaintWidget stored the layout result (rect/content_rect).
   void (*on_layout)(WidgetRegistry& world, wid e, const Rect& rect,
                     const Rect& content_rect) = nullptr;
-  bool (*on_key_down)(WidgetRegistry& world, wid e, i32 key, i32 mods) = nullptr;
+  bool (*on_key_down)(WidgetRegistry& world, wid e, i32 key,
+                      i32 mods) = nullptr;
   bool (*on_char_input)(WidgetRegistry& world, wid e, u32 codepoint) = nullptr;
   bool (*consumes_text_input)(WidgetRegistry& world, wid e) = nullptr;
   void (*on_dismiss)(WidgetRegistry& world, wid e) = nullptr;
@@ -38,10 +39,10 @@ struct WidgetVTable {
 
 /// Resolve the behaviour table for a kind. Built-in tables are installed on
 /// first use.
-const WidgetVTable& WidgetVTableFor(WidgetKind kind);
+UGUI_API const WidgetVTable& WidgetVTableFor(WidgetKind kind);
 
 /// Install (or replace) the behaviour table for a kind.
-void SetWidgetVTable(WidgetKind kind, const WidgetVTable& vt);
+UGUI_API void SetWidgetVTable(WidgetKind kind, const WidgetVTable& vt);
 
 }  // namespace ugui
 

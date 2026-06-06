@@ -16,25 +16,25 @@ struct CheckboxContent {
 };
 
 /// Behaviour table (draw + measure + click) for checkbox widgets.
-WidgetVTable CheckboxVTable();
+UGUI_API WidgetVTable CheckboxVTable();
 
 /// Create a checkbox entity: a generic widget tagged kCheckbox with a
 /// CheckboxContent component.
-wid CreateCheckbox(u32 id);
+UGUI_API wid CreateCheckbox(u32 id);
 
 /// Set the checkbox label. No-op if `e` is not a checkbox.
-void SetCheckboxLabel(wid e, const String& label);
+UGUI_API void SetCheckboxLabel(wid e, const String& label);
 
 /// Set the checkbox on_change handler (run with the new checked value when the
 /// user toggles it). No-op if `e` is not a checkbox.
-void SetCheckboxChange(wid e, Function<void(bool)> handler);
+UGUI_API void SetCheckboxChange(wid e, Function<void(bool)> handler);
 
 /// Set the checked state (toggles the kChecked state bit). Does not fire
 /// on_change (that fires only on a user click). Works on any widget.
-void SetChecked(wid e, bool checked);
+UGUI_API void SetChecked(wid e, bool checked);
 
 /// Whether the widget's kChecked state bit is set.
-bool IsChecked(wid e);
+UGUI_API bool IsChecked(wid e);
 
 }  // namespace ugui
 

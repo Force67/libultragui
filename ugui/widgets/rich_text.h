@@ -27,26 +27,26 @@ struct RichTextContent {
 };
 
 /// Behaviour table (draw + measure) for rich-text widgets.
-WidgetVTable RichTextVTable();
+UGUI_API WidgetVTable RichTextVTable();
 
 /// Create a rich-text entity: a generic widget tagged kRichText with a
 /// RichTextContent component.
-wid CreateRichText(u32 id);
+UGUI_API wid CreateRichText(u32 id);
 
 /// Replace all spans of a rich-text widget. No-op if `e` is not a rich-text
 /// widget.
-void SetRichTextSpans(wid e, const Vector<TextSpan>& spans);
+UGUI_API void SetRichTextSpans(wid e, const Vector<TextSpan>& spans);
 
 /// Append a span to a rich-text widget. No-op if `e` is not a rich-text widget.
-void AddRichTextSpan(wid e, const TextSpan& span);
+UGUI_API void AddRichTextSpan(wid e, const TextSpan& span);
 
 /// Remove all spans from a rich-text widget. No-op if `e` is not a rich-text
 /// widget.
-void ClearRichTextSpans(wid e);
+UGUI_API void ClearRichTextSpans(wid e);
 
 /// Set the font override used to shape every span. No-op if `e` is not a
 /// rich-text widget.
-void SetRichTextFont(wid e, FontHandle font);
+UGUI_API void SetRichTextFont(wid e, FontHandle font);
 
 }  // namespace ugui
 

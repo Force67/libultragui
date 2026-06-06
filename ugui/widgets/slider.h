@@ -19,30 +19,30 @@ struct SliderContent {
 };
 
 /// Behaviour table (draw + measure + click + update) for slider widgets.
-WidgetVTable SliderVTable();
+UGUI_API WidgetVTable SliderVTable();
 
 /// Create a slider entity: a generic widget tagged kSlider with a
 /// SliderContent component.
-wid CreateSlider(u32 id);
+UGUI_API wid CreateSlider(u32 id);
 
 /// Set the slider value, clamped to [min, max]. Does not fire on_change (that
 /// fires only on user interaction). No-op if `e` is not a slider.
-void SetSliderValue(wid e, f32 value);
+UGUI_API void SetSliderValue(wid e, f32 value);
 
 /// The slider's current value, or 0 if `e` is not a slider.
-f32 SliderValue(wid e);
+UGUI_API f32 SliderValue(wid e);
 
 /// The slider's range minimum / maximum, or 0 if `e` is not a slider.
-f32 SliderMin(wid e);
-f32 SliderMax(wid e);
+UGUI_API f32 SliderMin(wid e);
+UGUI_API f32 SliderMax(wid e);
 
 /// Set the slider's range. No-op if `e` is not a slider.
-void SetSliderMin(wid e, f32 min);
-void SetSliderMax(wid e, f32 max);
+UGUI_API void SetSliderMin(wid e, f32 min);
+UGUI_API void SetSliderMax(wid e, f32 max);
 
 /// Set the slider's on_change handler (run with the new value when the user
 /// drags it). No-op if `e` is not a slider.
-void SetSliderChange(wid e, Function<void(f32)> handler);
+UGUI_API void SetSliderChange(wid e, Function<void(f32)> handler);
 
 }  // namespace ugui
 

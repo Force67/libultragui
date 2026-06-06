@@ -16,18 +16,18 @@ struct ButtonContent {
 };
 
 /// Behaviour table (draw + measure + click) for button widgets.
-WidgetVTable ButtonVTable();
+UGUI_API WidgetVTable ButtonVTable();
 
 /// Create a button entity in the active registry: a widget tagged kButton with
 /// a ButtonContent component. Returns the new entity handle.
-wid CreateButton(u32 id);
+UGUI_API wid CreateButton(u32 id);
 
 /// Set the button label. No-op if `e` is not a button.
-void SetButtonLabel(wid e, const String& label);
+UGUI_API void SetButtonLabel(wid e, const String& label);
 
 /// Set the button click handler (run when the button is clicked). No-op if `e`
 /// is not a button.
-void SetButtonClick(wid e, Function<void()> handler);
+UGUI_API void SetButtonClick(wid e, Function<void()> handler);
 
 }  // namespace ugui
 

@@ -28,26 +28,27 @@ struct ContextMenuContent {
 };
 
 /// Behaviour table (draw + measure + click + dismiss) for context menus.
-WidgetVTable ContextMenuVTable();
+UGUI_API WidgetVTable ContextMenuVTable();
 
 /// Create a context-menu entity: a generic widget tagged kContextMenu with a
 /// ContextMenuContent component.
-wid CreateContextMenu(u32 id);
+UGUI_API wid CreateContextMenu(u32 id);
 
 /// Append an item with a label and action. No-op if `e` is not a context menu.
-void AddContextMenuItem(wid e, const String& label, Function<void()> action);
+UGUI_API void AddContextMenuItem(wid e, const String& label,
+                                 Function<void()> action);
 
 /// Append a separator. No-op if `e` is not a context menu.
-void AddContextMenuSeparator(wid e);
+UGUI_API void AddContextMenuSeparator(wid e);
 
 /// Remove all items. No-op if `e` is not a context menu.
-void ClearContextMenuItems(wid e);
+UGUI_API void ClearContextMenuItems(wid e);
 
 /// Show the menu as an overlay at `position`, sizing it to fit its items.
-void ShowContextMenuAt(wid e, UIContext* ctx, Vec2 position);
+UGUI_API void ShowContextMenuAt(wid e, UIContext* ctx, Vec2 position);
 
 /// Hide the menu and clear its hover state.
-void HideContextMenu(wid e, UIContext* ctx);
+UGUI_API void HideContextMenu(wid e, UIContext* ctx);
 
 }  // namespace ugui
 

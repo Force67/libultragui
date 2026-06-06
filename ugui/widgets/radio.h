@@ -18,28 +18,28 @@ struct RadioContent {
 };
 
 /// Behaviour table (draw + measure + click) for radio widgets.
-WidgetVTable RadioVTable();
+UGUI_API WidgetVTable RadioVTable();
 
 /// Create a radio entity: a generic widget tagged kRadio with a RadioContent
 /// component.
-wid CreateRadio(u32 id);
+UGUI_API wid CreateRadio(u32 id);
 
 /// Set the radio label.
-void SetRadioLabel(wid e, const String& label);
+UGUI_API void SetRadioLabel(wid e, const String& label);
 
 /// Set the radio group name (groups are mutually exclusive).
-void SetRadioGroup(wid e, const String& group);
+UGUI_API void SetRadioGroup(wid e, const String& group);
 
 /// Set the radio on_change handler (run with true when the user selects it).
-void SetRadioChange(wid e, Function<void(bool)> handler);
+UGUI_API void SetRadioChange(wid e, Function<void(bool)> handler);
 
 /// Set the selected state (toggles the kChecked state bit). Does not fire
 /// on_change and does not deselect siblings (that happens only on a user
 /// click). Works on any widget.
-void SetRadioSelected(wid e, bool selected);
+UGUI_API void SetRadioSelected(wid e, bool selected);
 
 /// Whether the widget's kChecked state bit is set.
-bool IsRadioSelected(wid e);
+UGUI_API bool IsRadioSelected(wid e);
 
 }  // namespace ugui
 
