@@ -25,6 +25,7 @@
 
 #include <ugui/core/types.h>
 #include <ugui/render/draw_data.h>
+#include <ugui/render/texture_backend.h>
 
 namespace ugui {
 namespace vk {
@@ -69,6 +70,23 @@ bool UpdateFontAtlas(const u8* pixels, u32 width, u32 height);
 /// inside a render pass compatible with InitInfo::render_pass that the host
 /// already began on this command buffer.
 void RenderDrawData(const DrawData& draw_data, VkCommandBuffer command_buffer);
+
+// --- Host texture API (for Image/SVG/Lottie/anim in draw-data mode) ---
+//
+// Create textures the backend can bind from draw commands. Hand the returned
+// TextureId to ultragui via UIContext::set_texture_backend() so LoadSvg/LoadUi
+// route through here. These ids live in the backend's own space, distinct from
+// kNullTextureId (white) and kFontTextureId (atlas).
+
+/// Upload pixels and return a bindable id. kNullTextureId on failure.
+TextureId CreateTexture(u32 width, u32 height, RHIFormat format,
+                        const void* pixels,
+                        RHIFilter filter = RHIFilter::kLinear);
+void UpdateTexture(TextureId id, const void* pixels);
+void DestroyTexture(TextureId id);
+
+/// The backend as a TextureBackend, for UIContext::set_texture_backend().
+TextureBackend& texture_backend();
 
 }  // namespace vk
 }  // namespace ugui

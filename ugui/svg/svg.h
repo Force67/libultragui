@@ -2,11 +2,10 @@
 #define ULTRAGUI_SVG_SVG_H_
 
 #include <ugui/core/types.h>
+#include <ugui/render/texture_backend.h>
 #include <ugui/rhi/rhi_types.h>
 
 namespace ugui {
-
-class RHI;
 
 /// CPU-side rasterized SVG image (RGBA8 pixels).
 struct SvgImage {
@@ -25,10 +24,10 @@ bool LoadSvg(const char* path, SvgImage& out, u32 target_width = 0,
 bool LoadSvgMemory(const char* data, usize length, SvgImage& out,
                    u32 target_width = 0, u32 target_height = 0);
 
-/// Load SVG, rasterize, and create an RHI texture. Returns kInvalidTexture on
-/// failure.
-RHITextureHandle LoadSvgTexture(RHI* rhi, const char* path,
-                                u32 target_width = 0, u32 target_height = 0);
+/// Load SVG, rasterize, and upload it through `backend`. Returns kNullTextureId
+/// on failure or if backend is null.
+TextureId LoadSvgTexture(TextureBackend* backend, const char* path,
+                         u32 target_width = 0, u32 target_height = 0);
 
 }  // namespace ugui
 

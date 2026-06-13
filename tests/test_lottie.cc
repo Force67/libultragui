@@ -76,7 +76,7 @@ static const char* write_test_lottie() {
 }
 
 // ============================================================================
-// Tests (no RHI needed - we test the API without GPU)
+// Tests (no RHI needed: we test the API without GPU)
 // ============================================================================
 
 TEST(load_from_data_no_rhi) {
@@ -99,7 +99,7 @@ TEST(default_state) {
   ugui::LottieAnimation anim;
   ASSERT(!anim.IsLoaded());
   ASSERT(!anim.IsPlaying());
-  ASSERT(anim.texture() == ugui::kInvalidTexture);
+  ASSERT(anim.texture() == ugui::kNullTextureId);
   ASSERT(anim.width() == 0);
   ASSERT(anim.height() == 0);
   ASSERT(anim.duration() == 0.0);
@@ -139,12 +139,12 @@ TEST(unload_without_load) {
 }
 
 TEST(load_from_data) {
-  // load_data with nullptr RHI - rlottie parses fine, no texture created
+  // load_data with nullptr RHI: rlottie parses fine, no texture created
   ugui::LottieAnimation anim;
   bool ok = anim.LoadData(nullptr, LOTTIE_JSON, "test", 64, 64);
   ASSERT(ok);
   ASSERT(anim.IsLoaded());
-  ASSERT(anim.texture() == ugui::kInvalidTexture);  // no RHI -> no texture
+  ASSERT(anim.texture() == ugui::kNullTextureId);  // no backend -> no texture
   ASSERT(anim.width() == 64);
   ASSERT(anim.height() == 64);
   ASSERT(anim.total_frames() == 61);  // rlottie: frames 0..op inclusive
@@ -213,7 +213,7 @@ TEST(loop_wraps_around) {
   anim.set_loop(true);
   anim.Play();
   anim.Update(3.0);  // 3 seconds into a 2 second animation
-  // Should wrap: 3.0 - 2.0 = 1.0 second -> ~50% progress
+  // Should wrap: 3.0: 2.0 = 1.0 second -> ~50% progress
   ASSERT(anim.IsPlaying());
   ASSERT(std::fabs(anim.progress() - 0.5f) < 0.05f);
 }

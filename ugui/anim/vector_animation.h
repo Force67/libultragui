@@ -2,11 +2,10 @@
 #define ULTRAGUI_ANIM_VECTOR_ANIMATION_H_
 
 #include <ugui/core/types.h>
+#include <ugui/render/texture_backend.h>
 #include <ugui/rhi/rhi_types.h>
 
 namespace ugui {
-
-class RHI;
 
 /// Lightweight vector animation player. Parses .uganim JSON files and
 /// renders frames via the built-in SVG rasterizer: zero external dependencies.
@@ -19,12 +18,12 @@ class VectorAnimation {
   VectorAnimation(const VectorAnimation&) = delete;
   VectorAnimation& operator=(const VectorAnimation&) = delete;
 
-  /// Load from a .uganim file.
-  bool Load(RHI* rhi, const char* path, u32 width, u32 height);
+  /// Load from a .uganim file. Textures are created through `backend`.
+  bool Load(TextureBackend* backend, const char* path, u32 width, u32 height);
 
   /// Load from JSON data in memory.
-  bool LoadData(RHI* rhi, const char* json_data, usize length, u32 width,
-                u32 height);
+  bool LoadData(TextureBackend* backend, const char* json_data, usize length,
+                u32 width, u32 height);
 
   /// Advance playback by dt seconds. Re-rasterizes if the frame changed.
   void Update(f64 dt);
@@ -33,7 +32,7 @@ class VectorAnimation {
   void Unload();
 
   bool IsLoaded() const;
-  RHITextureHandle texture() const;
+  TextureId texture() const;
   u32 width() const;
   u32 height() const;
 

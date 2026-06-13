@@ -12,6 +12,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ugui {
@@ -35,6 +36,16 @@ struct Texture {
   VkDescriptorSet set = VK_NULL_HANDLE;
 };
 
+// A host-created texture, plus what we need to re-upload it on UpdateTexture.
+struct UserTexture {
+  Texture tex;
+  VkFormat fmt = VK_FORMAT_UNDEFINED;
+  u32 pixel_size = 0;
+  u32 width = 0;
+  u32 height = 0;
+  VkSampler sampler = VK_NULL_HANDLE;
+};
+
 struct Backend {
   InitInfo info{};
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
@@ -46,11 +57,35 @@ struct Backend {
   Texture white;
   Texture font;
   u32 font_revision = ~0u;
+  std::unordered_map<TextureId, UserTexture> user_textures;
+  TextureId next_user_id = 1;  // 0 = white, ~0 = font; user ids start at 1
   std::vector<FrameBuffers> frames;
   u32 frame_index = 0;
 };
 
 Backend g;
+
+void RhiFormatToVk(RHIFormat f, VkFormat& fmt, u32& pixel_size) {
+  switch (f) {
+    case RHIFormat::kR8Unorm:
+      fmt = VK_FORMAT_R8_UNORM;
+      pixel_size = 1;
+      break;
+    case RHIFormat::kBgra8Unorm:
+      fmt = VK_FORMAT_B8G8R8A8_UNORM;
+      pixel_size = 4;
+      break;
+    case RHIFormat::kRgba32Float:
+      fmt = VK_FORMAT_R32G32B32A32_SFLOAT;
+      pixel_size = 16;
+      break;
+    case RHIFormat::kRgba8Unorm:
+    default:
+      fmt = VK_FORMAT_R8G8B8A8_UNORM;
+      pixel_size = 4;
+      break;
+  }
+}
 
 u32 FindMemoryType(u32 type_filter, VkMemoryPropertyFlags props) {
   VkPhysicalDeviceMemoryProperties mp;
@@ -259,8 +294,8 @@ void OneTimeSubmit(const std::function<void(VkCommandBuffer)>& fn) {
 }
 
 // Create a sampled texture from CPU pixels (RGBA8 or R8) + its descriptor set.
-Texture CreateTexture(u32 w, u32 h, VkFormat fmt, u32 pixel_size,
-                      const void* pixels, VkSampler sampler) {
+Texture MakeTexture(u32 w, u32 h, VkFormat fmt, u32 pixel_size,
+                    const void* pixels, VkSampler sampler) {
   Texture t;
   VkDeviceSize size = static_cast<VkDeviceSize>(w) * h * pixel_size;
 
@@ -350,7 +385,7 @@ Texture CreateTexture(u32 w, u32 h, VkFormat fmt, u32 pixel_size,
   return t;
 }
 
-void DestroyTexture(Texture& t) {
+void FreeTexture(Texture& t) {
   if (t.view) vkDestroyImageView(g.info.device, t.view, g.info.allocator);
   if (t.image) vkDestroyImage(g.info.device, t.image, g.info.allocator);
   if (t.memory) vkFreeMemory(g.info.device, t.memory, g.info.allocator);
@@ -410,8 +445,8 @@ bool Init(const InitInfo& info) {
   if (!g.quad_pipeline || !g.text_pipeline) return false;
 
   u32 white = 0xFFFFFFFFu;
-  g.white = CreateTexture(1, 1, VK_FORMAT_R8G8B8A8_UNORM, 4, &white,
-                          g.linear_sampler);
+  g.white = MakeTexture(1, 1, VK_FORMAT_R8G8B8A8_UNORM, 4, &white,
+                        g.linear_sampler);
 
   g.frames.resize(g.info.frames_in_flight);
   return true;
@@ -427,8 +462,10 @@ void Shutdown() {
     DestroyBuffer(f.text_idx);
   }
   g.frames.clear();
-  DestroyTexture(g.font);
-  DestroyTexture(g.white);
+  for (auto& kv : g.user_textures) FreeTexture(kv.second.tex);
+  g.user_textures.clear();
+  FreeTexture(g.font);
+  FreeTexture(g.white);
   if (g.quad_pipeline)
     vkDestroyPipeline(g.info.device, g.quad_pipeline, g.info.allocator);
   if (g.text_pipeline)
@@ -451,9 +488,9 @@ void NewFrame() {
 bool UpdateFontAtlas(const u8* pixels, u32 width, u32 height) {
   if (!pixels || width == 0 || height == 0) return false;
   vkDeviceWaitIdle(g.info.device);
-  DestroyTexture(g.font);
-  g.font = CreateTexture(width, height, VK_FORMAT_R8_UNORM, 1, pixels,
-                         g.nearest_sampler);
+  FreeTexture(g.font);
+  g.font = MakeTexture(width, height, VK_FORMAT_R8_UNORM, 1, pixels,
+                       g.nearest_sampler);
   return g.font.image != VK_NULL_HANDLE;
 }
 
@@ -498,9 +535,15 @@ void RenderDrawData(const DrawData& dd, VkCommandBuffer cmd) {
       bound_pipeline = want;
     }
 
-    VkDescriptorSet set = (c.is_text || c.texture_id == kFontTextureId)
-                              ? g.font.set
-                              : g.white.set;
+    VkDescriptorSet set;
+    if (c.is_text || c.texture_id == kFontTextureId) {
+      set = g.font.set;
+    } else if (c.texture_id == kNullTextureId) {
+      set = g.white.set;
+    } else {
+      auto it = g.user_textures.find(c.texture_id);
+      set = it != g.user_textures.end() ? it->second.tex.set : g.white.set;
+    }
     if (set == VK_NULL_HANDLE) set = g.white.set;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             g.pipeline_layout, 0, 1, &set, 0, nullptr);
@@ -525,6 +568,58 @@ void RenderDrawData(const DrawData& dd, VkCommandBuffer cmd) {
     vkCmdDrawIndexed(cmd, c.elem_count, 1, c.index_offset, 0, 0);
   }
 }
+
+TextureId CreateTexture(u32 width, u32 height, RHIFormat format,
+                        const void* pixels, RHIFilter filter) {
+  if (!g.info.device || width == 0 || height == 0 || !pixels)
+    return kNullTextureId;
+  UserTexture ut;
+  ut.width = width;
+  ut.height = height;
+  ut.sampler =
+      filter == RHIFilter::kNearest ? g.nearest_sampler : g.linear_sampler;
+  RhiFormatToVk(format, ut.fmt, ut.pixel_size);
+  ut.tex = MakeTexture(width, height, ut.fmt, ut.pixel_size, pixels, ut.sampler);
+  if (ut.tex.image == VK_NULL_HANDLE) return kNullTextureId;
+  TextureId id = g.next_user_id++;
+  g.user_textures.emplace(id, ut);
+  return id;
+}
+
+void UpdateTexture(TextureId id, const void* pixels) {
+  auto it = g.user_textures.find(id);
+  if (it == g.user_textures.end() || !pixels) return;
+  UserTexture& ut = it->second;
+  // Re-upload by rebuilding the image in place (the id and map entry persist).
+  vkDeviceWaitIdle(g.info.device);
+  FreeTexture(ut.tex);
+  ut.tex =
+      MakeTexture(ut.width, ut.height, ut.fmt, ut.pixel_size, pixels, ut.sampler);
+}
+
+void DestroyTexture(TextureId id) {
+  auto it = g.user_textures.find(id);
+  if (it == g.user_textures.end()) return;
+  vkDeviceWaitIdle(g.info.device);
+  FreeTexture(it->second.tex);
+  g.user_textures.erase(it);
+}
+
+namespace {
+struct VkTextureBackend : TextureBackend {
+  TextureId CreateTexture(u32 w, u32 h, RHIFormat fmt, const void* pixels,
+                          RHIFilter filter) override {
+    return ugui::vk::CreateTexture(w, h, fmt, pixels, filter);
+  }
+  void UpdateTexture(TextureId id, const void* pixels) override {
+    ugui::vk::UpdateTexture(id, pixels);
+  }
+  void DestroyTexture(TextureId id) override { ugui::vk::DestroyTexture(id); }
+};
+VkTextureBackend g_texture_backend;
+}  // namespace
+
+TextureBackend& texture_backend() { return g_texture_backend; }
 
 }  // namespace vk
 }  // namespace ugui

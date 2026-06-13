@@ -4,6 +4,7 @@
 #include <ugui/core/color.h>
 #include <ugui/core/rect.h>
 #include <ugui/render/draw_data.h>
+#include <ugui/render/texture_backend.h>
 #include <ugui/render/vertex.h>
 #include <ugui/rhi/rhi.h>
 #include <ugui/style/enums.h>
@@ -25,7 +26,7 @@ class Renderer2D {
 
   // --- Solid color drawing ---
   void DrawRect(Rect rect, Color color, u32 corner_radii = 0);
-  void DrawTexturedRect(Rect rect, RHITextureHandle texture,
+  void DrawTexturedRect(Rect rect, TextureId texture,
                         Color tint = Color::White(), u32 corner_radii = 0);
 
   // --- Visual effects ---
@@ -54,11 +55,11 @@ class Renderer2D {
   /// Draw shaped text at the given position.
   /// `pos` is the top-left origin; `run` comes from TextEngine::Shape().
   void DrawText(Vec2 pos, const TextRun& run, Color color,
-                RHITextureHandle atlas_texture);
+                TextureId atlas_texture);
 
   /// Draw laid-out text (multi-line with alignment).
   void DrawTextLayout(Vec2 pos, const TextRun& run, const TextLayout& layout,
-                      Color color, RHITextureHandle atlas_texture,
+                      Color color, TextureId atlas_texture,
                       f32 max_width = 0.0f);
 
   /// Draw a radial gradient (center color fading to edge color).
@@ -85,17 +86,25 @@ class Renderer2D {
   /// scissor when no RHI is attached (draw-data / embedded use).
   void set_display_size(Vec2 size) { display_size_ = size; }
 
+  /// Texture sink for cached gradients (and any renderer-owned textures). In
+  /// legacy mode this is the RHI adapter; in draw-data mode the host backend.
+  /// May be null, in which case gradients fall back to flat color.
+  void set_texture_backend(TextureBackend* backend) {
+    texture_backend_ = backend;
+  }
+
  private:
   void FlushBatch();
   void FlushTextBatch();
   void EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
                 f32 softness, f32 border_width, u32 border_color,
-                RHITextureHandle texture);
+                TextureId texture);
 
   RHI* rhi_ = nullptr;
+  TextureBackend* texture_backend_ = nullptr;
 
   struct DrawBatch {
-    RHITextureHandle texture;
+    TextureId texture;
     Rect scissor;
     u32 index_offset;
     u32 index_count;
@@ -125,19 +134,18 @@ class Renderer2D {
   Vector<Vertex2D> text_vertices_;
   Vector<u32> text_indices_;
   Vector<DrawBatch> text_batches_;
-  RHITextureHandle current_text_atlas_ = kInvalidTexture;
+  TextureId current_text_atlas_ = kNullTextureId;
 
   // Submission order across both batch lists.
   Vector<DrawCommand> draw_order_;
 
-  RHITextureHandle GetRadialGradientTexture(Color center, Color edge);
-  RHITextureHandle GetMultiStopGradientTexture(const GradientStop* stops,
-                                               u32 count, GradientType type,
-                                               f32 angle_deg);
+  TextureId GetRadialGradientTexture(Color center, Color edge);
+  TextureId GetMultiStopGradientTexture(const GradientStop* stops, u32 count,
+                                        GradientType type, f32 angle_deg);
 
   Vector<Rect> scissor_stack_;
-  HashMap<u64, RHITextureHandle> gradient_cache_;
-  RHITextureHandle current_texture_ = kInvalidTexture;
+  HashMap<u64, TextureId> gradient_cache_;
+  TextureId current_texture_ = kNullTextureId;
   Rect current_scissor_ = {};
 
   // Draw-data output (GetDrawData)

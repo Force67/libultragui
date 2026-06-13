@@ -24,6 +24,7 @@
 #include <ugui/platform/platform.h>
 #include <ugui/render/renderer2d.h>
 #include <ugui/rhi/rhi.h>
+#include <ugui/rhi/rhi_texture_backend.h>
 #include <ugui/scripting/script_runtime.h>
 #include <ugui/style/theme.h>
 #include <ugui/svg/svg.h>
@@ -193,9 +194,21 @@ class UIContext {
   /// Invalidate the widget name cache (call after dynamically adding children).
   void InvalidateWidgetCache() { widget_cache_dirty_ = true; }
 
-  /// Load an SVG file and create a GPU texture.
-  /// If width/height are 0, uses the SVG's native dimensions.
-  RHITextureHandle LoadSvg(const char* path, u32 width = 0, u32 height = 0);
+  /// The active texture sink. Subsystems (SVG, Image, gradients, anim) upload
+  /// through this. Legacy mode wires the bundled RHI; in draw-data mode the host
+  /// must provide one via set_texture_backend() before loading textured assets.
+  TextureBackend* texture_backend() { return texture_backend_; }
+
+  /// Draw-data mode: register the host's renderer backend (e.g.
+  /// ugui::vk::texture_backend()) so LoadSvg/LoadUi/gradients can create
+  /// textures the host can bind. Call after the backend's Init() and before any
+  /// LoadSvg/LoadAnim/LoadLottie. No effect on the font atlas (host-owned).
+  void set_texture_backend(TextureBackend* backend);
+
+  /// Load an SVG file and create a GPU texture through the active backend.
+  /// If width/height are 0, uses the SVG's native dimensions. Returns
+  /// kNullTextureId if no texture backend is set.
+  TextureId LoadSvg(const char* path, u32 width = 0, u32 height = 0);
 
   /// Load a .uganim vector animation. The returned animation is owned by
   /// UIContext and automatically updated each frame. Returns nullptr on
@@ -247,6 +260,10 @@ class UIContext {
  private:
   Platform platform_;
   RHI rhi_;
+  // Texture seam: legacy mode points texture_backend_ at this RHI adapter;
+  // draw-data mode leaves it null until the host calls set_texture_backend().
+  RHITextureBackend rhi_texture_backend_{&rhi_};
+  TextureBackend* texture_backend_ = nullptr;
   Renderer2D renderer_;
   TextEngine text_engine_;
   LayoutEngine layout_engine_;

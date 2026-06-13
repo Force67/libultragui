@@ -22,6 +22,11 @@ option(ULTRAGUI_LOTTIE "Enable Lottie animation support (rlottie)" ON)
 option(ULTRAGUI_VIDEO "Enable MPEG-1 video playback (pl_mpeg)" ON)
 option(ULTRAGUI_LUA "Enable built-in Lua scripting runtime" ON)
 option(ULTRAGUI_DEFAULT_OPEN_URL "Compile a default Platform::OpenURL implementation" ON)
+# A host that supplies its own ugui::Platform (ULTRAGUI_PLATFORM_SOURCE) and
+# renders the draw list with its own pipelines does not need GLFW or the bundled
+# GLSL shaders; turn these off to drop those build dependencies.
+option(ULTRAGUI_PLATFORM_GLFW "Build the bundled GLFW platform backend" ON)
+option(ULTRAGUI_BUILD_SHADERS "Compile the bundled GLSL shaders with glslc" ON)
 
 # Compiler warnings
 add_library(ultragui_warnings INTERFACE)
@@ -50,12 +55,15 @@ if(ULTRAGUI_LUA)
     pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
 endif()
 
-# GLFW (for examples/platform)
-find_package(glfw3 3.3 REQUIRED)
+# GLFW (bundled platform backend + examples)
+if(ULTRAGUI_PLATFORM_GLFW OR ULTRAGUI_BUILD_EXAMPLES)
+    find_package(glfw3 3.3 REQUIRED)
+endif()
 
-# Yoga layout engine (built from source)
+# Yoga layout engine (built from source). Add the library subdir directly, not
+# the yoga root: the root unconditionally adds a GoogleTest-based tests target.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-add_subdirectory(third_party/yoga EXCLUDE_FROM_ALL)
+add_subdirectory(third_party/yoga/yoga EXCLUDE_FROM_ALL)
 
 # rlottie (Lottie animation renderer)
 if(ULTRAGUI_LOTTIE)
@@ -67,6 +75,7 @@ if(ULTRAGUI_LOTTIE)
 endif()
 
 # --- Shader compilation ---
+if(ULTRAGUI_BUILD_SHADERS)
 find_program(GLSLC glslc REQUIRED)
 set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 set(SHADER_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
@@ -95,6 +104,7 @@ foreach(SHADER ${SHADER_SOURCES})
 endforeach()
 
 add_custom_target(ultragui_shaders DEPENDS ${SHADER_OUTPUTS})
+endif()  # ULTRAGUI_BUILD_SHADERS
 
 # --- HLSL shader compilation (D3D12) ---
 if(ULTRAGUI_BACKEND_D3D12)
@@ -228,7 +238,9 @@ if(ULTRAGUI_VIDEO)
 endif()
 
 add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
-add_dependencies(ultragui ultragui_shaders)
+if(ULTRAGUI_BUILD_SHADERS)
+    add_dependencies(ultragui ultragui_shaders)
+endif()
 if(ULTRAGUI_BACKEND_D3D12)
     add_dependencies(ultragui ultragui_hlsl_shaders)
 endif()
@@ -257,13 +269,12 @@ target_compile_definitions(ultragui
 )
 
 target_link_libraries(ultragui
-    PUBLIC
-        ultragui_warnings
     PRIVATE
+        ultragui_warnings
         PkgConfig::FREETYPE
         PkgConfig::HARFBUZZ
         $<$<BOOL:${ULTRAGUI_LUA}>:PkgConfig::LUA>
-        glfw
+        $<$<BOOL:${ULTRAGUI_PLATFORM_GLFW}>:glfw>
         yogacore
 )
 

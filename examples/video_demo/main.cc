@@ -384,7 +384,7 @@ int main(int argc, char* argv[]) {
     if (scene == 0) {
       if (video->texture() != ugui::kInvalidTexture)
         ugui::SetImageTexture(ui.FindWidget("video_frame"),
-                              video->texture(),
+                              ugui::TextureIdFromRhiHandle(video->texture()),
                               static_cast<float>(video->width()),
                               static_cast<float>(video->height()));
       // Time display
@@ -403,7 +403,7 @@ int main(int argc, char* argv[]) {
       for (auto* name : names) {
         if (video->texture() != ugui::kInvalidTexture)
           ugui::SetImageTexture(ui.FindWidget(name),
-                                video->texture(),
+                                ugui::TextureIdFromRhiHandle(video->texture()),
                                 static_cast<float>(video->width()),
                                 static_cast<float>(video->height()));
       }

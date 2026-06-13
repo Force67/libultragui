@@ -15,7 +15,9 @@
 
 #define GLFW_INCLUDE_VULKAN
 #include <ugui/backends/ugui_impl_vulkan.h>
+#include <ugui/svg/svg.h>
 #include <ugui/ultragui.h>
+#include <ugui/widgets/image.h>
 
 #include <GLFW/glfw3.h>
 #include <cmath>
@@ -35,10 +37,11 @@ panel root {
   width: 100vw; height: 100vh;
   layout: column; justify: center; align: center;
   panel card {
-    layout: column; gap: 10; padding: 28;
+    layout: column; gap: 10; padding: 28; align: center;
     background: #14142899; corner-radius: 18;
     border-color: #ffffff20; border-width: 1;
     shadow-color: #00000080; shadow-blur: 28; shadow-y: 10;
+    image logo { width: 72; height: 72; }
     text title { text: "ultragui via ugui_impl_vulkan"; font-size: 22; color: #ffffff; }
     text sub {
       text: "Host owns the Vulkan device, swapchain and render pass.";
@@ -50,6 +53,16 @@ panel root {
     }
   }
 }
+)";
+
+// A tiny SVG, rasterized on the CPU and uploaded through the host backend to
+// prove Image/SVG textures work in draw-data mode (host owns the device).
+static const char* kLogoSvg = R"(
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="50" cy="50" r="46" fill="#4a4aff"/>
+  <circle cx="50" cy="50" r="46" fill="none" stroke="#ffffff" stroke-width="4"/>
+  <rect x="30" y="30" width="40" height="40" rx="8" fill="#ffffff"/>
+</svg>
 )";
 
 static const char* FindFont() {
@@ -369,6 +382,24 @@ int main() {
   bi.frames_in_flight = kFramesInFlight;
   bi.shader_dir = ULTRAGUI_SHADER_DIR;
   if (!ugui::vk::Init(bi)) Die("ugui::vk::Init failed");
+
+  // Hand ultragui the host's texture sink, then rasterize an SVG and attach it
+  // to the Image widget. None of this was possible in draw-data mode before the
+  // TextureBackend seam: the library has no device, so it routes the upload to
+  // the host backend (ugui::vk) and references the result by its TextureId.
+  ui.set_texture_backend(&ugui::vk::texture_backend());
+  {
+    ugui::SvgImage img;
+    if (ugui::LoadSvgMemory(kLogoSvg, std::strlen(kLogoSvg), img, 72, 72)) {
+      ugui::TextureId logo = ui.texture_backend()->CreateTexture(
+          img.width, img.height, ugui::RHIFormat::kRgba8Unorm,
+          img.pixels.data());
+      ugui::SetImageTexture(ui.FindWidget("logo"), logo,
+                            static_cast<float>(img.width),
+                            static_cast<float>(img.height));
+    }
+  }
+
   u32 font_rev = ~0u;
 
   while (!glfwWindowShouldClose(win)) {

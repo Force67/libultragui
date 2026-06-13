@@ -99,6 +99,11 @@ bool UIContext::Init(const UIConfig& config) {
   renderer_.set_display_size(
       {static_cast<f32>(config.width), static_cast<f32>(config.height)});
 
+  // Texture seam. Legacy mode renders through the bundled RHI, so wire its
+  // adapter as the default sink. Draw-data mode leaves it null; the host
+  // registers its own backend via set_texture_backend().
+  if (rhi_ptr) set_texture_backend(&rhi_texture_backend_);
+
   // Text engine
   if (!text_engine_.Init(rhi_ptr)) {
     std::fprintf(stderr, "ultragui: failed to initialize text engine\n");
@@ -650,13 +655,18 @@ void UIContext::set_audio(AudioBackend* backend) {
 }
 #endif
 
-RHITextureHandle UIContext::LoadSvg(const char* path, u32 width, u32 height) {
-  return LoadSvgTexture(&rhi_, path, width, height);
+void UIContext::set_texture_backend(TextureBackend* backend) {
+  texture_backend_ = backend;
+  renderer_.set_texture_backend(backend);
+}
+
+TextureId UIContext::LoadSvg(const char* path, u32 width, u32 height) {
+  return LoadSvgTexture(texture_backend_, path, width, height);
 }
 
 VectorAnimation* UIContext::LoadAnim(const char* path, u32 width, u32 height) {
   auto* anim = new VectorAnimation();
-  if (!anim->Load(&rhi_, path, width, height)) {
+  if (!anim->Load(texture_backend_, path, width, height)) {
     delete anim;
     return nullptr;
   }
@@ -668,7 +678,7 @@ VectorAnimation* UIContext::LoadAnim(const char* path, u32 width, u32 height) {
 LottieAnimation* UIContext::LoadLottie(const char* path, u32 width,
                                        u32 height) {
   auto* anim = new LottieAnimation();
-  if (!anim->Load(&rhi_, path, width, height)) {
+  if (!anim->Load(texture_backend_, path, width, height)) {
     delete anim;
     return nullptr;
   }

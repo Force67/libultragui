@@ -1,4 +1,5 @@
 #include <ugui/scripting/lua_video.h>
+#include <ugui/render/texture_backend.h>
 #include <ugui/scripting/script_runtime.h>
 #include <ugui/video/video.h>
 #include <ugui/widgets/image.h>
@@ -116,7 +117,8 @@ void RegisterVideoLua(ScriptRuntime& lua,
     if (v) {
       wid w = find_widget(name);
       if (w.valid())
-        SetImageTexture(w, v->texture(), static_cast<f32>(v->width()),
+        SetImageTexture(w, TextureIdFromRhiHandle(v->texture()),
+                        static_cast<f32>(v->width()),
                         static_cast<f32>(v->height()));
     }
     return 0;

@@ -1,4 +1,3 @@
-#include <ugui/rhi/rhi.h>
 #include <ugui/svg/svg.h>
 
 #include <cstdio>
@@ -50,15 +49,15 @@ bool LoadSvgMemory(const char* data, usize length, SvgImage& out,
   return true;
 }
 
-RHITextureHandle LoadSvgTexture(RHI* rhi, const char* path, u32 target_width,
-                                u32 target_height) {
-  if (!rhi) return kInvalidTexture;
+TextureId LoadSvgTexture(TextureBackend* backend, const char* path,
+                         u32 target_width, u32 target_height) {
+  if (!backend) return kNullTextureId;
 
   SvgImage img;
-  if (!LoadSvg(path, img, target_width, target_height)) return kInvalidTexture;
+  if (!LoadSvg(path, img, target_width, target_height)) return kNullTextureId;
 
-  return rhi->CreateTexture(img.width, img.height, RHIFormat::kRgba8Unorm,
-                            img.pixels.data());
+  return backend->CreateTexture(img.width, img.height, RHIFormat::kRgba8Unorm,
+                                img.pixels.data());
 }
 
 }  // namespace ugui

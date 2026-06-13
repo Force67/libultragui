@@ -1,6 +1,5 @@
 #include <ugui/anim/anim_types.h>
 #include <ugui/anim/vector_animation.h>
-#include <ugui/rhi/rhi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -18,8 +17,8 @@ void render_anim_frame(const AnimDocument& doc, f32 time, u8* pixels, u32 width,
 
 struct VectorAnimation::Impl {
   AnimDocument doc;
-  RHI* rhi = nullptr;
-  RHITextureHandle texture_handle = kInvalidTexture;
+  TextureBackend* backend = nullptr;
+  TextureId texture_id = kNullTextureId;
   u32 w = 0, h = 0;
   Vector<u8> rgba_buf;
 
@@ -31,7 +30,8 @@ struct VectorAnimation::Impl {
 
 VectorAnimation::~VectorAnimation() { Unload(); }
 
-bool VectorAnimation::Load(RHI* rhi, const char* path, u32 width, u32 height) {
+bool VectorAnimation::Load(TextureBackend* backend, const char* path, u32 width,
+                           u32 height) {
   Unload();
   auto* p = new Impl();
   if (!parse_anim_file(path, p->doc)) {
@@ -39,39 +39,41 @@ bool VectorAnimation::Load(RHI* rhi, const char* path, u32 width, u32 height) {
     delete p;
     return false;
   }
-  p->rhi = rhi;
+  p->backend = backend;
   p->w = width;
   p->h = height;
   p->rgba_buf.resize(width * height * 4, 0);
 
   // Render first frame
   render_anim_frame(p->doc, 0, p->rgba_buf.data(), width, height);
-  p->texture_handle =
-      rhi->CreateTexture(width, height, RHIFormat::kRgba8Unorm,
-                         p->rgba_buf.data(), RHIFilter::kLinear);
+  if (backend)
+    p->texture_id =
+        backend->CreateTexture(width, height, RHIFormat::kRgba8Unorm,
+                               p->rgba_buf.data(), RHIFilter::kLinear);
   p->last_rendered_t = 0;
 
   impl_ = p;
   return true;
 }
 
-bool VectorAnimation::LoadData(RHI* rhi, const char* json_data, usize length,
-                               u32 width, u32 height) {
+bool VectorAnimation::LoadData(TextureBackend* backend, const char* json_data,
+                               usize length, u32 width, u32 height) {
   Unload();
   auto* p = new Impl();
   if (!parse_anim_data(json_data, length, p->doc)) {
     delete p;
     return false;
   }
-  p->rhi = rhi;
+  p->backend = backend;
   p->w = width;
   p->h = height;
   p->rgba_buf.resize(width * height * 4, 0);
 
   render_anim_frame(p->doc, 0, p->rgba_buf.data(), width, height);
-  p->texture_handle =
-      rhi->CreateTexture(width, height, RHIFormat::kRgba8Unorm,
-                         p->rgba_buf.data(), RHIFilter::kLinear);
+  if (backend)
+    p->texture_id =
+        backend->CreateTexture(width, height, RHIFormat::kRgba8Unorm,
+                               p->rgba_buf.data(), RHIFilter::kLinear);
   p->last_rendered_t = 0;
 
   impl_ = p;
@@ -100,15 +102,16 @@ void VectorAnimation::Update(f64 dt) {
   if (std::abs(t - impl_->last_rendered_t) > 0.012f) {
     render_anim_frame(impl_->doc, t, impl_->rgba_buf.data(), impl_->w,
                       impl_->h);
-    impl_->rhi->UpdateTexture(impl_->texture_handle, impl_->rgba_buf.data());
+    if (impl_->backend && impl_->texture_id != kNullTextureId)
+      impl_->backend->UpdateTexture(impl_->texture_id, impl_->rgba_buf.data());
     impl_->last_rendered_t = t;
   }
 }
 
 void VectorAnimation::Unload() {
   if (impl_) {
-    if (impl_->texture_handle != kInvalidTexture && impl_->rhi)
-      impl_->rhi->DestroyTexture(impl_->texture_handle);
+    if (impl_->texture_id != kNullTextureId && impl_->backend)
+      impl_->backend->DestroyTexture(impl_->texture_id);
     delete impl_;
     impl_ = nullptr;
   }
@@ -116,8 +119,8 @@ void VectorAnimation::Unload() {
 
 bool VectorAnimation::IsLoaded() const { return impl_ != nullptr; }
 
-RHITextureHandle VectorAnimation::texture() const {
-  return impl_ ? impl_->texture_handle : kInvalidTexture;
+TextureId VectorAnimation::texture() const {
+  return impl_ ? impl_->texture_id : kNullTextureId;
 }
 
 u32 VectorAnimation::width() const { return impl_ ? impl_->w : 0; }

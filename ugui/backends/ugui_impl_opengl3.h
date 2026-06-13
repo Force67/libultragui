@@ -19,6 +19,7 @@
 
 #include <ugui/core/types.h>
 #include <ugui/render/draw_data.h>
+#include <ugui/render/texture_backend.h>
 
 namespace ugui {
 namespace gl {
@@ -46,6 +47,21 @@ bool UpdateFontAtlas(const u8* pixels, u32 width, u32 height);
 /// it needs (blend, scissor, no depth/cull); restore your own state afterwards
 /// if you render more.
 void RenderDrawData(const DrawData& draw_data);
+
+// --- Host texture API (for Image/SVG/Lottie/anim in draw-data mode) ---
+//
+// Create textures the backend can bind from draw commands. Hand the returned
+// TextureId to ultragui via UIContext::set_texture_backend(). Byte formats
+// (R8/RGBA8/BGRA8) only; the GL backend does not handle float textures.
+
+TextureId CreateTexture(u32 width, u32 height, RHIFormat format,
+                        const void* pixels,
+                        RHIFilter filter = RHIFilter::kLinear);
+void UpdateTexture(TextureId id, const void* pixels);
+void DestroyTexture(TextureId id);
+
+/// The backend as a TextureBackend, for UIContext::set_texture_backend().
+TextureBackend& texture_backend();
 
 }  // namespace gl
 }  // namespace ugui

@@ -38,8 +38,8 @@ void Renderer2D::BeginFrame() {
   text_batches_.clear();
   draw_order_.clear();
   scissor_stack_.clear();
-  current_texture_ = kInvalidTexture;
-  current_text_atlas_ = kInvalidTexture;
+  current_texture_ = kNullTextureId;
+  current_text_atlas_ = kNullTextureId;
   Vec2 vp = rhi_ ? rhi_->display_size() : display_size_;
   current_scissor_ = Rect{0, 0, vp.x, vp.y};
 }
@@ -60,9 +60,7 @@ const DrawData& Renderer2D::GetDrawData() {
       out.index_offset = batch.index_offset;
       out.elem_count = batch.index_count;
       out.is_text = false;
-      out.texture_id = (batch.texture == kInvalidTexture)
-                           ? kNullTextureId
-                           : static_cast<TextureId>(batch.texture);
+      out.texture_id = batch.texture;
     } else {
       const auto& batch = text_batches_[cmd.batch_index];
       out.clip_rect = batch.scissor;
@@ -103,25 +101,27 @@ void Renderer2D::EndFrame() {
       rhi_->SetScissor(batch.scissor);
       rhi_->DrawTriangles(vertices_.data(), static_cast<u32>(vertices_.size()),
                           indices_.data() + batch.index_offset,
-                          batch.index_count, batch.texture);
+                          batch.index_count,
+                          RhiHandleFromTextureId(batch.texture));
     } else {
       const auto& batch = text_batches_[cmd.batch_index];
       rhi_->SetScissor(batch.scissor);
       rhi_->DrawTextTriangles(text_vertices_.data(),
                               static_cast<u32>(text_vertices_.size()),
                               text_indices_.data() + batch.index_offset,
-                              batch.index_count, batch.texture);
+                              batch.index_count,
+                              RhiHandleFromTextureId(batch.texture));
     }
   }
 }
 
 void Renderer2D::DrawRect(Rect rect, Color color, u32 corner_radii) {
   u32 packed = Vertex2D::PackColor(color.r, color.g, color.b, color.a);
-  EmitQuad(rect, packed, packed, corner_radii, 0.0f, 0.0f, 0, kInvalidTexture);
+  EmitQuad(rect, packed, packed, corner_radii, 0.0f, 0.0f, 0, kNullTextureId);
 }
 
-void Renderer2D::DrawTexturedRect(Rect rect, RHITextureHandle texture,
-                                  Color tint, u32 corner_radii) {
+void Renderer2D::DrawTexturedRect(Rect rect, TextureId texture, Color tint,
+                                  u32 corner_radii) {
   u32 packed = Vertex2D::PackColor(tint.r, tint.g, tint.b, tint.a);
   EmitQuad(rect, packed, packed, corner_radii, 0.0f, 0.0f, 0, texture);
 }
@@ -129,9 +129,9 @@ void Renderer2D::DrawTexturedRect(Rect rect, RHITextureHandle texture,
 void Renderer2D::DrawRectGradient(Rect rect, Color start_color, Color end_color,
                                   u32 corner_radii, f32 angle_deg) {
   // Batch management
-  if (kInvalidTexture != current_texture_) {
+  if (kNullTextureId != current_texture_) {
     FlushBatch();
-    current_texture_ = kInvalidTexture;
+    current_texture_ = kNullTextureId;
   }
 
   // DPI pixel snapping
@@ -221,9 +221,8 @@ void Renderer2D::DrawRectGradient(Rect rect, Color start_color, Color end_color,
   indices_.push_back(base + 3);
 }
 
-RHITextureHandle Renderer2D::GetRadialGradientTexture(Color center,
-                                                      Color edge) {
-  if (!rhi_) return kInvalidTexture;  // draw-data mode: host owns textures
+TextureId Renderer2D::GetRadialGradientTexture(Color center, Color edge) {
+  if (!texture_backend_) return kNullTextureId;  // no sink: fall back to flat
   u32 c1 = Vertex2D::PackColor(center.r, center.g, center.b, center.a);
   u32 c2 = Vertex2D::PackColor(edge.r, edge.g, edge.b, edge.a);
   u64 key = static_cast<u64>(c1) | (static_cast<u64>(c2) << 32);
@@ -251,7 +250,8 @@ RHITextureHandle Renderer2D::GetRadialGradientTexture(Color center,
     }
   }
 
-  auto tex = rhi_->CreateTexture(kSize, kSize, RHIFormat::kRgba8Unorm, pixels);
+  auto tex = texture_backend_->CreateTexture(kSize, kSize,
+                                             RHIFormat::kRgba8Unorm, pixels);
   gradient_cache_[key] = tex;
   return tex;
 }
@@ -286,9 +286,10 @@ static Color SampleGradient(const GradientStop* stops, u32 count, f32 t) {
   return stops[count - 1].color;
 }
 
-RHITextureHandle Renderer2D::GetMultiStopGradientTexture(
-    const GradientStop* stops, u32 count, GradientType type, f32 angle_deg) {
-  if (!rhi_) return kInvalidTexture;  // draw-data mode: host owns textures
+TextureId Renderer2D::GetMultiStopGradientTexture(const GradientStop* stops,
+                                                  u32 count, GradientType type,
+                                                  f32 angle_deg) {
+  if (!texture_backend_) return kNullTextureId;  // no sink: fall back to flat
   // Hash the gradient parameters for caching
   u64 hash = static_cast<u64>(count) ^ (static_cast<u64>(type) << 8);
   for (u32 i = 0; i < count; ++i) {
@@ -341,7 +342,8 @@ RHITextureHandle Renderer2D::GetMultiStopGradientTexture(
     }
   }
 
-  auto tex = rhi_->CreateTexture(kSize, kSize, RHIFormat::kRgba8Unorm, pixels);
+  auto tex = texture_backend_->CreateTexture(kSize, kSize,
+                                             RHIFormat::kRgba8Unorm, pixels);
   gradient_cache_[hash] = tex;
   return tex;
 }
@@ -371,7 +373,7 @@ void Renderer2D::DrawShadow(Rect rect, Color shadow_color, f32 blur, f32 spread,
       static_cast<f32>(tl) + spread, static_cast<f32>(tr) + spread,
       static_cast<f32>(br) + spread, static_cast<f32>(bl) + spread);
   EmitQuad(shadow_rect, packed, packed, shadow_radii, blur, 0.0f, 0,
-           kInvalidTexture);
+           kNullTextureId);
 }
 
 void Renderer2D::DrawInsetShadow(Rect rect, Color shadow_color, f32 blur,
@@ -395,7 +397,7 @@ void Renderer2D::DrawInsetShadow(Rect rect, Color shadow_color, f32 blur,
                           std::max(0.0f, static_cast<f32>(bl) - spread));
   // Negative softness signals inset mode to the shader
   EmitQuad(shadow_rect, packed, packed, inner_radii, -blur, 0.0f, 0,
-           kInvalidTexture);
+           kNullTextureId);
 }
 
 void Renderer2D::DrawBorderedRect(Rect rect, Color fill, Color border_color,
@@ -404,7 +406,7 @@ void Renderer2D::DrawBorderedRect(Rect rect, Color fill, Color border_color,
   u32 border_packed = Vertex2D::PackColor(border_color.r, border_color.g,
                                           border_color.b, border_color.a);
   EmitQuad(rect, fill_packed, fill_packed, corner_radii, 0.0f, border_width,
-           border_packed, kInvalidTexture);
+           border_packed, kNullTextureId);
 }
 
 void Renderer2D::PushScissor(Rect rect) {
@@ -425,7 +427,7 @@ void Renderer2D::PopScissor() {
 
 void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
                           f32 softness, f32 border_width, u32 border_color,
-                          RHITextureHandle texture) {
+                          TextureId texture) {
   // If there are pending text indices that haven't been flushed yet,
   // close them off as their own batch first so the upcoming quad
   // renders ON TOP of them rather than getting batched with earlier
@@ -556,7 +558,7 @@ void Renderer2D::FlushTextBatch() {
 }
 
 void Renderer2D::DrawText(Vec2 pos, const TextRun& run, Color color,
-                          RHITextureHandle atlas_texture) {
+                          TextureId atlas_texture) {
   // If there are pending quad indices that haven't been flushed yet,
   // close them off as their own batch first so the upcoming text
   // renders ON TOP of those quads (and BELOW any later quads). See
@@ -646,7 +648,7 @@ void Renderer2D::DrawText(Vec2 pos, const TextRun& run, Color color,
 
 void Renderer2D::DrawTextLayout(Vec2 pos, const TextRun& run,
                                 const TextLayout& layout, Color color,
-                                RHITextureHandle atlas_texture, f32 max_width) {
+                                TextureId atlas_texture, f32 max_width) {
   if (layout.line_count == 0) return;
 
   for (u32 li = 0; li < layout.line_count; ++li) {

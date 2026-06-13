@@ -5,6 +5,7 @@
 #include <ugui/core/math.h>
 #include <ugui/core/rect.h>
 #include <ugui/core/types.h>
+#include <ugui/render/texture_backend.h>
 #include <ugui/rhi/rhi_types.h>
 #include <ugui/style/enums.h>
 
@@ -103,8 +104,13 @@ class TextEngine {
   /// Must be called once per frame to upload any new glyphs to the GPU atlas.
   void FlushAtlas();
 
-  /// Get the atlas texture handle for rendering.
-  RHITextureHandle atlas_texture() const { return atlas_texture_; }
+  /// Get the atlas texture id for rendering. In legacy mode this is the RHI
+  /// atlas handle mapped into the unified TextureId space; in draw-data mode the
+  /// atlas lives host-side (referenced by kFontTextureId in draw commands), so
+  /// this is kNullTextureId.
+  TextureId atlas_texture() const {
+    return TextureIdFromRhiHandle(atlas_texture_);
+  }
 
   /// Get atlas dimensions
   Vec2 atlas_size() const;

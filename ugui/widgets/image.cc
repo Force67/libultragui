@@ -23,7 +23,7 @@ void ImageMeasure(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) {
 
 void ImageDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   ImageContent* c = world.Get<ImageContent>(e);
-  if (!c || c->texture == kInvalidTexture) return;
+  if (!c || c->texture == kNullTextureId) return;
   Style s = ComputedStyle(world, e);
   s.Scale(UiScale(world, e));
   renderer.DrawTexturedRect(world.Get<Transform>(e)->rect, c->texture,
@@ -47,7 +47,7 @@ wid CreateImage(u32 id) {
   return e;
 }
 
-void SetImageTexture(wid e, RHITextureHandle texture, f32 width, f32 height) {
+void SetImageTexture(wid e, TextureId texture, f32 width, f32 height) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kImage) return;

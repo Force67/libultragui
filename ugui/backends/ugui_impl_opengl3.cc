@@ -8,6 +8,8 @@
 #include <ugui/backends/ugui_impl_opengl3.h>
 #include <ugui/render/vertex.h>
 
+#include <unordered_map>
+
 namespace ugui {
 namespace gl {
 namespace {
@@ -45,6 +47,7 @@ using GLsizeiptr = ptrdiff_t;
 #define GL_UNSIGNED_BYTE 0x1401
 #define GL_RGBA 0x1908
 #define GL_RGBA8 0x8058
+#define GL_BGRA 0x80E1
 #define GL_RED 0x1903
 #define GL_R8 0x8229
 #define GL_TEXTURE_MIN_FILTER 0x2801
@@ -109,6 +112,14 @@ using GLsizeiptr = ptrdiff_t;
 GL_PROCS(GL_DECL)
 #undef GL_DECL
 
+// A host-created texture, plus what we need to re-upload it on UpdateTexture.
+struct UserTextureGl {
+  GLuint tex = 0;
+  u32 width = 0, height = 0;
+  GLint internal = 0;
+  GLenum fmt = 0;
+};
+
 struct State {
   GLuint vao = 0;
   GLuint quad_vbo = 0, quad_ibo = 0, text_vbo = 0, text_ibo = 0;
@@ -116,8 +127,30 @@ struct State {
   GLint quad_scale = -1, quad_translate = -1, quad_tex = -1;
   GLint text_scale = -1, text_translate = -1, text_tex = -1;
   GLuint white = 0, font = 0;
+  std::unordered_map<TextureId, UserTextureGl> user_textures;
+  TextureId next_user_id = 1;  // 0 = white, ~0 = font; user ids start at 1
 };
 State g;
+
+// Map an RHIFormat to GL (byte formats only; float is unsupported here).
+void RhiFormatToGl(RHIFormat f, GLint& internal, GLenum& fmt) {
+  switch (f) {
+    case RHIFormat::kR8Unorm:
+      internal = GL_R8;
+      fmt = GL_RED;
+      break;
+    case RHIFormat::kBgra8Unorm:
+      internal = GL_RGBA8;
+      fmt = GL_BGRA;
+      break;
+    case RHIFormat::kRgba8Unorm:
+    case RHIFormat::kRgba32Float:  // unsupported; treat as RGBA8 bytes
+    default:
+      internal = GL_RGBA8;
+      fmt = GL_RGBA;
+      break;
+  }
+}
 
 bool LoadGL(void* (*loader)(const char*)) {
   bool ok = true;
@@ -387,6 +420,9 @@ void Shutdown() {
   if (g.vao) glDeleteVertexArrays(1, &g.vao);
   GLuint bufs[] = {g.quad_vbo, g.quad_ibo, g.text_vbo, g.text_ibo};
   glDeleteBuffers(4, bufs);
+  for (auto& kv : g.user_textures)
+    if (kv.second.tex) glDeleteTextures(1, &kv.second.tex);
+  g.user_textures.clear();
   if (g.white) glDeleteTextures(1, &g.white);
   if (g.font) glDeleteTextures(1, &g.font);
   if (g.quad_prog) glDeleteProgram(g.quad_prog);
@@ -453,8 +489,15 @@ void RenderDrawData(const DrawData& dd) {
       glUseProgram(prog);
       bound_prog = prog;
     }
-    GLuint tex =
-        (c.is_text || c.texture_id == kFontTextureId) ? g.font : g.white;
+    GLuint tex;
+    if (c.is_text || c.texture_id == kFontTextureId) {
+      tex = g.font;
+    } else if (c.texture_id == kNullTextureId) {
+      tex = g.white;
+    } else {
+      auto it = g.user_textures.find(c.texture_id);
+      tex = it != g.user_textures.end() ? it->second.tex : g.white;
+    }
     glBindTexture(GL_TEXTURE_2D, tex);
 
     int kind = c.is_text ? 1 : 0;
@@ -483,6 +526,55 @@ void RenderDrawData(const DrawData& dd) {
                        static_cast<size_t>(c.index_offset) * sizeof(u32)));
   }
 }
+
+TextureId CreateTexture(u32 width, u32 height, RHIFormat format,
+                        const void* pixels, RHIFilter filter) {
+  if (width == 0 || height == 0 || !pixels) return kNullTextureId;
+  UserTextureGl ut;
+  ut.width = width;
+  ut.height = height;
+  RhiFormatToGl(format, ut.internal, ut.fmt);
+  GLint gl_filter = filter == RHIFilter::kNearest ? GL_NEAREST : GL_LINEAR;
+  ut.tex = MakeTexture(width, height, ut.internal, ut.fmt, pixels, gl_filter);
+  if (ut.tex == 0) return kNullTextureId;
+  TextureId id = g.next_user_id++;
+  g.user_textures.emplace(id, ut);
+  return id;
+}
+
+void UpdateTexture(TextureId id, const void* pixels) {
+  auto it = g.user_textures.find(id);
+  if (it == g.user_textures.end() || !pixels) return;
+  UserTextureGl& ut = it->second;
+  glBindTexture(GL_TEXTURE_2D, ut.tex);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexImage2D(GL_TEXTURE_2D, 0, ut.internal, static_cast<GLsizei>(ut.width),
+               static_cast<GLsizei>(ut.height), 0, ut.fmt, GL_UNSIGNED_BYTE,
+               pixels);
+}
+
+void DestroyTexture(TextureId id) {
+  auto it = g.user_textures.find(id);
+  if (it == g.user_textures.end()) return;
+  if (it->second.tex) glDeleteTextures(1, &it->second.tex);
+  g.user_textures.erase(it);
+}
+
+namespace {
+struct GlTextureBackend : TextureBackend {
+  TextureId CreateTexture(u32 w, u32 h, RHIFormat fmt, const void* pixels,
+                          RHIFilter filter) override {
+    return ugui::gl::CreateTexture(w, h, fmt, pixels, filter);
+  }
+  void UpdateTexture(TextureId id, const void* pixels) override {
+    ugui::gl::UpdateTexture(id, pixels);
+  }
+  void DestroyTexture(TextureId id) override { ugui::gl::DestroyTexture(id); }
+};
+GlTextureBackend g_texture_backend;
+}  // namespace
+
+TextureBackend& texture_backend() { return g_texture_backend; }
 
 }  // namespace gl
 }  // namespace ugui

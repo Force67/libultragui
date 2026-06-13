@@ -17,6 +17,7 @@
 #include <ugui/core/types.h>
 #include <ugui/platform/platform.h>
 #include <ugui/render/renderer2d.h>
+#include <ugui/render/texture_backend.h>
 #include <ugui/rhi/rhi.h>
 #include <ugui/ui_context.h>
 

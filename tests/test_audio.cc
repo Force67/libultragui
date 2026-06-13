@@ -36,7 +36,7 @@ static int tests_passed = 0;
 TEST(init_shutdown) {
   ugui::AudioEngine engine;
   bool ok = engine.Init();
-  // init may fail in CI (no audio device) - that's ok, we test the API paths
+  // init may fail in CI (no audio device): that's ok, we test the API paths
   if (ok) {
     ASSERT(engine.IsInitialized());
     engine.Shutdown();

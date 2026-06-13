@@ -1,6 +1,5 @@
 #include <ugui/core/config.h>
 #include <ugui/lottie/lottie.h>
-#include <ugui/rhi/rhi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -13,8 +12,8 @@ namespace ugui {
 
 struct LottieAnimation::Impl {
   std::unique_ptr<rlottie::Animation> anim;
-  RHI* rhi = nullptr;
-  RHITextureHandle texture = kInvalidTexture;
+  TextureBackend* backend = nullptr;
+  TextureId texture = kNullTextureId;
   u32 width = 0;
   u32 height = 0;
 
@@ -34,7 +33,7 @@ struct LottieAnimation::Impl {
   f64 duration = 0.0;
 
   void render_frame(u32 frame_no) {
-    if (!anim || !rhi || frame_no == last_rendered_frame) return;
+    if (!anim || !backend || frame_no == last_rendered_frame) return;
 
     // Clear buffer to transparent
     std::memset(pixel_buf.data(), 0, pixel_buf.size() * sizeof(u32));
@@ -67,11 +66,11 @@ struct LottieAnimation::Impl {
     }
 
     // Upload to GPU
-    if (texture == kInvalidTexture) {
-      texture = rhi->CreateTexture(width, height, RHIFormat::kRgba8Unorm,
-                                   rgba_buf.data());
+    if (texture == kNullTextureId) {
+      texture = backend->CreateTexture(width, height, RHIFormat::kRgba8Unorm,
+                                       rgba_buf.data());
     } else {
-      rhi->UpdateTexture(texture, rgba_buf.data());
+      backend->UpdateTexture(texture, rgba_buf.data());
     }
 
     last_rendered_frame = frame_no;
@@ -102,7 +101,8 @@ LottieAnimation& LottieAnimation::operator=(LottieAnimation&& other) noexcept {
   return *this;
 }
 
-bool LottieAnimation::Load(RHI* rhi, const char* path, u32 w, u32 h) {
+bool LottieAnimation::Load(TextureBackend* backend, const char* path, u32 w,
+                           u32 h) {
   if (impl_) Unload();
 
   auto anim = rlottie::Animation::loadFromFile(path);
@@ -113,7 +113,7 @@ bool LottieAnimation::Load(RHI* rhi, const char* path, u32 w, u32 h) {
 
   impl_ = new Impl();
   impl_->anim = std::move(anim);
-  impl_->rhi = rhi;
+  impl_->backend = backend;
   impl_->width = w;
   impl_->height = h;
   impl_->pixel_buf.resize(w * h, 0);
@@ -128,8 +128,8 @@ bool LottieAnimation::Load(RHI* rhi, const char* path, u32 w, u32 h) {
   return true;
 }
 
-bool LottieAnimation::LoadData(RHI* rhi, const char* json_data, const char* key,
-                               u32 w, u32 h) {
+bool LottieAnimation::LoadData(TextureBackend* backend, const char* json_data,
+                               const char* key, u32 w, u32 h) {
   if (impl_) Unload();
 
   auto anim = rlottie::Animation::loadFromData(String(json_data), String(key));
@@ -140,7 +140,7 @@ bool LottieAnimation::LoadData(RHI* rhi, const char* json_data, const char* key,
 
   impl_ = new Impl();
   impl_->anim = std::move(anim);
-  impl_->rhi = rhi;
+  impl_->backend = backend;
   impl_->width = w;
   impl_->height = h;
   impl_->pixel_buf.resize(w * h, 0);
@@ -186,8 +186,8 @@ void LottieAnimation::Update(f64 dt) {
 
 bool LottieAnimation::IsLoaded() const { return impl_ && impl_->anim; }
 
-RHITextureHandle LottieAnimation::texture() const {
-  return impl_ ? impl_->texture : kInvalidTexture;
+TextureId LottieAnimation::texture() const {
+  return impl_ ? impl_->texture : kNullTextureId;
 }
 
 u32 LottieAnimation::width() const { return impl_ ? impl_->width : 0; }
@@ -255,8 +255,8 @@ f64 LottieAnimation::frame_rate() const {
 
 void LottieAnimation::Unload() {
   if (!impl_) return;
-  if (impl_->texture != kInvalidTexture && impl_->rhi) {
-    impl_->rhi->DestroyTexture(impl_->texture);
+  if (impl_->texture != kNullTextureId && impl_->backend) {
+    impl_->backend->DestroyTexture(impl_->texture);
   }
   delete impl_;
   impl_ = nullptr;

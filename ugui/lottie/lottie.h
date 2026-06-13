@@ -2,11 +2,10 @@
 #define ULTRAGUI_LOTTIE_LOTTIE_H_
 
 #include <ugui/core/types.h>
+#include <ugui/render/texture_backend.h>
 #include <ugui/rhi/rhi_types.h>
 
 namespace ugui {
-
-class RHI;
 
 using LottieHandle = u32;
 static constexpr LottieHandle kInvalidLottie = 0;
@@ -31,12 +30,12 @@ class LottieAnimation {
   LottieAnimation(const LottieAnimation&) = delete;
   LottieAnimation& operator=(const LottieAnimation&) = delete;
 
-  /// Load a Lottie JSON file and create a GPU texture for rendering.
-  bool Load(RHI* rhi, const char* path, u32 width, u32 height);
+  /// Load a Lottie JSON file and create a texture through `backend`.
+  bool Load(TextureBackend* backend, const char* path, u32 width, u32 height);
 
   /// Load from a JSON string in memory.
-  bool LoadData(RHI* rhi, const char* json_data, const char* key, u32 width,
-                u32 height);
+  bool LoadData(TextureBackend* backend, const char* json_data, const char* key,
+                u32 width, u32 height);
 
   /// Advance the animation by dt seconds and re-render if the frame changed.
   void Update(f64 dt);
@@ -45,7 +44,7 @@ class LottieAnimation {
   bool IsLoaded() const;
 
   /// The GPU texture containing the current frame. Updated by Update().
-  RHITextureHandle texture() const;
+  TextureId texture() const;
 
   /// Rasterized dimensions.
   u32 width() const;

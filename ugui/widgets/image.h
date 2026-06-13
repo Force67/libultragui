@@ -1,7 +1,7 @@
 #ifndef ULTRAGUI_WIDGETS_IMAGE_H_
 #define ULTRAGUI_WIDGETS_IMAGE_H_
 
-#include <ugui/rhi/rhi_types.h>
+#include <ugui/render/draw_data.h>
 #include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_vtable.h>
 
@@ -11,7 +11,7 @@ namespace ugui {
 /// data; its behaviour lives in ImageVTable(). An image is a generic widget
 /// entity carrying this component, not a subclass.
 struct ImageContent {
-  RHITextureHandle texture = kInvalidTexture;
+  TextureId texture = kNullTextureId;
   f32 natural_w = 0;
   f32 natural_h = 0;
 };
@@ -25,8 +25,7 @@ UGUI_API wid CreateImage(u32 id);
 
 /// Set (or replace) the texture an image widget shows. No-op if `e` is not an
 /// image. Component-based replacement for the old Image::set_texture.
-UGUI_API void SetImageTexture(wid e, RHITextureHandle texture, f32 width,
-                              f32 height);
+UGUI_API void SetImageTexture(wid e, TextureId texture, f32 width, f32 height);
 
 }  // namespace ugui
 

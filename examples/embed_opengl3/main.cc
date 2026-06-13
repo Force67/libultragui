@@ -9,10 +9,13 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <ugui/backends/ugui_impl_opengl3.h>
+#include <ugui/svg/svg.h>
 #include <ugui/ultragui.h>
+#include <ugui/widgets/image.h>
 
 // --- Minimal GL loader for the HOST's own pipeline (the backend loads its
 // own).
@@ -84,6 +87,7 @@ panel root {
     background: #14142899; corner-radius: 18;
     border-color: #ffffff20; border-width: 1;
     shadow-color: #00000080; shadow-blur: 28; shadow-y: 10;
+    image logo { width: 72; height: 72; }
     text title { text: "ultragui via ugui_impl_opengl3"; font-size: 22; color: #ffffff; }
     text sub { text: "Host owns the GL context; ultragui hands it a draw list.";
                font-size: 13; color: #a8a8c8; }
@@ -91,6 +95,16 @@ panel root {
                        corner-radius: 8; padding: 10 20; cursor: pointer; }
   }
 }
+)";
+
+// Rasterized on the CPU and uploaded through the host GL backend to prove
+// Image/SVG textures work in draw-data mode.
+static const char* kLogoSvg = R"(
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="50" cy="50" r="46" fill="#4a4aff"/>
+  <circle cx="50" cy="50" r="46" fill="none" stroke="#ffffff" stroke-width="4"/>
+  <rect x="30" y="30" width="40" height="40" rx="8" fill="#ffffff"/>
+</svg>
 )";
 
 static const char* FindFont() {
@@ -179,6 +193,23 @@ int main() {
     std::fprintf(stderr, "embed_opengl3: backend init failed\n");
     return 1;
   }
+
+  // Hand ultragui the host's texture sink, then rasterize an SVG and attach it
+  // to the Image widget: only possible in draw-data mode via the TextureBackend
+  // seam, since the library owns no GL objects of its own.
+  ui.set_texture_backend(&ugui::gl::texture_backend());
+  {
+    ugui::SvgImage img;
+    if (ugui::LoadSvgMemory(kLogoSvg, std::strlen(kLogoSvg), img, 72, 72)) {
+      ugui::TextureId logo = ui.texture_backend()->CreateTexture(
+          img.width, img.height, ugui::RHIFormat::kRgba8Unorm,
+          img.pixels.data());
+      ugui::SetImageTexture(ui.FindWidget("logo"), logo,
+                            static_cast<float>(img.width),
+                            static_cast<float>(img.height));
+    }
+  }
+
   ugui::u32 font_rev = ~0u;
 
   while (!glfwWindowShouldClose(win)) {
