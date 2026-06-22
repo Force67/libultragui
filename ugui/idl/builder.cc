@@ -1,4 +1,5 @@
 #include <ugui/animation/animator.h>
+#include <ugui/core/from_chars_compat.h>
 #include <ugui/idl/builder.h>
 #include <ugui/widgets/button.h>
 #include <ugui/widgets/checkbox.h>
@@ -32,7 +33,7 @@ namespace ugui {
 
 static f32 parse_float(const String& s) {
   f32 v = 0;
-  std::from_chars(s.data(), s.data() + s.size(), v);
+  ugui::from_chars(s.data(), s.data() + s.size(), v);
   return v;
 }
 
@@ -49,7 +50,7 @@ static EdgeInsets parse_edge_insets(const String& s) {
     while (ptr < end && (*ptr == ' ' || *ptr == '\t')) ++ptr;
     if (ptr >= end) break;
     f32 v = 0;
-    auto result = std::from_chars(ptr, end, v);
+    auto result = ugui::from_chars(ptr, end, v);
     if (result.ptr == ptr) break;
     vals[count++] = v;
     ptr = result.ptr;
@@ -64,7 +65,7 @@ static EdgeInsets parse_edge_insets(const String& s) {
 static Length parse_length(const String& s) {
   if (s == "auto") return Length::Auto();
   f32 v = 0;
-  auto end = std::from_chars(s.data(), s.data() + s.size(), v).ptr;
+  auto end = ugui::from_chars(s.data(), s.data() + s.size(), v).ptr;
   String unit(end, s.data() + s.size());
   if (unit == "%") return Length::Percent(v);
   if (unit == "vw") return Length::Vw(v);
@@ -78,7 +79,7 @@ static Length parse_length(const String& s) {
 
 static f32 parse_duration(const String& val) {
   f32 dur = 0;
-  std::from_chars(val.data(), val.data() + val.size(), dur);
+  ugui::from_chars(val.data(), val.data() + val.size(), dur);
   return val.find("ms") != String::npos ? dur / 1000.0f : dur;
 }
 
@@ -190,7 +191,7 @@ static constexpr std::pair<std::string_view, Color> kNamedColors[] = {
 static Color parse_color(const String& s) {
   if (s.size() > 1 && s[0] == '#') {
     u32 hex = 0;
-    std::from_chars(s.data() + 1, s.data() + s.size(), hex, 16);
+    ugui::from_chars(s.data() + 1, s.data() + s.size(), hex, 16);
     if (s.size() == 7) return Color::FromHex(hex);
     if (s.size() == 9) {
       u32 rgb = hex >> 8;
@@ -255,7 +256,7 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
         }
         // Try numeric
         f32 num = 0;
-        std::from_chars(v.data(), v.data() + v.size(), num);
+        ugui::from_chars(v.data(), v.data() + v.size(), num);
         if (num >= 100 && num <= 900)
             s.font_weight = static_cast<FontWeight>(static_cast<u16>(num));
     }},
@@ -328,7 +329,7 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
 
             // Parse position (number followed by optional %)
             f32 pos = 0;
-            auto end = std::from_chars(sv.data(), sv.data() + sv.size(), pos);
+            auto end = ugui::from_chars(sv.data(), sv.data() + sv.size(), pos);
             if (end.ptr == sv.data()) break;
             sv.remove_prefix(static_cast<size_t>(end.ptr - sv.data()));
             if (!sv.empty() && sv[0] == '%') {
@@ -448,7 +449,7 @@ static Transition parse_transition_shorthand(const String& val) {
   Transition trans;
   f32 dur = 0;
   const char* p = val.c_str();
-  auto r = std::from_chars(p, p + val.size(), dur);
+  auto r = ugui::from_chars(p, p + val.size(), dur);
   if (r.ptr != p) {
     trans.duration =
         (*r.ptr == 'm' && *(r.ptr + 1) == 's') ? dur / 1000.0f : dur;

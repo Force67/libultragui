@@ -1,4 +1,5 @@
 #include <ugui/platform/platform.h>
+#include <ugui/core/from_chars_compat.h>
 #include <ugui/scripting/script_runtime.h>
 #include <ugui/widgets/button.h>
 #include <ugui/widgets/checkbox.h>
@@ -76,14 +77,14 @@ struct ScriptRuntime::Impl {
     size_t len = strlen(val);
     if (len != 7 && len != 9) return false;
     u32 hex = 0;
-    std::from_chars(val + 1, val + 7, hex, 16);
+    ugui::from_chars(val + 1, val + 7, hex, 16);
     r = static_cast<f32>((hex >> 16) & 0xFF);
     g = static_cast<f32>((hex >> 8) & 0xFF);
     b = static_cast<f32>(hex & 0xFF);
     a = 255.0f;
     if (len == 9) {
       u32 alpha = 0;
-      std::from_chars(val + 7, val + 9, alpha, 16);
+      ugui::from_chars(val + 7, val + 9, alpha, 16);
       a = static_cast<f32>(alpha);
     }
     return true;
@@ -581,11 +582,11 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
     size_t vlen = strlen(val);
     if (val[0] == '#' && (vlen == 7 || vlen == 9)) {
       u32 hex = 0;
-      std::from_chars(val + 1, val + 7, hex, 16);
+      ugui::from_chars(val + 1, val + 7, hex, 16);
       s.text_color = Color::FromHex(hex);
       if (vlen == 9) {
         u32 alpha = 0;
-        std::from_chars(val + 7, val + 9, alpha, 16);
+        ugui::from_chars(val + 7, val + 9, alpha, 16);
         s.text_color = s.text_color.WithAlpha(static_cast<f32>(alpha) / 255.0f);
       }
     }
@@ -594,11 +595,11 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
     size_t vlen = strlen(val);
     if (val[0] == '#' && (vlen == 7 || vlen == 9)) {
       u32 hex = 0;
-      std::from_chars(val + 1, val + 7, hex, 16);
+      ugui::from_chars(val + 1, val + 7, hex, 16);
       s.text_shadow_color = Color::FromHex(hex);
       if (vlen == 9) {
         u32 alpha = 0;
-        std::from_chars(val + 7, val + 9, alpha, 16);
+        ugui::from_chars(val + 7, val + 9, alpha, 16);
         s.text_shadow_color =
             s.text_shadow_color.WithAlpha(static_cast<f32>(alpha) / 255.0f);
       }
@@ -608,11 +609,11 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
     size_t vlen = strlen(val);
     if (val[0] == '#' && (vlen == 7 || vlen == 9)) {
       u32 hex = 0;
-      std::from_chars(val + 1, val + 7, hex, 16);
+      ugui::from_chars(val + 1, val + 7, hex, 16);
       s.shadow.color = Color::FromHex(hex);
       if (vlen == 9) {
         u32 alpha = 0;
-        std::from_chars(val + 7, val + 9, alpha, 16);
+        ugui::from_chars(val + 7, val + 9, alpha, 16);
         s.shadow.color =
             s.shadow.color.WithAlpha(static_cast<f32>(alpha) / 255.0f);
       }
@@ -639,11 +640,11 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
       size_t vlen = strlen(val);
       if (val[0] == '#' && (vlen == 7 || vlen == 9)) {
         u32 hex = 0;
-        std::from_chars(val + 1, val + 7, hex, 16);
+        ugui::from_chars(val + 1, val + 7, hex, 16);
         s.background = Color::FromHex(hex);
         if (vlen == 9) {
           u32 alpha = 0;
-          std::from_chars(val + 7, val + 9, alpha, 16);
+          ugui::from_chars(val + 7, val + 9, alpha, 16);
           s.background =
               s.background.WithAlpha(static_cast<f32>(alpha) / 255.0f);
         }

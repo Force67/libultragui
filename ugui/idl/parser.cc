@@ -1,4 +1,5 @@
 #include <ugui/idl/parser.h>
+#include <ugui/core/from_chars_compat.h>
 
 #include <cctype>
 #include <charconv>
@@ -541,7 +542,7 @@ class Parser {
         String pval = current_.value;
         pval.pop_back();  // remove '%'
         stop.percent = 0;
-        std::from_chars(pval.data(), pval.data() + pval.size(), stop.percent);
+        ugui::from_chars(pval.data(), pval.data() + pval.size(), stop.percent);
         stop.percent /= 100.0f;
         advance();
         expect(TokenType::kLBrace);
@@ -599,7 +600,7 @@ class Parser {
         if (mq.condition.empty()) mq.condition = current_.value;
       } else if (current_.type == TokenType::kNumber) {
         f32 v = 0;
-        std::from_chars(current_.value.data(),
+        ugui::from_chars(current_.value.data(),
                         current_.value.data() + current_.value.size(), v);
         mq.value = v;
       }

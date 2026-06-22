@@ -1,4 +1,5 @@
 #include <ugui/anim/anim_types.h>
+#include <ugui/core/from_chars_compat.h>
 #include <ugui/anim/json.h>
 #include <ugui/core/color.h>
 
@@ -18,7 +19,7 @@ static Color parse_anim_color(const char* s) {
   if (s[0] == '#') {
     u32 hex = 0;
     usize len = std::strlen(s);
-    std::from_chars(s + 1, s + len, hex, 16);
+    ugui::from_chars(s + 1, s + len, hex, 16);
     if (len == 7) return Color::FromHex(hex);
     if (len == 9) {
       u32 rgb = hex >> 8;

@@ -1,4 +1,5 @@
 #include <ugui/core/string_utils.h>
+#include <ugui/core/from_chars_compat.h>
 
 #include <charconv>
 #include <cstring>
@@ -19,7 +20,7 @@ bool ParseHexColor(StringView str, u32& out) {
 
   if (len != 6 && len != 8) return false;
 
-  auto result = std::from_chars(begin, begin + len, out, 16);
+  auto result = ugui::from_chars(begin, begin + len, out, 16);
   return result.ec == std::errc{};
 }
 

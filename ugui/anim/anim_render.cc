@@ -1,4 +1,5 @@
 #include <ugui/anim/anim_types.h>
+#include <ugui/core/from_chars_compat.h>
 
 #include <algorithm>
 #include <charconv>
@@ -39,7 +40,7 @@ static svg::Paint make_paint(const String& str, Color animated_color,
   p.type = svg::Paint::kSolid;
   if (str[0] == '#') {
     u32 hex = 0;
-    std::from_chars(str.data() + 1, str.data() + str.size(), hex, 16);
+    ugui::from_chars(str.data() + 1, str.data() + str.size(), hex, 16);
     if (str.size() == 7)
       p.color = Color::FromHex(hex);
     else if (str.size() == 9) {
