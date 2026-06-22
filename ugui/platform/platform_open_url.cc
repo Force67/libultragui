@@ -8,8 +8,8 @@
 // application instead.
 
 #if defined(_WIN32)
-#include <shellapi.h>
 #include <windows.h>
+#include <shellapi.h>
 #else
 #include <sys/wait.h>
 #include <unistd.h>
