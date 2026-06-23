@@ -40,6 +40,8 @@ void Renderer2D::BeginFrame() {
   scissor_stack_.clear();
   current_texture_ = kNullTextureId;
   current_text_atlas_ = kNullTextureId;
+  next_blur_ = 0.0f;
+  batch_blur_ = 0.0f;
   Vec2 vp = rhi_ ? rhi_->display_size() : display_size_;
   current_scissor_ = Rect{0, 0, vp.x, vp.y};
 }
@@ -61,6 +63,7 @@ const DrawData& Renderer2D::GetDrawData() {
       out.elem_count = batch.index_count;
       out.is_text = false;
       out.texture_id = batch.texture;
+      out.blur = batch.blur;
     } else {
       const auto& batch = text_batches_[cmd.batch_index];
       out.clip_rect = batch.scissor;
@@ -443,6 +446,13 @@ void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
       FlushTextBatch();
   }
 
+  // A blur-radius change breaks the batch (like a texture change): the prior
+  // run flushes carrying its own blur, then a new run accumulates with the new.
+  if (next_blur_ != batch_blur_) {
+    FlushBatch();
+    batch_blur_ = next_blur_;
+  }
+
   // Start a new batch if texture changed
   if (texture != current_texture_) {
     FlushBatch();
@@ -532,6 +542,7 @@ void Renderer2D::FlushBatch() {
       current_scissor_,
       idx_offset,
       total_indices - idx_offset,
+      batch_blur_,
   });
   draw_order_.push_back(
       {DrawKind::kQuad, static_cast<u32>(batches_.size() - 1)});

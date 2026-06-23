@@ -277,11 +277,14 @@ void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   }
 
   if (s.backdrop_blur > 0.0f) {
-    f32 blur_alpha = Clamp(s.backdrop_blur / 40.0f, 0.1f, 0.6f);
-    Color frost =
-        s.background.a > 0.0f ? s.background : Color{0.1f, 0.1f, 0.15f, 1.0f};
-    frost.a = Clamp(frost.a + blur_alpha, 0.0f, 0.95f) * alpha;
-    renderer.DrawRect(rect, frost, radii);
+    // Real backdrop blur: emit a quad flagged with the blur radius so a backend
+    // with a captured, blurred copy of what is behind the UI fills it (frosted
+    // glass), respecting the rounded-rect shape. The widget's own translucent
+    // background then composites on top for the tint. Backends without a
+    // backdrop simply skip it, so this degrades to no fill rather than a slab.
+    renderer.set_next_blur(s.backdrop_blur);
+    renderer.DrawRect(rect, Color{1.0f, 1.0f, 1.0f, alpha}, radii);
+    renderer.set_next_blur(0.0f);
   }
 
   if (s.background.a > 0.0f || s.border_width > 0.0f ||

@@ -25,6 +25,10 @@ struct DrawCmd {
   u32 index_offset = 0;  ///< first index into the relevant index buffer
   u32 elem_count = 0;    ///< number of indices to draw
   bool is_text = false;  ///< text pipeline + glyph buffers vs quad pipeline
+  /// Backdrop blur radius (px) for this batch's quads (frosted glass). 0 = none.
+  /// A backend with a captured, blurred copy of what is behind the UI fills the
+  /// quad with it instead of sampling the command's texture.
+  f32 blur = 0.0f;
 };
 
 /// All geometry and commands produced for one UI frame, like ImDrawData.

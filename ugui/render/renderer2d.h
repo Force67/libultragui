@@ -93,6 +93,12 @@ class Renderer2D {
     texture_backend_ = backend;
   }
 
+  /// Set the backdrop-blur radius (px) applied to subsequently emitted quads.
+  /// Carried through to DrawCmd::blur so a backend can render a frosted-glass
+  /// fill (a blurred sample of what is behind the UI). Reset to 0 after the
+  /// blurred quad. Only affects the next plain quads (DrawRect path).
+  void set_next_blur(f32 radius) { next_blur_ = radius; }
+
  private:
   void FlushBatch();
   void FlushTextBatch();
@@ -108,6 +114,7 @@ class Renderer2D {
     Rect scissor;
     u32 index_offset;
     u32 index_count;
+    f32 blur = 0.0f;  // backdrop-blur radius for this batch (0 = none)
   };
 
   // Each draw command points at a slot in either `batches_` or
@@ -147,6 +154,8 @@ class Renderer2D {
   HashMap<u64, TextureId> gradient_cache_;
   TextureId current_texture_ = kNullTextureId;
   Rect current_scissor_ = {};
+  f32 next_blur_ = 0.0f;   // caller-set blur for upcoming quads
+  f32 batch_blur_ = 0.0f;  // blur of the currently accumulating quad batch
 
   // Draw-data output (GetDrawData)
   Vector<DrawCmd> draw_cmds_;
