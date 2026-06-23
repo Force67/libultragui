@@ -802,6 +802,16 @@ void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
   }
   SetStyle(world, widget, merged);
 
+  // Per-widget font: `font: <name>` selects a face registered via RegisterFont
+  // (e.g. "mono"). Sets the text/button font override; unknown names are left
+  // on the context default. font-size/weight/style still apply on top.
+  if (auto font_it = node.properties.find("font"); font_it != node.properties.end()) {
+    if (auto fit = fonts_.find(font_it->second); fit != fonts_.end()) {
+      if (auto* tc = world.Get<TextContent>(widget)) tc->font = fit->second;
+      if (auto* bc = world.Get<ButtonContent>(widget)) bc->font = fit->second;
+    }
+  }
+
   // Tooltip
   auto tooltip_it = node.properties.find("tooltip");
   if (tooltip_it != node.properties.end())

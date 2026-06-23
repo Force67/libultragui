@@ -3,6 +3,7 @@
 
 #include <ugui/idl/parser.h>
 #include <ugui/style/style.h>
+#include <ugui/text/text_engine.h>
 #include <ugui/widgets/widget.h>
 
 namespace ugui {
@@ -23,6 +24,12 @@ class UguiBuilder {
   void SetVariable(const String& name, const String& value) {
     variables_[name] = value;
   }
+
+  /// Register a named font so markup can select it per widget via `font: <name>`
+  /// (e.g. a monospace face for code/IDs alongside the default UI font). The
+  /// handle comes from UIContext::LoadFont. Unknown names in markup are ignored,
+  /// leaving the widget on the context default font.
+  void RegisterFont(const String& name, FontHandle handle) { fonts_[name] = handle; }
 
   /// Build a widget tree from a document. Returns the root entity.
   wid Build(const UguiDocument& doc);
@@ -51,6 +58,7 @@ class UguiBuilder {
 
   HashMap<String, WidgetFactory> factories_;
   HashMap<String, String> variables_;
+  HashMap<String, FontHandle> fonts_;  // named fonts for the `font:` property
   HashMap<String, UguiDocument::StyleClass> style_classes_;
   Animator* animator_ = nullptr;
   Vec2 viewport_size_ = {1280.0f, 720.0f};
