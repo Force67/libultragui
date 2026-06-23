@@ -23,6 +23,51 @@ static void SetHoverBit(World& world, wid w, bool on) {
                                                 WidgetState::kHovered)));
 }
 
+// Collect a widget and all of its ancestors up to the root.
+static void CollectAncestorChain(World& world, wid w, std::vector<wid>& out) {
+  while (w.valid()) {
+    out.push_back(w);
+    Hierarchy* h = world.Get<Hierarchy>(w);
+    w = h ? h->parent : kNullWidget;
+  }
+}
+
+// Move the :hover state from the previously-hovered leaf's ancestor chain to the
+// newly-hovered leaf's chain. HitTest only ever returns the deepest widget under
+// the cursor, but CSS hover semantics expect every ancestor of that widget to be
+// "hovered" too (so `:hover` on a row/column lights up when the cursor is over
+// any of its children). Widgets common to both chains are left untouched, so a
+// container's hover transition fires once on enter, not every time the cursor
+// crosses an internal child boundary.
+static void UpdateHoverChain(World& world, wid old_leaf, wid new_leaf) {
+  if (old_leaf == new_leaf) return;
+  std::vector<wid> old_chain, new_chain;
+  CollectAncestorChain(world, old_leaf, old_chain);
+  CollectAncestorChain(world, new_leaf, new_chain);
+  auto contains = [](const std::vector<wid>& v, wid x) {
+    for (wid w : v)
+      if (w == x) return true;
+    return false;
+  };
+  for (wid w : old_chain)
+    if (!contains(new_chain, w)) SetHoverBit(world, w, false);
+  for (wid w : new_chain)
+    if (!contains(old_chain, w)) SetHoverBit(world, w, true);
+}
+
+// The effective cursor for a hovered leaf is the nearest explicit cursor walking
+// up the ancestor chain: a `cursor: pointer` row should still show the pointer
+// when the mouse is over a child text/icon that didn't set its own cursor.
+static Cursor ResolveCursor(World& world, wid leaf) {
+  for (wid w = leaf; w.valid();) {
+    Cursor c = ComputedStyle(world, w).cursor;
+    if (c != Cursor::kAuto) return c;
+    Hierarchy* h = world.Get<Hierarchy>(w);
+    w = h ? h->parent : kNullWidget;
+  }
+  return Cursor::kAuto;
+}
+
 // --- Drag-to-move system ----------------------------------------------------
 // The Movable component carries the drag state; these run when a press on a
 // Movable (or its DragHandle) crosses the drag threshold. The first move pins
@@ -75,15 +120,12 @@ bool InputRouter::Process(wid root) {
     wid new_hover = HitTest(world, root, pos);
 
     if (new_hover != hovered_) {
-      if (hovered_.valid()) {
-        SetHoverBit(world, hovered_, false);
-        if (on_hover_) on_hover_(hovered_, false);
-      }
+      if (hovered_.valid() && on_hover_) on_hover_(hovered_, false);
+      UpdateHoverChain(world, hovered_, new_hover);
       hovered_ = new_hover;
       if (new_hover.valid()) {
-        SetHoverBit(world, new_hover, true);
         if (on_hover_) on_hover_(new_hover, true);
-        platform_->SetCursor(ComputedStyle(world, new_hover).cursor);
+        platform_->SetCursor(ResolveCursor(world, new_hover));
       } else {
         platform_->SetCursor(Cursor::kAuto);
       }
@@ -334,15 +376,12 @@ void InputRouter::RefreshHover(wid root) {
   World& world = *reg;
   wid new_hover = HitTest(world, root, mouse_pos_);
   if (new_hover == hovered_) return;
-  if (hovered_.valid()) {
-    SetHoverBit(world, hovered_, false);
-    if (on_hover_) on_hover_(hovered_, false);
-  }
+  if (hovered_.valid() && on_hover_) on_hover_(hovered_, false);
+  UpdateHoverChain(world, hovered_, new_hover);
   hovered_ = new_hover;
   if (new_hover.valid()) {
-    SetHoverBit(world, new_hover, true);
     if (on_hover_) on_hover_(new_hover, true);
-    platform_->SetCursor(ComputedStyle(world, new_hover).cursor);
+    platform_->SetCursor(ResolveCursor(world, new_hover));
   } else {
     platform_->SetCursor(Cursor::kAuto);
   }
@@ -356,15 +395,12 @@ void InputRouter::set_hover(wid widget) {
   }
   World& world = *reg;
   if (hovered_ == widget) return;
-  if (hovered_.valid()) {
-    SetHoverBit(world, hovered_, false);
-    if (on_hover_) on_hover_(hovered_, false);
-  }
+  if (hovered_.valid() && on_hover_) on_hover_(hovered_, false);
+  UpdateHoverChain(world, hovered_, widget);
   hovered_ = widget;
   if (widget.valid()) {
-    SetHoverBit(world, widget, true);
     if (on_hover_) on_hover_(widget, true);
-    if (platform_) platform_->SetCursor(ComputedStyle(world, widget).cursor);
+    if (platform_) platform_->SetCursor(ResolveCursor(world, widget));
   } else if (platform_) {
     platform_->SetCursor(Cursor::kAuto);
   }
@@ -394,7 +430,7 @@ void InputRouter::set_focus(wid widget) {
 void InputRouter::ResetState() {
   if (WidgetRegistry* reg = WidgetRegistry::Active()) {
     World& world = *reg;
-    if (hovered_.valid()) SetHoverBit(world, hovered_, false);
+    if (hovered_.valid()) UpdateHoverChain(world, hovered_, kNullWidget);
     if (pressed_.valid()) {
       auto state = WidgetStateOf(world, pressed_);
       SetWidgetState(world, pressed_,
