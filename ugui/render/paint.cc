@@ -37,6 +37,13 @@ static void PaintWidgetTreeImpl(WidgetRegistry& world, wid e,
   Rect clip_rect = is_scroll_view ? t->content_rect : t->rect;
   if (clip) renderer.PushScissor(clip_rect);
 
+  // Rotation transforms this widget and its whole subtree about its own centre.
+  const bool rotated = s.rotation != 0.0f;
+  if (rotated)
+    renderer.PushTransform({t->rect.x + t->rect.w * 0.5f,
+                            t->rect.y + t->rect.h * 0.5f},
+                           s.rotation);
+
   PaintWidget(world, e, renderer);
 
   // If this widget is a scroll view, add its scroll offset for children.
@@ -44,6 +51,8 @@ static void PaintWidgetTreeImpl(WidgetRegistry& world, wid e,
 
   for (wid child : world.Get<Hierarchy>(e)->children)
     PaintWidgetTreeImpl(world, child, renderer, child_offset);
+
+  if (rotated) renderer.PopTransform();
 
   if (clip) renderer.PopScissor();
 

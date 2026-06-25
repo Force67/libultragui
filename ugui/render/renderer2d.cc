@@ -38,6 +38,8 @@ void Renderer2D::BeginFrame() {
   text_batches_.clear();
   draw_order_.clear();
   scissor_stack_.clear();
+  xform_stack_.clear();
+  xform_ = Affine2D{};
   current_texture_ = kNullTextureId;
   current_text_atlas_ = kNullTextureId;
   next_blur_ = 0.0f;
@@ -428,6 +430,42 @@ void Renderer2D::PopScissor() {
   }
 }
 
+void Renderer2D::PushTransform(Vec2 pivot, f32 degrees) {
+  xform_stack_.push_back(xform_);
+  if (degrees == 0.0f) return;  // identity push (keeps stack balanced)
+  const f32 r = degrees * 0.01745329252f;  // deg -> rad
+  const f32 cs = std::cos(r), sn = std::sin(r);
+  // Rotation about `pivot`: p' = pivot + R*(p - pivot).
+  Affine2D rot;
+  rot.a = cs;
+  rot.b = -sn;
+  rot.c = sn;
+  rot.d = cs;
+  rot.tx = pivot.x - (cs * pivot.x - sn * pivot.y);
+  rot.ty = pivot.y - (sn * pivot.x + cs * pivot.y);
+  rot.identity = false;
+  // Compose onto the current transform: new(p) = xform_(rot(p)), so a rotated
+  // parent already on the stack also rotates this widget's local rotation.
+  const Affine2D& A = xform_;
+  const Affine2D& B = rot;
+  Affine2D m;
+  m.a = A.a * B.a + A.b * B.c;
+  m.b = A.a * B.b + A.b * B.d;
+  m.c = A.c * B.a + A.d * B.c;
+  m.d = A.c * B.b + A.d * B.d;
+  m.tx = A.a * B.tx + A.b * B.ty + A.tx;
+  m.ty = A.c * B.tx + A.d * B.ty + A.ty;
+  m.identity = false;
+  xform_ = m;
+}
+
+void Renderer2D::PopTransform() {
+  if (!xform_stack_.empty()) {
+    xform_ = xform_stack_.back();
+    xform_stack_.pop_back();
+  }
+}
+
 void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
                           f32 softness, f32 border_width, u32 border_color,
                           TextureId texture) {
@@ -461,9 +499,11 @@ void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
 
   // Snap rect edges to physical pixel boundaries for crisp edges on fractional
   // DPI. Without this, a panel at x=10.3 on 1.65x DPI straddles framebuffer
-  // pixels, causing the SDF anti-aliasing to blur across an extra pixel.
+  // pixels, causing the SDF anti-aliasing to blur across an extra pixel. Skipped
+  // under an active transform: per-axis rounding would shear a rotated quad, and
+  // the SDF anti-aliasing keeps rotated edges crisp anyway.
   f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
-  if (dpi != 1.0f) {
+  if (dpi != 1.0f && xform_.identity) {
     f32 inv = 1.0f / dpi;
     f32 x0 = std::round(rect.x * dpi) * inv;
     f32 y0 = std::round(rect.y * dpi) * inv;
@@ -472,51 +512,36 @@ void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
     rect = {x0, y0, x1 - x0, y1 - y0};
   }
 
+  // half_size stays the UNrotated half-extents: the fragment shader evaluates
+  // the rounded-rect SDF in UV/local space, so only the corner positions rotate.
   f32 hw = rect.w * 0.5f;
   f32 hh = rect.h * 0.5f;
+
+  Vec2 p0{rect.x, rect.y};
+  Vec2 p1{rect.x + rect.w, rect.y};
+  Vec2 p2{rect.x + rect.w, rect.y + rect.h};
+  Vec2 p3{rect.x, rect.y + rect.h};
+  if (!xform_.identity) {
+    p0 = xform_.Apply(p0);
+    p1 = xform_.Apply(p1);
+    p2 = xform_.Apply(p2);
+    p3 = xform_.Apply(p3);
+  }
 
   u32 base = static_cast<u32>(vertices_.size());
 
   // Top-left
-  vertices_.push_back({{rect.x, rect.y},
-                       {0, 0},
-                       color,
-                       color2,
-                       corner_radii,
-                       softness,
-                       {hw, hh},
-                       border_width,
-                       border_color});
+  vertices_.push_back({{p0.x, p0.y}, {0, 0}, color, color2, corner_radii,
+                       softness, {hw, hh}, border_width, border_color});
   // Top-right
-  vertices_.push_back({{rect.x + rect.w, rect.y},
-                       {1, 0},
-                       color,
-                       color2,
-                       corner_radii,
-                       softness,
-                       {hw, hh},
-                       border_width,
-                       border_color});
+  vertices_.push_back({{p1.x, p1.y}, {1, 0}, color, color2, corner_radii,
+                       softness, {hw, hh}, border_width, border_color});
   // Bottom-right
-  vertices_.push_back({{rect.x + rect.w, rect.y + rect.h},
-                       {1, 1},
-                       color,
-                       color2,
-                       corner_radii,
-                       softness,
-                       {hw, hh},
-                       border_width,
-                       border_color});
+  vertices_.push_back({{p2.x, p2.y}, {1, 1}, color, color2, corner_radii,
+                       softness, {hw, hh}, border_width, border_color});
   // Bottom-left
-  vertices_.push_back({{rect.x, rect.y + rect.h},
-                       {0, 1},
-                       color,
-                       color2,
-                       corner_radii,
-                       softness,
-                       {hw, hh},
-                       border_width,
-                       border_color});
+  vertices_.push_back({{p3.x, p3.y}, {0, 1}, color, color2, corner_radii,
+                       softness, {hw, hh}, border_width, border_color});
 
   // Two triangles: 0-1-2, 0-2-3
   indices_.push_back(base + 0);
@@ -615,36 +640,25 @@ void Renderer2D::DrawText(Vec2 pos, const TextRun& run, Color color,
     f32 w = std::round(g.bmp_w * dpi) * inv_dpi;
     f32 h = std::round(g.bmp_h * dpi) * inv_dpi;
 
+    // Glyph quad corners, rotated through the active transform so text in a
+    // rotated subtree rotates rigidly with it (each glyph stays a sharp quad).
+    Vec2 g0{x, y}, g1{x + w, y}, g2{x + w, y + h}, g3{x, y + h};
+    if (!xform_.identity) {
+      g0 = xform_.Apply(g0);
+      g1 = xform_.Apply(g1);
+      g2 = xform_.Apply(g2);
+      g3 = xform_.Apply(g3);
+    }
+
     u32 base = static_cast<u32>(text_vertices_.size());
-    text_vertices_.push_back(
-        {{x, y}, {g.u0, g.v0}, packed_color, packed_color, 0, 0, {0, 0}, 0, 0});
-    text_vertices_.push_back({{x + w, y},
-                              {g.u1, g.v0},
-                              packed_color,
-                              packed_color,
-                              0,
-                              0,
-                              {0, 0},
-                              0,
-                              0});
-    text_vertices_.push_back({{x + w, y + h},
-                              {g.u1, g.v1},
-                              packed_color,
-                              packed_color,
-                              0,
-                              0,
-                              {0, 0},
-                              0,
-                              0});
-    text_vertices_.push_back({{x, y + h},
-                              {g.u0, g.v1},
-                              packed_color,
-                              packed_color,
-                              0,
-                              0,
-                              {0, 0},
-                              0,
-                              0});
+    text_vertices_.push_back({{g0.x, g0.y}, {g.u0, g.v0}, packed_color,
+                              packed_color, 0, 0, {0, 0}, 0, 0});
+    text_vertices_.push_back({{g1.x, g1.y}, {g.u1, g.v0}, packed_color,
+                              packed_color, 0, 0, {0, 0}, 0, 0});
+    text_vertices_.push_back({{g2.x, g2.y}, {g.u1, g.v1}, packed_color,
+                              packed_color, 0, 0, {0, 0}, 0, 0});
+    text_vertices_.push_back({{g3.x, g3.y}, {g.u0, g.v1}, packed_color,
+                              packed_color, 0, 0, {0, 0}, 0, 0});
 
     text_indices_.push_back(base + 0);
     text_indices_.push_back(base + 1);

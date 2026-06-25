@@ -74,6 +74,16 @@ class Renderer2D {
   void PushScissor(Rect rect);
   void PopScissor();
 
+  /// Push a rotation (degrees, clockwise) about `pivot` (display coords) onto the
+  /// transform stack. All geometry emitted until the matching PopTransform() is
+  /// rotated, composing with any outer transform already on the stack (so a
+  /// rotated parent rotates its whole subtree). The rotation is baked into the
+  /// emitted vertex positions, so batching, pipelines and shaders are unchanged;
+  /// the rounded-rect SDF stays correct because it is evaluated in UV/local
+  /// space. Scissor rects are not rotated (clipping stays axis-aligned).
+  void PushTransform(Vec2 pivot, f32 degrees);
+  void PopTransform();
+
   /// Finalize the current frame's batches and return them as a renderer-API
   /// agnostic draw list (the ImDrawData analog), instead of submitting via the
   /// RHI. Call after painting and instead of EndFrame(); a backend
@@ -149,6 +159,19 @@ class Renderer2D {
   TextureId GetRadialGradientTexture(Color center, Color edge);
   TextureId GetMultiStopGradientTexture(const GradientStop* stops, u32 count,
                                         GradientType type, f32 angle_deg);
+
+  // 2D affine transform applied to emitted vertex positions:
+  //   (x', y') = (a*x + b*y + tx, c*x + d*y + ty)
+  // Identity by default. PushTransform composes a rotation-about-pivot onto it.
+  struct Affine2D {
+    f32 a = 1, b = 0, c = 0, d = 1, tx = 0, ty = 0;
+    bool identity = true;
+    Vec2 Apply(Vec2 p) const {
+      return {a * p.x + b * p.y + tx, c * p.x + d * p.y + ty};
+    }
+  };
+  Affine2D xform_;             // current (composed) transform
+  Vector<Affine2D> xform_stack_;
 
   Vector<Rect> scissor_stack_;
   HashMap<u64, TextureId> gradient_cache_;

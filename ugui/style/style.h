@@ -79,6 +79,13 @@ struct Style {
   f32 backdrop_blur = 0.0f;  // Blur radius for frosted glass effect (0 = none)
   f32 aspect_ratio = 0.0f;   // 0 = none, positive = width/height
 
+  // --- Transform ---
+  // Rotation of the widget (and its subtree) about its own centre, in degrees,
+  // clockwise (CSS `transform: rotate()` semantics). 0 = no rotation. Applied at
+  // paint time to the emitted geometry, so rounded corners, borders, gradients
+  // and text all rotate correctly. The scissor/clip rect stays axis-aligned.
+  f32 rotation = 0.0f;
+
   // --- Box shadow ---
   BoxShadow shadow;
 

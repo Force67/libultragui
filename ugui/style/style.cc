@@ -53,6 +53,7 @@ Style Style::Lerp(const Style& a, const Style& b, f32 t) {
   result.background = ugui::Lerp(a.background, b.background, t);
   result.background_end = ugui::Lerp(a.background_end, b.background_end, t);
   result.gradient_angle = ugui::Lerp(a.gradient_angle, b.gradient_angle, t);
+  result.rotation = ugui::Lerp(a.rotation, b.rotation, t);
   result.border_color = ugui::Lerp(a.border_color, b.border_color, t);
   result.border_width = ugui::Lerp(a.border_width, b.border_width, t);
   result.corner_radius = ugui::Lerp(a.corner_radius, b.corner_radius, t);
@@ -163,6 +164,8 @@ static const std::pair<u64, MaskApply> kMaskApplicators[] = {
     {StyleMask::kShadow, [](Style& r, const Style& s) { r.shadow = s.shadow; }},
     {StyleMask::kGradientAngle,
      [](Style& r, const Style& s) { r.gradient_angle = s.gradient_angle; }},
+    {StyleMask::kTransform,
+     [](Style& r, const Style& s) { r.rotation = s.rotation; }},
 };
 
 static void ApplyMaskedOverride(Style& result, const StyleOverride& ov) {

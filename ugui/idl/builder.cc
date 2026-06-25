@@ -365,6 +365,17 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     {"aspect-ratio", [](Style& s, const String& v) { s.aspect_ratio = parse_float(v); }},
     {"backdrop-blur", [](Style& s, const String& v) { s.backdrop_blur = parse_float(v); }},
 
+    // Transform. `rotation: 45` (degrees, `deg` suffix optional) or the CSS-like
+    // `transform: rotate(45deg)`. parse_float reads the leading number, so for
+    // the rotate() form we skip to the first numeric character first.
+    {"rotation", [](Style& s, const String& v) { s.rotation = parse_float(v); }},
+    {"transform", [](Style& s, const String& v) {
+        size_t i = 0;
+        while (i < v.size() && (v[i] < '0' || v[i] > '9') && v[i] != '-' && v[i] != '+' && v[i] != '.')
+            ++i;
+        s.rotation = parse_float(String(v.data() + i, v.size() - i));
+    }},
+
     // Text
     {"font-size", [](Style& s, const String& v) { s.font_size = parse_float(v); }},
     {"letter-spacing", [](Style& s, const String& v) { s.letter_spacing = parse_float(v); }},
@@ -426,6 +437,8 @@ static constexpr std::pair<std::string_view, u64> kStyleMaskTable[] = {
     {"background-end", StyleMask::kBackgroundEnd},
     {"gradient-end", StyleMask::kBackgroundEnd},
     {"gradient-angle", StyleMask::kGradientAngle},
+    {"rotation", StyleMask::kTransform},
+    {"transform", StyleMask::kTransform},
     {"shadow-color", StyleMask::kShadow},
     {"shadow-blur", StyleMask::kShadow},
     {"shadow-spread", StyleMask::kShadow},
