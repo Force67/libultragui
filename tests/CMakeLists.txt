@@ -25,3 +25,8 @@ endif()
 add_executable(test_runtime_safety test_runtime_safety.cc)
 target_link_libraries(test_runtime_safety ultragui)
 add_test(NAME runtime_safety COMMAND test_runtime_safety)
+
+# .ugui component/import/class tests (no GPU required)
+add_executable(test_idl_components test_idl_components.cc)
+target_link_libraries(test_idl_components ultragui)
+add_test(NAME idl_components COMMAND test_idl_components)

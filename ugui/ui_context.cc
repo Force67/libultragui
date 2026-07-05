@@ -298,6 +298,13 @@ void UIContext::PumpInput() {
   builder_.set_viewport_size(viewport);
   widget_ctx_.ui_scale = ComputeViewportScale(config_, viewport);
 
+  // Viewport changed: re-resolve @media breakpoints so responsive layouts
+  // react to resizes live, not only at load time.
+  if (viewport.x != media_viewport_.x || viewport.y != media_viewport_.y) {
+    media_viewport_ = viewport;
+    if (root_.valid()) builder_.ReapplyMediaQueries(root_);
+  }
+
   // Route input - overlays intercept clicks before the root tree.
   // Press on an overlay dispatches OnClick; press outside dismisses all.
   if (!overlays_.empty()) {

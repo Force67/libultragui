@@ -18,6 +18,7 @@
 #include <ugui/widgets/widget_registry.h>
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstdio>
 #include <iterator>
@@ -119,6 +120,30 @@ static constexpr std::pair<std::string_view, AlignItems> kAlignItemsTable[] = {
     {"end", AlignItems::kEnd},
     {"center", AlignItems::kCenter},
     {"stretch", AlignItems::kStretch},
+    {"baseline", AlignItems::kBaseline},
+};
+
+static constexpr std::pair<std::string_view, AlignSelf> kAlignSelfTable[] = {
+    {"auto", AlignSelf::kAuto},       {"start", AlignSelf::kStart},
+    {"end", AlignSelf::kEnd},         {"center", AlignSelf::kCenter},
+    {"stretch", AlignSelf::kStretch},
+};
+
+static constexpr std::pair<std::string_view, AlignContent>
+    kAlignContentTable[] = {
+        {"start", AlignContent::kStart},
+        {"end", AlignContent::kEnd},
+        {"center", AlignContent::kCenter},
+        {"stretch", AlignContent::kStretch},
+        {"space-between", AlignContent::kSpaceBetween},
+        {"space-around", AlignContent::kSpaceAround},
+        {"space-evenly", AlignContent::kSpaceEvenly},
+};
+
+static constexpr std::pair<std::string_view, FlexWrap> kFlexWrapTable[] = {
+    {"nowrap", FlexWrap::kNoWrap},
+    {"wrap", FlexWrap::kWrap},
+    {"wrap-reverse", FlexWrap::kWrapReverse},
 };
 
 static constexpr std::pair<std::string_view, TextAlign> kTextAlignTable[] = {
@@ -288,11 +313,29 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     // Flex
     {"flex-grow", [](Style& s, const String& v) { s.flex_grow = parse_float(v); }},
     {"flex-shrink", [](Style& s, const String& v) { s.flex_shrink = parse_float(v); }},
+    {"flex-basis", [](Style& s, const String& v) { s.flex_basis = parse_length(v); }},
+    // CSS `flex: N` shorthand = grow N, shrink 1, basis 0
+    {"flex", [](Style& s, const String& v) {
+        s.flex_grow = parse_float(v);
+        s.flex_shrink = 1.0f;
+        s.flex_basis = Length::Px(0);
+    }},
+    {"flex-wrap", [](Style& s, const String& v) {
+        if (auto e = LookupEnum(kFlexWrapTable, v)) s.flex_wrap = *e;
+    }},
+    {"align-self", [](Style& s, const String& v) {
+        if (auto e = LookupEnum(kAlignSelfTable, v)) s.align_self = *e;
+    }},
+    {"align-content", [](Style& s, const String& v) {
+        if (auto e = LookupEnum(kAlignContentTable, v)) s.align_content = *e;
+    }},
 
     // Spacing
     {"padding", [](Style& s, const String& v) { s.padding = parse_edge_insets(v); }},
     {"margin", [](Style& s, const String& v) { s.margin = parse_edge_insets(v); }},
     {"gap", [](Style& s, const String& v) { s.gap = parse_float(v); }},
+    {"row-gap", [](Style& s, const String& v) { s.row_gap = parse_float(v); }},
+    {"column-gap", [](Style& s, const String& v) { s.column_gap = parse_float(v); }},
 
     // Colors
     {"background", [](Style& s, const String& v) { s.background = parse_color(v); }},
@@ -516,6 +559,141 @@ String UguiBuilder::ResolveValue(const String& value) const {
 }
 
 // ---------------------------------------------------------------------------
+// Component expansion
+// ---------------------------------------------------------------------------
+
+// Replaces `$prop` references in a property value. A reference is `$`
+// followed by the longest run of [A-Za-z0-9_-]; if that exact name is not
+// a known prop, trailing `-segment`s are trimmed until one matches (so
+// `$accent-hover` resolves `$accent` when only `accent` is declared).
+// Unresolved references are left verbatim.
+static String SubstituteProps(const String& value,
+                              const HashMap<String, String>& props) {
+  if (value.find('$') == String::npos) return value;
+  String out;
+  out.reserve(value.size());
+  usize i = 0;
+  while (i < value.size()) {
+    if (value[i] != '$') {
+      out += value[i++];
+      continue;
+    }
+    usize j = i + 1;
+    while (j < value.size() &&
+           (std::isalnum(static_cast<unsigned char>(value[j])) ||
+            value[j] == '_' || value[j] == '-'))
+      ++j;
+    String key = value.substr(i + 1, j - i - 1);
+    auto it = props.find(key);
+    while (it == props.end()) {
+      auto dash = key.rfind('-');
+      if (dash == String::npos) break;
+      key.resize(dash);
+      it = props.find(key);
+    }
+    if (it != props.end()) {
+      out += it->second;
+      i += 1 + key.size();
+    } else {
+      out += value[i++];
+    }
+  }
+  return out;
+}
+
+static void SubstituteNodeProps(UguiNode& node,
+                                const HashMap<String, String>& props) {
+  for (auto& [key, val] : node.properties) val = SubstituteProps(val, props);
+  for (auto& sb : node.state_blocks)
+    for (auto& [key, val] : sb.properties) val = SubstituteProps(val, props);
+  for (auto& kb : node.keyframe_blocks) {
+    for (auto& [key, val] : kb.properties) val = SubstituteProps(val, props);
+    for (auto& stop : kb.stops)
+      for (auto& [key, val] : stop.properties)
+        val = SubstituteProps(val, props);
+  }
+  for (auto& mq : node.media_queries)
+    for (auto& [key, val] : mq.properties) val = SubstituteProps(val, props);
+  for (auto& child : node.children) SubstituteNodeProps(child, props);
+}
+
+// Scopes the names of a component's internal widgets to the instance:
+// `panel bar` inside component `hp` becomes `hp_bar`, so multiple
+// instances don't collide and Lua handlers stay addressable per instance.
+static void PrefixNames(UguiNode& node, const String& prefix) {
+  for (auto& child : node.children) {
+    if (!child.name.empty()) child.name = prefix + "_" + child.name;
+    PrefixNames(child, prefix);
+  }
+}
+
+// Replaces the first `slot` element with the instance's children, or with
+// the slot's own children (fallback content) when the instance provides
+// none. Returns true if a slot was found.
+static bool ReplaceSlot(UguiNode& node, Vector<UguiNode>& fill) {
+  for (usize i = 0; i < node.children.size(); ++i) {
+    if (node.children[i].type == "slot") {
+      Vector<UguiNode> content =
+          fill.empty() ? std::move(node.children[i].children)
+                       : std::move(fill);
+      node.children.erase(node.children.begin() +
+                          static_cast<std::ptrdiff_t>(i));
+      node.children.insert(node.children.begin() +
+                               static_cast<std::ptrdiff_t>(i),
+                           std::make_move_iterator(content.begin()),
+                           std::make_move_iterator(content.end()));
+      return true;
+    }
+    if (ReplaceSlot(node.children[i], fill)) return true;
+  }
+  return false;
+}
+
+UguiNode UguiBuilder::ExpandComponent(const UguiDocument::Component& comp,
+                                      const UguiNode& instance) const {
+  // Resolve props: declared defaults, overridden by instance values.
+  // `$name` is implicit and resolves to the instance (or component) name.
+  HashMap<String, String> props = comp.props;
+  for (auto& [key, val] : instance.properties) {
+    if (comp.props.find(key) != comp.props.end()) props[key] = val;
+  }
+  if (props.find("name") == props.end())
+    props["name"] = instance.name.empty() ? comp.name : instance.name;
+
+  UguiNode expanded = comp.root;
+  SubstituteNodeProps(expanded, props);
+
+  if (!instance.name.empty()) {
+    expanded.name = instance.name;
+    PrefixNames(expanded, instance.name);
+  }
+
+  // Instance children fill the slot (or append to the root).
+  Vector<UguiNode> fill = instance.children;
+  if (!ReplaceSlot(expanded, fill) && !fill.empty()) {
+    expanded.children.insert(expanded.children.end(),
+                             std::make_move_iterator(fill.begin()),
+                             std::make_move_iterator(fill.end()));
+  }
+
+  // Non-prop instance properties override the root element's, so call
+  // sites can tweak layout/visuals (`width`, `margin`, `class`...) per
+  // instance without a dedicated prop.
+  for (auto& [key, val] : instance.properties) {
+    if (comp.props.find(key) == comp.props.end())
+      expanded.properties[key] = val;
+  }
+  for (auto& sb : instance.state_blocks)
+    expanded.state_blocks.push_back(sb);
+  for (auto& mq : instance.media_queries)
+    expanded.media_queries.push_back(mq);
+  for (auto& kb : instance.keyframe_blocks)
+    expanded.keyframe_blocks.push_back(kb);
+
+  return expanded;
+}
+
+// ---------------------------------------------------------------------------
 // Build
 // ---------------------------------------------------------------------------
 
@@ -532,6 +710,14 @@ wid UguiBuilder::Build(const UguiDocument& doc) {
   for (auto& sc : doc.style_classes) {
     style_classes_[sc.name] = sc;
   }
+
+  // Same for component templates: an element whose type matches a
+  // component name expands to a copy of the component's subtree.
+  components_.clear();
+  for (auto& comp : doc.components) {
+    components_[comp.name] = comp;
+  }
+  expand_depth_ = 0;
 
   if (doc.roots.empty()) return kNullWidget;
 
@@ -557,6 +743,22 @@ const UguiDocument::StyleClass* UguiBuilder::FindStyleClass(
 
 bool UguiBuilder::ApplyStyleClass(wid widget,
                                   const String& class_name) const {
+  // `class: card elevated;` applies each named class in order.
+  bool any = false;
+  usize start = 0;
+  while (start < class_name.size()) {
+    while (start < class_name.size() && class_name[start] == ' ') ++start;
+    usize end = class_name.find(' ', start);
+    if (end == String::npos) end = class_name.size();
+    if (end > start)
+      any |= ApplyOneStyleClass(widget, class_name.substr(start, end - start));
+    start = end;
+  }
+  return any;
+}
+
+bool UguiBuilder::ApplyOneStyleClass(wid widget,
+                                     const String& class_name) const {
   if (!widget.valid()) return false;
   const auto* sc = FindStyleClass(class_name);
   if (!sc) return false;
@@ -593,6 +795,26 @@ bool UguiBuilder::ApplyStyleClass(wid widget,
 wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   wid widget = kNullWidget;
+
+  // Component instance: expand the template and build the result. The
+  // expanded tree may itself instantiate components; the depth guard
+  // catches (mutually) recursive definitions.
+  if (auto comp_it = components_.find(node.type);
+      comp_it != components_.end()) {
+    if (expand_depth_ >= 32) {
+      std::fprintf(stderr,
+                   "ultragui: component expansion too deep at '%s' line %u "
+                   "(recursive component?)\n",
+                   node.type.c_str(), node.source_line);
+      return kNullWidget;
+    }
+    ++expand_depth_;
+    UguiNode expanded = ExpandComponent(comp_it->second, node);
+    wid result = BuildNode(expanded, id_counter);
+    --expand_depth_;
+    return result;
+  }
+
   u32 id = id_counter++;
 
   // Try registered factory
@@ -886,27 +1108,18 @@ void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
       AddStateTransition(world, widget, state, trans);
   }
 
-  // Media query overrides: apply matching conditions on top of the base style
-  for (auto& mq : node.media_queries) {
-    bool matches = false;
-    if (mq.condition == "min-width")
-      matches = viewport_size_.x >= mq.value;
-    else if (mq.condition == "max-width")
-      matches = viewport_size_.x <= mq.value;
-    else if (mq.condition == "min-height")
-      matches = viewport_size_.y >= mq.value;
-    else if (mq.condition == "max-height")
-      matches = viewport_size_.y <= mq.value;
-
-    if (matches) {
-      Style& style = world.Get<StyleC>(widget)->style;
-      for (auto& [key, val] : mq.properties) {
-        if (auto setter = FindPropertySetter(key)) {
-          String resolved = ResolveValue(val);
-          setter(style, resolved);
-        }
-      }
-    }
+  // Media query overrides: stash the media-independent base style plus the
+  // query list on the widget, then apply whatever matches the current
+  // viewport. Keeping the raw queries lets ReapplyMediaQueries re-resolve
+  // them on window resize instead of baking the load-time viewport in.
+  if (!node.media_queries.empty()) {
+    MediaStyle ms;
+    ms.base = world.Get<StyleC>(widget)->style;
+    ms.queries.reserve(node.media_queries.size());
+    for (auto& mq : node.media_queries)
+      ms.queries.push_back({mq.condition, mq.value, mq.properties});
+    world.Add<MediaStyle>(widget, std::move(ms));
+    ApplyMediaStyle(widget);
   }
 
   // @keyframes blocks
@@ -940,6 +1153,44 @@ void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
     anim.start_time = 0;  // Will be set when UIContext starts the animator
     animator_->StartAnimation(anim, 0);
   }
+}
+
+void UguiBuilder::ApplyMediaStyle(wid widget) const {
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  auto* ms = world.Get<MediaStyle>(widget);
+  if (!ms) return;
+
+  // Always start from the base: overrides whose condition no longer holds
+  // must fall away when the viewport shrinks/grows back.
+  Style style = ms->base;
+  for (auto& q : ms->queries) {
+    bool matches = false;
+    if (q.condition == "min-width")
+      matches = viewport_size_.x >= q.value;
+    else if (q.condition == "max-width")
+      matches = viewport_size_.x <= q.value;
+    else if (q.condition == "min-height")
+      matches = viewport_size_.y >= q.value;
+    else if (q.condition == "max-height")
+      matches = viewport_size_.y <= q.value;
+    if (!matches) continue;
+
+    for (auto& [key, val] : q.properties) {
+      if (auto setter = FindPropertySetter(key)) {
+        String resolved = ResolveValue(val);
+        setter(style, resolved);
+      }
+    }
+  }
+  SetStyle(world, widget, style);
+}
+
+void UguiBuilder::ReapplyMediaQueries(wid root) const {
+  if (!root.valid()) return;
+  WidgetRegistry& world = *WidgetRegistry::Active();
+  if (world.Has<MediaStyle>(root)) ApplyMediaStyle(root);
+  if (auto* h = world.Get<Hierarchy>(root))
+    for (wid child : h->children) ReapplyMediaQueries(child);
 }
 
 wid UguiBuilder::Rebuild(const UguiDocument& doc, wid existing_root) {

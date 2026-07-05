@@ -50,6 +50,13 @@ add_executable(ultragui_embed_opengl3
     ${CMAKE_SOURCE_DIR}/ugui/backends/ugui_impl_opengl3.cc)
 target_link_libraries(ultragui_embed_opengl3 PRIVATE ultragui glfw OpenGL::GL)
 
+# Standalone .ugui previewer: live window with hot reload, or --screenshot to
+# render offscreen and save a PNG (design iteration / visual diffing).
+add_executable(ugui_preview
+    preview/main.cc
+    ${CMAKE_SOURCE_DIR}/ugui/backends/ugui_impl_opengl3.cc)
+target_link_libraries(ugui_preview PRIVATE ultragui glfw OpenGL::GL)
+
 # Embedding sample: host owns the window + GL pipeline, ultragui composites on
 # top. Requires the OpenGL backend (host shares its GL context with the RHI).
 if(ULTRAGUI_BACKEND_OPENGL)

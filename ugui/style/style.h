@@ -33,6 +33,7 @@ struct Style {
   JustifyContent justify_content = JustifyContent::kStart;
   AlignItems align_items = AlignItems::kStretch;
   AlignSelf align_self = AlignSelf::kAuto;
+  AlignContent align_content = AlignContent::kStart;
   FlexWrap flex_wrap = FlexWrap::kNoWrap;
   Position position = Position::kRelative;
   Overflow overflow = Overflow::kVisible;
@@ -47,11 +48,14 @@ struct Style {
   Length max_height = Length::Px(1e6f);
   f32 flex_grow = 0.0f;
   f32 flex_shrink = 1.0f;
+  Length flex_basis = Length::Auto();
 
   // --- Spacing ---
   EdgeInsets margin;
   EdgeInsets padding;
   f32 gap = 0.0f;
+  f32 row_gap = -1.0f;     // -1 = use gap
+  f32 column_gap = -1.0f;  // -1 = use gap
 
   // --- Position offsets (for Position::kAbsolute or Relative offsets) ---
   Length top = Length::Auto();

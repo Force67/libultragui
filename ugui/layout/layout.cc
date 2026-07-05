@@ -126,6 +126,26 @@ static YGAlign map_align_self(AlignSelf a) {
   return YGAlignAuto;
 }
 
+static YGAlign map_align_content(AlignContent a) {
+  switch (a) {
+    case AlignContent::kStart:
+      return YGAlignFlexStart;
+    case AlignContent::kEnd:
+      return YGAlignFlexEnd;
+    case AlignContent::kCenter:
+      return YGAlignCenter;
+    case AlignContent::kStretch:
+      return YGAlignStretch;
+    case AlignContent::kSpaceBetween:
+      return YGAlignSpaceBetween;
+    case AlignContent::kSpaceAround:
+      return YGAlignSpaceAround;
+    case AlignContent::kSpaceEvenly:
+      return YGAlignSpaceEvenly;
+  }
+  return YGAlignFlexStart;
+}
+
 static YGWrap map_wrap(FlexWrap w) {
   switch (w) {
     case FlexWrap::kNoWrap:
@@ -182,6 +202,7 @@ static void apply_style(YGNodeRef yg, const Style& s,
   YGNodeStyleSetJustifyContent(yg, map_justify(s.justify_content));
   YGNodeStyleSetAlignItems(yg, map_align_items(s.align_items));
   YGNodeStyleSetAlignSelf(yg, map_align_self(s.align_self));
+  YGNodeStyleSetAlignContent(yg, map_align_content(s.align_content));
   YGNodeStyleSetFlexWrap(yg, map_wrap(s.flex_wrap));
   YGNodeStyleSetOverflow(yg, map_overflow(s.overflow));
   YGNodeStyleSetPositionType(yg, map_position(s.position));
@@ -192,6 +213,22 @@ static void apply_style(YGNodeRef yg, const Style& s,
   // Flex
   YGNodeStyleSetFlexGrow(yg, s.flex_grow);
   YGNodeStyleSetFlexShrink(yg, s.flex_shrink);
+  switch (s.flex_basis.unit) {
+    case Length::Unit::kAuto:
+      YGNodeStyleSetFlexBasisAuto(yg);
+      break;
+    case Length::Unit::kPercent:
+      YGNodeStyleSetFlexBasisPercent(yg, s.flex_basis.value);
+      break;
+    default:  // px/vw/vh/fr resolve to pixels along the main axis
+      YGNodeStyleSetFlexBasis(
+          yg, s.flex_basis.Resolve(0, vw, vh,
+                                   s.flex_direction == FlexDirection::kColumn ||
+                                       s.flex_direction ==
+                                           FlexDirection::kColumnReverse) *
+                  sc);
+      break;
+  }
 
   // Sizing
   set_yoga_length_w(yg, s.width, vw, vh, sc, YGNodeStyleSetWidth,
@@ -225,8 +262,11 @@ static void apply_style(YGNodeRef yg, const Style& s,
   YGNodeStyleSetPadding(yg, YGEdgeBottom, s.padding.bottom * sc);
   YGNodeStyleSetPadding(yg, YGEdgeLeft, s.padding.left * sc);
 
-  // Gap
+  // Gap: uniform, with optional per-axis overrides
   if (s.gap > 0.0f) YGNodeStyleSetGap(yg, YGGutterAll, s.gap * sc);
+  if (s.row_gap >= 0.0f) YGNodeStyleSetGap(yg, YGGutterRow, s.row_gap * sc);
+  if (s.column_gap >= 0.0f)
+    YGNodeStyleSetGap(yg, YGGutterColumn, s.column_gap * sc);
 
   // Aspect ratio
   if (s.aspect_ratio > 0.0f) YGNodeStyleSetAspectRatio(yg, s.aspect_ratio);

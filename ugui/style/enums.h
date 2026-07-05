@@ -64,6 +64,17 @@ enum class AlignSelf : u8 {
   kStretch,
 };
 
+/// Cross-axis alignment of wrapped lines (effective with FlexWrap::kWrap*)
+enum class AlignContent : u8 {
+  kStart,
+  kEnd,
+  kCenter,
+  kStretch,
+  kSpaceBetween,
+  kSpaceAround,
+  kSpaceEvenly,
+};
+
 /// How content overflows its container
 enum class Overflow : u8 {
   kVisible,

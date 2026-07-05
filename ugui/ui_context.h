@@ -306,6 +306,9 @@ class UIContext {
   // application call PumpInput early in its frame for same-frame
   // click->rebuild latency without double-processing input.
   bool input_pumped_this_frame_ = false;
+  // Last viewport @media breakpoints were resolved against; a mismatch in
+  // PumpInput triggers UguiBuilder::ReapplyMediaQueries.
+  Vec2 media_viewport_ = {-1.0f, -1.0f};
   String current_theme_name_;
 
   struct OffscreenPass {

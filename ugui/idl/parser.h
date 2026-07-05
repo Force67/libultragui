@@ -71,6 +71,25 @@ struct UguiDocument {
     Vector<UguiNode::StateBlock> state_blocks;
   };
   Vector<StyleClass> style_classes;
+
+  /// Top-level `component <name> { prop <p>: <default>; <root element> }`
+  /// blocks. A component is a reusable subtree template: using its name as
+  /// an element type stamps a copy of the root element with `$prop`
+  /// references in property values replaced by the instance's values.
+  /// A `slot { ... }` element inside the body marks where instance
+  /// children are inserted (the slot's own children are the fallback).
+  struct Component {
+    String name;
+    HashMap<String, String> props;  // declared prop name -> default value
+    UguiNode root;
+    u32 source_line = 0;
+  };
+  Vector<Component> components;
+
+  /// `import "other.ugui";` paths, relative to this file. Imports merge
+  /// the other file's components and style classes (not its root
+  /// widgets) into this document before its own definitions.
+  Vector<String> imports;
 };
 
 /// Parse error info

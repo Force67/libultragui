@@ -5,7 +5,9 @@
 #include <charconv>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 
 namespace ugui {
@@ -78,7 +80,7 @@ class Lexer {
         c == '.')
       return lex_number(tok_line, tok_col);
 
-    if (std::isalpha(c) || c == '_' || c == '-')
+    if (std::isalpha(c) || c == '_' || c == '-' || c == '$')
       return lex_identifier(tok_line, tok_col);
 
     advance();
@@ -214,6 +216,11 @@ class Lexer {
 
   Token lex_identifier(u32 line, u32 col) {
     String val;
+    // `$prop` references inside component bodies lex as one identifier
+    if (pos_ < len_ && src_[pos_] == '$') {
+      val += '$';
+      advance();
+    }
     while (pos_ < len_ && (std::isalnum(src_[pos_]) || src_[pos_] == '_' ||
                            src_[pos_] == '-')) {
       val += src_[pos_];
@@ -255,6 +262,18 @@ class Parser {
         if (!sc.name.empty()) doc.style_classes.push_back(std::move(sc));
         continue;
       }
+      if (current_.type == TokenType::kIdentifier &&
+          current_.value == "component") {
+        auto comp = parse_component();
+        if (!comp.name.empty()) doc.components.push_back(std::move(comp));
+        continue;
+      }
+      if (current_.type == TokenType::kIdentifier &&
+          current_.value == "import") {
+        String path = parse_import();
+        if (!path.empty()) doc.imports.push_back(std::move(path));
+        continue;
+      }
       auto node = parse_element();
       if (node.type.empty()) break;
       doc.roots.push_back(std::move(node));
@@ -294,6 +313,73 @@ class Parser {
     }
     if (current_.type == TokenType::kRBrace) advance();
     return sc;
+  }
+
+  // component = 'component' name '{' ('prop' name [':' value] ';')* element '}'
+  UguiDocument::Component parse_component() {
+    UguiDocument::Component comp;
+    comp.source_line = current_.line;
+    advance();  // skip 'component'
+    if (current_.type != TokenType::kIdentifier) {
+      error("expected component name after 'component'");
+      return comp;
+    }
+    comp.name = current_.value;
+    advance();
+    expect(TokenType::kLBrace);
+
+    bool has_root = false;
+    while (current_.type != TokenType::kRBrace &&
+           current_.type != TokenType::kEof) {
+      if (current_.type == TokenType::kIdentifier &&
+          current_.value == "prop") {
+        advance();  // skip 'prop'
+        if (current_.type != TokenType::kIdentifier) {
+          error("expected prop name after 'prop'");
+          continue;
+        }
+        String prop_name = current_.value;
+        advance();
+        String default_value;
+        if (current_.type == TokenType::kColon) {
+          advance();
+          default_value = parse_value();
+        }
+        if (current_.type == TokenType::kSemicolon) advance();
+        comp.props[prop_name] = default_value;
+      } else if (current_.type == TokenType::kIdentifier) {
+        UguiNode el = parse_element();
+        if (has_root) {
+          errors_->push_back({"component '" + comp.name +
+                                  "' must have exactly one root element",
+                              file_, el.source_line, 0});
+        } else {
+          comp.root = std::move(el);
+          has_root = true;
+        }
+      } else {
+        advance();
+      }
+    }
+    if (current_.type == TokenType::kRBrace) advance();
+    if (!has_root)
+      errors_->push_back({"component '" + comp.name + "' has no root element",
+                          file_, comp.source_line, 0});
+    return comp;
+  }
+
+  // import = 'import' string ';'
+  String parse_import() {
+    advance();  // skip 'import'
+    String path;
+    if (current_.type == TokenType::kString) {
+      path = current_.value;
+      advance();
+    } else {
+      error("expected \"path\" after 'import'");
+    }
+    if (current_.type == TokenType::kSemicolon) advance();
+    return path;
   }
 
  private:
@@ -652,17 +738,65 @@ class Parser {
 };
 
 // ---------------------------------------------------------------------------
-// Public API
+// Import resolution
 // ---------------------------------------------------------------------------
 
-bool ParseUgui(const char* source, usize source_len, const char* filename,
-               UguiDocument& out_doc, Vector<ParseError>& out_errors) {
-  Parser parser(source, source_len, filename);
-  return parser.parse(out_doc, out_errors);
+static bool ParseUguiFileInner(const char* path, UguiDocument& out_doc,
+                               Vector<ParseError>& out_errors,
+                               Vector<String>& visited);
+
+// Merges each imported file's components and style classes into `doc`,
+// BEFORE the document's own definitions so the importer wins on name
+// clashes. Root widgets of imported files are ignored: an import brings
+// in definitions, not UI. `visited` holds canonical paths already on the
+// import chain to break cycles.
+static void ResolveImports(UguiDocument& doc, Vector<ParseError>& errors,
+                           Vector<String>& visited) {
+  if (doc.imports.empty()) return;
+
+  namespace fs = std::filesystem;
+  fs::path base = fs::path(doc.source_path.c_str()).parent_path();
+
+  Vector<UguiDocument::Component> imported_components;
+  Vector<UguiDocument::StyleClass> imported_classes;
+
+  for (auto& import_path : doc.imports) {
+    std::error_code ec;
+    fs::path resolved = fs::weakly_canonical(base / import_path.c_str(), ec);
+    String key = ec ? String((base / import_path.c_str()).string())
+                    : String(resolved.string());
+
+    bool seen = false;
+    for (auto& v : visited)
+      if (v == key) {
+        seen = true;
+        break;
+      }
+    if (seen) continue;  // already imported somewhere up the chain
+    visited.push_back(key);
+
+    UguiDocument sub;
+    ParseUguiFileInner(key.c_str(), sub, errors, visited);
+    for (auto& c : sub.components)
+      imported_components.push_back(std::move(c));
+    for (auto& sc : sub.style_classes)
+      imported_classes.push_back(std::move(sc));
+  }
+
+  imported_components.insert(imported_components.end(),
+                             std::make_move_iterator(doc.components.begin()),
+                             std::make_move_iterator(doc.components.end()));
+  doc.components = std::move(imported_components);
+
+  imported_classes.insert(imported_classes.end(),
+                          std::make_move_iterator(doc.style_classes.begin()),
+                          std::make_move_iterator(doc.style_classes.end()));
+  doc.style_classes = std::move(imported_classes);
 }
 
-bool ParseUguiFile(const char* path, UguiDocument& out_doc,
-                   Vector<ParseError>& out_errors) {
+static bool ParseUguiFileInner(const char* path, UguiDocument& out_doc,
+                               Vector<ParseError>& out_errors,
+                               Vector<String>& visited) {
   std::ifstream file(path, std::ios::ate);
   if (!file.is_open()) {
     out_errors.push_back({"failed to open file", path, 0, 0});
@@ -674,7 +808,33 @@ bool ParseUguiFile(const char* path, UguiDocument& out_doc,
   file.seekg(0);
   file.read(buffer.data(), static_cast<std::streamsize>(size));
 
-  return ParseUgui(buffer.c_str(), buffer.size(), path, out_doc, out_errors);
+  Parser parser(buffer.c_str(), buffer.size(), path);
+  bool ok = parser.parse(out_doc, out_errors);
+  ResolveImports(out_doc, out_errors, visited);
+  return ok && out_errors.empty();
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+bool ParseUgui(const char* source, usize source_len, const char* filename,
+               UguiDocument& out_doc, Vector<ParseError>& out_errors) {
+  Parser parser(source, source_len, filename);
+  bool ok = parser.parse(out_doc, out_errors);
+  Vector<String> visited;
+  ResolveImports(out_doc, out_errors, visited);
+  return ok && out_errors.empty();
+}
+
+bool ParseUguiFile(const char* path, UguiDocument& out_doc,
+                   Vector<ParseError>& out_errors) {
+  Vector<String> visited;
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::path canonical = fs::weakly_canonical(path, ec);
+  visited.push_back(ec ? String(path) : String(canonical.string()));
+  return ParseUguiFileInner(path, out_doc, out_errors, visited);
 }
 
 }  // namespace ugui
