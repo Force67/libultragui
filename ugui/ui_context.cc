@@ -23,7 +23,8 @@
 
 namespace ugui {
 
-static f32 ComputeViewportScale(const UIConfig& cfg, Vec2 display) {
+static f32 ComputeViewportScale(const UIConfig& cfg, Vec2 display, f32 override_scale) {
+  if (override_scale > 0.0f) return override_scale;  // set_ui_scale() wins
   switch (cfg.scale_mode) {
     case ViewportScaleMode::kWidth:
       return (cfg.design_width > 0.0f) ? display.x / cfg.design_width : 1.0f;
@@ -156,8 +157,8 @@ bool UIContext::Init(const UIConfig& config) {
   widget_ctx_.platform = &platform_;
   widget_ctx_.registry = &widget_registry_;
   widget_ctx_.ui_scale = ComputeViewportScale(
-      config_,
-      {static_cast<f32>(config.width), static_cast<f32>(config.height)});
+      config_, {static_cast<f32>(config.width), static_cast<f32>(config.height)},
+      ui_scale_override_);
 
   // Builder
   builder_.set_animator(&animator_);
@@ -296,7 +297,7 @@ void UIContext::PumpInput() {
   // swapchain recreation in BeginFrame.
   Vec2 viewport = platform_.window_size();
   builder_.set_viewport_size(viewport);
-  widget_ctx_.ui_scale = ComputeViewportScale(config_, viewport);
+  widget_ctx_.ui_scale = ComputeViewportScale(config_, viewport, ui_scale_override_);
 
   // Viewport changed: re-resolve @media breakpoints so responsive layouts
   // react to resizes live, not only at load time.

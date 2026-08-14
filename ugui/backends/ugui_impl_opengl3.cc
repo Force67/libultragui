@@ -239,8 +239,20 @@ void main() {
         float d = sdf_rounded_rect_4(local, frag_half_size, frag_corner_radii);
         float soft = abs(frag_softness);
         float aa = max(fwidth(d) * 0.75, soft);
-        float alpha = (frag_softness < 0.0) ? smoothstep(-aa, 0.0, d)
-                                            : 1.0 - smoothstep(-aa, aa, d);
+        // Outer shadow (softness > 0): DrawShadow expanded the quad by `soft` so
+        // the falloff has room, so `d` is measured from that expanded edge.
+        // Centre the transition on the original rect edge (d == -soft) so alpha
+        // reaches 0 exactly where the geometry stops. Sharing the -aa..aa band
+        // with plain quads leaves it ~50% opaque there, which reads as a hard
+        // step a full blur radius out from the widget.
+        float alpha;
+        if (frag_softness < 0.0) {
+            alpha = smoothstep(-aa, 0.0, d);
+        } else if (frag_softness > 0.0) {
+            alpha = 1.0 - smoothstep(-2.0 * soft, 0.0, d);
+        } else {
+            alpha = 1.0 - smoothstep(-aa, aa, d);
+        }
         color.a *= alpha;
         if (frag_border_width > 0.0 && frag_border_color.a > 0.0) {
             vec2 inner_half = frag_half_size - vec2(frag_border_width);
@@ -483,6 +495,12 @@ void RenderDrawData(const DrawData& dd) {
   for (u32 i = 0; i < dd.command_count; ++i) {
     const DrawCmd& c = dd.commands[i];
     if (c.elem_count == 0) continue;
+    // Backdrop-blur fill. Widget::Paint emits this as an opaque white quad for
+    // a backend that owns a blurred copy of what is behind the UI; this backend
+    // has no such copy, so it must skip the command. Drawing it anyway paints a
+    // white slab and every translucent surface above it composites over white
+    // instead of the scene.
+    if (c.blur != 0.0f) continue;
 
     GLuint prog = c.is_text ? g.text_prog : g.quad_prog;
     if (prog != bound_prog) {
