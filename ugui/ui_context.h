@@ -178,6 +178,20 @@ class UIContext {
   /// Set the swapchain clear color (background).
   void set_clear_color(Color color) { config_.clear_color = color; }
 
+  /// Drive the scale factor directly instead of deriving it from scale_mode.
+  /// Every pixel size (font-size, border, corner-radius, shadow, padding,
+  /// margin, gap, fixed-px dimensions) is multiplied by it, exactly as under
+  /// scale_mode. Pass 0 to go back to scale_mode.
+  ///
+  /// This is what a host on a high pixel density display needs: there the
+  /// viewport is in pixels while the desktop lays the window out in larger
+  /// units, and the ratio between them is the scale, so the UI keeps its
+  /// physical size while every glyph is rasterized at the full pixel count.
+  /// scale_mode cannot express that, since it ties the scale to the viewport
+  /// size and so would rescale the UI on every window resize.
+  void set_ui_scale(f32 scale) { ui_scale_override_ = scale; }
+  f32 ui_scale() const { return widget_ctx_.ui_scale; }
+
   /// Find a widget by name (O(1) cached lookup). Returns a stable handle;
   /// resolve it via widgets().Get(id) right before use. Prefer this over a raw
   /// pointer so a stale reference safely becomes null after a tree rebuild.
@@ -286,6 +300,7 @@ class UIContext {
   wid root_;
   FontHandle default_font_ = kInvalidFont;
   UIConfig config_;
+  f32 ui_scale_override_ = 0.0f;  // set_ui_scale(); 0 defers to scale_mode
   WidgetRegistry widget_registry_;
   // Makes widget_registry_ the active registry for this thread for the entire
   // lifetime of the context, so every widget (built from IDL, created lazily,
