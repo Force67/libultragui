@@ -161,12 +161,23 @@ void ClearAnimationStyle(WidgetRegistry& world, wid e) {
 }
 
 Style ComputedStyle(WidgetRegistry& world, wid e) {
-  if (AnimStyle* a = world.Get<AnimStyle>(e)) return a->style;
-  StyleC* sc = world.Get<StyleC>(e);
-  StateStyle* ss = world.Get<StateStyle>(e);
-  if (!ss || ss->overrides.empty()) return sc->style;
-  return ResolveStyle(sc->style, ss->overrides.data(),
-                      static_cast<u32>(ss->overrides.size()), sc->state);
+  Style out;
+  if (AnimStyle* a = world.Get<AnimStyle>(e)) {
+    out = a->style;
+  } else {
+    StyleC* sc = world.Get<StyleC>(e);
+    StateStyle* ss = world.Get<StateStyle>(e);
+    if (!ss || ss->overrides.empty())
+      out = sc->style;
+    else
+      out = ResolveStyle(sc->style, ss->overrides.data(),
+                         static_cast<u32>(ss->overrides.size()), sc->state);
+  }
+  // Opacity inherits, the way CSS opacity and a Flash clip's alpha do: fading a
+  // container fades everything it holds, and a child cannot come back.
+  if (const Transform* t = world.Get<Transform>(e))
+    out.opacity *= t->inherited_opacity;
+  return out;
 }
 
 // --- Dirty / hit-testing ----------------------------------------------------

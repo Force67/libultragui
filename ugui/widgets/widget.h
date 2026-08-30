@@ -48,6 +48,9 @@ struct Transform {
   f32 intrinsic_h = 0;
   bool layout_dirty = true;
   bool paint_dirty = true;
+  /// The opacity this widget inherits from its ancestors, folded in by
+  /// ComputedStyle. Written by the paint walk; 1 until one has run.
+  f32 inherited_opacity = 1.0f;
 };
 
 /// Tree links, stored as stable handles.
