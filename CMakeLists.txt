@@ -49,8 +49,17 @@ if(ULTRAGUI_BACKEND_VULKAN OR ULTRAGUI_BACKEND_D3D12)
     find_package(Vulkan REQUIRED)
 endif()
 
-pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
-pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
+# Text stack. An embedder targeting a platform with no pkg-config to query (any
+# cross build) can build freetype and harfbuzz itself and hand the targets over;
+# otherwise they come from the system.
+if(TARGET freetype AND TARGET harfbuzz)
+    set(ULTRAGUI_TEXT_LIBS freetype harfbuzz)
+    message(STATUS "ultragui: using the embedder's freetype/harfbuzz targets")
+else()
+    pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
+    pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
+    set(ULTRAGUI_TEXT_LIBS PkgConfig::FREETYPE PkgConfig::HARFBUZZ)
+endif()
 if(ULTRAGUI_LUA)
     pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
 endif()
@@ -271,8 +280,7 @@ target_compile_definitions(ultragui
 target_link_libraries(ultragui
     PRIVATE
         ultragui_warnings
-        PkgConfig::FREETYPE
-        PkgConfig::HARFBUZZ
+        ${ULTRAGUI_TEXT_LIBS}
         $<$<BOOL:${ULTRAGUI_LUA}>:PkgConfig::LUA>
         $<$<BOOL:${ULTRAGUI_PLATFORM_GLFW}>:glfw>
         yogacore
