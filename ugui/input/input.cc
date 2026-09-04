@@ -28,14 +28,58 @@ static void SetHoverBit(World& world, wid w, bool on) {
 // (see PaintWidgetTreeImpl). Without that, an offscreen screen's rows stay in
 // the ring, so Tab and the d-pad land on widgets nobody can see: no focus
 // outline is drawn and the activation goes to a widget the routers refuse.
-static void CollectFocusable(WidgetRegistry& world, wid w, Vector<wid>& out) {
+// Would this widget be focusable even though nobody wrote a tab-index on it?
+//
+// Requiring an explicit index means a screen is navigable only if its author
+// remembered to number every row, and one that forgot is silently dead to the
+// keyboard and the d-pad. The implicit answer is the same one a mouse uses:
+// the kinds that exist to be operated, plus anything the style already declares
+// clickable with `cursor: pointer`.
+static bool IsImplicitlyFocusable(WidgetRegistry& world, wid w, const Style& s) {
+  switch (world.Get<WidgetNode>(w)->kind) {
+    case WidgetKind::kButton:
+    case WidgetKind::kCheckbox:
+    case WidgetKind::kRadio:
+    case WidgetKind::kToggle:
+    case WidgetKind::kSlider:
+    case WidgetKind::kDropdown:
+    case WidgetKind::kTextInput:
+      return true;
+    default:
+      break;
+  }
+  return s.cursor == Cursor::kPointer;
+}
+
+// Gather the focus ring under `w`, skipping anything hidden or collapsed (see
+// the note above). `implicit` widens the ring from the authored tab-indices to
+// everything that looks interactive; the caller uses it as a fallback.
+static void CollectFocusable(WidgetRegistry& world, wid w, Vector<wid>& out,
+                             bool implicit = false) {
   Style s = ComputedStyle(world, w);
   if (s.visibility == Visibility::kHidden ||
       s.visibility == Visibility::kCollapsed)
     return;
-  if (world.Get<WidgetNode>(w)->tab_index >= 0) out.push_back(w);
+  const bool explicit_index = world.Get<WidgetNode>(w)->tab_index >= 0;
+  if (explicit_index || (implicit && IsImplicitlyFocusable(world, w, s)))
+    out.push_back(w);
   for (wid child : world.Get<Hierarchy>(w)->children)
-    CollectFocusable(world, child, out);
+    CollectFocusable(world, child, out, implicit);
+}
+
+// The ring to navigate: what the screen authored, or -- when it authored
+// nothing -- what looks interactive.
+//
+// Deciding per collection rather than per document is what makes this work for
+// a host that concatenates every screen into one tree (recreation does): the
+// collapsed screens are pruned above, so "did anyone author a tab-index" is
+// asked only of the screen actually on display. A hand-numbered pause menu
+// keeps its exact ring while the wizard beside it gets an implicit one.
+static void CollectFocusRing(WidgetRegistry& world, wid root, Vector<wid>& out,
+                             bool allow_implicit) {
+  CollectFocusable(world, root, out);
+  if (out.empty() && allow_implicit)
+    CollectFocusable(world, root, out, /*implicit=*/true);
 }
 
 // Order the ring by tab index. std::sort is unstable, so ties would shuffle
@@ -263,13 +307,33 @@ bool InputRouter::Process(wid root) {
     }
   }
 
+  // Arrow-key navigation, the keyboard half of what the d-pad already does.
+  // Handled before Tab so a screen can offer both; repeats count, so holding a
+  // direction walks the ring at the platform's own key-repeat rate.
+  if (keyboard_nav_) {
+    for (u32 i = 0; i < queue.key_count; ++i) {
+      auto& evt = queue.key_events[i];
+      if (!evt.pressed) continue;
+      i8 dir_x = 0, dir_y = 0;
+      switch (evt.key) {
+        case 262: dir_x = 1; break;   // GLFW_KEY_RIGHT
+        case 263: dir_x = -1; break;  // GLFW_KEY_LEFT
+        case 264: dir_y = 1; break;   // GLFW_KEY_DOWN
+        case 265: dir_y = -1; break;  // GLFW_KEY_UP
+        default: continue;
+      }
+      NavigateFocus(root, dir_x, dir_y);
+      consumed = true;
+    }
+  }
+
   // Tab navigation
   for (u32 i = 0; i < queue.key_count; ++i) {
     auto& evt = queue.key_events[i];
     if (evt.pressed && evt.key == 258 /* GLFW_KEY_TAB */) {
       bool reverse = (evt.mods & 0x0001 /* GLFW_MOD_SHIFT */) != 0;
       Vector<wid> focusable;
-      CollectFocusable(world, root, focusable);
+      CollectFocusRing(world, root, focusable, keyboard_nav_);
       if (focusable.empty()) continue;
       SortFocusable(world, focusable);
       auto it = std::find(focusable.begin(), focusable.end(), focused_);
@@ -503,56 +567,98 @@ void InputRouter::ProcessGamepadNavigation(wid root, f32 /*delta_time*/) {
   (void)root;
 }
 
+// Centre of a widget's laid-out rect, which is what navigation reasons about:
+// where a control looks like it is, not where it sits in the document.
+static Vec2 FocusCentre(WidgetRegistry& world, wid w) {
+  const Rect& r = world.Get<Transform>(w)->rect;
+  return Vec2{r.x + r.w * 0.5f, r.y + r.h * 0.5f};
+}
+
+// The widget to move to from `from` heading (dir_x, dir_y), or an invalid
+// handle when there is nothing that way.
+//
+// Geometry, not document order. The old behaviour walked the tab ring for every
+// direction, so on any grid Left and Up did the same thing and Right and Down
+// did the other -- which is fine for a single column and nonsense for the tile
+// grid on a front screen. Candidates must lie genuinely in the direction asked
+// for; among those, the nearest wins, with sideways drift penalised so a
+// straight-ahead neighbour beats a closer diagonal one.
+static wid NearestInDirection(WidgetRegistry& world, const Vector<wid>& ring,
+                              wid from, i8 dir_x, i8 dir_y) {
+  // Below this a candidate counts as level with the focus rather than beyond
+  // it, which is what stops Left/Right walking a vertical list.
+  constexpr f32 kMinTravel = 1.0f;
+  constexpr f32 kDriftPenalty = 2.0f;
+
+  const Vec2 origin = FocusCentre(world, from);
+  wid best;
+  f32 best_score = 0.0f;
+  for (wid candidate : ring) {
+    if (candidate == from) continue;
+    const Vec2 to = FocusCentre(world, candidate);
+    const f32 dx = to.x - origin.x, dy = to.y - origin.y;
+    const f32 along = dx * dir_x + dy * dir_y;
+    if (along < kMinTravel) continue;  // level with, or behind, the focus
+    const f32 drift = std::abs(dx * -dir_y + dy * dir_x);
+    const f32 score = along + drift * kDriftPenalty;
+    if (!best.valid() || score < best_score) {
+      best = candidate;
+      best_score = score;
+    }
+  }
+  return best;
+}
+
+// The far end of the ring in the OPPOSITE direction, so walking off the bottom
+// of a list comes back on at the top. Same geometry test, so a vertical list
+// still refuses to wrap horizontally: nothing is far enough sideways to qualify.
+static wid WrapInDirection(WidgetRegistry& world, const Vector<wid>& ring,
+                           wid from, i8 dir_x, i8 dir_y) {
+  constexpr f32 kMinTravel = 1.0f;
+  const Vec2 origin = FocusCentre(world, from);
+  wid best;
+  f32 best_distance = 0.0f;
+  for (wid candidate : ring) {
+    if (candidate == from) continue;
+    const Vec2 to = FocusCentre(world, candidate);
+    const f32 dx = to.x - origin.x, dy = to.y - origin.y;
+    const f32 back = -(dx * dir_x + dy * dir_y);
+    if (back < kMinTravel) continue;
+    if (!best.valid() || back > best_distance) {
+      best = candidate;
+      best_distance = back;
+    }
+  }
+  return best;
+}
+
 void InputRouter::NavigateFocus(wid root, i8 dir_x, i8 dir_y) {
   WidgetRegistry* reg = WidgetRegistry::Active();
   if (!root.valid() || !reg) return;
   World& world = *reg;
 
   Vector<wid> focusable;
-  CollectFocusable(*reg, root, focusable);
+  CollectFocusRing(world, root, focusable, keyboard_nav_);
   if (focusable.empty()) return;
 
-  SortFocusable(*reg, focusable);
+  SortFocusable(world, focusable);
 
-  if (!focused_.valid()) {
+  // Nothing focused yet (a screen just opened, or the mouse has been driving):
+  // the first press lands on the ring's head rather than moving from nowhere.
+  if (!focused_.valid() ||
+      std::find(focusable.begin(), focusable.end(), focused_) == focusable.end()) {
     set_focus(focusable.front());
     if (on_hover_) on_hover_(focusable.front(), true);
     return;
   }
 
-  if (dir_y != 0) {
-    auto it = std::find(focusable.begin(), focusable.end(), focused_);
-    if (dir_y > 0) {
-      if (it == focusable.end() || std::next(it) == focusable.end())
-        set_focus(focusable.front());
-      else
-        set_focus(*std::next(it));
-    } else {
-      if (it == focusable.begin() || it == focusable.end())
-        set_focus(focusable.back());
-      else
-        set_focus(*std::prev(it));
-    }
-  }
+  wid next = NearestInDirection(world, focusable, focused_, dir_x, dir_y);
+  if (!next.valid())
+    next = WrapInDirection(world, focusable, focused_, dir_x, dir_y);
+  if (!next.valid()) return;  // nothing that way, and nothing to wrap to
 
-  if (dir_x != 0) {
-    auto it = std::find(focusable.begin(), focusable.end(), focused_);
-    if (dir_x > 0) {
-      if (it == focusable.end() || std::next(it) == focusable.end())
-        set_focus(focusable.front());
-      else
-        set_focus(*std::next(it));
-    } else {
-      if (it == focusable.begin() || it == focusable.end())
-        set_focus(focusable.back());
-      else
-        set_focus(*std::prev(it));
-    }
-  }
-
-  if (focused_.valid()) {
-    if (on_hover_) on_hover_(focused_, true);
-  }
+  set_focus(next);
+  if (on_hover_) on_hover_(next, true);
 }
 
 }  // namespace ugui

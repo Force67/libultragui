@@ -70,6 +70,20 @@ class InputRouter {
   /// gamepad).
   bool gamepad_nav_active() const { return gamepad_nav_active_; }
 
+  /// Keyboard navigation: the arrow keys move focus between interactive
+  /// widgets, the way the d-pad already does, and Enter/Space activate what is
+  /// focused. On by default; turn it off for a UI that wants the arrow keys for
+  /// something else (a text editor, a game view behind a HUD).
+  ///
+  /// It also decides how focusable widgets are found. A screen that authors
+  /// `tab-index` gets exactly the ring it asked for, always. A screen that
+  /// authors none gets an implicit ring instead - buttons, checkboxes, sliders,
+  /// dropdowns, and anything styled `cursor: pointer` - so a menu is navigable
+  /// without every widget having to opt in by hand. With this off, only
+  /// explicit `tab-index` is ever focusable.
+  void set_keyboard_navigation(bool enabled) { keyboard_nav_ = enabled; }
+  bool keyboard_navigation() const { return keyboard_nav_; }
+
  private:
   Platform* platform_ = nullptr;
 
@@ -88,6 +102,7 @@ class InputRouter {
   Vec2 drag_prev_ = Vec2::Zero();
   bool dragging_ = false;
   bool gamepad_nav_active_ = false;
+  bool keyboard_nav_ = true;
 
   // Gamepad stick repeat navigation
   f32 gamepad_nav_timer_ = 0.0f;
