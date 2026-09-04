@@ -9,11 +9,15 @@
 namespace ugui {
 
 static void PaintWidgetTreeImpl(WidgetRegistry& world, wid e,
-                                Renderer2D& renderer, Vec2 scroll_offset) {
+                                Renderer2D& renderer, Vec2 scroll_offset,
+                                f32 inherited_opacity) {
   Transform* t = world.Get<Transform>(e);
   if (!t) return;
 
+  t->inherited_opacity = inherited_opacity;
+  // Already carries the ancestors' opacity, so passing it down accumulates.
   Style s = ComputedStyle(world, e);
+  if (s.opacity <= 0.0f) return;
   if (s.visibility == Visibility::kHidden ||
       s.visibility == Visibility::kCollapsed)
     return;
@@ -50,7 +54,7 @@ static void PaintWidgetTreeImpl(WidgetRegistry& world, wid e,
   Vec2 child_offset = scroll_offset + ScrollOffset(world, e);
 
   for (wid child : world.Get<Hierarchy>(e)->children)
-    PaintWidgetTreeImpl(world, child, renderer, child_offset);
+    PaintWidgetTreeImpl(world, child, renderer, child_offset, s.opacity);
 
   if (rotated) renderer.PopTransform();
 
@@ -66,7 +70,7 @@ static void PaintWidgetTreeImpl(WidgetRegistry& world, wid e,
 
 void PaintWidgetTree(wid root, Renderer2D& renderer) {
   if (!root.valid()) return;
-  PaintWidgetTreeImpl(*WidgetRegistry::Active(), root, renderer, Vec2::Zero());
+  PaintWidgetTreeImpl(*WidgetRegistry::Active(), root, renderer, Vec2::Zero(), 1.0f);
 }
 
 }  // namespace ugui

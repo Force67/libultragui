@@ -23,6 +23,46 @@ static void SetHoverBit(World& world, wid w, bool on) {
                                                 WidgetState::kHovered)));
 }
 
+// Collect the focus ring: every tab-indexed widget under root, in tab order.
+// A hidden or collapsed subtree is skipped whole, exactly as painting skips it
+// (see PaintWidgetTreeImpl). Without that, an offscreen screen's rows stay in
+// the ring, so Tab and the d-pad land on widgets nobody can see: no focus
+// outline is drawn and the activation goes to a widget the routers refuse.
+static void CollectFocusable(WidgetRegistry& world, wid w, Vector<wid>& out) {
+  Style s = ComputedStyle(world, w);
+  if (s.visibility == Visibility::kHidden ||
+      s.visibility == Visibility::kCollapsed)
+    return;
+  if (world.Get<WidgetNode>(w)->tab_index >= 0) out.push_back(w);
+  for (wid child : world.Get<Hierarchy>(w)->children)
+    CollectFocusable(world, child, out);
+}
+
+// Order the ring by tab index. std::sort is unstable, so ties would shuffle
+// between frames; the widget id breaks them to keep the walk repeatable.
+static void SortFocusable(WidgetRegistry& world, Vector<wid>& ring) {
+  std::sort(ring.begin(), ring.end(), [&world](wid a, wid b) {
+    const i32 ta = world.Get<WidgetNode>(a)->tab_index;
+    const i32 tb = world.Get<WidgetNode>(b)->tab_index;
+    if (ta != tb) return ta < tb;
+    return a.index < b.index;
+  });
+}
+
+// Is the widget itself, or anything it hangs under, hidden or collapsed?
+// Focus survives across a screen change, so the widget that held it can be
+// painted away while still focused; activating it then fires a click nobody
+// aimed at.
+static bool IsWidgetVisible(WidgetRegistry& world, wid w) {
+  for (; w.valid(); w = world.Get<Hierarchy>(w)->parent) {
+    Style s = ComputedStyle(world, w);
+    if (s.visibility == Visibility::kHidden ||
+        s.visibility == Visibility::kCollapsed)
+      return false;
+  }
+  return true;
+}
+
 // Collect a widget and all of its ancestors up to the root.
 static void CollectAncestorChain(World& world, wid w, std::vector<wid>& out) {
   while (w.valid()) {
@@ -229,16 +269,9 @@ bool InputRouter::Process(wid root) {
     if (evt.pressed && evt.key == 258 /* GLFW_KEY_TAB */) {
       bool reverse = (evt.mods & 0x0001 /* GLFW_MOD_SHIFT */) != 0;
       Vector<wid> focusable;
-      Function<void(wid)> collect = [&](wid w) {
-        if (world.Get<WidgetNode>(w)->tab_index >= 0) focusable.push_back(w);
-        for (wid child : world.Get<Hierarchy>(w)->children) collect(child);
-      };
-      collect(root);
+      CollectFocusable(world, root, focusable);
       if (focusable.empty()) continue;
-      std::sort(focusable.begin(), focusable.end(), [&world](wid a, wid b) {
-        return world.Get<WidgetNode>(a)->tab_index <
-               world.Get<WidgetNode>(b)->tab_index;
-      });
+      SortFocusable(world, focusable);
       auto it = std::find(focusable.begin(), focusable.end(), focused_);
       if (reverse) {
         if (it == focusable.begin() || it == focusable.end())
@@ -272,7 +305,8 @@ bool InputRouter::Process(wid root) {
 
       // Enter or Space activates the focused widget (keyboard/gamepad nav),
       // unless it consumes text input (then Space is a literal character).
-      if (focused_.valid() && !ConsumesTextInput(world, focused_) &&
+      if (focused_.valid() && IsWidgetVisible(world, focused_) &&
+          !ConsumesTextInput(world, focused_) &&
           (evt.key == 257 /* GLFW_KEY_ENTER */ ||
            evt.key == 335 /* GLFW_KEY_KP_ENTER */ ||
            evt.key == 32 /* GLFW_KEY_SPACE */)) {
@@ -301,7 +335,7 @@ bool InputRouter::Process(wid root) {
     gamepad_nav_active_ = true;
 
     if (evt.button == GamepadButton::kA) {
-      if (focused_.valid()) {
+      if (focused_.valid() && IsWidgetVisible(world, focused_)) {
         if (on_click_) on_click_(focused_, MouseButton::kLeft);
         ClickWidget(world, focused_);
         consumed = true;
@@ -475,17 +509,10 @@ void InputRouter::NavigateFocus(wid root, i8 dir_x, i8 dir_y) {
   World& world = *reg;
 
   Vector<wid> focusable;
-  Function<void(wid)> collect = [&](wid w) {
-    if (world.Get<WidgetNode>(w)->tab_index >= 0) focusable.push_back(w);
-    for (wid child : world.Get<Hierarchy>(w)->children) collect(child);
-  };
-  collect(root);
+  CollectFocusable(*reg, root, focusable);
   if (focusable.empty()) return;
 
-  std::sort(focusable.begin(), focusable.end(), [&world](wid a, wid b) {
-    return world.Get<WidgetNode>(a)->tab_index <
-           world.Get<WidgetNode>(b)->tab_index;
-  });
+  SortFocusable(*reg, focusable);
 
   if (!focused_.valid()) {
     set_focus(focusable.front());
