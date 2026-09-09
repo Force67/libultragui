@@ -59,12 +59,9 @@ struct UguiDocument {
   Vector<UguiNode> roots;
   String source_path;
 
-  /// Top-level `class <name> { property: value; ... }` blocks. The
-  /// parser collects these out-of-band so they can be referenced by
-  /// widgets via a `class:` property and applied as additional style
-  /// overrides on top of the widget's base style. Application code
-  /// can also fetch a class by name via UIContext::ApplyStyleClass
-  /// to style dynamically-spawned widgets without subclassing.
+  /// Top-level `class <name> { property: value; ... }` blocks, referenced
+  /// by widgets via `class:` and applied as style overrides. Fetch via
+  /// UIContext::ApplyStyleClass to style dynamically-spawned widgets.
   struct StyleClass {
     String name;
     HashMap<String, String> properties;
@@ -73,11 +70,9 @@ struct UguiDocument {
   Vector<StyleClass> style_classes;
 
   /// Top-level `component <name> { prop <p>: <default>; <root element> }`
-  /// blocks. A component is a reusable subtree template: using its name as
-  /// an element type stamps a copy of the root element with `$prop`
-  /// references in property values replaced by the instance's values.
-  /// A `slot { ... }` element inside the body marks where instance
-  /// children are inserted (the slot's own children are the fallback).
+  /// blocks. Using the name as an element type stamps a copy of the root
+  /// with `$prop` references replaced by instance values. A `slot { ... }`
+  /// marks where instance children go (its own children are the fallback).
   struct Component {
     String name;
     HashMap<String, String> props;  // declared prop name -> default value
@@ -87,8 +82,7 @@ struct UguiDocument {
   Vector<Component> components;
 
   /// `import "other.ugui";` paths, relative to this file. Imports merge
-  /// the other file's components and style classes (not its root
-  /// widgets) into this document before its own definitions.
+  /// the other file's components and style classes, not its root widgets.
   Vector<String> imports;
 };
 

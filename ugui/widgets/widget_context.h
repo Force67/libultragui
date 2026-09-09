@@ -10,9 +10,8 @@ class Animator;
 class Platform;
 class WidgetRegistry;
 
-/// Shared context propagated through the widget tree.
-/// Provides widgets with access to subsystems they need (text shaping, etc.)
-/// without requiring manual per-widget injection.
+/// Shared context propagated through the widget tree; gives widgets access
+/// to subsystems (text shaping, etc.) without manual per-widget injection.
 struct WidgetContext {
   TextEngine* text_engine = nullptr;
   FontHandle default_font = kInvalidFont;

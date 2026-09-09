@@ -253,9 +253,7 @@ class Parser {
     doc.source_path = file_;
 
     while (current_.type != TokenType::kEof) {
-      // Top-level `class <name> { ... }` blocks are collected
-      // separately as style class declarations rather than as
-      // widget elements.
+      // Top-level `class` blocks are style class declarations, not widgets.
       if (current_.type == TokenType::kIdentifier &&
           current_.value == "class") {
         auto sc = parse_style_class();
@@ -676,10 +674,8 @@ class Parser {
     UguiNode::MediaQuery mq;
     advance();  // skip "media"
 
-    // Parse tokens until '{', extracting the condition identifier and numeric
-    // value. Parentheses '(' and ')' are not lexer tokens: they appear as
-    // kError tokens; colons inside the condition also appear as kColon. Skip
-    // them gracefully.
+    // Tokens until '{'; '(' ')' are not lexer tokens (kError) and colons
+    // inside the condition are kColon. Skip them.
     while (current_.type != TokenType::kLBrace &&
            current_.type != TokenType::kEof) {
       if (current_.type == TokenType::kIdentifier) {
@@ -745,11 +741,10 @@ static bool ParseUguiFileInner(const char* path, UguiDocument& out_doc,
                                Vector<ParseError>& out_errors,
                                Vector<String>& visited);
 
-// Merges each imported file's components and style classes into `doc`,
-// BEFORE the document's own definitions so the importer wins on name
-// clashes. Root widgets of imported files are ignored: an import brings
-// in definitions, not UI. `visited` holds canonical paths already on the
-// import chain to break cycles.
+// Merge each imported file's components and style classes into `doc` before
+// its own definitions, so the importer wins on name clashes. Root widgets of
+// imports are ignored. `visited` holds canonical paths on the import chain to
+// break cycles.
 static void ResolveImports(UguiDocument& doc, Vector<ParseError>& errors,
                            Vector<String>& visited) {
   if (doc.imports.empty()) return;

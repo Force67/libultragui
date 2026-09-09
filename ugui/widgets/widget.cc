@@ -173,8 +173,8 @@ Style ComputedStyle(WidgetRegistry& world, wid e) {
       out = ResolveStyle(sc->style, ss->overrides.data(),
                          static_cast<u32>(ss->overrides.size()), sc->state);
   }
-  // Opacity inherits, the way CSS opacity and a Flash clip's alpha do: fading a
-  // container fades everything it holds, and a child cannot come back.
+  // Opacity inherits multiplicatively: fading a container fades everything
+  // it holds, and a child cannot come back.
   if (const Transform* t = world.Get<Transform>(e))
     out.opacity *= t->inherited_opacity;
   return out;
@@ -288,11 +288,9 @@ void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   }
 
   if (s.backdrop_blur > 0.0f) {
-    // Real backdrop blur: emit a quad flagged with the blur radius so a backend
-    // with a captured, blurred copy of what is behind the UI fills it (frosted
-    // glass), respecting the rounded-rect shape. The widget's own translucent
-    // background then composites on top for the tint. Backends without a
-    // backdrop simply skip it, so this degrades to no fill rather than a slab.
+    // Emit a quad flagged with the blur radius; a backend with a blurred copy
+    // of the scene fills it (frosted glass) and composites the widget's own
+    // translucent background over it. Backends without one skip the command.
     renderer.set_next_blur(s.backdrop_blur);
     renderer.DrawRect(rect, Color{1.0f, 1.0f, 1.0f, alpha}, radii);
     renderer.set_next_blur(0.0f);

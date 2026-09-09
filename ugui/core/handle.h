@@ -5,14 +5,12 @@
 
 namespace ugui {
 
-/// Stable, generation-checked handle to a widget (ECS-style id). Holding one of
-/// these instead of a raw Widget* means a stale reference resolves to null
-/// (via WidgetRegistry::Get) instead of dangling: when a widget is destroyed
-/// its slot's generation is bumped, invalidating every outstanding handle.
+/// Generation-checked widget handle (ECS-style id). A stale handle resolves
+/// to null via WidgetRegistry::Get instead of dangling: destroying a widget
+/// bumps its slot's generation, invalidating outstanding handles.
 ///
-/// index 0 is reserved as the null handle. The 32-bit generation does not
-/// realistically wrap (a packed handle with a small generation would alias
-/// under per-frame tree rebuilds, hence the full 8-byte handle).
+/// index 0 is the null handle. The full 8-byte handle keeps the generation
+/// wide so it cannot alias under per-frame tree rebuilds.
 struct WidgetId {
   u32 index = 0;
   u32 generation = 0;
@@ -24,8 +22,7 @@ struct WidgetId {
   bool operator!=(const WidgetId& o) const { return !(*this == o); }
 };
 
-/// Short alias for the widget handle. `wid` is the preferred spelling for
-/// referring to a widget anywhere a raw Widget* used to be stored.
+/// Preferred spelling for a widget handle.
 using wid = WidgetId;
 
 inline constexpr WidgetId kNullWidget{};

@@ -104,26 +104,21 @@ class TextEngine {
   /// Must be called once per frame to upload any new glyphs to the GPU atlas.
   void FlushAtlas();
 
-  /// Get the atlas texture id for rendering. In legacy mode this is the RHI
-  /// atlas handle mapped into the unified TextureId space; in draw-data mode the
-  /// atlas lives host-side (referenced by kFontTextureId in draw commands), so
-  /// this is kNullTextureId.
+  /// Atlas texture id. Legacy mode: RHI atlas handle. Draw-data mode: the
+  /// atlas lives host-side (kFontTextureId in draw commands), so this is
+  /// kNullTextureId.
   TextureId atlas_texture() const {
     return TextureIdFromRhiHandle(atlas_texture_);
   }
 
-  /// Get atlas dimensions
   Vec2 atlas_size() const;
 
-  /// CPU pixels of the glyph atlas, single-channel 8-bit alpha (R8), row-major,
-  /// atlas_size().x * atlas_size().y bytes. For renderer backends that own the
-  /// font texture themselves (the Dear ImGui io.Fonts->GetTexDataAsAlpha8
-  /// analog). Valid for the lifetime of the engine; contents grow as glyphs are
-  /// shaped.
+  /// CPU pixels of the glyph atlas: 8-bit alpha (R8), row-major,
+  /// atlas_size().x * atlas_size().y bytes. For backends that own the font
+  /// texture. Valid for the engine's lifetime; grows as glyphs are shaped.
   const u8* atlas_pixels() const;
 
-  /// Monotonic counter bumped whenever the atlas contents change (a new glyph
-  /// was packed). A backend re-uploads its font texture when this changes.
+  /// Bumped whenever the atlas changes. Backends re-upload when it changes.
   u32 atlas_revision() const;
 
  private:

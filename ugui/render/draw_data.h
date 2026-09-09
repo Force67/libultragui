@@ -25,19 +25,18 @@ struct DrawCmd {
   u32 index_offset = 0;  ///< first index into the relevant index buffer
   u32 elem_count = 0;    ///< number of indices to draw
   bool is_text = false;  ///< text pipeline + glyph buffers vs quad pipeline
-  /// Backdrop blur radius (px) for this batch's quads (frosted glass). 0 = none.
-  /// A backend with a captured, blurred copy of what is behind the UI fills the
-  /// quad with it instead of sampling the command's texture.
+  /// Backdrop blur radius (px) for this batch's quads (frosted glass). A
+  /// backend with a blurred copy of what is behind the UI fills the quad
+  /// with it instead of sampling the command's texture. 0 = none.
   f32 blur = 0.0f;
 };
 
 /// All geometry and commands produced for one UI frame, like ImDrawData.
 ///
-/// ultragui uses two pipelines (an SDF rounded-rect "quad" pipeline and an
-/// alpha-only "text" pipeline) with separate vertex/index buffers, so a
-/// backend uploads both buffers and selects per command via DrawCmd::is_text.
-/// All pointers are owned by the renderer and remain valid until the next
-/// frame is built.
+/// Two pipelines (SDF rounded-rect "quad", alpha-only "text") with separate
+/// vertex/index buffers; a backend uploads both and selects per command via
+/// DrawCmd::is_text. Pointers are owned by the renderer and valid until the
+/// next frame is built.
 struct DrawData {
   const Vertex2D* quad_vertices = nullptr;
   u32 quad_vertex_count = 0;

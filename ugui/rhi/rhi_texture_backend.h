@@ -6,10 +6,10 @@
 
 namespace ugui {
 
-/// TextureBackend that forwards to the bundled device-owning RHI. Used in
-/// legacy mode so subsystems can create textures through the same seam the
-/// draw-data path uses. Maps the RHI's u32 handles into the TextureId space via
-/// the +1 bias (see TextureIdFromRhiHandle).
+/// TextureBackend forwarding to the bundled device-owning RHI, used in legacy
+/// mode so subsystems create textures through the same seam as draw-data mode.
+/// Maps RHI u32 handles into the TextureId space via the +1 bias
+/// (see TextureIdFromRhiHandle).
 class RHITextureBackend : public TextureBackend {
  public:
   explicit RHITextureBackend(RHI* rhi) : rhi_(rhi) {}

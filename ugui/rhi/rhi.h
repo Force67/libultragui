@@ -16,10 +16,8 @@ struct RHIConfig {
   bool validation = true;
   bool vsync = true;
   const char* shader_dir = nullptr;
-  /// Embedded mode: the host owns the frame. The RHI renders into the existing
-  /// (host) surface without clearing it on BeginFrame or presenting on
-  /// EndFrame; the host is responsible for clearing and presenting. Used when
-  /// dropping ultragui on top of an application's own render pipeline.
+  /// Embedded mode: host owns the frame. RHI renders into the host surface
+  /// without clearing on BeginFrame or presenting on EndFrame.
   bool embedded = false;
 };
 
@@ -59,10 +57,8 @@ class RHI {
   void UpdateTexture(RHITextureHandle handle, const void* pixels);
   void DestroyTexture(RHITextureHandle handle);
 
-  /// Acquire the next frame (fence wait, swapchain image, command buffer begin)
-  /// without starting a render pass. Call this before BeginOffscreen() if you
-  /// need offscreen passes before the swapchain pass. If not called explicitly,
-  /// BeginFrame() will call it internally.
+  /// Acquire the next frame (fence wait, image, command buffer begin) without
+  /// starting a render pass. BeginFrame() calls this internally if you don't.
   bool AcquireFrame();
 
   /// Create an offscreen render target that can be drawn into and sampled as a
@@ -81,11 +77,9 @@ class RHI {
   /// layout.
   void EndOffscreen(RHITextureHandle target);
 
-  /// Convert YCbCr planes to RGBA by rendering a fullscreen pass with the video
-  /// shader into an offscreen render target. The target must be a render target
-  /// created with CreateRenderTarget(). y/cb/cr are R8 textures for the three
-  /// planes. Must be called after AcquireFrame(), outside any other render
-  /// pass.
+  /// Convert YCbCr planes to RGBA via the video shader into `target` (from
+  /// CreateRenderTarget()). y/cb/cr are R8 textures. Requires AcquireFrame(),
+  /// outside any other render pass.
   void ConvertVideoFrame(RHITextureHandle target, RHITextureHandle y,
                          RHITextureHandle cb, RHITextureHandle cr);
 

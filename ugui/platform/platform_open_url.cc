@@ -2,10 +2,9 @@
 
 // Optional default implementation of Platform::OpenURL.
 //
-// Compiled when the ULTRAGUI_DEFAULT_OPEN_URL CMake option is ON (the default),
-// so URLs open in the system browser out of the box. Turn the option OFF and
-// link your own ugui::Platform::OpenURL to route URL handling through the host
-// application instead.
+// Compiled when the ULTRAGUI_DEFAULT_OPEN_URL CMake option is ON (default).
+// Turn it OFF and link your own ugui::Platform::OpenURL to route URL handling
+// through the host application.
 
 #if defined(_WIN32)
 #include <windows.h>

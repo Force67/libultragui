@@ -528,11 +528,8 @@ void RenderDrawData(const DrawData& dd, VkCommandBuffer cmd) {
   for (u32 i = 0; i < dd.command_count; ++i) {
     const DrawCmd& c = dd.commands[i];
     if (c.elem_count == 0) continue;
-    // Backdrop-blur fill. Widget::Paint emits this as an opaque white quad for
-    // a backend that owns a blurred copy of what is behind the UI; this backend
-    // has no such copy, so it must skip the command. Drawing it anyway paints a
-    // white slab and every translucent surface above it composites over white
-    // instead of the scene.
+    // Widget::Paint emits backdrop blur as a white quad for backends that hold
+    // a blurred scene copy. This backend has none; skip it.
     if (c.blur != 0.0f) continue;
 
     VkPipeline want = c.is_text ? g.text_pipeline : g.quad_pipeline;

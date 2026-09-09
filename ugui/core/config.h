@@ -1,35 +1,24 @@
 #ifndef ULTRAGUI_CORE_CONFIG_H_
 #define ULTRAGUI_CORE_CONFIG_H_
 
-/// \file config.h
-/// \brief Type customization point for libultragui.
+/// Container type customization point.
 ///
-/// By default, libultragui aliases its container and utility types to their
-/// standard-library equivalents. Middleware integrators (game engines, app
-/// frameworks) can redirect every allocation and type used by the library by
-/// defining \c ULTRAGUI_CUSTOM_CONFIG to a header path **before** any ultragui
-/// include:
+/// By default, container types alias to the STL. To redirect every type used
+/// by the library, define ULTRAGUI_CUSTOM_CONFIG to a header path before any
+/// ultragui include:
 ///
-/// \code
-///   // In your build system (CMake, premake, etc.):
-///   add_definitions(-DULTRAGUI_CUSTOM_CONFIG="my_engine/ugui_config.h")
-/// \endcode
+///   -DULTRAGUI_CUSTOM_CONFIG="my_engine/ugui_config.h"
 ///
-/// Your custom header must provide the following aliases inside
-/// \c namespace ugui:
+/// The header must provide these aliases in namespace ugui:
 ///
-/// \code
-///   namespace ugui {
-///     template <typename T>         using Vector   = ...;
-///     template <typename K, typename V> using HashMap = ...;
-///     template <typename Sig>       using Function = ...;
-///     template <typename T>         using Optional = ...;
-///     using String = ...;
-///   }
-/// \endcode
+///   template <typename T>             using Vector   = ...;
+///   template <typename K, typename V> using HashMap = ...;
+///   template <typename Sig>           using Function = ...;
+///   template <typename T>             using Optional = ...;
+///   using String = ...;
 ///
-/// The custom types must be API-compatible with their STL counterparts
-/// (push_back, emplace_back, operator[], size, find, begin/end, etc.).
+/// Types must be API-compatible with their STL counterparts
+/// (push_back, emplace_back, operator[], find, begin/end, ...).
 
 #ifdef ULTRAGUI_CUSTOM_CONFIG
 #include ULTRAGUI_CUSTOM_CONFIG

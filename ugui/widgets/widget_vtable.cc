@@ -19,9 +19,9 @@ namespace {
 
 WidgetVTable g_table[static_cast<usize>(WidgetKind::kCount)];
 
-// Register the behaviour tables for converted built-in widgets. Listed here
-// (rather than self-registered per file) so a static library keeps the object
-// files: this function references each one, so the linker cannot drop them.
+// Register the behaviour tables for built-in widgets. Listed here rather
+// than self-registered per file: this function references each one, so a
+// static library cannot drop the object files.
 void InstallBuiltins() {
   SetWidgetVTable(WidgetKind::kImage, ImageVTable());
   SetWidgetVTable(WidgetKind::kText, TextVTable());

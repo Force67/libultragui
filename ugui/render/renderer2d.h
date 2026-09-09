@@ -74,39 +74,29 @@ class Renderer2D {
   void PushScissor(Rect rect);
   void PopScissor();
 
-  /// Push a rotation (degrees, clockwise) about `pivot` (display coords) onto the
-  /// transform stack. All geometry emitted until the matching PopTransform() is
-  /// rotated, composing with any outer transform already on the stack (so a
-  /// rotated parent rotates its whole subtree). The rotation is baked into the
-  /// emitted vertex positions, so batching, pipelines and shaders are unchanged;
-  /// the rounded-rect SDF stays correct because it is evaluated in UV/local
-  /// space. Scissor rects are not rotated (clipping stays axis-aligned).
+  /// Push a clockwise rotation (degrees) about `pivot`. Composes with the
+  /// outer transform, so a rotated parent rotates its subtree. Baked into
+  /// vertex positions; shaders unchanged. Scissor rects stay axis-aligned.
   void PushTransform(Vec2 pivot, f32 degrees);
   void PopTransform();
 
-  /// Finalize the current frame's batches and return them as a renderer-API
-  /// agnostic draw list (the ImDrawData analog), instead of submitting via the
-  /// RHI. Call after painting and instead of EndFrame(); a backend
-  /// (see ugui_impl_*) renders the returned data. Pointers stay valid until
-  /// the next BeginFrame(). Does not touch the RHI, so it works without a
-  /// device.
+  /// Finalize batches and return a renderer-agnostic draw list instead of
+  /// submitting via the RHI. Call after painting, instead of EndFrame().
+  /// Valid until the next BeginFrame(). No RHI required.
   const DrawData& GetDrawData();
 
   /// Display (window-coordinate) viewport size, used to seed the default
   /// scissor when no RHI is attached (draw-data / embedded use).
   void set_display_size(Vec2 size) { display_size_ = size; }
 
-  /// Texture sink for cached gradients (and any renderer-owned textures). In
-  /// legacy mode this is the RHI adapter; in draw-data mode the host backend.
-  /// May be null, in which case gradients fall back to flat color.
+  /// Texture sink for cached gradients. Legacy mode: RHI adapter; draw-data
+  /// mode: host backend. Null means gradients fall back to flat color.
   void set_texture_backend(TextureBackend* backend) {
     texture_backend_ = backend;
   }
 
-  /// Set the backdrop-blur radius (px) applied to subsequently emitted quads.
-  /// Carried through to DrawCmd::blur so a backend can render a frosted-glass
-  /// fill (a blurred sample of what is behind the UI). Reset to 0 after the
-  /// blurred quad. Only affects the next plain quads (DrawRect path).
+  /// Backdrop-blur radius (px) for the next plain quads. Reset to 0 after
+  /// the blurred quad.
   void set_next_blur(f32 radius) { next_blur_ = radius; }
 
  private:
@@ -127,12 +117,10 @@ class Renderer2D {
     f32 blur = 0.0f;  // backdrop-blur radius for this batch (0 = none)
   };
 
-  // Each draw command points at a slot in either `batches_` or
-  // `text_batches_`. EndFrame walks `draw_order_` rather than the two
-  // batch vectors directly so quads and text are submitted to the GPU
-  // in the order they were emitted by the widget tree - without this,
-  // text from any earlier widget renders on top of any later widget's
-  // background, breaking modal overlays.
+  // Commands point into batches_ or text_batches_. EndFrame walks
+  // draw_order_ so quads and text reach the GPU in emission order;
+  // otherwise earlier text renders on top of later backgrounds,
+  // breaking modal overlays.
   enum class DrawKind : u8 {
     kQuad,
     kText,
@@ -160,9 +148,8 @@ class Renderer2D {
   TextureId GetMultiStopGradientTexture(const GradientStop* stops, u32 count,
                                         GradientType type, f32 angle_deg);
 
-  // 2D affine transform applied to emitted vertex positions:
+  // 2D affine transform applied to vertex positions:
   //   (x', y') = (a*x + b*y + tx, c*x + d*y + ty)
-  // Identity by default. PushTransform composes a rotation-about-pivot onto it.
   struct Affine2D {
     f32 a = 1, b = 0, c = 0, d = 1, tx = 0, ty = 0;
     bool identity = true;

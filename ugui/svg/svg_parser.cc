@@ -952,8 +952,7 @@ static void parse_gradient_stops(const XmlNode& node, Gradient& grad) {
 
     // Check style attribute for stop-color/stop-opacity
     StyleAttrs sa;
-    parse_style_attr(child.attr("style"), sa);
-    // (style can override attributes but we keep it simple)
+    parse_style_attr(child.attr("style"), sa);  // style wins over attributes
 
     grad.stops.push_back(stop);
   }

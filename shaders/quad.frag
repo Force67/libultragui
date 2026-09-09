@@ -37,12 +37,9 @@ void main() {
         if (frag_softness < 0.0) {
             alpha = smoothstep(-aa, 0.0, d);
         } else if (frag_softness > 0.0) {
-            // Outer shadow: DrawShadow expanded the quad by `soft` so the
-            // falloff has room, so `d` is measured from that expanded edge.
-            // Centre the transition on the original rect edge (d == -soft) so
-            // alpha reaches 0 exactly where the geometry stops. Sharing the
-            // -aa..aa band with plain quads leaves it ~50% opaque there, which
-            // reads as a hard step a full blur radius out from the widget.
+            // DrawShadow expanded the quad by `soft`; centre the alpha
+            // transition on the original rect edge (d == -soft) so alpha
+            // hits 0 where the geometry ends, not a blur radius out.
             alpha = 1.0 - smoothstep(-2.0 * soft, 0.0, d);
         } else {
             alpha = 1.0 - smoothstep(-aa, aa, d);
