@@ -26,25 +26,18 @@ class InputRouter {
   wid hovered_widget() const { return hovered_; }
   wid focused_widget() const { return focused_; }
   wid pressed_widget() const { return pressed_; }
-  /// True between OnDragStart and OnDragEnd. The application can use
-  /// this to defer destructive widget-tree rebuilds while a drag is
-  /// in flight (otherwise the drag target gets destroyed mid-move).
+  /// True between OnDragStart and OnDragEnd. Defer tree rebuilds while
+  /// dragging, or the drag target gets destroyed mid-move.
   bool is_dragging() const { return dragging_; }
 
-  /// Re-run hit-testing at the cached mouse position and update the
-  /// hovered widget + cursor. Call this after replacing the widget
-  /// tree (e.g. via LoadUi) so the hover state survives the rebuild
-  /// - otherwise stationary cursors lose their hover styling until
-  /// the user wiggles the mouse, which appears as flicker on
-  /// FPS/animation-driven dirty rebuilds.
+  /// Re-run hit-testing at the cached mouse position. Call after replacing
+  /// the widget tree so hover survives the rebuild instead of flickering
+  /// off until the next mouse-move.
   void RefreshHover(wid root);
 
   void set_focus(wid widget);
-  /// Set the hovered widget directly. Mirrors set_focus - used by
-  /// applications that destroy + rebuild the widget tree on a dirty
-  /// flag and want hover state to survive without waiting for the
-  /// next mouse-move event. Updates the kHovered widget-state bit on
-  /// both the old and new widgets and updates the cursor.
+  /// Set the hovered widget directly. For apps that rebuild the tree on a
+  /// dirty flag and want hover state to survive without a mouse-move.
   void set_hover(wid widget);
   Vec2 mouse_position() const { return mouse_pos_; }
 
@@ -70,31 +63,27 @@ class InputRouter {
   /// gamepad).
   bool gamepad_nav_active() const { return gamepad_nav_active_; }
 
-  /// Keyboard navigation: the arrow keys move focus between interactive
-  /// widgets, the way the d-pad already does, and Enter/Space activate what is
-  /// focused. On by default; turn it off for a UI that wants the arrow keys for
-  /// something else (a text editor, a game view behind a HUD).
+  /// Keyboard navigation: arrows move focus, Enter/Space activate. On by
+  /// default; disable for UIs that use arrow keys themselves (text editors,
+  /// game views).
   ///
-  /// It also decides how focusable widgets are found. A screen that authors
-  /// `tab-index` gets exactly the ring it asked for, always. A screen that
-  /// authors none gets an implicit ring instead - buttons, checkboxes, sliders,
-  /// dropdowns, and anything styled `cursor: pointer` - so a menu is navigable
-  /// without every widget having to opt in by hand. With this off, only
-  /// explicit `tab-index` is ever focusable.
+  /// Focus ring: widgets with `tab-index` form the ring when present;
+  /// otherwise an implicit ring of interactive widgets (buttons, checkboxes,
+  /// sliders, dropdowns, `cursor: pointer`). Off: only explicit `tab-index`
+  /// is focusable.
   void set_keyboard_navigation(bool enabled) { keyboard_nav_ = enabled; }
   bool keyboard_navigation() const { return keyboard_nav_; }
 
  private:
   Platform* platform_ = nullptr;
 
-  // Persistent widget references are stored as generation-checked handles, not
-  // raw pointers, so a tree rebuild that destroys these widgets leaves the
-  // handles resolving to null instead of dangling.
+  // Handles, not raw pointers: a tree rebuild nulls them instead of
+  // leaving them dangling.
   WidgetId hovered_;
   WidgetId focused_;
   WidgetId pressed_;
-  /// Resolved drag target - usually `pressed_`, but may be a draggable
-  /// ancestor if the press landed on a drag handle (see input.cc).
+  /// Usually `pressed_`; a draggable ancestor if the press landed on a
+  /// drag handle (see input.cc).
   WidgetId drag_target_;
 
   Vec2 mouse_pos_ = Vec2::Zero();

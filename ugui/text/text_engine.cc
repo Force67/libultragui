@@ -72,9 +72,8 @@ struct TextEngine::Impl {
 
   std::unordered_map<GlyphKey, CachedGlyph, GlyphKeyHash> glyph_cache;
 
-  // Per-shape glyph buffers. Each Shape() call gets its own vector.
-  // Moving inner vectors (when the outer vector grows) doesn't move heap data,
-  // so TextRun::glyphs pointers into inner vectors remain valid for the frame.
+  // Per-shape glyph buffers; inner vectors don't move their heap data when
+  // the outer vector grows, so TextRun::glyphs pointers stay valid for a frame.
   Vector<Vector<TextRun::Glyph>> glyph_runs;
   Vector<TextLayout::Line> scratch_lines;
 
@@ -281,8 +280,7 @@ TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
                           f32 line_height_mult) {
   assert(impl_ && font < MAX_FONTS && impl_->fonts[font].in_use);
 
-  // Rasterize glyphs at physical pixel size for sharpness on HiDPI displays.
-  // All returned metrics (bmp_w, bearing, advance, ascent, etc.) are scaled
+  // Rasterize at physical pixel size for HiDPI sharpness; metrics are scaled
   // back to window coordinates so the vertex layout is unchanged.
   f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
   f32 inv_dpi = 1.0f / dpi;
@@ -303,9 +301,8 @@ TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
   hb_glyph_position_t* glyph_pos =
       hb_buffer_get_glyph_positions(buf, &glyph_count);
 
-  // Each Shape() call gets its own glyph vector. The outer vector may
-  // reallocate on push_back, but that only moves the inner vector metadata -
-  // the heap-allocated glyph array stays in place, so pointers remain valid.
+  // Each Shape() call gets its own glyph vector; outer-vector growth moves
+  // only the inner vector metadata, so glyph pointers stay valid.
   impl_->glyph_runs.emplace_back(glyph_count);
   auto& glyphs = impl_->glyph_runs.back();
 

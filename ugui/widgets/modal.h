@@ -8,13 +8,11 @@ namespace ugui {
 
 class UIContext;
 
-/// Data for a modal widget (WidgetKind::kModal): the backdrop overlay entity,
-/// its color, the shown flag and an on_dismiss callback. A modal is a generic
-/// widget entity carrying this component, not a subclass. Its lifecycle
-/// (show/hide the backdrop + content overlays) lives in the free functions
-/// below; the base widget handles paint and measure. Other widgets (e.g. a
-/// message box) can also carry a ModalContent to reuse the modal lifecycle by
-/// composition.
+/// Data for a modal widget (WidgetKind::kModal): backdrop overlay entity,
+/// its color, the shown flag, and on_dismiss. A modal is a generic widget
+/// entity carrying this component, not a subclass; the lifecycle lives in
+/// the free functions below. Other widgets (e.g. a message box) carry a
+/// ModalContent too, reusing the lifecycle by composition.
 struct ModalContent {
   Color backdrop_color = {0.0f, 0.0f, 0.0f, 0.5f};
   wid backdrop;

@@ -84,10 +84,9 @@ struct Style {
   f32 aspect_ratio = 0.0f;   // 0 = none, positive = width/height
 
   // --- Transform ---
-  // Rotation of the widget (and its subtree) about its own centre, in degrees,
-  // clockwise (CSS `transform: rotate()` semantics). 0 = no rotation. Applied at
-  // paint time to the emitted geometry, so rounded corners, borders, gradients
-  // and text all rotate correctly. The scissor/clip rect stays axis-aligned.
+  // Widget rotation about its own centre, degrees clockwise (CSS
+  // `transform: rotate()`). Applied to emitted geometry at paint time;
+  // the scissor rect stays axis-aligned.
   f32 rotation = 0.0f;
 
   // --- Box shadow ---
@@ -133,15 +132,11 @@ struct Style {
            (shadow.blur > 0.0f || shadow.spread > 0.0f);
   }
 
-  /// Scale all pixel-valued visual properties by a factor.
-  /// Used for viewport-responsive scaling. Layout properties (padding, margin,
-  /// gap, dimensions) are NOT scaled here: the layout engine handles those.
-  /// This scales: font_size, letter_spacing, border_width, corner_radius,
-  /// shadow, text_shadow, and backdrop_blur.
+  /// Scale visual pixel properties (font, border, corner radius, shadows,
+  /// blur). Layout properties are scaled by the layout engine instead.
   void Scale(f32 s);
 
-  /// Linearly interpolate between two styles for animation.
-  /// Only interpolates animatable properties (colors, sizes, opacity, etc).
+  /// Interpolate animatable properties (colors, sizes, opacity, ...).
   static Style Lerp(const Style& a, const Style& b, f32 t);
 };
 

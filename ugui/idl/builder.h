@@ -10,11 +10,8 @@ namespace ugui {
 
 class Animator;
 
-/// Component attached to widgets that declare `@media` blocks: the
-/// media-independent base style plus the raw query property maps, so the
-/// builder can re-resolve the overrides whenever the viewport changes
-/// (responsive breakpoints keep working after window resizes, not just at
-/// load time).
+/// Component for widgets declaring `@media` blocks: base style plus raw query
+/// property maps, re-resolved on viewport changes so breakpoints stay live.
 struct MediaStyle {
   struct Query {
     String condition;  // "min-width", "max-width", "min-height", "max-height"
@@ -40,10 +37,8 @@ class UguiBuilder {
     variables_[name] = value;
   }
 
-  /// Register a named font so markup can select it per widget via `font: <name>`
-  /// (e.g. a monospace face for code/IDs alongside the default UI font). The
-  /// handle comes from UIContext::LoadFont. Unknown names in markup are ignored,
-  /// leaving the widget on the context default font.
+  /// Register a named font for the `font: <name>` property. Unknown names
+  /// in markup are ignored.
   void RegisterFont(const String& name, FontHandle handle) { fonts_[name] = handle; }
 
   /// Build a widget tree from a document. Returns the root entity.
@@ -53,20 +48,16 @@ class UguiBuilder {
   /// Returns the root entity (may be the same or new).
   wid Rebuild(const UguiDocument& doc, wid existing_root);
 
-  /// Apply top-level `class <name> { ... }` style classes to an
-  /// already-constructed widget. Used by application code to style
-  /// dynamically-spawned widgets (chat bubbles, list rows, etc.)
-  /// without rebuilding their style in C++. Accepts multiple
-  /// space-separated names applied in order (later classes win).
-  /// Returns true if at least one class was found.
+  /// Apply top-level style classes to an already-built widget (space-separated
+  /// names, later wins). For styling dynamically-spawned widgets without
+  /// rebuilding style in C++. Returns true if any class matched.
   bool ApplyStyleClass(wid widget, const String& class_name) const;
 
   /// Look up a style class by name; returns nullptr if not found.
   const UguiDocument::StyleClass* FindStyleClass(const String& name) const;
 
-  /// Re-evaluate `@media` overrides for every widget in the subtree against
-  /// the current viewport size. UIContext calls this when the window
-  /// resizes so breakpoints apply live.
+  /// Re-evaluate `@media` overrides for a subtree against the current
+  /// viewport. Called on window resize so breakpoints apply live.
   void ReapplyMediaQueries(wid root) const;
 
  private:

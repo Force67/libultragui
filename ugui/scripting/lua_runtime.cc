@@ -703,9 +703,8 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
   }
 
   SetStyle(world, w, s);
-  // Cancel any active CSS transition so the scripted change is visible
-  // immediately. Without this, animation_style_ overrides the base style
-  // and the change appears to not take effect until the transition ends.
+  // Cancel any active transition; otherwise animation_style_ overrides the
+  // base style and the change waits for the transition to end.
   ClearAnimationStyle(world, w);
   return 0;
 }

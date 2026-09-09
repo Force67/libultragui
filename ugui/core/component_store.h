@@ -9,11 +9,9 @@
 
 namespace ugui {
 
-/// Monotonic per-type id for components. Each distinct C gets a stable index
-/// the first time it is used, so a World can look its store up in O(1) by array
-/// slot. Header-only, shared across translation units (the static local lives
-/// in the template instantiation), no RTTI. A host engine that defines its own
-/// component type automatically gets a fresh id the first time it is stored.
+/// Monotonic per-type id for components, assigned on first use so a World can
+/// look up each store in O(1). Header-only, no RTTI; host-defined component
+/// types get a fresh id automatically.
 inline u32 NextComponentTypeId() {
   static u32 counter = 0;
   return counter++;
@@ -32,13 +30,12 @@ class IComponentStore {
   virtual void Remove(WidgetId id) = 0;
 };
 
-/// Sparse-set storage for one component type. Data is kept densely packed for
-/// cache-friendly system iteration; `sparse_` maps an entity index to its dense
-/// slot. Lookups are generation-checked through the WidgetId, so a stale handle
-/// never reads a reused entity's component.
+/// Sparse-set storage for one component type. Dense data for cache-friendly
+/// iteration; `sparse_` maps entity index to dense slot. Lookups are
+/// generation-checked, so a stale handle never reads a reused entity's slot.
 ///
 /// Add/Remove may move elements (swap-and-pop): never hold a C* across a
-/// structural change, resolve again right before use (same rule as handles).
+/// structural change.
 template <class C>
 class ComponentStore : public IComponentStore {
  public:

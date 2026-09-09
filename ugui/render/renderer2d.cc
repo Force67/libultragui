@@ -49,8 +49,7 @@ void Renderer2D::BeginFrame() {
 }
 
 const DrawData& Renderer2D::GetDrawData() {
-  // Finalize pending geometry into batches, exactly as EndFrame() does before
-  // submitting, but expose it instead of issuing RHI draw calls.
+  // Finalize into batches as EndFrame() does, but expose instead of submit.
   FlushBatch();
   FlushTextBatch();
 
@@ -96,10 +95,9 @@ void Renderer2D::EndFrame() {
   FlushBatch();
   FlushTextBatch();
 
-  // Walk submission order so quads and text are interleaved exactly
-  // as the widget tree emitted them. Without this, all text was drawn
-  // after all quads in a global pass - meaning a settings modal would
-  // be covered by text from any panel painted earlier in the tree.
+  // Walk submission order so quads and text interleave exactly as emitted;
+  // otherwise all text draws after all quads and earlier panels' text
+  // covers later modals.
   for (const auto& cmd : draw_order_) {
     if (cmd.kind == DrawKind::kQuad) {
       const auto& batch = batches_[cmd.batch_index];
@@ -469,11 +467,8 @@ void Renderer2D::PopTransform() {
 void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
                           f32 softness, f32 border_width, u32 border_color,
                           TextureId texture) {
-  // If there are pending text indices that haven't been flushed yet,
-  // close them off as their own batch first so the upcoming quad
-  // renders ON TOP of them rather than getting batched with earlier
-  // quads (which would all draw before any text). This is what makes
-  // a settings modal cover panels with text behind it.
+  // Flush any pending text first so the upcoming quad renders on top of
+  // it instead of batching with earlier quads (which draw before text).
   {
     u32 expected_text_end = 0;
     if (!text_batches_.empty()) {
@@ -497,11 +492,9 @@ void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
     current_texture_ = texture;
   }
 
-  // Snap rect edges to physical pixel boundaries for crisp edges on fractional
-  // DPI. Without this, a panel at x=10.3 on 1.65x DPI straddles framebuffer
-  // pixels, causing the SDF anti-aliasing to blur across an extra pixel. Skipped
-  // under an active transform: per-axis rounding would shear a rotated quad, and
-  // the SDF anti-aliasing keeps rotated edges crisp anyway.
+  // Snap rect edges to physical pixels for crisp edges on fractional DPI;
+  // otherwise the SDF anti-aliasing blurs across an extra pixel. Skipped
+  // under an active transform: per-axis rounding would shear a rotated quad.
   f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
   if (dpi != 1.0f && xform_.identity) {
     f32 inv = 1.0f / dpi;
@@ -595,10 +588,8 @@ void Renderer2D::FlushTextBatch() {
 
 void Renderer2D::DrawText(Vec2 pos, const TextRun& run, Color color,
                           TextureId atlas_texture) {
-  // If there are pending quad indices that haven't been flushed yet,
-  // close them off as their own batch first so the upcoming text
-  // renders ON TOP of those quads (and BELOW any later quads). See
-  // the symmetric guard in EmitQuad for the rationale.
+  // Flush any pending quads first so the upcoming text renders on top of
+  // them (and below any later quads). See the symmetric guard in EmitQuad.
   {
     u32 expected_quad_end = 0;
     if (!batches_.empty()) {
@@ -617,10 +608,8 @@ void Renderer2D::DrawText(Vec2 pos, const TextRun& run, Color color,
   f32 cursor_x = pos.x;
   f32 baseline_y = pos.y + run.ascent;
 
-  // Snap glyph positions to physical pixel boundaries to prevent sub-pixel
-  // blur. On fractional DPI (e.g., 1.65x), unsnapped positions straddle
-  // framebuffer pixels, causing the GPU to bilinear-filter the glyph texture ->
-  // fuzz.
+  // Snap glyph positions to physical pixels to prevent sub-pixel blur from
+  // bilinear filtering on fractional DPI.
   f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
   f32 inv_dpi = 1.0f / dpi;
 
@@ -631,10 +620,7 @@ void Renderer2D::DrawText(Vec2 pos, const TextRun& run, Color color,
       continue;
     }
 
-    // Snap glyph position AND size to physical pixel grid.
-    // Position snap prevents sub-pixel blur from bilinear interpolation.
-    // Size snap ensures the glyph quad covers an integer number of physical
-    // pixels.
+    // Snap glyph position and size to the physical pixel grid.
     f32 x = std::round((cursor_x + g.bearing_x + g.x_offset) * dpi) * inv_dpi;
     f32 y = std::round((baseline_y - g.bearing_y + g.y_offset) * dpi) * inv_dpi;
     f32 w = std::round(g.bmp_w * dpi) * inv_dpi;

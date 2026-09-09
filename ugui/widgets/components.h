@@ -9,10 +9,9 @@
 
 namespace ugui {
 
-// Built-in widget components. Behaviour that used to live as members + virtuals
-// on the Widget base is migrating here, so it becomes opt-in per entity instead
-// of a cost every widget pays. Attach with world.Add<T>(id, {...}); a system
-// reads it back. Host engines define their own component structs the same way.
+// Built-in widget components, opt-in per entity: attach with
+// world.Add<T>(id, {...}); a system reads it back. Host engines define their
+// own component structs the same way.
 
 /// Hover help text. The tooltip system shows it after a short delay.
 struct Tooltip {
@@ -44,17 +43,14 @@ struct StateTransitionRule {
 };
 
 /// Per-state style overrides (:hover, :pressed, :selected, ...) and their
-/// transitions. Only widgets that declare state styles carry this, so a plain
-/// panel no longer pays for two empty vectors.
+/// transitions. Carried only by widgets that declare state styles.
 struct StateStyle {
   Vector<StyleOverride> overrides;
   Vector<StateTransitionRule> transitions;
 };
 
-/// Active animated style override written by the animator. Its presence means
-/// the widget is currently showing an animated style; removing the component
-/// reverts to the resolved base/state style. Kept off the base so non-animating
-/// widgets do not each reserve a full Style.
+/// Active animated style override written by the animator. Removing the
+/// component reverts to the resolved base/state style.
 struct AnimStyle {
   Style style;
 };

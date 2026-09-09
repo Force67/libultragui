@@ -6,7 +6,7 @@ Simple GPU-accelerated UI middleware for game engines. Vulkan rendering, flexbox
 
 Most game UI options boil down to: immediate mode (ImGui, good for tools, not so nice for complex logic or pretty custom game UI), embedded browser (Coherent, CEF, heavy), something old like scaleform widgets, or whatever your engine of choice ships.
 
-libultragui is middleware, so it sits in the gap. Widgets are Retained-mode, with CSS-like styling, flexbox layout andproper text shaping, all rendering through your GPU. 
+libultragui is middleware, so it sits in the gap. Widgets are Retained-mode, with CSS-like styling, flexbox layout and proper text shaping, all rendering through your GPU.
 Link it, hand it a window, call `Update()` once per frame.
 
 ## Authoring UI
@@ -56,7 +56,7 @@ panel hud {
 }
 ```
 
-Interaction are done in Lua. Click `btn_inventory`, the runtime calls `on_btn_inventory`:
+Interaction is done in Lua. Click `btn_inventory`, the runtime calls `on_btn_inventory`:
 
 ```lua
 function on_btn_inventory(widget)

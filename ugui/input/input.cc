@@ -24,17 +24,9 @@ static void SetHoverBit(World& world, wid w, bool on) {
 }
 
 // Collect the focus ring: every tab-indexed widget under root, in tab order.
-// A hidden or collapsed subtree is skipped whole, exactly as painting skips it
-// (see PaintWidgetTreeImpl). Without that, an offscreen screen's rows stay in
-// the ring, so Tab and the d-pad land on widgets nobody can see: no focus
-// outline is drawn and the activation goes to a widget the routers refuse.
-// Would this widget be focusable even though nobody wrote a tab-index on it?
-//
-// Requiring an explicit index means a screen is navigable only if its author
-// remembered to number every row, and one that forgot is silently dead to the
-// keyboard and the d-pad. The implicit answer is the same one a mouse uses:
-// the kinds that exist to be operated, plus anything the style already declares
-// clickable with `cursor: pointer`.
+// Hidden or collapsed subtrees are skipped whole, as painting skips them.
+// Without an authored tab-index, a widget is focusable when it is an
+// interactive kind (buttons, sliders, inputs, ...) or styled `cursor: pointer`.
 static bool IsImplicitlyFocusable(WidgetRegistry& world, wid w, const Style& s) {
   switch (world.Get<WidgetNode>(w)->kind) {
     case WidgetKind::kButton:
@@ -51,9 +43,9 @@ static bool IsImplicitlyFocusable(WidgetRegistry& world, wid w, const Style& s) 
   return s.cursor == Cursor::kPointer;
 }
 
-// Gather the focus ring under `w`, skipping anything hidden or collapsed (see
-// the note above). `implicit` widens the ring from the authored tab-indices to
-// everything that looks interactive; the caller uses it as a fallback.
+// Gather the focus ring under `w`, skipping anything hidden or collapsed.
+// `implicit` widens the ring from authored tab-indices to anything that
+// looks interactive; the caller uses it as a fallback.
 static void CollectFocusable(WidgetRegistry& world, wid w, Vector<wid>& out,
                              bool implicit = false) {
   Style s = ComputedStyle(world, w);
@@ -67,14 +59,10 @@ static void CollectFocusable(WidgetRegistry& world, wid w, Vector<wid>& out,
     CollectFocusable(world, child, out, implicit);
 }
 
-// The ring to navigate: what the screen authored, or -- when it authored
-// nothing -- what looks interactive.
-//
-// Deciding per collection rather than per document is what makes this work for
-// a host that concatenates every screen into one tree (recreation does): the
-// collapsed screens are pruned above, so "did anyone author a tab-index" is
-// asked only of the screen actually on display. A hand-numbered pause menu
-// keeps its exact ring while the wizard beside it gets an implicit one.
+// The ring to navigate: authored tab-indices, or when there are none, the
+// implicitly focusable widgets. Decided per collection, not per document, so
+// a host that concatenates every screen into one tree only asks the screen
+// actually on display (collapsed screens are pruned above).
 static void CollectFocusRing(WidgetRegistry& world, wid root, Vector<wid>& out,
                              bool allow_implicit) {
   CollectFocusable(world, root, out);
@@ -93,10 +81,9 @@ static void SortFocusable(WidgetRegistry& world, Vector<wid>& ring) {
   });
 }
 
-// Is the widget itself, or anything it hangs under, hidden or collapsed?
-// Focus survives across a screen change, so the widget that held it can be
-// painted away while still focused; activating it then fires a click nobody
-// aimed at.
+// Is the widget, or anything under its ancestors, hidden or collapsed?
+// Focus survives a screen change, so a focused widget can be painted away;
+// activating it would fire a click nobody aimed at.
 static bool IsWidgetVisible(WidgetRegistry& world, wid w) {
   for (; w.valid(); w = world.Get<Hierarchy>(w)->parent) {
     Style s = ComputedStyle(world, w);
@@ -116,13 +103,10 @@ static void CollectAncestorChain(World& world, wid w, std::vector<wid>& out) {
   }
 }
 
-// Move the :hover state from the previously-hovered leaf's ancestor chain to the
-// newly-hovered leaf's chain. HitTest only ever returns the deepest widget under
-// the cursor, but CSS hover semantics expect every ancestor of that widget to be
-// "hovered" too (so `:hover` on a row/column lights up when the cursor is over
-// any of its children). Widgets common to both chains are left untouched, so a
-// container's hover transition fires once on enter, not every time the cursor
-// crosses an internal child boundary.
+// Move the :hover state between the old and new leaf's ancestor chains.
+// HitTest returns the deepest widget only, but CSS hover semantics light up
+// every ancestor too. Common ancestors are left untouched so a container's
+// hover transition fires once on enter, not per internal child boundary.
 static void UpdateHoverChain(World& world, wid old_leaf, wid new_leaf) {
   if (old_leaf == new_leaf) return;
   std::vector<wid> old_chain, new_chain;
@@ -577,11 +561,9 @@ static Vec2 FocusCentre(WidgetRegistry& world, wid w) {
 // The widget to move to from `from` heading (dir_x, dir_y), or an invalid
 // handle when there is nothing that way.
 //
-// Geometry, not document order. The old behaviour walked the tab ring for every
-// direction, so on any grid Left and Up did the same thing and Right and Down
-// did the other -- which is fine for a single column and nonsense for the tile
-// grid on a front screen. Candidates must lie genuinely in the direction asked
-// for; among those, the nearest wins, with sideways drift penalised so a
+// Geometry, not document order: walking the tab ring for every direction
+// makes Left/Up behave identically on grids. Candidates must lie in the
+// direction asked for; nearest wins, with sideways drift penalized so a
 // straight-ahead neighbour beats a closer diagonal one.
 static wid NearestInDirection(WidgetRegistry& world, const Vector<wid>& ring,
                               wid from, i8 dir_x, i8 dir_y) {

@@ -7,10 +7,9 @@
 namespace ugui {
 
 /// Host-providable GPU texture sink, the Dear ImGui style middleware seam.
-/// ultragui never owns a graphics device; whoever does (the bundled RHI in
-/// legacy mode, or the application's own renderer in draw-data mode) implements
-/// this so SVG, Image, Lottie, and vector-animation textures flow through one
-/// opaque TextureId space regardless of which path is active.
+/// Whoever owns the graphics device (bundled RHI in legacy mode, the
+/// application's renderer in draw-data mode) implements this so SVG, Image,
+/// Lottie, and animation textures flow through one TextureId space.
 ///
 /// TextureId conventions (see draw_data.h): 0 = none/white, ~0 = font atlas,
 /// anything else = a real texture meaningful to the backend that minted it.

@@ -5,19 +5,17 @@
 
 namespace ugui {
 
-/// miniaudio-backed AudioBackend, the bundled audio backend. Wire it in the
-/// same way as the renderer backends (ugui_impl_vulkan / ugui_impl_opengl3):
-/// compile ugui/backends/ugui_impl_miniaudio.cc into your application, then
-/// hand an instance to the context before Init():
+/// miniaudio-backed AudioBackend, the bundled audio backend. Compile
+/// ugui/backends/ugui_impl_miniaudio.cc into your application and hand an
+/// instance to the context before Init():
 ///
 ///   ugui::AudioEngine audio;
 ///   ui.set_audio(&audio);   // before ui.Init(); UIContext init/shuts it down
 ///   ui.Init(cfg);
 ///
-/// (Standalone use without UIContext also works: Init(); Play(...);
-/// Shutdown().) Supports WAV, MP3, and FLAC out of the box (decoded by
-/// miniaudio). Without a wired backend the context uses a silent no-op (see
-/// NullAudioBackend).
+/// Standalone use also works (Init(); Play(...); Shutdown()). Supports WAV,
+/// MP3, and FLAC. Without a wired backend the context uses a silent no-op
+/// (see NullAudioBackend).
 class AudioEngine final : public AudioBackend {
  public:
   AudioEngine();

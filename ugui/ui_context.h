@@ -45,33 +45,24 @@ struct UIConfig {
   Color clear_color = Color::FromHex(0x0f0f1a);
   const char* shader_dir = nullptr;  // Falls back to ULTRAGUI_SHADER_DIR
 
-  /// Viewport scaling mode. When set to anything other than kNone, all pixel
-  /// sizes (font-size, border, corner-radius, shadow, padding, margin, gap,
-  /// and fixed-px dimensions) scale proportionally as the window is resized.
-  /// The design_width/design_height define the reference resolution at which
-  /// the scale factor is 1.0. Behaves like CSS rem-based responsive design.
+  /// Pixel sizes (font, border, padding, ...) scale by viewport_size /
+  /// design_size. kNone disables scaling.
   ViewportScaleMode scale_mode = ViewportScaleMode::kNone;
   f32 design_width = 1280.0f;
   f32 design_height = 720.0f;
 
-  /// Embedding: attach to a host-created window (GLFWwindow*) instead of
-  /// creating one, and run the RHI in embedded mode (host clears and presents).
-  /// Set both to drop ultragui on top of an application's own render pipeline.
-  /// See examples/embed_gl for a worked example. (OpenGL backend.)
+  /// Attach to a host-created window (GLFWwindow*) instead of creating one.
+  /// With embedded=true the host clears and presents. See examples/embed_gl.
   void* external_window = nullptr;
   bool embedded = false;
 
-  /// Draw-data mode (Dear ImGui style): ultragui creates NO graphics device.
-  /// Each frame, call RenderDrawData() to get a renderer-agnostic draw list
-  /// that your own backend renders (see ugui_impl_vulkan.h / examples/
-  /// embed_vulkan). Requires external_window for input/timing. The host owns
-  /// the GPU entirely and uploads the glyph atlas (TextEngine::atlas_pixels()).
+  /// No graphics device; RenderDrawData() returns a draw list for the host's
+  /// backend (see ugui_impl_vulkan.h). Requires external_window. Host owns the
+  /// GPU and uploads the glyph atlas (TextEngine::atlas_pixels()).
   bool draw_data = false;
 };
 
-/// High-level framework context. Ties together all subsystems
-/// (platform, GPU, renderer, text, layout, input, animation, scripting)
-/// into a single easy-to-use API.
+/// Owns all subsystems and drives one frame of the UI.
 ///
 /// Usage:
 ///   UIContext ui;
@@ -119,32 +110,18 @@ class UIContext {
   /// Returns true while the window is open.
   bool Running() const;
 
-  /// Drain the OS input queue and dispatch click / hover / drag /
-  /// keyboard events through the widget tree. Idempotent within a
-  /// frame: a flag prevents double-processing if Update() is called
-  /// later in the same frame, and Update() will auto-call PumpInput
-  /// if the application hasn't already.
-  ///
-  /// Why expose this separately? Applications that rebuild their
-  /// widget tree on a dirty flag (like the xeed editor) want click
-  /// handlers to fire BEFORE the rebuild check, so the rebuild can
-  /// happen in the same frame as the click. Calling PumpInput at the
-  /// start of the application's render function and Update later
-  /// gives same-frame click->rebuild->render latency. Otherwise the
-  /// click handler runs inside Update, sets the dirty flag too late,
-  /// and the rebuild only happens on the NEXT frame.
+  /// Dispatch input events through the widget tree. Safe to call before
+  /// Update() in the same frame: handlers then run before Update, so a
+  /// dirty-flag rebuild triggered by a click renders in the same frame.
   void PumpInput();
 
   /// Run one frame: poll input (if not already pumped), update
   /// animations, compute layout, paint.
   void Update();
 
-  /// Draw-data mode only (UIConfig::draw_data): poll input, update, compute
-  /// layout, and paint into a renderer-agnostic draw list, returning it WITHOUT
-  /// touching any GPU. Your backend (e.g. ugui_impl_vulkan) renders the result
-  /// into your own command buffer. The returned reference is valid until the
-  /// next RenderDrawData() call. Upload the glyph atlas from text_engine()
-  /// when its atlas_revision() changes.
+  /// Draw-data mode only: full frame into a renderer-agnostic draw list, no
+  /// GPU work. Valid until the next call. Upload the glyph atlas when
+  /// text_engine().atlas_revision() changes.
   const DrawData& RenderDrawData();
 
   /// Clean up all subsystems.
@@ -178,45 +155,33 @@ class UIContext {
   /// Set the swapchain clear color (background).
   void set_clear_color(Color color) { config_.clear_color = color; }
 
-  /// Drive the scale factor directly instead of deriving it from scale_mode.
-  /// Every pixel size (font-size, border, corner-radius, shadow, padding,
-  /// margin, gap, fixed-px dimensions) is multiplied by it, exactly as under
-  /// scale_mode. Pass 0 to go back to scale_mode.
-  ///
-  /// This is what a host on a high pixel density display needs: there the
-  /// viewport is in pixels while the desktop lays the window out in larger
-  /// units, and the ratio between them is the scale, so the UI keeps its
-  /// physical size while every glyph is rasterized at the full pixel count.
-  /// scale_mode cannot express that, since it ties the scale to the viewport
-  /// size and so would rescale the UI on every window resize.
+  /// Override the scale factor applied to all pixel sizes. 0 returns to
+  /// scale_mode. Use on high-DPI hosts, where scale_mode would rescale on
+  /// every resize; the viewport/desktop unit ratio is constant there.
   void set_ui_scale(f32 scale) { ui_scale_override_ = scale; }
   f32 ui_scale() const { return widget_ctx_.ui_scale; }
 
-  /// Find a widget by name (O(1) cached lookup). Returns a stable handle;
-  /// resolve it via widgets().Get(id) right before use. Prefer this over a raw
-  /// pointer so a stale reference safely becomes null after a tree rebuild.
+  /// Find a widget by name (cached, O(1)). Handles stay valid across tree
+  /// rebuilds; resolve via widgets().Get(id) right before use.
   WidgetId FindWidget(const char* name) const;
 
-  /// The entity-and-component world. widgets().Get<C>(e) resolves a component
-  /// on entity e (or nullptr); widgets().Alive(e) checks liveness.
+  /// Entity registry. Get<C>(e) resolves a component (or nullptr);
+  /// Alive(e) checks liveness.
   WidgetRegistry& widgets() { return widget_registry_; }
 
-  /// The entity-and-component world (same object as widgets()). Attach custom
-  /// components to any widget: ui.world().Add<MyComponent>(id, {...}).
+  /// Same registry as widgets(). Attach custom components:
+  /// ui.world().Add<MyComponent>(id, {...}).
   World& world() { return widget_registry_; }
 
   /// Invalidate the widget name cache (call after dynamically adding children).
   void InvalidateWidgetCache() { widget_cache_dirty_ = true; }
 
-  /// The active texture sink. Subsystems (SVG, Image, gradients, anim) upload
-  /// through this. Legacy mode wires the bundled RHI; in draw-data mode the host
-  /// must provide one via set_texture_backend() before loading textured assets.
+  /// Texture sink used by SVG, Image, gradients, animations. Null in draw-data
+  /// mode until the host sets one.
   TextureBackend* texture_backend() { return texture_backend_; }
 
-  /// Draw-data mode: register the host's renderer backend (e.g.
-  /// ugui::vk::texture_backend()) so LoadSvg/LoadUi/gradients can create
-  /// textures the host can bind. Call after the backend's Init() and before any
-  /// LoadSvg/LoadAnim/LoadLottie. No effect on the font atlas (host-owned).
+  /// Draw-data mode: register the host's texture backend before loading any
+  /// textured assets. No effect on the font atlas (host-owned).
   void set_texture_backend(TextureBackend* backend);
 
   /// Load an SVG file and create a GPU texture through the active backend.

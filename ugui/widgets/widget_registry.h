@@ -10,11 +10,10 @@
 
 namespace ugui {
 
-/// The entity-and-component world: a generation-checked slot map of widget
-/// entities plus their component stores. An entity (WidgetId / wid) owns no
-/// object; its data lives in components. New() allocates an entity with the
-/// core widget components; Release() frees it (dropping all its components and
-/// bumping the generation so stale handles resolve to dead).
+/// Entity-and-component world: generation-checked slot map of widget entities
+/// plus component stores. An entity (wid) owns no object; data lives in
+/// components. Release() drops components and bumps the generation so stale
+/// handles resolve to dead.
 class WidgetRegistry {
  public:
   /// Allocate a new widget entity with the core components (WidgetNode,
@@ -27,12 +26,10 @@ class WidgetRegistry {
   /// Free an entity: drop its components and bump the generation.
   void Release(WidgetId id);
 
-  // --- Components (composition-lite ECS) ---------------------------------
+  // --- Components ---
   // An entity can carry any set of component structs. Host engines attach
-  // their own types the same way, no core changes needed:
-  //   world.Add<MyComponent>(id, {...});
-  //   if (auto* c = world.Get<MyComponent>(id)) ...
-  // Components are dropped automatically when the entity is released.
+  // their own types the same way; components drop when the entity is
+  // released.
 
   /// The store for component type C, created on first use.
   template <class C>

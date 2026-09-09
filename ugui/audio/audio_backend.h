@@ -10,13 +10,11 @@ static constexpr SoundHandle kInvalidSound = 0;
 
 /// Abstract audio backend interface.
 ///
-/// `UIContext` talks to audio exclusively through this interface. Like the
-/// renderer backends, the implementation is wired in by the application, not
-/// baked into the library: compile a backend .cc into your app and hand an
-/// instance to `UIContext::set_audio()` before `Init()` (the host owns its
-/// lifetime). The bundled implementation is the miniaudio `AudioEngine` in
-/// ugui/backends/ugui_impl_miniaudio. Until one is wired, audio is a silent
-/// no-op (see NullAudioBackend).
+/// The implementation is wired in by the application: compile a backend .cc
+/// into your app and pass it to UIContext::set_audio() before Init() (the
+/// host owns its lifetime). Bundled: miniaudio AudioEngine in
+/// ugui/backends/ugui_impl_miniaudio. Until then, a silent no-op
+/// (NullAudioBackend) is active.
 class AudioBackend {
  public:
   AudioBackend() = default;
@@ -52,9 +50,7 @@ class AudioBackend {
 };
 
 /// No-op audio backend. The default until a real backend is wired via
-/// UIContext::set_audio(), so audio calls are silent rather than crashing.
-/// Compile a backend (e.g. ugui/backends/ugui_impl_miniaudio.cc) into your app
-/// and wire it in to get sound.
+/// UIContext::set_audio().
 class NullAudioBackend final : public AudioBackend {
  public:
   bool Init() override { return true; }

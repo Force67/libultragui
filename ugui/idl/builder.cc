@@ -183,11 +183,8 @@ static constexpr std::pair<std::string_view, WidgetState> kWidgetStateTable[] =
         {"focus", WidgetState::kFocused},
         {"disabled", WidgetState::kDisabled},
         {"checked", WidgetState::kChecked},
-        // `:selected` and `:active` are application-driven states for
-        // marking a widget as the currently-active/highlighted entry in a
-        // sidebar / list / nav bar. Toggled via Widget::set_selected()
-        // (or set_widget_state) from C++. Distinct from `:pressed` which
-        // means "user is currently mouse-pressing".
+        // `:selected`/`:active`: app-driven highlight state, toggled from
+        // C++ via Widget::set_selected(). Distinct from `:pressed`.
         {"selected", WidgetState::kSelected},
         {"active", WidgetState::kSelected},
 };
@@ -562,11 +559,9 @@ String UguiBuilder::ResolveValue(const String& value) const {
 // Component expansion
 // ---------------------------------------------------------------------------
 
-// Replaces `$prop` references in a property value. A reference is `$`
-// followed by the longest run of [A-Za-z0-9_-]; if that exact name is not
-// a known prop, trailing `-segment`s are trimmed until one matches (so
-// `$accent-hover` resolves `$accent` when only `accent` is declared).
-// Unresolved references are left verbatim.
+// Replaces `$prop` references in a property value: `$` + longest run of
+// [A-Za-z0-9_-]. Unknown names fall back to trimmed `-segment` prefixes
+// (`$accent-hover` -> `$accent`); unresolved references stay verbatim.
 static String SubstituteProps(const String& value,
                               const HashMap<String, String>& props) {
   if (value.find('$') == String::npos) return value;
@@ -1017,11 +1012,7 @@ wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
 
 void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
   WidgetRegistry& world = *WidgetRegistry::Active();
-  // Apply a top-level style class first if the element opted in via
-  // `class: name;`. The class is the BASE; inline properties below
-  // win over class properties. State blocks from the class are
-  // appended to the widget's state-override list and run alongside
-  // any inline state blocks the element declares.
+  // Style class from `class: name;` first; inline properties below win.
   auto class_it = node.properties.find("class");
   if (class_it != node.properties.end()) {
     ApplyStyleClass(widget, class_it->second);
@@ -1108,10 +1099,8 @@ void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
       AddStateTransition(world, widget, state, trans);
   }
 
-  // Media query overrides: stash the media-independent base style plus the
-  // query list on the widget, then apply whatever matches the current
-  // viewport. Keeping the raw queries lets ReapplyMediaQueries re-resolve
-  // them on window resize instead of baking the load-time viewport in.
+  // Stash the base style plus raw queries so ReapplyMediaQueries can
+  // re-resolve them on resize.
   if (!node.media_queries.empty()) {
     MediaStyle ms;
     ms.base = world.Get<StyleC>(widget)->style;
