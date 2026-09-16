@@ -178,6 +178,15 @@ FontHandle UIContext::LoadFont(const char* path) {
   return font;
 }
 
+FontHandle UIContext::LoadFontMemory(const char* data, usize length) {
+  FontHandle font = text_engine_.LoadFontMemory(data, length);
+  if (font == kInvalidFont) {
+    std::fprintf(stderr, "ultragui: failed to load font from %zu bytes\n",
+                 static_cast<size_t>(length));
+  }
+  return font;
+}
+
 void UIContext::set_default_font(FontHandle font) {
   default_font_ = font;
   widget_ctx_.default_font = font;

@@ -49,6 +49,10 @@ struct FontSlot {
   FT_Face ft_face = nullptr;
   hb_font_t* hb_font = nullptr;
   bool in_use = false;
+  // Only set for a font loaded from memory. FreeType reads the buffer for the
+  // life of the face instead of copying it, so the slot has to hold it; a
+  // caller's buffer is free to go away the moment LoadFontMemory returns.
+  std::vector<unsigned char> data;
 };
 
 struct FontInfo {
@@ -125,7 +129,12 @@ void TextEngine::Shutdown() {
 // Font loading
 // ---------------------------------------------------------------------------
 
-FontHandle TextEngine::LoadFont(const char* path) {
+// Takes a free slot, opens the face FreeType's way (a path or a buffer, which
+// is the only difference between the two entry points below) and fills in the
+// slot's shaping handle and family metadata. `origin` names the source in the
+// log lines, where a path used to be the only thing there could be.
+FontHandle TextEngine::OpenFace(const char* path, const char* data,
+                                usize length, const char* origin) {
   FontHandle handle = kInvalidFont;
   for (u32 i = 0; i < MAX_FONTS; ++i) {
     if (!impl_->fonts[i].in_use) {
@@ -136,8 +145,26 @@ FontHandle TextEngine::LoadFont(const char* path) {
   if (handle == kInvalidFont) return kInvalidFont;
 
   auto& slot = impl_->fonts[handle];
-  if (FT_New_Face(impl_->ft_library, path, 0, &slot.ft_face) != 0) {
-    std::fprintf(stderr, "ultragui: failed to load font '%s'\n", path);
+
+  FT_Open_Args args{};
+  if (path) {
+    args.flags = FT_OPEN_PATHNAME;
+    args.pathname = const_cast<char*>(path);
+  } else {
+    // Copied before the face is opened, not after: FT_Open_Face starts reading
+    // through the pointer immediately, and it must stay the slot's own buffer.
+    slot.data.assign(reinterpret_cast<const unsigned char*>(data),
+                     reinterpret_cast<const unsigned char*>(data) + length);
+    args.flags = FT_OPEN_MEMORY;
+    args.memory_base = slot.data.data();
+    args.memory_size = static_cast<FT_Long>(slot.data.size());
+  }
+
+  if (FT_Open_Face(impl_->ft_library, &args, 0, &slot.ft_face) != 0) {
+    std::fprintf(stderr, "ultragui: failed to load font '%s'\n", origin);
+    slot.data.clear();
+    slot.data.shrink_to_fit();
+    slot.ft_face = nullptr;
     return kInvalidFont;
   }
 
@@ -150,17 +177,36 @@ FontHandle TextEngine::LoadFont(const char* path) {
   info.weight = FontWeight::kRegular;
   info.style = FontStyle::kNormal;
 
-  std::printf("ultragui: loaded font '%s' (%s)\n", path,
+  std::printf("ultragui: loaded font '%s' (%s)\n", origin,
               slot.ft_face->family_name);
   return handle;
 }
 
+FontHandle TextEngine::LoadFont(const char* path) {
+  if (!path || !*path) return kInvalidFont;
+  return OpenFace(path, nullptr, 0, path);
+}
+
+FontHandle TextEngine::LoadFontMemory(const char* data, usize length) {
+  if (!data || length == 0) return kInvalidFont;
+  return OpenFace(nullptr, data, length, "<memory>");
+}
+
 FontHandle TextEngine::LoadFont(const char* path, FontWeight weight,
                                 FontStyle style) {
-  FontHandle handle = LoadFont(path);
-  if (handle == kInvalidFont) return kInvalidFont;
+  return SetFontStyle(LoadFont(path), weight, style);
+}
 
-  // Override with caller-supplied weight and style
+FontHandle TextEngine::LoadFontMemory(const char* data, usize length,
+                                      FontWeight weight, FontStyle style) {
+  return SetFontStyle(LoadFontMemory(data, length), weight, style);
+}
+
+// Overrides the weight and style FreeType reported with what the caller says
+// the face is, for the family matching ResolveFont does.
+FontHandle TextEngine::SetFontStyle(FontHandle handle, FontWeight weight,
+                                    FontStyle style) {
+  if (handle == kInvalidFont) return kInvalidFont;
   auto& info = impl_->font_info_[handle];
   info.weight = weight;
   info.style = style;

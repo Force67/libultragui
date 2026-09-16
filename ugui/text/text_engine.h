@@ -80,8 +80,17 @@ class TextEngine {
   /// Load a font from a file path. Returns a handle for use with shape/draw.
   FontHandle LoadFont(const char* path);
 
+  /// Load a font from a memory buffer, for a face that lives in an archive or
+  /// is embedded in the binary and has no path of its own. The engine keeps its
+  /// own copy of the bytes, so the caller's buffer can go away immediately.
+  FontHandle LoadFontMemory(const char* data, usize length);
+
   /// Load a font with explicit weight and style metadata.
   FontHandle LoadFont(const char* path, FontWeight weight, FontStyle style);
+
+  /// Load a font from memory with explicit weight and style metadata.
+  FontHandle LoadFontMemory(const char* data, usize length, FontWeight weight,
+                            FontStyle style);
 
   /// Resolve the best font handle for the given weight and style.
   /// Falls back to the closest available weight in the same family.
@@ -122,6 +131,14 @@ class TextEngine {
   u32 atlas_revision() const;
 
  private:
+  /// Shared body of the four loaders: `path` opens a file, `data`/`length` a
+  /// buffer, and exactly one of the two is set. `origin` is what the log lines
+  /// call the font.
+  FontHandle OpenFace(const char* path, const char* data, usize length,
+                      const char* origin);
+  /// Stamps caller-supplied weight/style onto an already loaded font.
+  FontHandle SetFontStyle(FontHandle handle, FontWeight weight, FontStyle style);
+
   struct Impl;
   Impl* impl_ = nullptr;
   RHI* rhi_ = nullptr;

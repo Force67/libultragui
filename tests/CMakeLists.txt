@@ -21,6 +21,11 @@ if(ULTRAGUI_LOTTIE)
     add_test(NAME lottie COMMAND test_lottie)
 endif()
 
+# Font loading from memory (no GPU required)
+add_executable(test_font_memory test_font_memory.cc)
+target_link_libraries(test_font_memory ultragui)
+add_test(NAME font_memory COMMAND test_font_memory)
+
 # Runtime safety regression tests
 add_executable(test_runtime_safety test_runtime_safety.cc)
 target_link_libraries(test_runtime_safety ultragui)
