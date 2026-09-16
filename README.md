@@ -79,6 +79,8 @@ config.shader_dir = ULTRAGUI_SHADER_DIR;
 ugui::UIContext ui;
 ui.Init(config);
 ui.LoadFont("assets/ui/font.ttf");
+// Or, for a font that lives in an archive or in the binary rather than on
+// disk: ui.LoadFontMemory(bytes, length), which copies what it is given.
 ui.set_default_font(font);
 ui.LoadUi("assets/ui/hud.ugui");
 ui.LoadScript("assets/ui/hud.lua");

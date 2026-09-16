@@ -83,6 +83,11 @@ class UIContext {
   /// Load a TTF/OTF font. Returns a handle, or kInvalidFont on failure.
   FontHandle LoadFont(const char* path);
 
+  /// Load a font from bytes rather than a path, for fonts that ship inside an
+  /// archive or the binary. UIContext copies them; the caller's buffer is its
+  /// own again on return.
+  FontHandle LoadFontMemory(const char* data, usize length);
+
   /// Set the default font used by the builder for text/button widgets.
   void set_default_font(FontHandle font);
 
