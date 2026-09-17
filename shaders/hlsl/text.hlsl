@@ -1,6 +1,9 @@
-// ultragui text shader: D3D12 HLSL port of text.vert + text.frag
-// Compile: dxc -T vs_6_0 -E VSMain -Fo text_vs.cso text.hlsl
-//          dxc -T ps_6_0 -E PSMain -Fo text_ps.cso text.hlsl
+// ultragui text shader: HLSL port of text.vert + text.frag. Both D3D backends
+// share it. D3D12 compiles it to DXIL at build time:
+//   dxc -T vs_6_0 -E VSMain -Fo text_vs.cso text.hlsl
+//   dxc -T ps_6_0 -E PSMain -Fo text_ps.cso text.hlsl
+// D3D11 needs DXBC instead, so it compiles this text at startup from the copy
+// CMake embeds into ugui_hlsl_embedded.h. Keep this file the only source.
 
 cbuffer PushConstants : register(b0) {
     float2 scale;

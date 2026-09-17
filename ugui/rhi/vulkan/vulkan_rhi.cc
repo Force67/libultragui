@@ -776,14 +776,35 @@ void RHI::Impl::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
   vkBindBufferMemory(device_, buffer, memory, 0);
 }
 
+// A buffer that outgrew itself part-way through a frame cannot be destroyed on
+// the spot: the open command buffer still binds it, and the draws already
+// recorded read their vertices out of it. Park it until the fence for this
+// frame signals.
+void RHI::Impl::retire_buffer(VkBuffer buffer, VkDeviceMemory memory) {
+  if (buffer == VK_NULL_HANDLE) return;
+  auto& f = frames_[current_frame_];
+  f.retired_buffers.push_back(buffer);
+  f.retired_memory.push_back(memory);
+}
+
+void RHI::Impl::free_retired_buffers(u32 frame) {
+  auto& f = frames_[frame];
+  for (auto buffer : f.retired_buffers)
+    vkDestroyBuffer(device_, buffer, nullptr);
+  for (auto memory : f.retired_memory) vkFreeMemory(device_, memory, nullptr);
+  f.retired_buffers.clear();
+  f.retired_memory.clear();
+}
+
 void RHI::Impl::ensure_vertex_capacity(u32 vertex_count) {
   auto& f = frames_[current_frame_];
   if (f.vertex_capacity >= vertex_count) return;
 
-  if (f.vertex_buffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(device_, f.vertex_buffer, nullptr);
-    vkFreeMemory(device_, f.vertex_memory, nullptr);
-  }
+  retire_buffer(f.vertex_buffer, f.vertex_memory);
+  // The cached offset refers to the retired buffer, so the next draw has to
+  // upload again rather than point into the new one.
+  last_quad_verts_ = nullptr;
+  last_quad_vert_count_ = 0;
 
   u32 new_cap = std::max(vertex_count, f.vertex_capacity * 2);
   new_cap = std::max(new_cap, 16384u);
@@ -798,10 +819,7 @@ void RHI::Impl::ensure_index_capacity(u32 index_count) {
   auto& f = frames_[current_frame_];
   if (f.index_capacity >= index_count) return;
 
-  if (f.index_buffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(device_, f.index_buffer, nullptr);
-    vkFreeMemory(device_, f.index_memory, nullptr);
-  }
+  retire_buffer(f.index_buffer, f.index_memory);
 
   u32 new_cap = std::max(index_count, f.index_capacity * 2);
   new_cap = std::max(new_cap, 32768u);
@@ -816,10 +834,9 @@ void RHI::Impl::ensure_text_vertex_capacity(u32 vertex_count) {
   auto& f = frames_[current_frame_];
   if (f.text_vertex_capacity >= vertex_count) return;
 
-  if (f.text_vertex_buffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(device_, f.text_vertex_buffer, nullptr);
-    vkFreeMemory(device_, f.text_vertex_memory, nullptr);
-  }
+  retire_buffer(f.text_vertex_buffer, f.text_vertex_memory);
+  last_text_verts_ = nullptr;
+  last_text_vert_count_ = 0;
 
   u32 new_cap = std::max(vertex_count, f.text_vertex_capacity * 2);
   new_cap = std::max(new_cap, 16384u);
@@ -834,10 +851,7 @@ void RHI::Impl::ensure_text_index_capacity(u32 index_count) {
   auto& f = frames_[current_frame_];
   if (f.text_index_capacity >= index_count) return;
 
-  if (f.text_index_buffer != VK_NULL_HANDLE) {
-    vkDestroyBuffer(device_, f.text_index_buffer, nullptr);
-    vkFreeMemory(device_, f.text_index_memory, nullptr);
-  }
+  retire_buffer(f.text_index_buffer, f.text_index_memory);
 
   u32 new_cap = std::max(index_count, f.text_index_capacity * 2);
   new_cap = std::max(new_cap, 32768u);
@@ -1140,6 +1154,10 @@ bool RHI::Impl::AcquireFrame() {
   auto& f = frames_[current_frame_];
   vkWaitForFences(device_, 1, &f.in_flight, VK_TRUE, UINT64_MAX);
 
+  // The fence is the point at which last frame's draws are done reading, so
+  // anything a mid-frame grow displaced can go now.
+  free_retired_buffers(current_frame_);
+
   VkResult result =
       vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, f.image_available,
                             VK_NULL_HANDLE, &image_index_);
@@ -1421,6 +1439,23 @@ f32 RHI::Impl::dpi_scale() const { return dpi_scale_; }
 // Offscreen rendering
 // ---------------------------------------------------------------------------
 
+// A render target holds sRGB-encoded bytes, like every other texture the quad
+// shader samples. The attachment view takes the swapchain's own sRGB format,
+// so the hardware encodes on write and the offscreen pass stays render-pass
+// compatible with the swapchain pipelines. The sampled view takes the matching
+// UNORM format, which leaves srgb_to_linear() in the shader as the only
+// decode. Decoding twice darkens every offscreen pass.
+static VkFormat unorm_view_format(VkFormat srgb) {
+  switch (srgb) {
+    case VK_FORMAT_B8G8R8A8_SRGB:
+      return VK_FORMAT_B8G8R8A8_UNORM;
+    case VK_FORMAT_R8G8B8A8_SRGB:
+      return VK_FORMAT_R8G8B8A8_UNORM;
+    default:
+      return srgb;  // already a UNORM fallback; there is no encode to undo
+  }
+}
+
 bool RHI::Impl::create_offscreen_render_pass() {
   if (offscreen_render_pass_) return true;
 
@@ -1481,7 +1516,8 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
   ici.extent = {width, height, 1};
   ici.mipLevels = 1;
   ici.arrayLayers = 1;
-  ici.format = swapchain_format_;
+  ici.format = unorm_view_format(swapchain_format_);
+  ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
   ici.tiling = VK_IMAGE_TILING_OPTIMAL;
   ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -1498,24 +1534,29 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
   vkAllocateMemory(device_, &ai, nullptr, &slot.memory);
   vkBindImageMemory(device_, slot.image, slot.memory, 0);
 
-  // Image view
+  // Sampled view (UNORM: hands the shader the stored bytes as they are)
   VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
   vci.image = slot.image;
   vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  vci.format = swapchain_format_;
+  vci.format = unorm_view_format(swapchain_format_);
   vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
   vkCreateImageView(device_, &vci, nullptr, &slot.view);
+
+  // Attachment view (sRGB: the hardware encodes what the shader writes)
+  vci.format = swapchain_format_;
+  vkCreateImageView(device_, &vci, nullptr, &slot.attachment_view);
 
   // Framebuffer for offscreen rendering
   VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
   fci.renderPass = offscreen_render_pass_;
   fci.attachmentCount = 1;
-  fci.pAttachments = &slot.view;
+  fci.pAttachments = &slot.attachment_view;
   fci.width = width;
   fci.height = height;
   fci.layers = 1;
   if (vkCreateFramebuffer(device_, &fci, nullptr, &slot.framebuffer) !=
       VK_SUCCESS) {
+    vkDestroyImageView(device_, slot.attachment_view, nullptr);
     vkDestroyImageView(device_, slot.view, nullptr);
     vkDestroyImage(device_, slot.image, nullptr);
     vkFreeMemory(device_, slot.memory, nullptr);
@@ -1594,6 +1635,8 @@ void RHI::Impl::DestroyRenderTarget(RHITextureHandle handle) {
   auto& slot = textures_[handle];
   if (slot.framebuffer)
     vkDestroyFramebuffer(device_, slot.framebuffer, nullptr);
+  if (slot.attachment_view)
+    vkDestroyImageView(device_, slot.attachment_view, nullptr);
   vkDestroyImageView(device_, slot.view, nullptr);
   vkDestroyImage(device_, slot.image, nullptr);
   vkFreeMemory(device_, slot.memory, nullptr);
@@ -1923,6 +1966,7 @@ void RHI::Impl::Shutdown() {
   // Per-frame resources
   for (u32 i = 0; i < MAX_FRAMES; ++i) {
     auto& f = frames_[i];
+    free_retired_buffers(i);
     if (f.vertex_buffer) vkDestroyBuffer(device_, f.vertex_buffer, nullptr);
     if (f.vertex_memory) vkFreeMemory(device_, f.vertex_memory, nullptr);
     if (f.index_buffer) vkDestroyBuffer(device_, f.index_buffer, nullptr);

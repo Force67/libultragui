@@ -64,6 +64,8 @@ struct RHI::Impl {
   void ensure_index_capacity(u32 index_count);
   void ensure_text_vertex_capacity(u32 vertex_count);
   void ensure_text_index_capacity(u32 index_count);
+  void retire_buffer(VkBuffer buffer, VkDeviceMemory memory);
+  void free_retired_buffers(u32 frame);
 
   GLFWwindow* window_ = nullptr;
   String shader_dir_;
@@ -124,6 +126,11 @@ struct RHI::Impl {
     VkDeviceMemory text_index_memory = VK_NULL_HANDLE;
     u32 text_index_capacity = 0;
     u32 text_index_write_pos = 0;
+    // Buffers a mid-frame grow replaced. The command buffer being recorded
+    // still binds them and they still hold the vertices those draws read, so
+    // they are freed once this frame's fence signals, not at the grow.
+    Vector<VkBuffer> retired_buffers;
+    Vector<VkDeviceMemory> retired_memory;
   };
   FrameData frames_[MAX_FRAMES];
   u32 current_frame_ = 0;
@@ -146,7 +153,11 @@ struct RHI::Impl {
   struct TextureSlot {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkImageView view = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;  // sampled: UNORM, no hardware decode
+    // Render targets are written through an sRGB view so the hardware encodes
+    // on write, and sampled through the UNORM `view` above so the shader's own
+    // srgb_to_linear() is the only decode. Null for ordinary textures.
+    VkImageView attachment_view = VK_NULL_HANDLE;
     VkDescriptorSet descriptor = VK_NULL_HANDLE;
     u32 width = 0;
     u32 height = 0;

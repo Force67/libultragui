@@ -1,9 +1,20 @@
+// D3D11 RHI backend. It builds against the Windows SDK, and on Linux against
+// DXVK-native, which turns these calls back into Vulkan. Development and
+// testing therefore need no Windows machine.
+//
+// Three things differ between the two builds: the HLSL compiler (see
+// load_d3dcompile), the HWND, and the libraries CMake links. DXVK-native has
+// no window system of its own, so it takes a GLFWwindow* as its HWND. Start
+// it with DXVK_WSI_DRIVER=GLFW.
 #include <ugui/platform/platform.h>
 #include <ugui/rhi/rhi.h>
 
-// Use C-style COM interface (DXVK-native is a C library; C++ vtable ABI can
-// mismatch)
+// Use the C-style COM interface. DXVK-native exposes a C API, where the C++
+// vtable ABI can mismatch. The Windows SDK offers the same C-style vtables
+// behind CINTERFACE, so one call style covers both.
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #define INITGUID
 #define CINTERFACE
 #define COBJMACROS
@@ -26,305 +37,110 @@
 #include <cstdio>
 #include <cstring>
 
+#if defined(_WIN32)
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
+
+// kQuadHlsl / kTextHlsl / kVideoHlsl, generated from shaders/hlsl/*.hlsl by
+// cmake/EmbedHlsl.cmake.
+#include <ugui_hlsl_embedded.h>
+
+#if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
+#endif
 
 namespace ugui {
-
-// ---------------------------------------------------------------------------
-// Embedded HLSL shaders (compiled at runtime via D3DCompile)
-// ---------------------------------------------------------------------------
-
-static const char* quad_hlsl = R"hlsl(
-// ultragui quad shader -- D3D12 HLSL port of quad.vert + quad.frag
-// Compile: dxc -T vs_6_0 -E VSMain -Fo quad_vs.cso quad.hlsl
-//          dxc -T ps_6_0 -E PSMain -Fo quad_ps.cso quad.hlsl
-
-cbuffer PushConstants : register(b0) {
-    float2 scale;
-    float2 translate;
-};
-
-Texture2D tex : register(t0);
-SamplerState samp_linear : register(s0);
-
-struct VSInput {
-    float2 pos          : POSITION;
-    float2 uv           : TEXCOORD0;
-    uint   color        : COLOR0;
-    uint   color2       : COLOR1;
-    uint   corner_radii : BLENDINDICES0;
-    float  softness     : BLENDWEIGHT0;
-    float2 half_size    : TEXCOORD1;
-    float  border_width : BLENDWEIGHT1;
-    uint   border_color : COLOR2;
-};
-
-struct VSOutput {
-    float4 pos          : SV_Position;
-    float2 uv           : TEXCOORD0;
-    float4 color        : COLOR0;
-    float4 color2       : COLOR1;
-    float4 corner_radii : TEXCOORD1;
-    float  softness     : TEXCOORD2;
-    float2 half_size    : TEXCOORD3;
-    float  border_width : TEXCOORD4;
-    float4 border_color : COLOR2;
-};
-
-// sRGB EOTF: sRGB -> linear
-float3 srgb_to_linear(float3 c) {
-    return lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c));
-}
-
-float4 unpack_color(uint c) {
-    float4 col = float4(
-        float(c & 0xFFu) / 255.0,
-        float((c >> 8u) & 0xFFu) / 255.0,
-        float((c >> 16u) & 0xFFu) / 255.0,
-        float((c >> 24u) & 0xFFu) / 255.0
-    );
-    col.rgb = srgb_to_linear(col.rgb);
-    return col;
-}
-
-VSOutput VSMain(VSInput input) {
-    VSOutput o;
-    o.pos = float4(input.pos * scale + translate, 0.0, 1.0);
-    o.uv = input.uv;
-    o.color = unpack_color(input.color);
-    o.color2 = unpack_color(input.color2);
-    o.corner_radii = float4(
-        float(input.corner_radii & 0xFFu),
-        float((input.corner_radii >> 8u) & 0xFFu),
-        float((input.corner_radii >> 16u) & 0xFFu),
-        float((input.corner_radii >> 24u) & 0xFFu)
-    );
-    o.softness = input.softness;
-    o.half_size = input.half_size;
-    o.border_width = input.border_width;
-    o.border_color = unpack_color(input.border_color);
-    return o;
-}
-
-float sdf_rounded_rect_4(float2 p, float2 b, float4 radii) {
-    // radii = (tl, tr, br, bl)
-    float radius = (p.x > 0.0) ? ((p.y > 0.0) ? radii.z : radii.y) : ((p.y > 0.0) ? radii.w : radii.x);
-    float2 q = abs(p) - b + radius;
-    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
-}
-
-float4 PSMain(VSOutput input) : SV_Target {
-    float4 tex_color = tex.Sample(samp_linear, input.uv);
-    tex_color.rgb = srgb_to_linear(tex_color.rgb);
-
-    // Linear gradient along V axis
-    float4 base_color = lerp(input.color, input.color2, input.uv.y);
-    float4 color = base_color * tex_color;
-
-    // SDF-based alpha for rounded rects
-    if (input.half_size.x > 0.0 && input.half_size.y > 0.0) {
-        float2 local = (input.uv * 2.0 - 1.0) * input.half_size;
-        float d = sdf_rounded_rect_4(local, input.half_size, input.corner_radii);
-
-        float soft = abs(input.softness);
-        float aa = max(fwidth(d) * 0.75, soft);
-        float alpha;
-        if (input.softness < 0.0) {
-            alpha = smoothstep(-aa, 0.0, d);
-        } else if (input.softness > 0.0) {
-            // DrawShadow expanded the quad by `soft`; centre the alpha
-            // transition on the original rect edge (d == -soft) so alpha
-            // hits 0 where the geometry ends, not a blur radius out.
-            alpha = 1.0 - smoothstep(-2.0 * soft, 0.0, d);
-        } else {
-            alpha = 1.0 - smoothstep(-aa, aa, d);
-        }
-        color.a *= alpha;
-
-        // Border rendering
-        if (input.border_width > 0.0 && input.border_color.a > 0.0) {
-            float2 inner_half = input.half_size - float2(input.border_width, input.border_width);
-            float4 inner_radii = max(input.corner_radii - float4(input.border_width, input.border_width,
-                                     input.border_width, input.border_width), float4(0, 0, 0, 0));
-            float d_inner = sdf_rounded_rect_4(local, inner_half, inner_radii);
-            float inner_aa = fwidth(d_inner) * 0.75;
-            float inner_alpha = 1.0 - smoothstep(-inner_aa, inner_aa, d_inner);
-
-            float border_mask = alpha * (1.0 - inner_alpha);
-            float4 border_col = input.border_color;
-            border_col.a *= border_mask;
-
-            float4 fill = color;
-            fill.a *= inner_alpha;
-
-            // Pre-multiplied alpha compositing
-            color = fill + border_col * (1.0 - fill.a);
-            color.a = fill.a + border_col.a * (1.0 - fill.a);
-        }
-    }
-
-    return color;
-}
-)hlsl";
-
-static const char* text_hlsl = R"hlsl(
-// ultragui text shader -- D3D12 HLSL port of text.vert + text.frag
-// Compile: dxc -T vs_6_0 -E VSMain -Fo text_vs.cso text.hlsl
-//          dxc -T ps_6_0 -E PSMain -Fo text_ps.cso text.hlsl
-
-cbuffer PushConstants : register(b0) {
-    float2 scale;
-    float2 translate;
-};
-
-Texture2D tex : register(t0);
-SamplerState samp_nearest : register(s1);
-
-struct VSInput {
-    float2 pos          : POSITION;
-    float2 uv           : TEXCOORD0;
-    uint   color        : COLOR0;
-    uint   color2       : COLOR1;
-    uint   corner_radii : BLENDINDICES0;
-    float  softness     : BLENDWEIGHT0;
-    float2 half_size    : TEXCOORD1;
-    float  border_width : BLENDWEIGHT1;
-    uint   border_color : COLOR2;
-};
-
-struct VSOutput {
-    float4 pos   : SV_Position;
-    float2 uv    : TEXCOORD0;
-    float4 color : COLOR0;
-};
-
-float3 srgb_to_linear(float3 c) {
-    return lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c));
-}
-
-VSOutput VSMain(VSInput input) {
-    VSOutput o;
-    o.pos = float4(input.pos * scale + translate, 0.0, 1.0);
-    o.uv = input.uv;
-
-    float4 col = float4(
-        float(input.color & 0xFFu) / 255.0,
-        float((input.color >> 8u) & 0xFFu) / 255.0,
-        float((input.color >> 16u) & 0xFFu) / 255.0,
-        float((input.color >> 24u) & 0xFFu) / 255.0
-    );
-    col.rgb = srgb_to_linear(col.rgb);
-    o.color = col;
-    return o;
-}
-
-float4 PSMain(VSOutput input) : SV_Target {
-    float alpha = tex.Sample(samp_nearest, input.uv).r;
-    return float4(input.color.rgb, input.color.a * alpha);
-}
-)hlsl";
-
-static const char* video_hlsl = R"hlsl(
-// ultragui video shader -- D3D12 HLSL port of video.vert + video.frag
-// Compile: dxc -T vs_6_0 -E VSMain -Fo video_vs.cso video.hlsl
-//          dxc -T ps_6_0 -E PSMain -Fo video_ps.cso video.hlsl
-
-Texture2D tex_y  : register(t0);
-Texture2D tex_cb : register(t1);
-Texture2D tex_cr : register(t2);
-SamplerState samp_linear : register(s0);
-
-struct VSOutput {
-    float4 pos : SV_Position;
-    float2 uv  : TEXCOORD0;
-};
-
-VSOutput VSMain(uint vid : SV_VertexID) {
-    // Fullscreen triangle from vertex index -- no vertex buffer needed.
-    float2 positions[3] = {
-        float2(-1.0, -1.0),
-        float2( 3.0, -1.0),
-        float2(-1.0,  3.0)
-    };
-    float2 uvs[3] = {
-        float2(0.0, 0.0),
-        float2(2.0, 0.0),
-        float2(0.0, 2.0)
-    };
-
-    VSOutput o;
-    o.pos = float4(positions[vid], 0.0, 1.0);
-    o.uv = uvs[vid];
-    return o;
-}
-
-float4 PSMain(VSOutput input) : SV_Target {
-    float y  = tex_y.Sample(samp_linear, input.uv).r;
-    float cb = tex_cb.Sample(samp_linear, input.uv).r;
-    float cr = tex_cr.Sample(samp_linear, input.uv).r;
-
-    // BT.601 YCbCr to RGB conversion (from pl_mpeg documentation)
-    float4 ycbcr = float4(y, cb, cr, 1.0);
-    float r = dot(ycbcr, float4(1.16438,  0.00000,  1.59603, -0.87079));
-    float g = dot(ycbcr, float4(1.16438, -0.39176, -0.81297,  0.52959));
-    float b = dot(ycbcr, float4(1.16438,  2.01723,  0.00000, -1.08139));
-
-    return float4(saturate(r), saturate(g), saturate(b), 1.0);
-}
-)hlsl";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// vkd3d-utils exports D3DCompile with ms_abi calling convention,
-// but DXVK headers declare WINAPI as nothing (sysv_abi). We must
-// load D3DCompile via dlsym and call with the correct ABI.
+// D3D11 consumes DXBC, which dxc no longer emits, so this backend compiles the
+// HLSL at startup. Windows keeps that compiler in d3dcompiler_47.dll, Linux in
+// vkd3d-utils. Loading it by name avoids an import lib and vkd3d's headers.
+//
+// The two disagree on x86-64: vkd3d gives its COM surface the Microsoft
+// convention, DXVK-native declares WINAPI as nothing. Elsewhere a single C ABI
+// covers both.
+#if defined(_WIN32)
+#include <windows.h>
+#define UGUI_D3DCOMPILE_ABI WINAPI
+#elif defined(__x86_64__)
 #include <dlfcn.h>
+#define UGUI_D3DCOMPILE_ABI __attribute__((ms_abi))
+#else
+#include <dlfcn.h>
+#define UGUI_D3DCOMPILE_ABI
+#endif
 
-typedef HRESULT(__attribute__((ms_abi)) *
-                PFN_D3DCompile_vkd3d)(const void*, SIZE_T, const char*,
-                                      const void*,
-                                      void*,  // D3D_SHADER_MACRO*, ID3DInclude*
-                                      const char*, const char*, UINT, UINT,
-                                      ID3D10Blob**, ID3D10Blob**);
+typedef HRESULT(UGUI_D3DCOMPILE_ABI* PFN_D3DCompile_ugui)(
+    const void*, SIZE_T, const char*, const void*,
+    void*,  // D3D_SHADER_MACRO*, ID3DInclude*
+    const char*, const char*, UINT, UINT, ID3D10Blob**, ID3D10Blob**);
 
-static PFN_D3DCompile_vkd3d s_D3DCompile = nullptr;
+static PFN_D3DCompile_ugui s_D3DCompile = nullptr;
 
 static bool load_d3dcompile() {
   if (s_D3DCompile) return true;
+#if defined(_WIN32)
+  HMODULE lib = LoadLibraryA("d3dcompiler_47.dll");
+  if (!lib) lib = LoadLibraryA("d3dcompiler_43.dll");
+  if (!lib) {
+    std::fprintf(stderr, "ultragui-d3d11: failed to load d3dcompiler\n");
+    return false;
+  }
+  s_D3DCompile = reinterpret_cast<PFN_D3DCompile_ugui>(
+      reinterpret_cast<void*>(GetProcAddress(lib, "D3DCompile")));
+#else
   void* lib = dlopen("libvkd3d-utils.so.1", RTLD_LAZY);
   if (!lib) lib = dlopen("libvkd3d-utils.so", RTLD_LAZY);
   if (!lib) {
     std::fprintf(stderr, "ultragui-d3d11: failed to load libvkd3d-utils.so\n");
     return false;
   }
-  s_D3DCompile = (PFN_D3DCompile_vkd3d)dlsym(lib, "D3DCompile");
+  s_D3DCompile =
+      reinterpret_cast<PFN_D3DCompile_ugui>(dlsym(lib, "D3DCompile"));
+#endif
   if (!s_D3DCompile) {
-    std::fprintf(stderr,
-                 "ultragui-d3d11: D3DCompile not found in libvkd3d-utils\n");
+    std::fprintf(stderr, "ultragui-d3d11: D3DCompile not found\n");
     return false;
   }
   return true;
 }
 
-// The blob returned by vkd3d's D3DCompile uses ms_abi COM vtable.
-// DXVK's ID3D10Blob macros use sysv_abi. We need ms_abi wrappers.
+// The blob comes from whichever compiler is in use. On Linux its vtable
+// follows vkd3d's convention, which DXVK's ID3D10Blob macros cannot call. On
+// Windows the blob and the macros are both the SDK's.
+#if defined(_WIN32)
+using CompilerBlob = ID3D10Blob;
+static void* blob_data(CompilerBlob* b) {
+  return ID3D10Blob_GetBufferPointer(b);
+}
+static SIZE_T blob_size(CompilerBlob* b) { return ID3D10Blob_GetBufferSize(b); }
+static void blob_release(CompilerBlob* b) { ID3D10Blob_Release(b); }
+#else
 struct VkD3DBlob;  // opaque
 struct VkD3DBlobVtbl {
   // IUnknown
-  HRESULT(__attribute__((ms_abi)) * QueryInterface)(VkD3DBlob*, const IID&,
-                                                    void**);
-  ULONG(__attribute__((ms_abi)) * AddRef)(VkD3DBlob*);
-  ULONG(__attribute__((ms_abi)) * Release)(VkD3DBlob*);
+  HRESULT(UGUI_D3DCOMPILE_ABI* QueryInterface)(VkD3DBlob*, const IID&, void**);
+  ULONG(UGUI_D3DCOMPILE_ABI* AddRef)(VkD3DBlob*);
+  ULONG(UGUI_D3DCOMPILE_ABI* Release)(VkD3DBlob*);
   // ID3D10Blob
-  void*(__attribute__((ms_abi)) * GetBufferPointer)(VkD3DBlob*);
-  SIZE_T(__attribute__((ms_abi)) * GetBufferSize)(VkD3DBlob*);
+  void*(UGUI_D3DCOMPILE_ABI* GetBufferPointer)(VkD3DBlob*);
+  SIZE_T(UGUI_D3DCOMPILE_ABI* GetBufferSize)(VkD3DBlob*);
 };
 struct VkD3DBlob {
   const VkD3DBlobVtbl* lpVtbl;
 };
+using CompilerBlob = VkD3DBlob;
+static void* blob_data(CompilerBlob* b) {
+  return b->lpVtbl->GetBufferPointer(b);
+}
+static SIZE_T blob_size(CompilerBlob* b) { return b->lpVtbl->GetBufferSize(b); }
+static void blob_release(CompilerBlob* b) { b->lpVtbl->Release(b); }
+#endif
 
 struct ShaderBlob {
   std::vector<char> data;
@@ -334,31 +150,29 @@ static bool compile_shader(const char* source, const char* entry,
                            const char* target, std::vector<char>& out) {
   if (!load_d3dcompile()) return false;
 
-  VkD3DBlob* blob = nullptr;
-  VkD3DBlob* errors = nullptr;
+  CompilerBlob* blob = nullptr;
+  CompilerBlob* errors = nullptr;
   HRESULT hr =
       s_D3DCompile(source, std::strlen(source), "shader", nullptr, nullptr,
                    entry, target, 0, 0, reinterpret_cast<ID3D10Blob**>(&blob),
                    reinterpret_cast<ID3D10Blob**>(&errors));
   if (FAILED(hr)) {
     if (errors) {
-      std::fprintf(
-          stderr, "ultragui-d3d11: shader compile error (%s/%s):\n%s\n", entry,
-          target,
-          static_cast<const char*>(errors->lpVtbl->GetBufferPointer(errors)));
-      errors->lpVtbl->Release(errors);
+      std::fprintf(stderr,
+                   "ultragui-d3d11: shader compile error (%s/%s):\n%s\n", entry,
+                   target, static_cast<const char*>(blob_data(errors)));
+      blob_release(errors);
     } else {
       std::fprintf(stderr, "ultragui-d3d11: shader compile failed: 0x%08lx\n",
-                   hr);
+                   static_cast<unsigned long>(hr));
     }
     return false;
   }
-  if (errors) errors->lpVtbl->Release(errors);
+  if (errors) blob_release(errors);
 
-  void* ptr = blob->lpVtbl->GetBufferPointer(blob);
-  SIZE_T len = blob->lpVtbl->GetBufferSize(blob);
-  out.assign(static_cast<char*>(ptr), static_cast<char*>(ptr) + len);
-  blob->lpVtbl->Release(blob);
+  const char* ptr = static_cast<const char*>(blob_data(blob));
+  out.assign(ptr, ptr + blob_size(blob));
+  blob_release(blob);
   return true;
 }
 
@@ -406,8 +220,8 @@ struct RHI::Impl {
   bool create_projection_cb();
   bool create_default_resources();
   void update_projection(f32 width, f32 height);
-  ID3D11Buffer* create_dynamic_buffer(u32 size, UINT bind_flags);
-  void ensure_buffer(ID3D11Buffer*& buf, u32& capacity, u32 required,
+  ID3D11Buffer* create_dynamic_buffer(u64 size, UINT bind_flags);
+  bool ensure_buffer(ID3D11Buffer*& buf, u32& capacity, u32 required,
                      UINT bind_flags, u32 stride);
   bool ensure_video_shaders();
   void bind_quad_pipeline();
@@ -492,6 +306,7 @@ struct RHI::Impl {
     u32 width = 0;
     u32 height = 0;
     u32 pixel_size = 0;
+    RHIFilter filter = RHIFilter::kLinear;
     bool in_use = false;
     bool is_render_target = false;
   };
@@ -510,9 +325,17 @@ struct RHI::Impl {
 // Dynamic buffer helpers
 // ---------------------------------------------------------------------------
 
-ID3D11Buffer* RHI::Impl::create_dynamic_buffer(u32 size, UINT bind_flags) {
+ID3D11Buffer* RHI::Impl::create_dynamic_buffer(u64 size, UINT bind_flags) {
+  // ByteWidth is 32-bit. Refuse rather than wrap, which would hand back a
+  // buffer far smaller than the caller is about to write into.
+  if (size > 0xFFFFFFFFull) {
+    std::fprintf(stderr, "ultragui-d3d11: buffer of %llu bytes is too large\n",
+                 static_cast<unsigned long long>(size));
+    return nullptr;
+  }
+
   D3D11_BUFFER_DESC desc = {};
-  desc.ByteWidth = size;
+  desc.ByteWidth = static_cast<UINT>(size);
   desc.Usage = D3D11_USAGE_DYNAMIC;
   desc.BindFlags = bind_flags;
   desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -526,9 +349,14 @@ ID3D11Buffer* RHI::Impl::create_dynamic_buffer(u32 size, UINT bind_flags) {
   return buf;
 }
 
-void RHI::Impl::ensure_buffer(ID3D11Buffer*& buf, u32& capacity, u32 required,
+// Grows `buf` to hold `required` elements. Returns true when it allocated a
+// new buffer. Releasing the old one mid-frame is safe: draws already recorded
+// on the immediate context hold an internal reference, so it keeps its
+// contents until the GPU is done. The return value warns callers that cache an
+// offset into it.
+bool RHI::Impl::ensure_buffer(ID3D11Buffer*& buf, u32& capacity, u32 required,
                               UINT bind_flags, u32 stride) {
-  if (capacity >= required) return;
+  if (capacity >= required) return false;
 
   if (buf) {
     ID3D11Buffer_Release(buf);
@@ -537,8 +365,9 @@ void RHI::Impl::ensure_buffer(ID3D11Buffer*& buf, u32& capacity, u32 required,
 
   u32 new_cap = std::max(required, capacity * 2);
   new_cap = std::max(new_cap, 16384u);
-  buf = create_dynamic_buffer(new_cap * stride, bind_flags);
-  capacity = new_cap;
+  buf = create_dynamic_buffer(static_cast<u64>(new_cap) * stride, bind_flags);
+  capacity = buf ? new_cap : 0;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -601,7 +430,7 @@ bool RHI::Impl::create_shaders() {
   std::vector<char> bytecode;
 
   // Quad vertex shader
-  if (!compile_shader(quad_hlsl, "VSMain", "vs_5_0", bytecode)) return false;
+  if (!compile_shader(kQuadHlsl, "VSMain", "vs_5_0", bytecode)) return false;
   HRESULT hr = ID3D11Device_CreateVertexShader(
       device_, bytecode.data(), bytecode.size(), nullptr, &quad_vs_);
   if (FAILED(hr)) {
@@ -613,7 +442,7 @@ bool RHI::Impl::create_shaders() {
   if (!create_input_layout(bytecode.data(), bytecode.size())) return false;
 
   // Quad pixel shader
-  if (!compile_shader(quad_hlsl, "PSMain", "ps_5_0", bytecode)) return false;
+  if (!compile_shader(kQuadHlsl, "PSMain", "ps_5_0", bytecode)) return false;
   hr = ID3D11Device_CreatePixelShader(device_, bytecode.data(), bytecode.size(),
                                       nullptr, &quad_ps_);
   if (FAILED(hr)) {
@@ -622,7 +451,7 @@ bool RHI::Impl::create_shaders() {
   }
 
   // Text vertex shader
-  if (!compile_shader(text_hlsl, "VSMain", "vs_5_0", bytecode)) return false;
+  if (!compile_shader(kTextHlsl, "VSMain", "vs_5_0", bytecode)) return false;
   hr = ID3D11Device_CreateVertexShader(device_, bytecode.data(),
                                        bytecode.size(), nullptr, &text_vs_);
   if (FAILED(hr)) {
@@ -631,7 +460,7 @@ bool RHI::Impl::create_shaders() {
   }
 
   // Text pixel shader
-  if (!compile_shader(text_hlsl, "PSMain", "ps_5_0", bytecode)) return false;
+  if (!compile_shader(kTextHlsl, "PSMain", "ps_5_0", bytecode)) return false;
   hr = ID3D11Device_CreatePixelShader(device_, bytecode.data(), bytecode.size(),
                                       nullptr, &text_ps_);
   if (FAILED(hr)) {
@@ -789,7 +618,7 @@ bool RHI::Impl::ensure_video_shaders() {
   if (video_vs_ && video_ps_) return true;
 
   std::vector<char> bytecode;
-  if (!compile_shader(video_hlsl, "VSMain", "vs_5_0", bytecode)) return false;
+  if (!compile_shader(kVideoHlsl, "VSMain", "vs_5_0", bytecode)) return false;
   HRESULT hr = ID3D11Device_CreateVertexShader(
       device_, bytecode.data(), bytecode.size(), nullptr, &video_vs_);
   if (FAILED(hr)) {
@@ -797,7 +626,7 @@ bool RHI::Impl::ensure_video_shaders() {
     return false;
   }
 
-  if (!compile_shader(video_hlsl, "PSMain", "ps_5_0", bytecode)) return false;
+  if (!compile_shader(kVideoHlsl, "PSMain", "ps_5_0", bytecode)) return false;
   hr = ID3D11Device_CreatePixelShader(device_, bytecode.data(), bytecode.size(),
                                       nullptr, &video_ps_);
   if (FAILED(hr)) {
@@ -879,8 +708,12 @@ bool RHI::Impl::Init(const RHIConfig& config) {
   sc_desc.SampleDesc.Quality = 0;
   sc_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
   sc_desc.BufferCount = 2;
-  sc_desc.OutputWindow =
-      (HWND)window_;  // GLFWwindow* cast for DXVK-native GLFW WSI
+#if defined(_WIN32)
+  sc_desc.OutputWindow = glfwGetWin32Window(window_);
+#else
+  // DXVK-native's GLFW WSI takes the GLFWwindow* in place of an HWND.
+  sc_desc.OutputWindow = reinterpret_cast<HWND>(window_);
+#endif
   sc_desc.Windowed = TRUE;
   sc_desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
@@ -985,7 +818,12 @@ bool RHI::Impl::BeginFrame(Color clear_color) {
   if (framebuffer_resized_) {
     framebuffer_resized_ = false;
 
-    // Release old backbuffer RTV
+    // ResizeBuffers needs every reference to the back buffers gone, and the
+    // context holds one for as long as the view is bound as a render target.
+    // Unbind before releasing, or the resize fails with
+    // DXGI_ERROR_INVALID_CALL. (DXVK is lenient here; Windows is not.)
+    ID3D11RenderTargetView* no_rtv = nullptr;
+    ID3D11DeviceContext_OMSetRenderTargets(ctx_, 1, &no_rtv, nullptr);
     if (backbuffer_rtv_) {
       ID3D11RenderTargetView_Release(backbuffer_rtv_);
       backbuffer_rtv_ = nullptr;
@@ -1119,16 +957,24 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
   if (vertices == last_quad_verts_ && vertex_count == last_quad_vert_count_) {
     vb_byte_offset = last_quad_vb_offset_;
   } else {
-    ensure_buffer(vertex_buf_, vertex_capacity_,
-                  vertex_write_pos_ + vertex_count, D3D11_BIND_VERTEX_BUFFER,
-                  sizeof(Vertex2D));
+    const bool vb_grown = ensure_buffer(
+        vertex_buf_, vertex_capacity_, vertex_write_pos_ + vertex_count,
+        D3D11_BIND_VERTEX_BUFFER, sizeof(Vertex2D));
+    if (vb_grown) {
+      // The cached offset points into the buffer that was just replaced.
+      last_quad_verts_ = nullptr;
+      last_quad_vert_count_ = 0;
+    }
+    if (!vertex_buf_) return;
 
     vb_byte_offset = vertex_write_pos_ * sizeof(Vertex2D);
 
-    // Map: first draw uses DISCARD to orphan the old buffer,
-    // subsequent draws use NO_OVERWRITE to append.
-    D3D11_MAP map_type = first_quad_draw_ ? D3D11_MAP_WRITE_DISCARD
-                                          : D3D11_MAP_WRITE_NO_OVERWRITE;
+    // DISCARD for the first write into a buffer -- the first of the frame, or
+    // one that just grew -- and NO_OVERWRITE to append after that, so the
+    // draws already recorded keep reading what they were given.
+    D3D11_MAP map_type = (first_quad_draw_ || vb_grown)
+                             ? D3D11_MAP_WRITE_DISCARD
+                             : D3D11_MAP_WRITE_NO_OVERWRITE;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     HRESULT hr = ID3D11DeviceContext_Map(ctx_, (ID3D11Resource*)vertex_buf_, 0,
                                          map_type, 0, &mapped);
@@ -1146,13 +992,16 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
   }
 
   // Always append indices
-  ensure_buffer(index_buf_, index_capacity_, index_write_pos_ + index_count,
-                D3D11_BIND_INDEX_BUFFER, sizeof(u32));
+  const bool ib_grown =
+      ensure_buffer(index_buf_, index_capacity_, index_write_pos_ + index_count,
+                    D3D11_BIND_INDEX_BUFFER, sizeof(u32));
+  if (!index_buf_) return;
 
   u32 ib_byte_offset = index_write_pos_ * sizeof(u32);
   {
-    D3D11_MAP map_type = (ib_byte_offset == 0) ? D3D11_MAP_WRITE_DISCARD
-                                               : D3D11_MAP_WRITE_NO_OVERWRITE;
+    D3D11_MAP map_type = (ib_byte_offset == 0 || ib_grown)
+                             ? D3D11_MAP_WRITE_DISCARD
+                             : D3D11_MAP_WRITE_NO_OVERWRITE;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     HRESULT hr = ID3D11DeviceContext_Map(ctx_, (ID3D11Resource*)index_buf_, 0,
                                          map_type, 0, &mapped);
@@ -1174,11 +1023,16 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
   ID3D11DeviceContext_IASetIndexBuffer(ctx_, index_buf_, DXGI_FORMAT_R32_UINT,
                                        ib_byte_offset);
 
-  // Bind texture SRV to PS slot 0
+  // Bind texture SRV and its sampler to PS slot 0. The quad shader samples
+  // s0, so honouring RHIFilter means picking the sampler per draw.
   RHITextureHandle tex =
       (texture != kInvalidTexture) ? texture : white_texture_;
   if (tex < MAX_TEXTURES && textures_[tex].in_use) {
     ID3D11DeviceContext_PSSetShaderResources(ctx_, 0, 1, &textures_[tex].srv);
+    ID3D11SamplerState* sampler = (textures_[tex].filter == RHIFilter::kNearest)
+                                      ? sampler_nearest_
+                                      : sampler_linear_;
+    ID3D11DeviceContext_PSSetSamplers(ctx_, 0, 1, &sampler);
   }
 
   ID3D11DeviceContext_DrawIndexed(ctx_, index_count, 0, 0);
@@ -1206,14 +1060,21 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
   if (vertices == last_text_verts_ && vertex_count == last_text_vert_count_) {
     vb_byte_offset = last_text_vb_offset_;
   } else {
-    ensure_buffer(text_vertex_buf_, text_vertex_capacity_,
-                  text_vertex_write_pos_ + vertex_count,
-                  D3D11_BIND_VERTEX_BUFFER, sizeof(Vertex2D));
+    const bool vb_grown =
+        ensure_buffer(text_vertex_buf_, text_vertex_capacity_,
+                      text_vertex_write_pos_ + vertex_count,
+                      D3D11_BIND_VERTEX_BUFFER, sizeof(Vertex2D));
+    if (vb_grown) {
+      last_text_verts_ = nullptr;
+      last_text_vert_count_ = 0;
+    }
+    if (!text_vertex_buf_) return;
 
     vb_byte_offset = text_vertex_write_pos_ * sizeof(Vertex2D);
 
-    D3D11_MAP map_type = first_text_draw_ ? D3D11_MAP_WRITE_DISCARD
-                                          : D3D11_MAP_WRITE_NO_OVERWRITE;
+    D3D11_MAP map_type = (first_text_draw_ || vb_grown)
+                             ? D3D11_MAP_WRITE_DISCARD
+                             : D3D11_MAP_WRITE_NO_OVERWRITE;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     HRESULT hr = ID3D11DeviceContext_Map(
         ctx_, (ID3D11Resource*)text_vertex_buf_, 0, map_type, 0, &mapped);
@@ -1231,14 +1092,16 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
   }
 
   // Always append text indices
-  ensure_buffer(text_index_buf_, text_index_capacity_,
-                text_index_write_pos_ + index_count, D3D11_BIND_INDEX_BUFFER,
-                sizeof(u32));
+  const bool ib_grown = ensure_buffer(text_index_buf_, text_index_capacity_,
+                                      text_index_write_pos_ + index_count,
+                                      D3D11_BIND_INDEX_BUFFER, sizeof(u32));
+  if (!text_index_buf_) return;
 
   u32 ib_byte_offset = text_index_write_pos_ * sizeof(u32);
   {
-    D3D11_MAP map_type = (ib_byte_offset == 0) ? D3D11_MAP_WRITE_DISCARD
-                                               : D3D11_MAP_WRITE_NO_OVERWRITE;
+    D3D11_MAP map_type = (ib_byte_offset == 0 || ib_grown)
+                             ? D3D11_MAP_WRITE_DISCARD
+                             : D3D11_MAP_WRITE_NO_OVERWRITE;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     HRESULT hr = ID3D11DeviceContext_Map(ctx_, (ID3D11Resource*)text_index_buf_,
                                          0, map_type, 0, &mapped);
@@ -1294,7 +1157,7 @@ f32 RHI::Impl::dpi_scale() const { return dpi_scale_; }
 
 RHITextureHandle RHI::Impl::CreateTexture(u32 width, u32 height,
                                           RHIFormat format, const void* pixels,
-                                          RHIFilter /*filter*/) {
+                                          RHIFilter filter) {
   // Find free slot
   RHITextureHandle handle = kInvalidTexture;
   for (u32 i = 0; i < MAX_TEXTURES; ++i) {
@@ -1365,6 +1228,7 @@ RHITextureHandle RHI::Impl::CreateTexture(u32 width, u32 height,
   slot.width = width;
   slot.height = height;
   slot.pixel_size = pixel_size;
+  slot.filter = filter;
   slot.in_use = true;
   return handle;
 }
@@ -1408,13 +1272,17 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
 
   auto& slot = textures_[handle];
 
-  // Create texture with SHADER_RESOURCE | RENDER_TARGET bind flags
+  // A render target holds sRGB-encoded bytes, like every other texture the
+  // quad shader samples. TYPELESS storage lets the RTV be sRGB, so the
+  // hardware encodes what the shader writes. The SRV stays UNORM, which leaves
+  // srgb_to_linear() in the shader as the only decode. Decoding twice darkens
+  // every offscreen pass.
   D3D11_TEXTURE2D_DESC tex_desc = {};
   tex_desc.Width = width;
   tex_desc.Height = height;
   tex_desc.MipLevels = 1;
   tex_desc.ArraySize = 1;
-  tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  tex_desc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
   tex_desc.SampleDesc.Count = 1;
   tex_desc.SampleDesc.Quality = 0;
   tex_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -1429,9 +1297,13 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
     return kInvalidTexture;
   }
 
-  // Create SRV
+  // Create SRV (UNORM: hands the shader the stored bytes as they are)
+  D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+  srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+  srv_desc.Texture2D.MipLevels = 1;
   hr = ID3D11Device_CreateShaderResourceView(
-      device_, (ID3D11Resource*)slot.texture, nullptr, &slot.srv);
+      device_, (ID3D11Resource*)slot.texture, &srv_desc, &slot.srv);
   if (FAILED(hr)) {
     std::fprintf(
         stderr,
@@ -1441,9 +1313,12 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
     return kInvalidTexture;
   }
 
-  // Create RTV
+  // Create RTV (sRGB: the hardware encodes what the shader writes)
+  D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+  rtv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+  rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
   hr = ID3D11Device_CreateRenderTargetView(
-      device_, (ID3D11Resource*)slot.texture, nullptr, &slot.rtv);
+      device_, (ID3D11Resource*)slot.texture, &rtv_desc, &slot.rtv);
   if (FAILED(hr)) {
     std::fprintf(
         stderr, "ultragui-d3d11: CreateRenderTargetView (RT) failed: 0x%08lx\n",
@@ -1792,6 +1667,8 @@ void RHI::ConvertVideoFrame(RHITextureHandle target, RHITextureHandle y,
 Vec2 RHI::display_size() const { return impl_->display_size(); }
 f32 RHI::dpi_scale() const { return impl_->dpi_scale(); }
 
+#if defined(__clang__)
 #pragma clang diagnostic pop
+#endif
 
 }  // namespace ugui

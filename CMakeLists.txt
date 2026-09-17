@@ -148,11 +148,48 @@ if(ULTRAGUI_BACKEND_D3D12)
     add_custom_target(ultragui_hlsl_shaders DEPENDS ${HLSL_OUTPUTS})
 endif()
 
+# --- HLSL source embedding (D3D11) ---
+# D3D11 consumes DXBC, which dxc no longer emits, so the backend compiles the
+# HLSL at startup. Embedding the shader text keeps shaders/hlsl as the single
+# source for both D3D backends, and leaves the D3D11 path with no shader files
+# to ship.
+if(ULTRAGUI_BACKEND_D3D11)
+    set(HLSL_EMBED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    set(HLSL_EMBED_HEADER ${HLSL_EMBED_DIR}/ugui_hlsl_embedded.h)
+    file(MAKE_DIRECTORY ${HLSL_EMBED_DIR})
+    add_custom_command(
+        OUTPUT ${HLSL_EMBED_HEADER}
+        COMMAND ${CMAKE_COMMAND}
+                -DHLSL_DIR=${CMAKE_CURRENT_SOURCE_DIR}/shaders/hlsl
+                -DOUT=${HLSL_EMBED_HEADER}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedHlsl.cmake
+        DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/shaders/hlsl/quad.hlsl
+            ${CMAKE_CURRENT_SOURCE_DIR}/shaders/hlsl/text.hlsl
+            ${CMAKE_CURRENT_SOURCE_DIR}/shaders/hlsl/video.hlsl
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedHlsl.cmake
+        COMMENT "Embedding HLSL sources for the D3D11 backend"
+    )
+    add_custom_target(ultragui_hlsl_embed DEPENDS ${HLSL_EMBED_HEADER})
+endif()
+
 # --- Swappable implementation sources ---
 # Point these at your own .cc file to provide a custom backend.
 set(ULTRAGUI_PLATFORM_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ugui/platform/platform_glfw.cc"
     CACHE FILEPATH "Platform implementation source file")
-set(ULTRAGUI_RHI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/vulkan/vulkan_rhi.cc"
+# The library compiles exactly one RHI translation unit, because they all
+# define ugui::RHI. The backend switches pick it, most specific first. Vulkan
+# comes last: ULTRAGUI_BACKEND_VULKAN stays ON unless someone turns it off.
+if(ULTRAGUI_BACKEND_D3D11)
+    set(_default_rhi_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/d3d11/d3d11_rhi.cc")
+elseif(ULTRAGUI_BACKEND_D3D12)
+    set(_default_rhi_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/d3d12/d3d12_rhi.cc")
+elseif(ULTRAGUI_BACKEND_OPENGL AND NOT ULTRAGUI_BACKEND_VULKAN)
+    set(_default_rhi_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/opengl/opengl_rhi.cc")
+else()
+    set(_default_rhi_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/vulkan/vulkan_rhi.cc")
+endif()
+set(ULTRAGUI_RHI_SOURCE "${_default_rhi_src}"
     CACHE FILEPATH "RHI implementation source file")
 if(ULTRAGUI_LUA)
     set(_default_script_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/scripting/lua_runtime.cc")
@@ -253,6 +290,10 @@ endif()
 if(ULTRAGUI_BACKEND_D3D12)
     add_dependencies(ultragui ultragui_hlsl_shaders)
 endif()
+if(ULTRAGUI_BACKEND_D3D11)
+    add_dependencies(ultragui ultragui_hlsl_embed)
+    target_include_directories(ultragui PRIVATE ${HLSL_EMBED_DIR})
+endif()
 
 target_include_directories(ultragui
     PUBLIC
@@ -315,10 +356,19 @@ if(ULTRAGUI_BACKEND_D3D12)
 endif()
 
 if(ULTRAGUI_BACKEND_D3D11)
-    pkg_check_modules(DXVK_D3D11 REQUIRED IMPORTED_TARGET dxvk-d3d11)
-    pkg_check_modules(DXVK_DXGI REQUIRED IMPORTED_TARGET dxvk-dxgi)
-    pkg_check_modules(VKD3D_UTILS_D3D11 REQUIRED IMPORTED_TARGET libvkd3d-utils)
-    target_link_libraries(ultragui PRIVATE PkgConfig::DXVK_D3D11 PkgConfig::DXVK_DXGI PkgConfig::VKD3D_UTILS_D3D11)
+    if(WIN32)
+        # d3d11 and dxgi come from the platform SDK. The HLSL compiler is
+        # loaded at run time out of d3dcompiler_47.dll (which ships with
+        # Windows), so it needs no import library here.
+        target_link_libraries(ultragui PRIVATE d3d11 dxgi)
+    else()
+        # DXVK-native stands in for d3d11/dxgi, and vkd3d-utils supplies the
+        # D3DCompile the backend dlopens. Run with DXVK_WSI_DRIVER=GLFW.
+        pkg_check_modules(DXVK_D3D11 REQUIRED IMPORTED_TARGET dxvk-d3d11)
+        pkg_check_modules(DXVK_DXGI REQUIRED IMPORTED_TARGET dxvk-dxgi)
+        pkg_check_modules(VKD3D_UTILS_D3D11 REQUIRED IMPORTED_TARGET libvkd3d-utils)
+        target_link_libraries(ultragui PRIVATE PkgConfig::DXVK_D3D11 PkgConfig::DXVK_DXGI PkgConfig::VKD3D_UTILS_D3D11)
+    endif()
 endif()
 
 if(ULTRAGUI_BACKEND_OPENGL)

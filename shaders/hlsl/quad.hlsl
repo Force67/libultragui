@@ -1,6 +1,9 @@
-// ultragui quad shader: D3D12 HLSL port of quad.vert + quad.frag
-// Compile: dxc -T vs_6_0 -E VSMain -Fo quad_vs.cso quad.hlsl
-//          dxc -T ps_6_0 -E PSMain -Fo quad_ps.cso quad.hlsl
+// ultragui quad shader: HLSL port of quad.vert + quad.frag. Both D3D backends
+// share it. D3D12 compiles it to DXIL at build time:
+//   dxc -T vs_6_0 -E VSMain -Fo quad_vs.cso quad.hlsl
+//   dxc -T ps_6_0 -E PSMain -Fo quad_ps.cso quad.hlsl
+// D3D11 needs DXBC instead, so it compiles this text at startup from the copy
+// CMake embeds into ugui_hlsl_embedded.h. Keep this file the only source.
 
 cbuffer PushConstants : register(b0) {
     float2 scale;
@@ -94,6 +97,11 @@ float4 PSMain(VSOutput input) : SV_Target {
         float alpha;
         if (input.softness < 0.0) {
             alpha = smoothstep(-aa, 0.0, d);
+        } else if (input.softness > 0.0) {
+            // DrawShadow expanded the quad by `soft`; centre the alpha
+            // transition on the original rect edge (d == -soft) so alpha
+            // hits 0 where the geometry ends, not a blur radius out.
+            alpha = 1.0 - smoothstep(-2.0 * soft, 0.0, d);
         } else {
             alpha = 1.0 - smoothstep(-aa, aa, d);
         }
