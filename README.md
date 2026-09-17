@@ -1,6 +1,6 @@
 # libultragui
 
-Simple GPU-accelerated UI middleware for game engines. Vulkan rendering, flexbox layout via Yoga, text shaping via FreeType/HarfBuzz, Lua scripting. Ships as a static library.
+Simple GPU-accelerated UI middleware for game engines. Vulkan rendering (D3D11, D3D12 and GL 3.3 backends also available), flexbox layout via Yoga, text shaping via FreeType/HarfBuzz, Lua scripting. Ships as a static library.
 
 ## Why
 
@@ -117,7 +117,7 @@ config.design_height = 1080.0f;
 
 | | What | Dependency |
 |-|------|------------|
-| Rendering | Batched quads, SDF rounded rects, Vulkan | built-in |
+| Rendering | Batched quads, SDF rounded rects; Vulkan, D3D11, D3D12 or GL 3.3 | built-in |
 | Layout | Flexbox (row, column, wrap, grow, gap, ...) | Yoga |
 | Text | Glyph atlas, shaping, multi-weight/style | FreeType, HarfBuzz |
 | Scripting | Lua bindings for the widget tree | Lua 5.4 |
@@ -136,6 +136,46 @@ cmake -B build -G Ninja
 cmake --build build
 ./build/examples/ultragui_showcase   # press 1-8 to switch scenes
 ```
+
+### Rendering backends
+
+`ugui::RHI` has one implementation per graphics API, chosen at link time.
+Vulkan is the default. `ULTRAGUI_BACKEND_D3D11`, `ULTRAGUI_BACKEND_D3D12` and
+`ULTRAGUI_BACKEND_OPENGL` pick another one. `ULTRAGUI_RHI_SOURCE` overrides
+all of them if you bring your own.
+
+```bash
+cmake -B build -G Ninja -DULTRAGUI_BACKEND_D3D11=ON
+```
+
+The D3D11 backend builds two ways from one source. On Windows it links
+`d3d11` and `dxgi` from the platform SDK and takes the HWND behind the GLFW
+window. Nothing else is needed there.
+
+On Linux it links DXVK-native, which turns the same calls back into Vulkan.
+Development and testing therefore need no Windows machine. That build wants
+`dxvk-d3d11`, `dxvk-dxgi` and `libvkd3d-utils` on the pkg-config path, which
+the dev shell provides. It also wants one environment variable, because
+DXVK-native has no window system of its own and takes a `GLFWwindow*` in place
+of an HWND:
+
+```bash
+export DXVK_WSI_DRIVER=GLFW
+./build/examples/ultragui_showcase
+```
+
+D3D11 takes DXBC, which `dxc` no longer emits, so the backend compiles
+`shaders/hlsl/*.hlsl` at startup. Windows uses `d3dcompiler_47.dll`, Linux
+uses `D3DCompile` from vkd3d-utils, and the backend loads either one by name
+at run time. CMake embeds that HLSL into the binary, so there are no shader
+files to ship. D3D12 compiles the same sources to DXIL ahead of time instead.
+
+All backends share one colour pipeline. The shaders decode vertex and texture
+colours from sRGB, blending happens in linear light, and the sRGB render
+target re-encodes on write. A colour written in `.ugui` therefore reaches the
+screen unchanged. Offscreen render targets hold sRGB bytes like any other
+texture. An sRGB view writes them and a UNORM view samples them, so the
+hardware encodes once and the shader decodes once.
 
 ## .ugui
 

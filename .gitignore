@@ -26,6 +26,7 @@ Thumbs.db
 /tests/CMakeFiles
 
 # In-source CMake artifacts
+/generated
 CMakeCache.txt
 CTestTestfile.cmake
 Makefile

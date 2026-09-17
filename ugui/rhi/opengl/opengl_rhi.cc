@@ -453,15 +453,12 @@ static GLuint compile_program(const char* vs_src, const char* fs_src) {
   return prog;
 }
 
-// ---------------------------------------------------------------------------
-// sRGB helper: glClearColor bypasses GL_FRAMEBUFFER_SRGB conversion,
-// so we manually apply the sRGB transfer function to the clear color.
-// ---------------------------------------------------------------------------
-
-static f32 linear_to_srgb(f32 c) {
-  if (c <= 0.0031308f) return c * 12.92f;
-  return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-}
+// EXT_texture_sRGB_decode: samples a texture without GL applying the sRGB
+// transfer function. glcorearb.h is core-only, so spell the enums out.
+#ifndef GL_TEXTURE_SRGB_DECODE_EXT
+#define GL_TEXTURE_SRGB_DECODE_EXT 0x8A48
+#define GL_SKIP_DECODE_EXT 0x8A4A
+#endif
 
 // ---------------------------------------------------------------------------
 // RHI::Impl
@@ -471,6 +468,7 @@ struct RHI::Impl {
   GLFWwindow* window_ = nullptr;
   f32 dpi_scale_ = 1.0f;
   bool vsync_ = true;
+  bool srgb_decode_control_ = false;  // EXT_texture_sRGB_decode present
   bool embedded_ = false;
 
   // Shader programs
@@ -599,7 +597,7 @@ struct RHI::Impl {
   void ensure_text_index_capacity(u32 needed);
   bool ensure_video_program();
 
-  void bind_vertex_format(GLuint vbo, GLuint ibo);
+  void bind_vertex_format(GLuint vbo, GLuint ibo, u32 base_offset);
   void set_projection(GLuint program, f32 win_w, f32 win_h);
 };
 
@@ -613,48 +611,58 @@ static RHI::Impl* s_rhi_instance = nullptr;
 // Vertex format binding
 // ---------------------------------------------------------------------------
 
-void RHI::Impl::bind_vertex_format(GLuint vbo, GLuint ibo) {
+// `base_offset` is where this batch's vertices start in the streaming buffer.
+// Every attribute pointer needs it. Without it, a frame that uploads more than
+// one distinct vertex array, such as an offscreen pass before the main pass,
+// draws every later batch from the first batch's vertices.
+void RHI::Impl::bind_vertex_format(GLuint vbo, GLuint ibo, u32 base_offset) {
   glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  const uintptr_t base = static_cast<uintptr_t>(base_offset);
 
   // 0: pos (2xfloat, offset 0)
   glEnableVertexAttribArray(0);
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
-                        reinterpret_cast<void*>(offsetof(Vertex2D, pos)));
+  glVertexAttribPointer(
+      0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
+      reinterpret_cast<void*>(base + offsetof(Vertex2D, pos)));
   // 1: uv (2xfloat, offset 8)
   glEnableVertexAttribArray(1);
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
-                        reinterpret_cast<void*>(offsetof(Vertex2D, uv)));
+                        reinterpret_cast<void*>(base + offsetof(Vertex2D, uv)));
   // 2: color (1xuint, offset 16): integer attribute
   glEnableVertexAttribArray(2);
-  glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(Vertex2D),
-                         reinterpret_cast<void*>(offsetof(Vertex2D, color)));
+  glVertexAttribIPointer(
+      2, 1, GL_UNSIGNED_INT, sizeof(Vertex2D),
+      reinterpret_cast<void*>(base + offsetof(Vertex2D, color)));
   // 3: color2 (1xuint, offset 20)
   glEnableVertexAttribArray(3);
-  glVertexAttribIPointer(3, 1, GL_UNSIGNED_INT, sizeof(Vertex2D),
-                         reinterpret_cast<void*>(offsetof(Vertex2D, color2)));
+  glVertexAttribIPointer(
+      3, 1, GL_UNSIGNED_INT, sizeof(Vertex2D),
+      reinterpret_cast<void*>(base + offsetof(Vertex2D, color2)));
   // 4: corner_radii (1xuint, offset 24)
   glEnableVertexAttribArray(4);
   glVertexAttribIPointer(
       4, 1, GL_UNSIGNED_INT, sizeof(Vertex2D),
-      reinterpret_cast<void*>(offsetof(Vertex2D, corner_radii)));
+      reinterpret_cast<void*>(base + offsetof(Vertex2D, corner_radii)));
   // 5: softness (1xfloat, offset 28)
   glEnableVertexAttribArray(5);
-  glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
-                        reinterpret_cast<void*>(offsetof(Vertex2D, softness)));
+  glVertexAttribPointer(
+      5, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
+      reinterpret_cast<void*>(base + offsetof(Vertex2D, softness)));
   // 6: half_size (2xfloat, offset 32)
   glEnableVertexAttribArray(6);
-  glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
-                        reinterpret_cast<void*>(offsetof(Vertex2D, half_size)));
+  glVertexAttribPointer(
+      6, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
+      reinterpret_cast<void*>(base + offsetof(Vertex2D, half_size)));
   // 7: border_width (1xfloat, offset 40)
   glEnableVertexAttribArray(7);
   glVertexAttribPointer(
       7, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex2D),
-      reinterpret_cast<void*>(offsetof(Vertex2D, border_width)));
+      reinterpret_cast<void*>(base + offsetof(Vertex2D, border_width)));
   // 8: border_color (1xuint, offset 44)
   glEnableVertexAttribArray(8);
   glVertexAttribIPointer(
       8, 1, GL_UNSIGNED_INT, sizeof(Vertex2D),
-      reinterpret_cast<void*>(offsetof(Vertex2D, border_color)));
+      reinterpret_cast<void*>(base + offsetof(Vertex2D, border_color)));
 
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
 }
@@ -761,6 +769,24 @@ bool RHI::Impl::Init(const RHIConfig& config) {
       reinterpret_cast<const char*>(glGetString(GL_RENDERER));
   std::printf("ultragui: OpenGL %s (%s)\n", version ? version : "unknown",
               renderer ? renderer : "unknown");
+
+  {
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint i = 0; i < count; ++i) {
+      const char* ext = reinterpret_cast<const char*>(
+          glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+      if (ext && std::strcmp(ext, "GL_EXT_texture_sRGB_decode") == 0) {
+        srgb_decode_control_ = true;
+        break;
+      }
+    }
+    if (!srgb_decode_control_) {
+      std::fprintf(stderr,
+                   "ultragui: no EXT_texture_sRGB_decode; offscreen render "
+                   "targets will render darker than on other backends\n");
+    }
+  }
 
   // Compute DPI scale
   {
@@ -945,12 +971,11 @@ bool RHI::Impl::BeginFrame(Color clear_color) {
   glScissor(0, 0, static_cast<GLsizei>(swapchain_width_),
             static_cast<GLsizei>(swapchain_height_));
 
-  // Clear: glClearColor is NOT affected by GL_FRAMEBUFFER_SRGB, so we
-  // must manually encode the linear clear color into sRGB for correct output.
-  // In embedded mode the host owns the clear, so we draw on top of its content.
+  // GL_FRAMEBUFFER_SRGB makes GL encode the clear for us, matching how Vulkan
+  // and D3D11 treat a clear value. In embedded mode the host owns the clear,
+  // so we draw on top of its content.
   if (!embedded_) {
-    glClearColor(linear_to_srgb(clear_color.r), linear_to_srgb(clear_color.g),
-                 linear_to_srgb(clear_color.b), clear_color.a);
+    glClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
     glClear(GL_COLOR_BUFFER_BIT);
   }
 
@@ -1051,7 +1076,7 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
   }
 
   // Set up vertex format with the correct VBO offset
-  bind_vertex_format(vertex_buf_, index_buf_);
+  bind_vertex_format(vertex_buf_, index_buf_, vb_byte_offset);
 
   // Set projection uniforms (in case program was switched)
   glUniform2f(quad_u_scale_, proj_scale_[0], proj_scale_[1]);
@@ -1112,7 +1137,7 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
   }
 
   // Set up vertex format with text buffers
-  bind_vertex_format(text_vertex_buf_, text_index_buf_);
+  bind_vertex_format(text_vertex_buf_, text_index_buf_, vb_byte_offset);
 
   // Draw
   glDrawElements(
@@ -1234,12 +1259,22 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
 
   auto& slot = textures_[handle];
 
-  // Create texture for the render target
+  // A render target holds sRGB-encoded bytes, like every other texture the
+  // quad shader samples. sRGB storage makes GL_FRAMEBUFFER_SRGB encode on
+  // write. Sampling must then skip GL's decode, which leaves srgb_to_linear()
+  // in the shader as the only one. EXT_texture_sRGB_decode is what skips it;
+  // without the extension, fall back to RGBA8, which neither encodes nor
+  // decodes.
   glGenTextures(1, &slot.texture);
   glBindTexture(GL_TEXTURE_2D, slot.texture);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(width),
-               static_cast<GLsizei>(height), 0, GL_RGBA, GL_UNSIGNED_BYTE,
-               nullptr);
+  glTexImage2D(GL_TEXTURE_2D, 0,
+               srgb_decode_control_ ? GL_SRGB8_ALPHA8 : GL_RGBA8,
+               static_cast<GLsizei>(width), static_cast<GLsizei>(height), 0,
+               GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  if (srgb_decode_control_) {
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SRGB_DECODE_EXT,
+                    GL_SKIP_DECODE_EXT);
+  }
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1304,8 +1339,7 @@ bool RHI::Impl::BeginOffscreen(RHITextureHandle target, Color clear_color) {
   glScissor(0, 0, static_cast<GLsizei>(slot.width),
             static_cast<GLsizei>(slot.height));
 
-  glClearColor(linear_to_srgb(clear_color.r), linear_to_srgb(clear_color.g),
-               linear_to_srgb(clear_color.b), clear_color.a);
+  glClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
   glClear(GL_COLOR_BUFFER_BIT);
 
   // Set up quad program with offscreen projection

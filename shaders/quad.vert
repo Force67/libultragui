@@ -25,13 +25,22 @@ layout(location = 5) out vec2 frag_half_size;
 layout(location = 6) out float frag_border_width;
 layout(location = 7) out vec4 frag_border_color;
 
+// sRGB EOTF: sRGB -> linear. Vertex colours and textures carry sRGB-encoded
+// bytes. Decode them here, so blending happens in linear light and the sRGB
+// render target re-encodes on write.
+vec3 srgb_to_linear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
 vec4 unpack_color(uint c) {
-    return vec4(
+    vec4 col = vec4(
         float(c & 0xFFu) / 255.0,
         float((c >> 8) & 0xFFu) / 255.0,
         float((c >> 16) & 0xFFu) / 255.0,
         float((c >> 24) & 0xFFu) / 255.0
     );
+    col.rgb = srgb_to_linear(col.rgb);
+    return col;
 }
 
 void main() {
