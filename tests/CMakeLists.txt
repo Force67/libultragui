@@ -35,3 +35,8 @@ add_test(NAME runtime_safety COMMAND test_runtime_safety)
 add_executable(test_idl_components test_idl_components.cc)
 target_link_libraries(test_idl_components ultragui)
 add_test(NAME idl_components COMMAND test_idl_components)
+
+# Retained Yoga tree regression tests (no GPU required)
+add_executable(test_layout_retained test_layout_retained.cc)
+target_link_libraries(test_layout_retained ultragui)
+add_test(NAME layout_retained COMMAND test_layout_retained)

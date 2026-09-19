@@ -42,11 +42,29 @@ struct LayoutViewport {
 };
 
 /// Runs the Yoga layout algorithm on a tree of LayoutNodes.
+///
+/// The Yoga tree is retained between calls. Yoga caches each node's measured
+/// layout and re-solves only the subtrees that changed, which it cannot do for
+/// a tree that is thrown away and rebuilt every frame. Compute() notices when
+/// the shape it is handed no longer matches the tree it holds and rebuilds.
 class LayoutEngine {
  public:
+  LayoutEngine() = default;
+  ~LayoutEngine();
+  LayoutEngine(const LayoutEngine&) = delete;
+  LayoutEngine& operator=(const LayoutEngine&) = delete;
+
   /// Compute layout for all nodes. The root node fills the viewport.
   void Compute(LayoutNode* nodes, u32 node_count,
                const LayoutViewport& viewport);
+
+  /// Drop the retained tree. Only needed to release the memory early; a
+  /// changed tree is detected and rebuilt by Compute() on its own.
+  void Reset();
+
+ private:
+  struct Retained;
+  Retained* retained_ = nullptr;
 };
 
 }  // namespace ugui
