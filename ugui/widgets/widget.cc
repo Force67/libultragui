@@ -221,6 +221,13 @@ wid HitTest(WidgetRegistry& world, wid e, Vec2 point) {
   if (vt.hit_test) return vt.hit_test(world, e, point);
 
   if (!world.Get<Transform>(e)->rect.contains(point)) return kNullWidget;
+  // A widget nobody can see takes no clicks, and neither does anything under
+  // it. Paint already skips these; without the same rule here a screen that
+  // was collapsed while the pointer was over it keeps catching presses,
+  // because a collapsed subtree keeps the rects it was last laid out at.
+  const Visibility vis = ComputedStyle(world, e).visibility;
+  if (vis == Visibility::kHidden || vis == Visibility::kCollapsed)
+    return kNullWidget;
   const Vector<wid>& kids = world.Get<Hierarchy>(e)->children;
   for (auto it = kids.rbegin(); it != kids.rend(); ++it) {
     wid hit = HitTest(world, *it, point);
