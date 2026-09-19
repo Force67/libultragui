@@ -62,6 +62,32 @@ struct UIConfig {
   bool draw_data = false;
 };
 
+/// What RenderDrawData() should do when a frame would come out identical to
+/// the last one.
+enum class FrameReuse {
+  kOff,     ///< always rebuild (the default)
+  kOn,      ///< hand back the previous draw list
+  kVerify,  ///< rebuild anyway and report any frame reuse would have got wrong
+};
+
+/// Where one frame's CPU time went, and how much work each stage did. Filled
+/// by RenderDrawData(); a handful of clock reads, so it is always on rather
+/// than behind a build flag.
+struct FrameStats {
+  f64 input_ms = 0.0;
+  f64 update_ms = 0.0;  // timers, animation, per-widget update
+  f64 measure_ms = 0.0;
+  f64 layout_ms = 0.0;
+  f64 paint_ms = 0.0;
+  f64 total_ms = 0.0;
+  u32 widgets = 0;       // widgets walked by measure
+  u32 layout_nodes = 0;  // nodes handed to the layout engine
+  u32 shape_calls = 0;   // text runs shaped (see TextEngine::shape_calls)
+  u32 shape_hits = 0;    // of those, served from the shaping cache
+  u32 draw_commands = 0;
+  bool reused = false;  ///< the previous draw list was handed back unchanged
+};
+
 /// Owns all subsystems and drives one frame of the UI.
 ///
 /// Usage:
@@ -170,6 +196,11 @@ class UIContext {
   /// rebuilds; resolve via widgets().Get(id) right before use.
   WidgetId FindWidget(const char* name) const;
 
+  /// Resolve a widget id through the same cache (O(1)). The animator holds
+  /// ids rather than handles and asks once per running animation per frame,
+  /// which a tree search would make O(widgets) each time.
+  wid WidgetById(u32 id) const;
+
   /// Entity registry. Get<C>(e) resolves a component (or nullptr);
   /// Alive(e) checks liveness.
   WidgetRegistry& widgets() { return widget_registry_; }
@@ -241,6 +272,24 @@ class UIContext {
   /// Get the current theme name (empty if no theme has been applied).
   const String& theme_name() const { return current_theme_name_; }
 
+  /// Where the last frame's CPU time went. See FrameStats.
+  const FrameStats& frame_stats() const { return stats_; }
+
+  /// Skip measure/layout/paint on frames that would redraw the same picture.
+  /// Off by default: it trades a rebuild for trusting that everything which
+  /// changes what is drawn goes through MarkDirty/MarkPaintDirty. kVerify
+  /// rebuilds regardless and reports where that trust was misplaced, which is
+  /// how to qualify it on a new UI before turning it on.
+  void set_frame_reuse(FrameReuse mode) { frame_reuse_ = mode; }
+  FrameReuse frame_reuse() const { return frame_reuse_; }
+
+  /// Frames kVerify found a difference on. Non-zero means reuse is unsafe for
+  /// this UI and something it draws from is changing without marking dirty.
+  u64 frame_reuse_mismatches() const { return reuse_mismatches_; }
+  /// Frames the predicate called a repeat. A mismatch count of zero only means
+  /// something if this is not zero too.
+  u64 frame_reuse_candidates() const { return reuse_candidates_; }
+
  private:
   Platform platform_;
   RHI rhi_;
@@ -285,6 +334,26 @@ class UIContext {
   f64 dt_ = 0.0;
 
   Vector<LayoutNode> layout_nodes_;
+  FrameStats stats_;
+  f64 last_input_ms_ = 0.0;
+
+  // Frame reuse. Everything here is "what the last built frame was built
+  // from"; a frame whose inputs all match may hand back that frame's list.
+  FrameReuse frame_reuse_ = FrameReuse::kOff;
+  bool have_built_frame_ = false;
+  u64 last_widget_revision_ = 0;
+  u64 last_draw_hash_ = 0;
+  u64 reuse_mismatches_ = 0;
+  u64 reuse_candidates_ = 0;
+  Vec2 last_reuse_viewport_ = {-1.0f, -1.0f};
+  f32 last_reuse_scale_ = -1.0f;
+  wid last_tooltip_target_;
+  bool last_tooltip_visible_ = false;
+  Vector<wid> last_overlay_widgets_;
+  /// True when nothing that feeds the draw list has moved since it was built.
+  bool FrameWouldRepeat() const;
+  /// Remember what the frame just built was built from.
+  void RecordBuiltFrame(const DrawData& dd);
   bool owns_root_ = false;  // true if root was created by load_ui
   bool initialized_ = false;
   // Flips true on PumpInput, false at the end of Update. Lets the
@@ -310,11 +379,13 @@ class UIContext {
   };
   Vector<OverlayEntry> overlays_;
 
-  // Widget name -> entity cache (O(1) lookup, rebuilt lazily).
+  // Widget name/id -> entity caches (O(1) lookup, rebuilt lazily together).
   mutable HashMap<String, wid> widget_cache_;
+  mutable HashMap<u32, wid> id_cache_;
   mutable bool widget_cache_dirty_ = true;
   void RebuildWidgetCache() const;
-  static void CacheWidgetTree(wid w, HashMap<String, wid>& cache);
+  static void CacheWidgetTree(wid w, HashMap<String, wid>& cache,
+                              HashMap<u32, wid>& by_id);
 
   // Tooltip state
   wid tooltip_target_;

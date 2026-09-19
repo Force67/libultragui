@@ -113,6 +113,9 @@ UGUI_API f32 UiScale(WidgetRegistry& world, wid e);
 UGUI_API const WidgetContext* WidgetContextOf(WidgetRegistry& world, wid e);
 UGUI_API void MarkDirty(WidgetRegistry& world, wid e);
 UGUI_API void MarkPaintDirty(WidgetRegistry& world, wid e);
+/// Bumped by every MarkDirty/MarkPaintDirty. Unchanged between two frames
+/// means nothing asked for a redraw in between.
+UGUI_API u64 WidgetRevision();
 UGUI_API void SetTooltip(WidgetRegistry& world, wid e, const String& text);
 UGUI_API const String& TooltipText(WidgetRegistry& world, wid e);
 UGUI_API Vec2 InputToLayoutPoint(WidgetRegistry& world, wid e, Vec2 point);
