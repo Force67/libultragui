@@ -26,13 +26,26 @@ static u32 style_corner_radii(const Style& s) {
   return Vertex2D::PackRadii(s.corner_radius);
 }
 
-void DestroyWidget(WidgetRegistry& world, wid e) {
+// Release a widget and everything under it. The caller has already unhooked
+// the top of the subtree, and every parent below it is going away too, so
+// nothing here has to maintain a child list it is about to destroy.
+static void ReleaseSubtree(WidgetRegistry& world, wid e) {
   if (!world.Alive(e)) return;
   if (Hierarchy* h = world.Get<Hierarchy>(e)) {
     Vector<wid> kids = h->children;  // copy: Release mutates the stores
-    for (wid c : kids) DestroyWidget(world, c);
+    for (wid c : kids) ReleaseSubtree(world, c);
   }
   world.Release(e);
+}
+
+void DestroyWidget(WidgetRegistry& world, wid e) {
+  if (!world.Alive(e)) return;
+  // Unhook from the parent first. Releasing the entity does not take it out of
+  // the parent's child list, and every tree walk that does not check liveness
+  // (layout's among them) would then follow the dead handle.
+  if (Hierarchy* h = world.Get<Hierarchy>(e); h != nullptr && h->parent.valid())
+    RemoveChild(world, h->parent, e);
+  ReleaseSubtree(world, e);
 }
 
 // --- Tree -------------------------------------------------------------------
