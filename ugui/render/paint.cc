@@ -48,7 +48,9 @@ static void PaintWidgetTreeImpl(WidgetRegistry& world, wid e,
                             t->rect.y + t->rect.h * 0.5f},
                            s.rotation);
 
-  PaintWidget(world, e, renderer);
+  // `s` is the style this walk already resolved; PaintWidget would otherwise
+  // resolve the same overrides again for every widget.
+  PaintWidget(world, e, renderer, s);
 
   // If this widget is a scroll view, add its scroll offset for children.
   Vec2 child_offset = scroll_offset + ScrollOffset(world, e);

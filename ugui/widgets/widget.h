@@ -120,6 +120,11 @@ UGUI_API wid HitTest(WidgetRegistry& world, wid e, Vec2 point);
 
 // Per-kind dispatch (the vtable, see widget_vtable.h).
 UGUI_API void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer);
+/// Paint with a style the caller has already resolved. The tree walk computes
+/// one to decide visibility and inherited opacity; handing it over saves
+/// resolving the same state overrides a second time per widget.
+UGUI_API void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer,
+                          const Style& computed);
 UGUI_API void MeasureWidget(WidgetRegistry& world, wid e, f32& out_w,
                             f32& out_h);
 UGUI_API void LayoutWidget(WidgetRegistry& world, wid e, const Rect& rect,

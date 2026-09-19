@@ -289,6 +289,11 @@ void MeasureWidget(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) {
 }
 
 void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  PaintWidget(world, e, renderer, ComputedStyle(world, e));
+}
+
+void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer,
+                 const Style& computed) {
   const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
   if (vt.custom_paint) {
     if (vt.draw) vt.draw(world, e, renderer);
@@ -296,7 +301,7 @@ void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   }
 
   Rect rect = world.Get<Transform>(e)->rect;
-  Style s = ComputedStyle(world, e);
+  Style s = computed;
   s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
   u32 radii = style_corner_radii(s);
