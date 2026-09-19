@@ -13,6 +13,8 @@ namespace ugui {
 struct GradientStop {
   f32 position = 0.0f;  // 0.0 to 1.0
   Color color;
+
+  constexpr bool operator==(const GradientStop&) const = default;
 };
 
 /// Box shadow definition (CSS-like).
@@ -22,6 +24,8 @@ struct BoxShadow {
   f32 spread = 0.0f;
   Vec2 offset = Vec2::Zero();
   bool inset = false;
+
+  constexpr bool operator==(const BoxShadow&) const = default;
 };
 
 /// Complete visual style for a widget. Every widget has one of these.
@@ -138,6 +142,13 @@ struct Style {
 
   /// Interpolate animatable properties (colors, sizes, opacity, ...).
   static Style Lerp(const Style& a, const Style& b, f32 t);
+
+  /// Field-by-field equality. Used to skip work whose only input is the style:
+  /// re-applying it to a retained layout node, or writing it back to a widget
+  /// that already has exactly this. Floats compare bitwise, so the answer is
+  /// conservative - a style that differs re-applies, which is merely the old
+  /// behaviour.
+  bool operator==(const Style&) const = default;
 };
 
 /// A style override for a specific widget state (e.g. :hover, :pressed).

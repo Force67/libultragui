@@ -52,6 +52,10 @@ void SetImageTexture(wid e, TextureId texture, f32 width, f32 height) {
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kImage) return;
   ImageContent& c = world.GetOrAdd<ImageContent>(e);
+  // Hosts rebind the same texture every frame while a panel is up; only a real
+  // change is worth a relayout.
+  if (c.texture == texture && c.natural_w == width && c.natural_h == height)
+    return;
   c.texture = texture;
   c.natural_w = width;
   c.natural_h = height;
