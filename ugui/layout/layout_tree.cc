@@ -6,6 +6,15 @@
 
 namespace ugui {
 
+// A collapsed widget is `display: none`: the layout engine gives it no size and
+// zeroes its whole subtree, so building nodes for what is under it is work with
+// no result. Both walks below read the answer off the node's own style, the
+// same copy apply_style() hands to Yoga, so they cannot disagree about where
+// the tree was cut.
+static bool SubtreeIsCollapsed(const LayoutNode& node) {
+  return node.style.visibility == Visibility::kCollapsed;
+}
+
 static void build_layout_nodes(WidgetRegistry& world, wid e, u32 parent_index,
                                Vector<LayoutNode>& nodes) {
   u32 my_index = static_cast<u32>(nodes.size());
@@ -15,8 +24,9 @@ static void build_layout_nodes(WidgetRegistry& world, wid e, u32 parent_index,
   node.parent = parent_index;
   node.first_child = ~0u;
   node.next_sibling = ~0u;
+  const bool collapsed = SubtreeIsCollapsed(node);
   const Vector<wid>& kids = world.Get<Hierarchy>(e)->children;
-  node.child_count = static_cast<u32>(kids.size());
+  node.child_count = collapsed ? 0u : static_cast<u32>(kids.size());
 
   nodes.push_back(node);
 
@@ -32,6 +42,7 @@ static void build_layout_nodes(WidgetRegistry& world, wid e, u32 parent_index,
     }
   }
 
+  if (collapsed) return;
   for (wid child : kids) build_layout_nodes(world, child, my_index, nodes);
 }
 
@@ -66,10 +77,13 @@ static void apply_layout_results(WidgetRegistry& world, wid e, u32& node_index,
     }
   }
 
+  const bool collapsed = SubtreeIsCollapsed(node);
+
   ApplyLayoutResult(world, e, node);
   LayoutWidget(world, e, node.computed_rect, node.content_rect);
 
   ++node_index;
+  if (collapsed) return;  // its children never got nodes; see build_layout_nodes
   for (wid child : world.Get<Hierarchy>(e)->children)
     apply_layout_results(world, child, node_index, nodes);
 }

@@ -17,7 +17,8 @@ UGUI_API wid FindWidgetById(wid root, u32 id);
 UGUI_API void UpdateWidgetTree(wid root, f64 dt);
 
 /// Bottom-up measure pass: measures all widgets and sets intrinsic sizes.
-UGUI_API void MeasureWidgetTree(wid root);
+/// Returns how many widgets were measured.
+UGUI_API u32 MeasureWidgetTree(wid root);
 
 }  // namespace ugui
 
