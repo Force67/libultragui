@@ -61,6 +61,11 @@ struct Hierarchy {
 
 /// Base style and current interaction-state bitset. State overrides and the
 /// animation override live in the StateStyle / AnimStyle components.
+///
+/// Write `style` through SetStyle(), or call MarkDirty() after writing it in
+/// place. Layout refreshes a widget's node only when the widget is dirty, so a
+/// style written behind its back is not picked up until something else marks
+/// the widget.
 struct StyleC {
   Style style;
   WidgetState state = WidgetState::kNone;

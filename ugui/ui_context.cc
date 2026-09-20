@@ -475,7 +475,7 @@ void UIContext::Update() {
 
       renderer_.BeginFrame();
       if (pass.root.valid()) {
-        ComputeWidgetLayout(pass.root, vp, layout_engine_, layout_nodes_);
+        ComputeWidgetLayout(pass.root, vp, layout_engine_);
         PaintWidgetTree(pass.root, renderer_);
       }
       text_engine_.FlushAtlas();
@@ -494,7 +494,7 @@ void UIContext::Update() {
     on_paint_cb_(renderer_, &rhi_);
   } else if (root_.valid()) {
     LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
+    ComputeWidgetLayout(root_, vp, layout_engine_);
     PaintWidgetTree(root_, renderer_);
   }
 
@@ -502,7 +502,7 @@ void UIContext::Update() {
   for (auto& overlay : overlays_) {
     if (overlay.widget.valid()) {
       LayoutViewport ovp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-      ComputeWidgetLayout(overlay.widget, ovp, layout_engine_, layout_nodes_);
+      ComputeWidgetLayout(overlay.widget, ovp, layout_engine_);
       PaintWidgetTree(overlay.widget, renderer_);
     }
   }
@@ -650,9 +650,10 @@ const DrawData& UIContext::RenderDrawData() {
   LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
   if (root_.valid()) {
     mark = platform_.time();
-    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
+    ComputeWidgetLayout(root_, vp, layout_engine_);
     stats_.layout_ms += (platform_.time() - mark) * 1000.0;
-    stats_.layout_nodes += static_cast<u32>(layout_nodes_.size());
+    stats_.layout_nodes += static_cast<u32>(
+        layout_engine_.StoreFor(widget_registry_.Get<WidgetNode>(root_)->id).nodes.size());
     mark = platform_.time();
     PaintWidgetTree(root_, renderer_);
     stats_.paint_ms += (platform_.time() - mark) * 1000.0;
@@ -660,9 +661,11 @@ const DrawData& UIContext::RenderDrawData() {
   for (auto& overlay : overlays_) {
     if (overlay.widget.valid()) {
       mark = platform_.time();
-      ComputeWidgetLayout(overlay.widget, vp, layout_engine_, layout_nodes_);
+      ComputeWidgetLayout(overlay.widget, vp, layout_engine_);
       stats_.layout_ms += (platform_.time() - mark) * 1000.0;
-      stats_.layout_nodes += static_cast<u32>(layout_nodes_.size());
+      stats_.layout_nodes += static_cast<u32>(
+          layout_engine_.StoreFor(widget_registry_.Get<WidgetNode>(overlay.widget)->id)
+              .nodes.size());
       mark = platform_.time();
       PaintWidgetTree(overlay.widget, renderer_);
       stats_.paint_ms += (platform_.time() - mark) * 1000.0;

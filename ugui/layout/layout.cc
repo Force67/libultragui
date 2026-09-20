@@ -415,6 +415,7 @@ struct RetainedTree {
 struct LayoutEngine::Retained {
   YGConfigRef config = nullptr;
   std::unordered_map<u32, RetainedTree> trees;
+  std::unordered_map<u32, LayoutEngine::NodeStore> stores;
 
   ~Retained() {
     for (auto& [root_id, tree] : trees)
@@ -430,6 +431,11 @@ LayoutEngine::~LayoutEngine() {
 void LayoutEngine::Reset() {
   delete retained_;
   retained_ = nullptr;
+}
+
+LayoutEngine::NodeStore& LayoutEngine::StoreFor(u32 root_id) {
+  if (!retained_) retained_ = new Retained();
+  return retained_->stores[root_id];
 }
 
 void LayoutEngine::Compute(LayoutNode* nodes, u32 node_count,
@@ -485,7 +491,12 @@ void LayoutEngine::Compute(LayoutNode* nodes, u32 node_count,
     // The LayoutNode array is the caller's scratch and moves between frames,
     // so the context has to be re-pointed even when the tree was reused.
     YGNodeSetContext(r.nodes[i], &nodes[i]);
-    if (viewport_moved || !(r.applied[i] == nodes[i].style)) {
+    // A node the caller did not refresh still holds the style that was applied
+    // last frame, so there is nothing to compare and nothing to write.
+    // A resize changes what every length resolves to, so it re-applies
+    // everything; otherwise only a node the caller refreshed can differ.
+    if (viewport_moved ||
+        (nodes[i].dirty && !(r.applied[i] == nodes[i].style))) {
       apply_style(r.nodes[i], nodes[i].style, viewport);
       r.applied[i] = nodes[i].style;
     }
