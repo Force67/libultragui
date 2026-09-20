@@ -61,6 +61,11 @@ struct Hierarchy {
 
 /// Base style and current interaction-state bitset. State overrides and the
 /// animation override live in the StateStyle / AnimStyle components.
+///
+/// Write `style` through SetStyle(), or call MarkDirty() after writing it in
+/// place. Layout refreshes a widget's node only when the widget is dirty, so a
+/// style written behind its back is not picked up until something else marks
+/// the widget.
 struct StyleC {
   Style style;
   WidgetState state = WidgetState::kNone;
@@ -113,6 +118,9 @@ UGUI_API f32 UiScale(WidgetRegistry& world, wid e);
 UGUI_API const WidgetContext* WidgetContextOf(WidgetRegistry& world, wid e);
 UGUI_API void MarkDirty(WidgetRegistry& world, wid e);
 UGUI_API void MarkPaintDirty(WidgetRegistry& world, wid e);
+/// Bumped by every MarkDirty/MarkPaintDirty. Unchanged between two frames
+/// means nothing asked for a redraw in between.
+UGUI_API u64 WidgetRevision();
 UGUI_API void SetTooltip(WidgetRegistry& world, wid e, const String& text);
 UGUI_API const String& TooltipText(WidgetRegistry& world, wid e);
 UGUI_API Vec2 InputToLayoutPoint(WidgetRegistry& world, wid e, Vec2 point);
@@ -120,6 +128,11 @@ UGUI_API wid HitTest(WidgetRegistry& world, wid e, Vec2 point);
 
 // Per-kind dispatch (the vtable, see widget_vtable.h).
 UGUI_API void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer);
+/// Paint with a style the caller has already resolved. The tree walk computes
+/// one to decide visibility and inherited opacity; handing it over saves
+/// resolving the same state overrides a second time per widget.
+UGUI_API void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer,
+                          const Style& computed);
 UGUI_API void MeasureWidget(WidgetRegistry& world, wid e, f32& out_w,
                             f32& out_h);
 UGUI_API void LayoutWidget(WidgetRegistry& world, wid e, const Rect& rect,

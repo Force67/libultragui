@@ -130,6 +130,11 @@ class TextEngine {
   /// Bumped whenever the atlas changes. Backends re-upload when it changes.
   u32 atlas_revision() const;
 
+  /// Shape() calls since the last BeginFrame, and how many of those the
+  /// shaping cache answered without touching HarfBuzz.
+  u32 shape_calls() const;
+  u32 shape_hits() const;
+
  private:
   /// Shared body of the four loaders: `path` opens a file, `data`/`length` a
   /// buffer, and exactly one of the two is set. `origin` is what the log lines

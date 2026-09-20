@@ -267,8 +267,7 @@ TEST(flex_wrap_lays_out_multiple_lines) {
     }
   )");
   ugui::LayoutEngine engine;
-  ugui::Vector<ugui::LayoutNode> scratch;
-  ugui::ComputeWidgetLayout(root, {800.0f, 600.0f, 1.0f}, engine, scratch);
+  ugui::ComputeWidgetLayout(root, {800.0f, 600.0f, 1.0f}, engine);
 
   // 250px row fits two 100px items; the third wraps to a second line
   // offset by height + row-gap.

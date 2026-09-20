@@ -61,6 +61,58 @@ struct FontInfo {
   FontStyle style = FontStyle::kNormal;
 };
 
+// A shaped run, keyed by everything that changes its glyphs or their
+// positions. Most UI text is the same string frame after frame, so shaping it
+// once and keeping the result is the difference between a HarfBuzz pass per
+// text widget per frame and a hash lookup.
+struct ShapeKey {
+  u64 text_hash;
+  FontHandle font;
+  u32 pixel_size;
+  f32 letter_spacing;
+  f32 line_height_mult;
+  u32 text_len;
+
+  bool operator==(const ShapeKey& o) const {
+    return text_hash == o.text_hash && font == o.font &&
+           pixel_size == o.pixel_size && letter_spacing == o.letter_spacing &&
+           line_height_mult == o.line_height_mult && text_len == o.text_len;
+  }
+};
+
+struct ShapeKeyHash {
+  size_t operator()(const ShapeKey& k) const {
+    size_t h = static_cast<size_t>(k.text_hash);
+    h = h * 1099511628211u + k.font;
+    h = h * 1099511628211u + k.pixel_size;
+    h = h * 1099511628211u + k.text_len;
+    u32 ls, lh;
+    std::memcpy(&ls, &k.letter_spacing, 4);
+    std::memcpy(&lh, &k.line_height_mult, 4);
+    h = h * 1099511628211u + ls;
+    h = h * 1099511628211u + lh;
+    return h;
+  }
+};
+
+struct CachedRun {
+  std::vector<TextRun::Glyph> glyphs;
+  f32 total_advance = 0.0f;
+  f32 ascent = 0.0f;
+  f32 descent = 0.0f;
+  f32 line_height = 0.0f;
+  u32 last_used_frame = 0;
+};
+
+static u64 HashText(const char* text, u32 len) {
+  u64 h = 1469598103934665603ull;  // FNV-1a
+  for (u32 i = 0; i < len; ++i) {
+    h ^= static_cast<unsigned char>(text[i]);
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
 struct TextEngine::Impl {
   FT_Library ft_library = nullptr;
   FontSlot fonts[MAX_FONTS] = {};
@@ -76,10 +128,22 @@ struct TextEngine::Impl {
 
   std::unordered_map<GlyphKey, CachedGlyph, GlyphKeyHash> glyph_cache;
 
-  // Per-shape glyph buffers; inner vectors don't move their heap data when
-  // the outer vector grows, so TextRun::glyphs pointers stay valid for a frame.
-  Vector<Vector<TextRun::Glyph>> glyph_runs;
+  // Scratch for runs the cache will not keep; inner vectors don't move their
+  // heap data when the outer vector grows, so glyph pointers stay valid for a
+  // frame.
+  std::vector<std::vector<TextRun::Glyph>> glyph_runs;
   Vector<TextLayout::Line> scratch_lines;
+
+  // Shaped runs kept across frames. Entries stay put in the map, so the glyph
+  // pointers a TextRun hands out stay valid until the entry is evicted, which
+  // only happens between frames.
+  std::unordered_map<ShapeKey, CachedRun, ShapeKeyHash> shape_cache;
+  u32 frame_index = 0;
+  u32 shape_calls = 0;
+  u32 shape_hits = 0;
+  // The size FT_Set_Pixel_Sizes last saw per font, so a run at the size the
+  // face is already set to skips the size change and the HarfBuzz reload.
+  u32 font_pixel_size[MAX_FONTS] = {};
 
   CachedGlyph* rasterize_glyph(FontHandle font, u32 glyph_id, u32 pixel_size);
 };
@@ -264,7 +328,10 @@ CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id,
   if (it != glyph_cache.end()) return &it->second;
 
   auto& face = fonts[font].ft_face;
-  FT_Set_Pixel_Sizes(face, 0, pixel_size);
+  if (font_pixel_size[font] != pixel_size) {
+    FT_Set_Pixel_Sizes(face, 0, pixel_size);
+    font_pixel_size[font] = pixel_size;
+  }
   if (FT_Load_Glyph(face, glyph_id, FT_LOAD_RENDER) != 0) return nullptr;
 
   auto& bmp = face->glyph->bitmap;
@@ -315,11 +382,35 @@ CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id,
 // ---------------------------------------------------------------------------
 
 void TextEngine::BeginFrame() {
-  if (impl_) {
-    impl_->glyph_runs.clear();
-    impl_->scratch_lines.clear();
+  if (!impl_) return;
+  impl_->glyph_runs.clear();
+  impl_->scratch_lines.clear();
+  impl_->shape_calls = 0;
+  impl_->shape_hits = 0;
+  ++impl_->frame_index;
+
+  // Drop runs nothing has asked for in a while. Text that changes every frame
+  // (a clock, a coordinate readout) leaves an entry behind every frame, so the
+  // cache does need sweeping - but sweeping walks the whole map, so it runs on
+  // an interval and only once the map has outgrown what a screen plausibly
+  // holds. Between sweeps the cache is allowed to run over the cap.
+  constexpr u32 kShapeCacheSoftCap = 4096;
+  constexpr u32 kShapeCacheMaxAge = 240;    // frames
+  constexpr u32 kShapeCacheSweepEvery = 60;  // frames
+  if (impl_->frame_index % kShapeCacheSweepEvery == 0 &&
+      impl_->shape_cache.size() > kShapeCacheSoftCap) {
+    for (auto it = impl_->shape_cache.begin();
+         it != impl_->shape_cache.end();) {
+      if (impl_->frame_index - it->second.last_used_frame > kShapeCacheMaxAge)
+        it = impl_->shape_cache.erase(it);
+      else
+        ++it;
+    }
   }
 }
+
+u32 TextEngine::shape_calls() const { return impl_ ? impl_->shape_calls : 0; }
+u32 TextEngine::shape_hits() const { return impl_ ? impl_->shape_hits : 0; }
 
 TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
                           f32 font_size, f32 letter_spacing,
@@ -333,8 +424,34 @@ TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
 
   auto& slot = impl_->fonts[font];
   u32 pixel_size = static_cast<u32>(font_size * dpi + 0.5f);
-  FT_Set_Pixel_Sizes(slot.ft_face, 0, pixel_size);
-  hb_ft_font_changed(slot.hb_font);
+
+  ++impl_->shape_calls;
+  const ShapeKey key{HashText(text, text_len), font,        pixel_size,
+                     letter_spacing,           line_height_mult, text_len};
+  auto cached_it = impl_->shape_cache.find(key);
+  if (cached_it != impl_->shape_cache.end()) {
+    // The atlas only ever appends, so a glyph keeps the UVs it was packed at
+    // and a cached run stays valid however much text is shaped after it.
+    CachedRun& cr = cached_it->second;
+    cr.last_used_frame = impl_->frame_index;
+    ++impl_->shape_hits;
+    TextRun run{};
+    run.glyphs = cr.glyphs.data();
+    run.glyph_count = static_cast<u32>(cr.glyphs.size());
+    run.total_advance = cr.total_advance;
+    run.ascent = cr.ascent;
+    run.descent = cr.descent;
+    run.line_height = cr.line_height;
+    return run;
+  }
+
+  // FT_Set_Pixel_Sizes and the HarfBuzz reload behind it are not cheap, and a
+  // screen mostly asks for one size per face.
+  if (impl_->font_pixel_size[font] != pixel_size) {
+    FT_Set_Pixel_Sizes(slot.ft_face, 0, pixel_size);
+    hb_ft_font_changed(slot.hb_font);
+    impl_->font_pixel_size[font] = pixel_size;
+  }
 
   hb_buffer_t* buf = hb_buffer_create();
   hb_buffer_add_utf8(buf, text, static_cast<int>(text_len), 0,
@@ -347,11 +464,11 @@ TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
   hb_glyph_position_t* glyph_pos =
       hb_buffer_get_glyph_positions(buf, &glyph_count);
 
-  // Each Shape() call gets its own glyph vector; outer-vector growth moves
-  // only the inner vector metadata, so glyph pointers stay valid.
-  impl_->glyph_runs.emplace_back(glyph_count);
-  auto& glyphs = impl_->glyph_runs.back();
+  CachedRun fresh;
+  fresh.glyphs.resize(glyph_count);
+  auto& glyphs = fresh.glyphs;
 
+  bool all_packed = true;
   f32 cursor_x = 0.0f;
   for (u32 i = 0; i < glyph_count; ++i) {
     auto& g = glyphs[i];
@@ -375,6 +492,8 @@ TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
       g.bmp_h = cached->bmp_h * inv_dpi;
       g.bearing_x = cached->bearing_x * inv_dpi;
       g.bearing_y = cached->bearing_y * inv_dpi;
+    } else {
+      all_packed = false;
     }
 
     cursor_x += g.x_advance;
@@ -391,13 +510,30 @@ TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
   f32 line_height = static_cast<f32>(slot.ft_face->size->metrics.height) /
                     64.0f * inv_dpi * line_height_mult;
 
+  fresh.total_advance = cursor_x;
+  fresh.ascent = ascent;
+  fresh.descent = descent;
+  fresh.line_height = line_height;
+  fresh.last_used_frame = impl_->frame_index;
+
   TextRun run{};
-  run.glyphs = glyphs.data();
   run.glyph_count = glyph_count;
   run.total_advance = cursor_x;
   run.ascent = ascent;
   run.descent = descent;
   run.line_height = line_height;
+
+  if (all_packed) {
+    // Node-based map: the entry, and so the glyph pointer handed out here,
+    // stays put until the run is evicted in some later BeginFrame.
+    auto [it, _] = impl_->shape_cache.emplace(key, std::move(fresh));
+    run.glyphs = it->second.glyphs.data();
+  } else {
+    // A glyph that would not pack (a full atlas) must not be remembered, or
+    // the run would keep its blank UVs for the rest of the session.
+    impl_->glyph_runs.push_back(std::move(fresh.glyphs));
+    run.glyphs = impl_->glyph_runs.back().data();
+  }
   return run;
 }
 

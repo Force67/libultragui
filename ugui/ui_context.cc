@@ -221,6 +221,9 @@ wid UIContext::LoadUi(const char* path) {
     RegisterWidgetTree(script_, root_);
     script_.WireChangeHandlers(root_);
   }
+  // The layout engine holds a Yoga tree per root; the widgets it was built
+  // from are gone.
+  layout_engine_.Reset();
   widget_cache_dirty_ = true;
 
   return root_;
@@ -255,6 +258,9 @@ wid UIContext::LoadUiString(const char* source, const char* name) {
     RegisterWidgetTree(script_, root_);
     script_.WireChangeHandlers(root_);
   }
+  // The layout engine holds a Yoga tree per root; the widgets it was built
+  // from are gone.
+  layout_engine_.Reset();
   widget_cache_dirty_ = true;
 
   return root_;
@@ -284,6 +290,9 @@ void UIContext::set_root(wid root) {
     SetContext(widget_registry_, root_, &widget_ctx_);
     RegisterWidgetTree(script_, root_);
   }
+  // The layout engine holds a Yoga tree per root; the widgets it was built
+  // from are gone.
+  layout_engine_.Reset();
   widget_cache_dirty_ = true;
 }
 
@@ -296,6 +305,7 @@ f64 UIContext::time() const { return initialized_ ? platform_.time() : 0.0; }
 void UIContext::PumpInput() {
   if (input_pumped_this_frame_) return;
   input_pumped_this_frame_ = true;
+  const f64 input_start = platform_.time();
 
   // Poll OS input (processes window resize events, fires platform
   // callbacks that may push events into the queue).
@@ -359,6 +369,11 @@ void UIContext::PumpInput() {
   }
 
   if (root_.valid()) input_.Process(root_);
+
+  // Kept aside rather than written into stats_: an application that pumps
+  // early (to route a click before the values it changes are read) does so
+  // before the frame's stats are reset.
+  last_input_ms_ = (platform_.time() - input_start) * 1000.0;
 }
 
 void UIContext::Update() {
@@ -389,14 +404,14 @@ void UIContext::Update() {
         now,
         [](u32 widget_id, const Style& animated_style, void* user_data) {
           auto* ctx = static_cast<UIContext*>(user_data);
-          wid w = FindWidgetById(ctx->root_, widget_id);
+          wid w = ctx->WidgetById(widget_id);
           if (w.valid())
             SetAnimationStyle(ctx->widget_registry_, w, animated_style);
         },
         this,
         [](u32 widget_id, void* user_data) {
           auto* ctx = static_cast<UIContext*>(user_data);
-          wid w = FindWidgetById(ctx->root_, widget_id);
+          wid w = ctx->WidgetById(widget_id);
           if (w.valid()) ClearAnimationStyle(ctx->widget_registry_, w);
         });
   }
@@ -460,7 +475,7 @@ void UIContext::Update() {
 
       renderer_.BeginFrame();
       if (pass.root.valid()) {
-        ComputeWidgetLayout(pass.root, vp, layout_engine_, layout_nodes_);
+        ComputeWidgetLayout(pass.root, vp, layout_engine_);
         PaintWidgetTree(pass.root, renderer_);
       }
       text_engine_.FlushAtlas();
@@ -479,7 +494,7 @@ void UIContext::Update() {
     on_paint_cb_(renderer_, &rhi_);
   } else if (root_.valid()) {
     LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
+    ComputeWidgetLayout(root_, vp, layout_engine_);
     PaintWidgetTree(root_, renderer_);
   }
 
@@ -487,7 +502,7 @@ void UIContext::Update() {
   for (auto& overlay : overlays_) {
     if (overlay.widget.valid()) {
       LayoutViewport ovp{viewport.x, viewport.y, widget_ctx_.ui_scale};
-      ComputeWidgetLayout(overlay.widget, ovp, layout_engine_, layout_nodes_);
+      ComputeWidgetLayout(overlay.widget, ovp, layout_engine_);
       PaintWidgetTree(overlay.widget, renderer_);
     }
   }
@@ -506,16 +521,82 @@ void UIContext::Update() {
   input_pumped_this_frame_ = false;
 }
 
+
+// --- Frame reuse ------------------------------------------------------------
+
+// FNV-1a over the bytes a backend would actually upload. Used only by
+// kVerify, to tell a frame that genuinely repeated from one the predicate
+// merely believed had.
+static u64 HashDrawData(const DrawData& dd) {
+  u64 h = 1469598103934665603ull;
+  auto feed = [&h](const void* p, usize bytes) {
+    const u8* b = static_cast<const u8*>(p);
+    for (usize i = 0; i < bytes; ++i) {
+      h ^= b[i];
+      h *= 1099511628211ull;
+    }
+  };
+  feed(&dd.display_size, sizeof(dd.display_size));
+  feed(&dd.display_pos, sizeof(dd.display_pos));
+  feed(&dd.framebuffer_scale, sizeof(dd.framebuffer_scale));
+  if (dd.commands)
+    feed(dd.commands, dd.command_count * sizeof(DrawCmd));
+  if (dd.quad_vertices)
+    feed(dd.quad_vertices, dd.quad_vertex_count * sizeof(Vertex2D));
+  if (dd.quad_indices) feed(dd.quad_indices, dd.quad_index_count * sizeof(u32));
+  if (dd.text_vertices)
+    feed(dd.text_vertices, dd.text_vertex_count * sizeof(Vertex2D));
+  if (dd.text_indices) feed(dd.text_indices, dd.text_index_count * sizeof(u32));
+  return h;
+}
+
+bool UIContext::FrameWouldRepeat() const {
+  if (!have_built_frame_) return false;
+  // Every mutation that changes what is drawn marks the widget dirty, and
+  // every mark bumps this. Animations included: the animator writes each step
+  // through SetAnimationStyle, which marks paint-dirty.
+  if (WidgetRevision() != last_widget_revision_) return false;
+  const Vec2 viewport = platform_.window_size();
+  if (viewport.x != last_reuse_viewport_.x ||
+      viewport.y != last_reuse_viewport_.y)
+    return false;
+  if (widget_ctx_.ui_scale != last_reuse_scale_) return false;
+  // The tooltip is drawn straight into the list by DrawTooltip rather than
+  // being a widget, so its state is not covered by the revision.
+  if (tooltip_visible_ != last_tooltip_visible_) return false;
+  if (tooltip_target_ != last_tooltip_target_) return false;
+  if (overlays_.size() != last_overlay_widgets_.size()) return false;
+  for (usize i = 0; i < overlays_.size(); ++i)
+    if (overlays_[i].widget != last_overlay_widgets_[i]) return false;
+  return true;
+}
+
+void UIContext::RecordBuiltFrame(const DrawData& dd) {
+  have_built_frame_ = true;
+  last_widget_revision_ = WidgetRevision();
+  last_reuse_viewport_ = platform_.window_size();
+  last_reuse_scale_ = widget_ctx_.ui_scale;
+  last_tooltip_visible_ = tooltip_visible_;
+  last_tooltip_target_ = tooltip_target_;
+  last_overlay_widgets_.clear();
+  for (const auto& o : overlays_) last_overlay_widgets_.push_back(o.widget);
+  if (frame_reuse_ == FrameReuse::kVerify) last_draw_hash_ = HashDrawData(dd);
+}
+
 const DrawData& UIContext::RenderDrawData() {
   // Timing
   f64 now = platform_.time();
   dt_ = now - last_time_;
   last_time_ = now;
+  const f64 frame_start = now;
+  stats_ = {};
 
   // Input (via the attached host window) + viewport
-  PumpInput();
+  PumpInput();  // no-op if the application already pumped this frame
   Vec2 viewport = platform_.window_size();
   renderer_.set_display_size(viewport);
+  f64 mark = platform_.time();
+  stats_.input_ms = last_input_ms_;
 
   script_.UpdateTimers(now);
   UpdateTooltip();
@@ -527,43 +608,96 @@ const DrawData& UIContext::RenderDrawData() {
         now,
         [](u32 widget_id, const Style& animated_style, void* user_data) {
           auto* ctx = static_cast<UIContext*>(user_data);
-          wid w = FindWidgetById(ctx->root_, widget_id);
+          wid w = ctx->WidgetById(widget_id);
           if (w.valid())
             SetAnimationStyle(ctx->widget_registry_, w, animated_style);
         },
         this,
         [](u32 widget_id, void* user_data) {
           auto* ctx = static_cast<UIContext*>(user_data);
-          wid w = FindWidgetById(ctx->root_, widget_id);
+          wid w = ctx->WidgetById(widget_id);
           if (w.valid()) ClearAnimationStyle(ctx->widget_registry_, w);
         });
     UpdateWidgetTree(root_, dt_);
   }
+  stats_.update_ms = (platform_.time() - mark) * 1000.0;
+  mark = platform_.time();
+
+  // Everything above can itself change the tree - a timer firing, an animation
+  // stepping, scroll momentum - so the question is only worth asking now.
+  const bool would_repeat = frame_reuse_ != FrameReuse::kOff && FrameWouldRepeat();
+  if (would_repeat && frame_reuse_ == FrameReuse::kOn) {
+    // The renderer's buffers still hold the last list; nothing has touched
+    // them, so handing it back is handing back that exact frame.
+    input_pumped_this_frame_ = false;
+    const DrawData& dd = renderer_.GetDrawData();
+    stats_.reused = true;
+    stats_.draw_commands = dd.command_count;
+    stats_.total_ms = (platform_.time() - frame_start) * 1000.0;
+    return dd;
+  }
 
   // Text shaping (no GPU upload: the host uploads from text_engine().)
   text_engine_.BeginFrame();
-  if (root_.valid()) MeasureWidgetTree(root_);
+  if (root_.valid()) stats_.widgets += MeasureWidgetTree(root_);
   for (auto& overlay : overlays_) {
-    if (overlay.widget.valid()) MeasureWidgetTree(overlay.widget);
+    if (overlay.widget.valid()) stats_.widgets += MeasureWidgetTree(overlay.widget);
   }
+  stats_.measure_ms = (platform_.time() - mark) * 1000.0;
 
   // Paint into the renderer; collect as a draw list instead of submitting.
   renderer_.BeginFrame();
   LayoutViewport vp{viewport.x, viewport.y, widget_ctx_.ui_scale};
   if (root_.valid()) {
-    ComputeWidgetLayout(root_, vp, layout_engine_, layout_nodes_);
+    mark = platform_.time();
+    ComputeWidgetLayout(root_, vp, layout_engine_);
+    stats_.layout_ms += (platform_.time() - mark) * 1000.0;
+    stats_.layout_nodes += static_cast<u32>(
+        layout_engine_.StoreFor(widget_registry_.Get<WidgetNode>(root_)->id).nodes.size());
+    mark = platform_.time();
     PaintWidgetTree(root_, renderer_);
+    stats_.paint_ms += (platform_.time() - mark) * 1000.0;
   }
   for (auto& overlay : overlays_) {
     if (overlay.widget.valid()) {
-      ComputeWidgetLayout(overlay.widget, vp, layout_engine_, layout_nodes_);
+      mark = platform_.time();
+      ComputeWidgetLayout(overlay.widget, vp, layout_engine_);
+      stats_.layout_ms += (platform_.time() - mark) * 1000.0;
+      stats_.layout_nodes += static_cast<u32>(
+          layout_engine_.StoreFor(widget_registry_.Get<WidgetNode>(overlay.widget)->id)
+              .nodes.size());
+      mark = platform_.time();
       PaintWidgetTree(overlay.widget, renderer_);
+      stats_.paint_ms += (platform_.time() - mark) * 1000.0;
     }
   }
   DrawTooltip();
 
   input_pumped_this_frame_ = false;
-  return renderer_.GetDrawData();
+  const DrawData& dd = renderer_.GetDrawData();
+  stats_.draw_commands = dd.command_count;
+  stats_.shape_calls = text_engine_.shape_calls();
+  stats_.shape_hits = text_engine_.shape_hits();
+
+  // kVerify: the frame was rebuilt whatever the predicate said, so the two can
+  // be held against each other. A frame the predicate called a repeat, that
+  // did not come out byte-identical, is something changing what is drawn
+  // without marking the widget dirty.
+  if (frame_reuse_ == FrameReuse::kVerify && would_repeat) {
+    ++reuse_candidates_;
+    stats_.reused = true;  // "would have been", in this mode
+    if (HashDrawData(dd) != last_draw_hash_) {
+      ++reuse_mismatches_;
+      std::fprintf(stderr,
+                   "ultragui: frame reuse would have shown a stale frame "
+                   "(mismatch %llu)\n",
+                   static_cast<unsigned long long>(reuse_mismatches_));
+    }
+  }
+  RecordBuiltFrame(dd);
+
+  stats_.total_ms = (platform_.time() - frame_start) * 1000.0;
+  return dd;
 }
 
 void UIContext::UpdateTooltip() {
@@ -769,19 +903,30 @@ WidgetId UIContext::FindWidget(const char* name) const {
   return FindWidgetEntity(name);
 }
 
-void UIContext::CacheWidgetTree(wid w, HashMap<String, wid>& cache) {
+void UIContext::CacheWidgetTree(wid w, HashMap<String, wid>& cache,
+                                HashMap<u32, wid>& by_id) {
   if (!w.valid()) return;
   World& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(w);
-  if (n && !n->name.empty()) cache[n->name] = w;
+  if (n) {
+    if (!n->name.empty()) cache[n->name] = w;
+    by_id[n->id] = w;
+  }
   if (Hierarchy* h = world.Get<Hierarchy>(w))
-    for (wid child : h->children) CacheWidgetTree(child, cache);
+    for (wid child : h->children) CacheWidgetTree(child, cache, by_id);
 }
 
 void UIContext::RebuildWidgetCache() const {
   widget_cache_.clear();
-  CacheWidgetTree(root_, widget_cache_);
+  id_cache_.clear();
+  CacheWidgetTree(root_, widget_cache_, id_cache_);
   widget_cache_dirty_ = false;
+}
+
+wid UIContext::WidgetById(u32 id) const {
+  if (widget_cache_dirty_) RebuildWidgetCache();
+  auto it = id_cache_.find(id);
+  return it != id_cache_.end() ? it->second : kNullWidget;
 }
 
 }  // namespace ugui

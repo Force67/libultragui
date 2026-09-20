@@ -13,6 +13,8 @@ namespace ugui {
 struct GradientStop {
   f32 position = 0.0f;  // 0.0 to 1.0
   Color color;
+
+  constexpr bool operator==(const GradientStop&) const = default;
 };
 
 /// Box shadow definition (CSS-like).
@@ -22,13 +24,20 @@ struct BoxShadow {
   f32 spread = 0.0f;
   Vec2 offset = Vec2::Zero();
   bool inset = false;
+
+  constexpr bool operator==(const BoxShadow&) const = default;
 };
 
 /// Complete visual style for a widget. Every widget has one of these.
 /// Properties use CSS-like naming. Default values produce an invisible,
 /// auto-sized, flow-layout element (like an unstyled <div>).
 struct Style {
-  // --- Layout ---
+  // --- Enums, grouped ---
+  // Kept together rather than filed under the section each belongs to: they
+  // are one byte apiece, and a Style is copied and compared per widget on the
+  // layout path. Scattered among the floats, each stranded byte cost three to
+  // alignment - 15 of 656, which this recovers. Grouping is the only reason
+  // they sit together; the sections below still say what each one does.
   FlexDirection flex_direction = FlexDirection::kRow;
   JustifyContent justify_content = JustifyContent::kStart;
   AlignItems align_items = AlignItems::kStretch;
@@ -38,6 +47,13 @@ struct Style {
   Position position = Position::kRelative;
   Overflow overflow = Overflow::kVisible;
   Visibility visibility = Visibility::kVisible;
+  GradientType gradient_type = GradientType::kLinear;
+  TextAlign text_align = TextAlign::kLeft;
+  TextTransform text_transform = TextTransform::kNone;
+  FontStyle font_style = FontStyle::kNormal;
+  TextDecoration text_decoration = TextDecoration::kNone;
+  Cursor cursor = Cursor::kAuto;
+  FontWeight font_weight = FontWeight::kRegular;  // u16, so last of the block
 
   // --- Sizing ---
   Length width = Length::Auto();
@@ -68,7 +84,6 @@ struct Style {
   Color background_end =
       Color::Transparent();  // If != transparent, linear gradient top->bottom
   f32 gradient_angle = 180.0f;  // CSS degrees: 180 = top-to-bottom (default)
-  GradientType gradient_type = GradientType::kLinear;
   static constexpr u32 kMaxGradientStops = 8;
   GradientStop gradient_stops[kMaxGradientStops] = {};
   u32 gradient_stop_count = 0;
@@ -92,16 +107,11 @@ struct Style {
   // --- Box shadow ---
   BoxShadow shadow;
 
-  // --- Text ---
+  // --- Text (see the enum block above for align/transform/weight/style) ---
   Color text_color = Color::White();
   f32 font_size = 16.0f;
-  TextAlign text_align = TextAlign::kLeft;
   f32 letter_spacing = 0.0f;          // Extra pixels between characters
   f32 line_height_multiplier = 1.0f;  // Multiplier on default line height
-  TextTransform text_transform = TextTransform::kNone;
-  FontWeight font_weight = FontWeight::kRegular;
-  FontStyle font_style = FontStyle::kNormal;
-  TextDecoration text_decoration = TextDecoration::kNone;
   Color text_decoration_color =
       Color::Transparent();  // transparent = inherit text_color
 
@@ -109,9 +119,6 @@ struct Style {
   Color text_shadow_color = Color::Transparent();
   f32 text_shadow_blur = 0.0f;
   Vec2 text_shadow_offset = Vec2::Zero();
-
-  // --- Cursor ---
-  Cursor cursor = Cursor::kAuto;
 
   // --- Transitions (keyed by property group) ---
   Transition background_transition;
@@ -138,6 +145,13 @@ struct Style {
 
   /// Interpolate animatable properties (colors, sizes, opacity, ...).
   static Style Lerp(const Style& a, const Style& b, f32 t);
+
+  /// Field-by-field equality. Used to skip work whose only input is the style:
+  /// re-applying it to a retained layout node, or writing it back to a widget
+  /// that already has exactly this. Floats compare bitwise, so the answer is
+  /// conservative - a style that differs re-applies, which is merely the old
+  /// behaviour.
+  bool operator==(const Style&) const = default;
 };
 
 /// A style override for a specific widget state (e.g. :hover, :pressed).

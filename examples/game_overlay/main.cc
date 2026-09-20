@@ -378,7 +378,6 @@ int main(int argc, char* argv[]) {
   // Our own layout engine + scratch for painting the widget tree inside the
   // custom paint callback (UIContext's are private).
   ugui::LayoutEngine layout_engine;
-  std::vector<ugui::LayoutNode> layout_scratch;
 
   int frame_count = 0;
   double fps_accum = 0.0;
@@ -404,7 +403,7 @@ int main(int argc, char* argv[]) {
     ugui::wid root = ui.root();
     if (root.valid()) {
       ugui::LayoutViewport vp{ds.x, ds.y};
-      ugui::ComputeWidgetLayout(root, vp, layout_engine, layout_scratch);
+      ugui::ComputeWidgetLayout(root, vp, layout_engine);
       ugui::PaintWidgetTree(root, r);
     }
   });

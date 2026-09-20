@@ -160,7 +160,12 @@ void SetText(wid e, const String& text) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kText) return;
-  world.GetOrAdd<TextContent>(e).text = text;
+  TextContent& content = world.GetOrAdd<TextContent>(e);
+  // Hosts drive their labels by writing every value every frame, so most calls
+  // set the string that is already there. Comparing first skips both the copy
+  // and MarkDirty, which walks the ancestor chain to the root.
+  if (content.text == text) return;
+  content.text = text;
   MarkDirty(world, e);
 }
 

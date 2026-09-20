@@ -1,6 +1,7 @@
 #include <ugui/layout/layout.h>
 
 #include <algorithm>
+#include <unordered_map>
 #include <vector>
 #include <yoga/Yoga.h>
 
@@ -192,6 +193,15 @@ static YGSize yoga_measure_func(YGNodeConstRef node, float /*width*/,
   return {ln->intrinsic_width, ln->intrinsic_height};
 }
 
+// Write a Style onto a Yoga node.
+//
+// Every property is written on every pass, including the ones the style does
+// not constrain (cleared to YGUndefined instead of being left alone). The nodes
+// are retained between frames, so a property that is only written under a
+// condition keeps whatever the last frame that met the condition put there: a
+// panel that stops being collapsed would stay `display: none` forever. Yoga's
+// setters compare before they mark a node dirty, so writing the same value back
+// every frame costs a comparison and leaves the layout cache intact.
 static void apply_style(YGNodeRef yg, const Style& s,
                         const LayoutViewport& vp) {
   f32 vw = vp.width;
@@ -207,8 +217,9 @@ static void apply_style(YGNodeRef yg, const Style& s,
   YGNodeStyleSetOverflow(yg, map_overflow(s.overflow));
   YGNodeStyleSetPositionType(yg, map_position(s.position));
 
-  if (s.visibility == Visibility::kCollapsed)
-    YGNodeStyleSetDisplay(yg, YGDisplayNone);
+  YGNodeStyleSetDisplay(yg, s.visibility == Visibility::kCollapsed
+                                ? YGDisplayNone
+                                : YGDisplayFlex);
 
   // Flex
   YGNodeStyleSetFlexGrow(yg, s.flex_grow);
@@ -236,19 +247,28 @@ static void apply_style(YGNodeRef yg, const Style& s,
   set_yoga_length_h(yg, s.height, vw, vh, sc, YGNodeStyleSetHeight,
                     YGNodeStyleSetHeightPercent, YGNodeStyleSetHeightAuto);
 
-  // Min/max: skip the default "unbounded" sentinel (1e6)
+  // Min/max: the defaults (min 0, max 1e6) mean "unconstrained", which is
+  // YGUndefined rather than a number Yoga would have to honour.
   if (s.min_width.value > 0.0f)
     set_yoga_length_w(yg, s.min_width, vw, vh, sc, YGNodeStyleSetMinWidth,
                       YGNodeStyleSetMinWidthPercent);
+  else
+    YGNodeStyleSetMinWidth(yg, YGUndefined);
   if (s.min_height.value > 0.0f)
     set_yoga_length_h(yg, s.min_height, vw, vh, sc, YGNodeStyleSetMinHeight,
                       YGNodeStyleSetMinHeightPercent);
+  else
+    YGNodeStyleSetMinHeight(yg, YGUndefined);
   if (s.max_width.value < 1e5f)
     set_yoga_length_w(yg, s.max_width, vw, vh, sc, YGNodeStyleSetMaxWidth,
                       YGNodeStyleSetMaxWidthPercent);
+  else
+    YGNodeStyleSetMaxWidth(yg, YGUndefined);
   if (s.max_height.value < 1e5f)
     set_yoga_length_h(yg, s.max_height, vw, vh, sc, YGNodeStyleSetMaxHeight,
                       YGNodeStyleSetMaxHeightPercent);
+  else
+    YGNodeStyleSetMaxHeight(yg, YGUndefined);
 
   // Margin (pixel values: scale them)
   YGNodeStyleSetMargin(yg, YGEdgeTop, s.margin.top * sc);
@@ -262,27 +282,39 @@ static void apply_style(YGNodeRef yg, const Style& s,
   YGNodeStyleSetPadding(yg, YGEdgeBottom, s.padding.bottom * sc);
   YGNodeStyleSetPadding(yg, YGEdgeLeft, s.padding.left * sc);
 
-  // Gap: uniform, with optional per-axis overrides
-  if (s.gap > 0.0f) YGNodeStyleSetGap(yg, YGGutterAll, s.gap * sc);
-  if (s.row_gap >= 0.0f) YGNodeStyleSetGap(yg, YGGutterRow, s.row_gap * sc);
-  if (s.column_gap >= 0.0f)
-    YGNodeStyleSetGap(yg, YGGutterColumn, s.column_gap * sc);
+  // Gap: uniform, with optional per-axis overrides. A negative per-axis value
+  // means "defer to the uniform gap", which is what clearing it to undefined
+  // tells Yoga.
+  YGNodeStyleSetGap(yg, YGGutterAll, s.gap > 0.0f ? s.gap * sc : YGUndefined);
+  YGNodeStyleSetGap(yg, YGGutterRow,
+                    s.row_gap >= 0.0f ? s.row_gap * sc : YGUndefined);
+  YGNodeStyleSetGap(yg, YGGutterColumn,
+                    s.column_gap >= 0.0f ? s.column_gap * sc : YGUndefined);
 
   // Aspect ratio
-  if (s.aspect_ratio > 0.0f) YGNodeStyleSetAspectRatio(yg, s.aspect_ratio);
+  YGNodeStyleSetAspectRatio(
+      yg, s.aspect_ratio > 0.0f ? s.aspect_ratio : YGUndefined);
 
   // Position offsets (resolve, then scale the px result)
   if (!s.top.IsAuto())
     YGNodeStyleSetPosition(yg, YGEdgeTop, s.top.Resolve(0, vw, vh, true) * sc);
+  else
+    YGNodeStyleSetPosition(yg, YGEdgeTop, YGUndefined);
   if (!s.right_offset.IsAuto())
     YGNodeStyleSetPosition(yg, YGEdgeRight,
                            s.right_offset.Resolve(0, vw, vh, false) * sc);
+  else
+    YGNodeStyleSetPosition(yg, YGEdgeRight, YGUndefined);
   if (!s.bottom.IsAuto())
     YGNodeStyleSetPosition(yg, YGEdgeBottom,
                            s.bottom.Resolve(0, vw, vh, true) * sc);
+  else
+    YGNodeStyleSetPosition(yg, YGEdgeBottom, YGUndefined);
   if (!s.left_offset.IsAuto())
     YGNodeStyleSetPosition(yg, YGEdgeLeft,
                            s.left_offset.Resolve(0, vw, vh, false) * sc);
+  else
+    YGNodeStyleSetPosition(yg, YGEdgeLeft, YGUndefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -340,47 +372,151 @@ static void readback_results(YGNodeRef yg, LayoutNode* nodes, u32 node_index,
 // Main entry point
 // ---------------------------------------------------------------------------
 
+// What the retained tree was built for. Compute() rebuilds when any of this
+// stops matching: the Yoga nodes are addressed by index, so a tree of a
+// different shape would silently pair widgets with someone else's node.
+struct RetainedShape {
+  u32 id = 0;
+  u32 parent = ~0u;
+  u32 first_child = ~0u;
+  u32 next_sibling = ~0u;
+  bool measured = false;
+
+  bool operator==(const RetainedShape&) const = default;
+};
+
+static RetainedShape ShapeOf(const LayoutNode& n) {
+  return RetainedShape{
+      n.id, n.parent, n.first_child, n.next_sibling,
+      // A leaf with intrinsic content measures itself through the context.
+      n.first_child == ~0u &&
+          (n.intrinsic_width > 0.0f || n.intrinsic_height > 0.0f)};
+}
+
+// One retained Yoga tree.
+struct RetainedTree {
+  std::vector<YGNodeRef> nodes;
+  std::vector<RetainedShape> shape;
+  // The style last written to each node. apply_style is a pure function of
+  // (style, viewport), so a node whose style has not moved since the last pass
+  // can skip it: seventy-odd setter calls that would each compare and find
+  // nothing changed.
+  std::vector<Style> applied;
+  LayoutViewport applied_viewport{0.0f, 0.0f, 0.0f};
+  // Last intrinsic size handed to each measured node. Yoga caches what a
+  // measure function returned and has no way to know the answer changed, so a
+  // node whose text was re-shaped has to be marked dirty by hand.
+  std::vector<Vec2> intrinsic;
+};
+
+// One engine serves several trees - the main root, each overlay, each
+// offscreen pass - and they interleave within a frame. Keyed by root widget so
+// they do not evict one another; a single tree would rebuild on every call.
+struct LayoutEngine::Retained {
+  YGConfigRef config = nullptr;
+  std::unordered_map<u32, RetainedTree> trees;
+  std::unordered_map<u32, LayoutEngine::NodeStore> stores;
+
+  ~Retained() {
+    for (auto& [root_id, tree] : trees)
+      if (!tree.nodes.empty()) YGNodeFreeRecursive(tree.nodes[0]);
+    if (config) YGConfigFree(config);
+  }
+};
+
+LayoutEngine::~LayoutEngine() {
+  delete retained_;
+}
+
+void LayoutEngine::Reset() {
+  delete retained_;
+  retained_ = nullptr;
+}
+
+LayoutEngine::NodeStore& LayoutEngine::StoreFor(u32 root_id) {
+  if (!retained_) retained_ = new Retained();
+  return retained_->stores[root_id];
+}
+
 void LayoutEngine::Compute(LayoutNode* nodes, u32 node_count,
                            const LayoutViewport& viewport) {
   if (node_count == 0) return;
 
-  YGConfigRef config = YGConfigNew();
+  if (!retained_) retained_ = new Retained();
+  if (!retained_->config) retained_->config = YGConfigNew();
+  RetainedTree& r = retained_->trees[nodes[0].id];
 
-  // Create Yoga nodes
-  Vector<YGNodeRef> yg_nodes(node_count);
-  for (u32 i = 0; i < node_count; ++i) {
-    yg_nodes[i] = YGNodeNewWithConfig(config);
-    YGNodeSetContext(yg_nodes[i], &nodes[i]);
-    apply_style(yg_nodes[i], nodes[i].style, viewport);
-
-    // Leaf nodes with intrinsic content get a measure function
-    if (nodes[i].first_child == ~0u &&
-        (nodes[i].intrinsic_width > 0.0f || nodes[i].intrinsic_height > 0.0f)) {
-      YGNodeSetMeasureFunc(yg_nodes[i], yoga_measure_func);
+  bool same_tree = r.shape.size() == node_count;
+  if (same_tree) {
+    for (u32 i = 0; i < node_count; ++i) {
+      if (!(r.shape[i] == ShapeOf(nodes[i]))) {
+        same_tree = false;
+        break;
+      }
     }
   }
 
-  // Wire parent-child relationships
-  for (u32 i = 0; i < node_count; ++i) {
-    u32 child_idx = nodes[i].first_child;
-    u32 insert_pos = 0;
-    while (child_idx != ~0u) {
-      YGNodeInsertChild(yg_nodes[i], yg_nodes[child_idx], insert_pos);
-      child_idx = nodes[child_idx].next_sibling;
-      ++insert_pos;
+  if (!same_tree) {
+    if (!r.nodes.empty()) YGNodeFreeRecursive(r.nodes[0]);
+    r.nodes.assign(node_count, nullptr);
+    r.shape.resize(node_count);
+    r.intrinsic.assign(node_count, Vec2{});
+    r.applied.assign(node_count, Style{});
+    r.applied_viewport = {0.0f, 0.0f, 0.0f};  // force the first write
+    for (u32 i = 0; i < node_count; ++i) {
+      r.nodes[i] = YGNodeNewWithConfig(retained_->config);
+      r.shape[i] = ShapeOf(nodes[i]);
+      if (r.shape[i].measured)
+        YGNodeSetMeasureFunc(r.nodes[i], yoga_measure_func);
+    }
+    for (u32 i = 0; i < node_count; ++i) {
+      u32 child_idx = nodes[i].first_child;
+      u32 insert_pos = 0;
+      while (child_idx != ~0u) {
+        YGNodeInsertChild(r.nodes[i], r.nodes[child_idx], insert_pos);
+        child_idx = nodes[child_idx].next_sibling;
+        ++insert_pos;
+      }
     }
   }
 
-  // Compute layout from root
-  YGNodeCalculateLayout(yg_nodes[0], viewport.width, viewport.height,
+  // A resize changes what every vw/vh/scaled px resolves to, so nothing can be
+  // skipped on the pass that first sees a new viewport.
+  const bool viewport_moved = !(r.applied_viewport.width == viewport.width &&
+                                r.applied_viewport.height == viewport.height &&
+                                r.applied_viewport.scale == viewport.scale);
+  r.applied_viewport = viewport;
+
+  for (u32 i = 0; i < node_count; ++i) {
+    // The LayoutNode array is the caller's scratch and moves between frames,
+    // so the context has to be re-pointed even when the tree was reused.
+    YGNodeSetContext(r.nodes[i], &nodes[i]);
+    // A node the caller did not refresh still holds the style that was applied
+    // last frame, so there is nothing to compare and nothing to write.
+    // A resize changes what every length resolves to, so it re-applies
+    // everything; otherwise only a node the caller refreshed can differ.
+    if (viewport_moved ||
+        (nodes[i].dirty && !(r.applied[i] == nodes[i].style))) {
+      apply_style(r.nodes[i], nodes[i].style, viewport);
+      r.applied[i] = nodes[i].style;
+    }
+
+    if (r.shape[i].measured) {
+      const Vec2 intrinsic{nodes[i].intrinsic_width, nodes[i].intrinsic_height};
+      if (intrinsic.x != r.intrinsic[i].x || intrinsic.y != r.intrinsic[i].y) {
+        r.intrinsic[i] = intrinsic;
+        YGNodeMarkDirty(r.nodes[i]);
+      }
+    }
+  }
+
+  // Clean nodes whose available size is unchanged come straight out of Yoga's
+  // layout cache, so a frame in which nothing moved costs a walk, not a solve.
+  YGNodeCalculateLayout(r.nodes[0], viewport.width, viewport.height,
                         YGDirectionLTR);
 
   // Read back results into LayoutNodes (converting parent-relative -> absolute)
-  readback_results(yg_nodes[0], nodes, 0, 0.0f, 0.0f);
-
-  // Cleanup
-  YGNodeFreeRecursive(yg_nodes[0]);
-  YGConfigFree(config);
+  readback_results(r.nodes[0], nodes, 0, 0.0f, 0.0f);
 }
 
 }  // namespace ugui

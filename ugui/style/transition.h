@@ -28,6 +28,8 @@ struct Transition {
   f32 spring_mass = 1.0f;
 
   constexpr bool IsInstant() const { return duration <= 0.0f; }
+
+  constexpr bool operator==(const Transition&) const = default;
 };
 
 /// Evaluate an easing curve at time t (0-1), returns 0-1

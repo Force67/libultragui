@@ -26,13 +26,26 @@ static u32 style_corner_radii(const Style& s) {
   return Vertex2D::PackRadii(s.corner_radius);
 }
 
-void DestroyWidget(WidgetRegistry& world, wid e) {
+// Release a widget and everything under it. The caller has already unhooked
+// the top of the subtree, and every parent below it is going away too, so
+// nothing here has to maintain a child list it is about to destroy.
+static void ReleaseSubtree(WidgetRegistry& world, wid e) {
   if (!world.Alive(e)) return;
   if (Hierarchy* h = world.Get<Hierarchy>(e)) {
     Vector<wid> kids = h->children;  // copy: Release mutates the stores
-    for (wid c : kids) DestroyWidget(world, c);
+    for (wid c : kids) ReleaseSubtree(world, c);
   }
   world.Release(e);
+}
+
+void DestroyWidget(WidgetRegistry& world, wid e) {
+  if (!world.Alive(e)) return;
+  // Unhook from the parent first. Releasing the entity does not take it out of
+  // the parent's child list, and every tree walk that does not check liveness
+  // (layout's among them) would then follow the dead handle.
+  if (Hierarchy* h = world.Get<Hierarchy>(e); h != nullptr && h->parent.valid())
+    RemoveChild(world, h->parent, e);
+  ReleaseSubtree(world, e);
 }
 
 // --- Tree -------------------------------------------------------------------
@@ -182,15 +195,26 @@ Style ComputedStyle(WidgetRegistry& world, wid e) {
 
 // --- Dirty / hit-testing ----------------------------------------------------
 
+// Counts every call that says something about the tree changed. A frame can
+// compare this against the value it last built at to decide whether rebuilding
+// would produce the same picture. Deliberately one counter for the process
+// rather than one per registry: a second UIContext bumping it only causes an
+// unnecessary rebuild, never a stale frame.
+static u64 g_widget_revision = 1;
+
+u64 WidgetRevision() { return g_widget_revision; }
+
 void MarkDirty(WidgetRegistry& world, wid e) {
   Transform* t = world.Get<Transform>(e);
   if (!t) return;
+  ++g_widget_revision;
   t->layout_dirty = true;
   t->paint_dirty = true;
   wid p = world.Get<Hierarchy>(e)->parent;
   if (p.valid()) MarkDirty(world, p);
 }
 void MarkPaintDirty(WidgetRegistry& world, wid e) {
+  ++g_widget_revision;
   if (Transform* t = world.Get<Transform>(e)) t->paint_dirty = true;
 }
 
@@ -208,6 +232,13 @@ wid HitTest(WidgetRegistry& world, wid e, Vec2 point) {
   if (vt.hit_test) return vt.hit_test(world, e, point);
 
   if (!world.Get<Transform>(e)->rect.contains(point)) return kNullWidget;
+  // A widget nobody can see takes no clicks, and neither does anything under
+  // it. Paint already skips these; without the same rule here a screen that
+  // was collapsed while the pointer was over it keeps catching presses,
+  // because a collapsed subtree keeps the rects it was last laid out at.
+  const Visibility vis = ComputedStyle(world, e).visibility;
+  if (vis == Visibility::kHidden || vis == Visibility::kCollapsed)
+    return kNullWidget;
   const Vector<wid>& kids = world.Get<Hierarchy>(e)->children;
   for (auto it = kids.rbegin(); it != kids.rend(); ++it) {
     wid hit = HitTest(world, *it, point);
@@ -269,6 +300,11 @@ void MeasureWidget(WidgetRegistry& world, wid e, f32& out_w, f32& out_h) {
 }
 
 void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
+  PaintWidget(world, e, renderer, ComputedStyle(world, e));
+}
+
+void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer,
+                 const Style& computed) {
   const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
   if (vt.custom_paint) {
     if (vt.draw) vt.draw(world, e, renderer);
@@ -276,7 +312,7 @@ void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   }
 
   Rect rect = world.Get<Transform>(e)->rect;
-  Style s = ComputedStyle(world, e);
+  Style s = computed;
   s.Scale(UiScale(world, e));
   f32 alpha = s.opacity;
   u32 radii = style_corner_radii(s);

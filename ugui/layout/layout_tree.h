@@ -7,10 +7,11 @@
 namespace ugui {
 
 /// Build a LayoutNode array from a widget tree, run Yoga layout, and apply
-/// results back to the entities. The scratch buffer is reused across frames to
-/// avoid per-frame allocation.
+/// results back to the entities. The node array lives in the engine, one per
+/// root, and is refreshed rather than rebuilt: a widget that has not been
+/// marked dirty keeps the entry it had last frame.
 void ComputeWidgetLayout(wid root, const LayoutViewport& vp,
-                         LayoutEngine& engine, Vector<LayoutNode>& scratch);
+                         LayoutEngine& engine);
 
 }  // namespace ugui
 

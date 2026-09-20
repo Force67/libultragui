@@ -32,6 +32,9 @@ struct LayoutNode {
 
   // Dirty tracking
   bool layout_dirty = true;
+  /// Refreshed from the widget this frame, rather than carried over from the
+  /// last one. Only a node whose inputs moved needs its style re-applied.
+  bool dirty = true;
 };
 
 /// Viewport info needed for resolving vw/vh/frac units
@@ -42,11 +45,38 @@ struct LayoutViewport {
 };
 
 /// Runs the Yoga layout algorithm on a tree of LayoutNodes.
+///
+/// The Yoga tree is retained between calls. Yoga caches each node's measured
+/// layout and re-solves only the subtrees that changed, which it cannot do for
+/// a tree that is thrown away and rebuilt every frame. Compute() notices when
+/// the shape it is handed no longer matches the tree it holds and rebuilds.
 class LayoutEngine {
  public:
+  LayoutEngine() = default;
+  ~LayoutEngine();
+  LayoutEngine(const LayoutEngine&) = delete;
+  LayoutEngine& operator=(const LayoutEngine&) = delete;
+
+  /// The retained node array for a root. Kept across frames so a frame only
+  /// has to refresh the entries whose widgets changed; `widgets` is the
+  /// matching index -> widget map the caller checks the tree against.
+  struct NodeStore {
+    Vector<LayoutNode> nodes;
+    Vector<u32> widget_keys;  ///< widget id per index, to spot a changed tree
+  };
+  NodeStore& StoreFor(u32 root_id);
+
   /// Compute layout for all nodes. The root node fills the viewport.
   void Compute(LayoutNode* nodes, u32 node_count,
                const LayoutViewport& viewport);
+
+  /// Drop the retained tree. Only needed to release the memory early; a
+  /// changed tree is detected and rebuilt by Compute() on its own.
+  void Reset();
+
+ private:
+  struct Retained;
+  Retained* retained_ = nullptr;
 };
 
 }  // namespace ugui

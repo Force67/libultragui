@@ -30,19 +30,33 @@ void UpdateWidgetTree(wid root, f64 dt) {
   if (!root.valid()) return;
   WidgetRegistry& world = *WidgetRegistry::Active();
   UpdateWidget(world, root, dt);
+  // Nothing under a collapsed widget is laid out or painted, so there is no
+  // per-frame state under it worth advancing: scroll momentum on a screen
+  // nobody can see resumes when the screen comes back.
+  if (world.Get<StyleC>(root)->style.visibility == Visibility::kCollapsed)
+    return;
   for (wid child : world.Get<Hierarchy>(root)->children)
     UpdateWidgetTree(child, dt);
 }
 
-void MeasureWidgetTree(wid root) {
-  if (!root.valid()) return;
+u32 MeasureWidgetTree(wid root) {
+  if (!root.valid()) return 0;
   WidgetRegistry& world = *WidgetRegistry::Active();
-  for (wid child : world.Get<Hierarchy>(root)->children) MeasureWidgetTree(child);
+  u32 measured = 1;
+  // Nothing under a collapsed widget reaches layout or paint, so measuring it
+  // (which means shaping its text) buys nothing. Uncollapsing marks the tree
+  // dirty and measure runs before layout, so the frame it comes back is
+  // already measured.
+  if (world.Get<StyleC>(root)->style.visibility == Visibility::kCollapsed)
+    return measured;
+  for (wid child : world.Get<Hierarchy>(root)->children)
+    measured += MeasureWidgetTree(child);
   f32 w = 0, h = 0;
   MeasureWidget(world, root, w, h);
   Transform* t = world.Get<Transform>(root);
   t->intrinsic_w = w;
   t->intrinsic_h = h;
+  return measured;
 }
 
 }  // namespace ugui
