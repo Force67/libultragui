@@ -80,6 +80,16 @@ bool Near(float a, float b) {
   return std::fabs(a - b) < 0.01f;
 }
 
+// Change a style the way an application does. Writing StyleC::style in place
+// is not the supported path: layout refreshes a widget's node only when the
+// widget has been marked dirty, which SetStyle does and a raw write does not.
+template <typename Edit>
+void Restyle(ugui::wid w, Edit edit) {
+  ugui::Style s = StyleOf(w);
+  edit(s);
+  ugui::SetStyle(*ugui::WidgetRegistry::Active(), w, s);
+}
+
 }  // namespace
 
 // A node that re-measures has to be marked dirty by hand: Yoga caches what the
@@ -92,13 +102,12 @@ TEST(retained_tree_sees_intrinsic_size_change) {
   SetIntrinsic(leaf, 100.0f, 20.0f);
 
   ugui::LayoutEngine engine;
-  ugui::Vector<ugui::LayoutNode> scratch;
 
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(leaf).h, 20.0f));
 
   SetIntrinsic(leaf, 100.0f, 50.0f);
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(leaf).h, 50.0f));
 
   ugui::DestroyWidget(world, root);
@@ -115,17 +124,16 @@ TEST(retained_tree_uncollapses) {
   StyleOf(panel).height = ugui::Length::Px(60);
 
   ugui::LayoutEngine engine;
-  ugui::Vector<ugui::LayoutNode> scratch;
 
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).w, 120.0f));
 
-  StyleOf(panel).visibility = ugui::Visibility::kCollapsed;
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  Restyle(panel, [](ugui::Style& s) { s.visibility = ugui::Visibility::kCollapsed; });
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).w, 0.0f));
 
-  StyleOf(panel).visibility = ugui::Visibility::kVisible;
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  Restyle(panel, [](ugui::Style& s) { s.visibility = ugui::Visibility::kVisible; });
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).w, 120.0f));
   ASSERT(Near(RectOf(panel).h, 60.0f));
 
@@ -143,34 +151,35 @@ TEST(retained_tree_clears_optional_properties) {
   StyleOf(panel).height = ugui::Length::Px(40);
 
   ugui::LayoutEngine engine;
-  ugui::Vector<ugui::LayoutNode> scratch;
 
   // A min-width wider than the width wins, then stops applying.
-  StyleOf(panel).min_width = ugui::Length::Px(200);
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  Restyle(panel, [](ugui::Style& s) { s.min_width = ugui::Length::Px(200); });
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).w, 200.0f));
 
-  StyleOf(panel).min_width = ugui::Length::Px(0);
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  Restyle(panel, [](ugui::Style& s) { s.min_width = ugui::Length::Px(0); });
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).w, 100.0f));
 
   // A max-height clamps, then stops applying.
-  StyleOf(panel).max_height = ugui::Length::Px(10);
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  Restyle(panel, [](ugui::Style& s) { s.max_height = ugui::Length::Px(10); });
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).h, 10.0f));
 
-  StyleOf(panel).max_height = ugui::Length::Px(1e6f);
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  Restyle(panel, [](ugui::Style& s) { s.max_height = ugui::Length::Px(1e6f); });
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).h, 40.0f));
 
   // An absolute offset moves the panel, then goes back to auto.
-  StyleOf(panel).position = ugui::Position::kAbsolute;
-  StyleOf(panel).left_offset = ugui::Length::Px(35);
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  Restyle(panel, [](ugui::Style& s) {
+    s.position = ugui::Position::kAbsolute;
+    s.left_offset = ugui::Length::Px(35);
+  });
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).x, 35.0f));
 
-  StyleOf(panel).left_offset = ugui::Length::Auto();
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  Restyle(panel, [](ugui::Style& s) { s.left_offset = ugui::Length::Auto(); });
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).x, 0.0f));
 
   ugui::DestroyWidget(world, root);
@@ -187,9 +196,8 @@ TEST(retained_tree_rebuilds_on_shape_change) {
   StyleOf(first).height = ugui::Length::Px(30);
 
   ugui::LayoutEngine engine;
-  ugui::Vector<ugui::LayoutNode> scratch;
 
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(first).y, 0.0f));
 
   ugui::wid second = world.New(3);
@@ -197,13 +205,13 @@ TEST(retained_tree_rebuilds_on_shape_change) {
   StyleOf(second).width = ugui::Length::Px(50);
   StyleOf(second).height = ugui::Length::Px(30);
 
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(first).y, 0.0f));
   ASSERT(Near(RectOf(second).y, 30.0f));  // stacked under the first
   ASSERT(Near(RectOf(second).w, 50.0f));
 
   ugui::DestroyWidget(world, second);
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(first).y, 0.0f));
   ASSERT(Near(RectOf(first).h, 30.0f));
 
@@ -227,11 +235,10 @@ TEST(retained_trees_do_not_evict_each_other) {
   StyleOf(b_child).height = ugui::Length::Px(45);
 
   ugui::LayoutEngine engine;
-  ugui::Vector<ugui::LayoutNode> scratch;
 
   for (int pass = 0; pass < 3; ++pass) {
-    ugui::ComputeWidgetLayout(a_root, kViewport, engine, scratch);
-    ugui::ComputeWidgetLayout(b_root, kViewport, engine, scratch);
+    ugui::ComputeWidgetLayout(a_root, kViewport, engine);
+    ugui::ComputeWidgetLayout(b_root, kViewport, engine);
     ASSERT(Near(RectOf(a_child).w, 80.0f));
     ASSERT(Near(RectOf(a_child).h, 25.0f));
     ASSERT(Near(RectOf(b_child).w, 140.0f));
@@ -253,15 +260,42 @@ TEST(retained_tree_survives_reset) {
   StyleOf(panel).height = ugui::Length::Px(35);
 
   ugui::LayoutEngine engine;
-  ugui::Vector<ugui::LayoutNode> scratch;
 
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).w, 70.0f));
 
   engine.Reset();
-  ugui::ComputeWidgetLayout(root, kViewport, engine, scratch);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
   ASSERT(Near(RectOf(panel).w, 70.0f));
   ASSERT(Near(RectOf(panel).h, 35.0f));
+
+  ugui::DestroyWidget(world, root);
+}
+
+// The contract damage tracking rests on, pinned so it cannot be changed by
+// accident in either direction: a style written straight into the component is
+// not picked up, and marking the widget dirty is what publishes it.
+TEST(layout_refreshes_only_widgets_marked_dirty) {
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid root = MakeColumnRoot(1);
+  ugui::wid panel = world.New(2);
+  ugui::AddChild(world, root, panel);
+  StyleOf(panel).width = ugui::Length::Px(40);
+  StyleOf(panel).height = ugui::Length::Px(40);
+
+  ugui::LayoutEngine engine;
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
+  ASSERT(Near(RectOf(panel).w, 40.0f));
+
+  // Written behind layout's back: ignored, by design.
+  StyleOf(panel).width = ugui::Length::Px(90);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
+  ASSERT(Near(RectOf(panel).w, 40.0f));
+
+  // The same write, published.
+  ugui::MarkDirty(world, panel);
+  ugui::ComputeWidgetLayout(root, kViewport, engine);
+  ASSERT(Near(RectOf(panel).w, 90.0f));
 
   ugui::DestroyWidget(world, root);
 }

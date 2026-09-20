@@ -333,7 +333,6 @@ class UIContext {
   f64 last_time_ = 0.0;
   f64 dt_ = 0.0;
 
-  Vector<LayoutNode> layout_nodes_;
   FrameStats stats_;
   f64 last_input_ms_ = 0.0;
 

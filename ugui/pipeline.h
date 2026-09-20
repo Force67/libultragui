@@ -17,7 +17,7 @@
 ///   6. text_engine.FlushAtlas()             // upload glyphs to GPU
 ///   7. rhi->BeginFrame(clear_color)
 ///   8. renderer.BeginFrame()
-///   9. ComputeWidgetLayout(root, vp, engine, scratch)
+///   9. ComputeWidgetLayout(root, vp, engine)
 ///  10. PaintWidgetTree(root, renderer)     // depth-first rendering
 ///  11. text_engine.FlushAtlas()             // catch late glyphs
 ///  12. renderer.EndFrame()

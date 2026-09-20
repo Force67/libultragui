@@ -32,6 +32,9 @@ struct LayoutNode {
 
   // Dirty tracking
   bool layout_dirty = true;
+  /// Refreshed from the widget this frame, rather than carried over from the
+  /// last one. Only a node whose inputs moved needs its style re-applied.
+  bool dirty = true;
 };
 
 /// Viewport info needed for resolving vw/vh/frac units
@@ -53,6 +56,15 @@ class LayoutEngine {
   ~LayoutEngine();
   LayoutEngine(const LayoutEngine&) = delete;
   LayoutEngine& operator=(const LayoutEngine&) = delete;
+
+  /// The retained node array for a root. Kept across frames so a frame only
+  /// has to refresh the entries whose widgets changed; `widgets` is the
+  /// matching index -> widget map the caller checks the tree against.
+  struct NodeStore {
+    Vector<LayoutNode> nodes;
+    Vector<u32> widget_keys;  ///< widget id per index, to spot a changed tree
+  };
+  NodeStore& StoreFor(u32 root_id);
 
   /// Compute layout for all nodes. The root node fills the viewport.
   void Compute(LayoutNode* nodes, u32 node_count,

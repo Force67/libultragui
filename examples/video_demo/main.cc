@@ -338,8 +338,7 @@ int main(int argc, char* argv[]) {
             if (ui.root().valid()) {
               ugui::LayoutViewport lv{vp.x, vp.y, 1.0f};
               ugui::LayoutEngine le;
-              ugui::Vector<ugui::LayoutNode> nodes;
-              ugui::ComputeWidgetLayout(ui.root(), lv, le, nodes);
+              ugui::ComputeWidgetLayout(ui.root(), lv, le);
               ugui::PaintWidgetTree(ui.root(), renderer);
             }
           });
