@@ -286,6 +286,10 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
         if (v == "italic") s.font_style = FontStyle::kItalic;
         else s.font_style = FontStyle::kNormal;
     }},
+    {"pointer-events", [](Style& s, const String& v) {
+        s.pointer_events =
+            v == "none" ? PointerEvents::kNone : PointerEvents::kAuto;
+    }},
     {"cursor", [](Style& s, const String& v) {
         s.cursor = LookupEnum(kCursorTable, v).value_or(Cursor::kAuto);
     }},

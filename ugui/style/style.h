@@ -53,6 +53,7 @@ struct Style {
   FontStyle font_style = FontStyle::kNormal;
   TextDecoration text_decoration = TextDecoration::kNone;
   Cursor cursor = Cursor::kAuto;
+  PointerEvents pointer_events = PointerEvents::kAuto;
   FontWeight font_weight = FontWeight::kRegular;  // u16, so last of the block
 
   // --- Sizing ---
