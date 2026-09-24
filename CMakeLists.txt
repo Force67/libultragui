@@ -22,11 +22,33 @@ option(ULTRAGUI_LOTTIE "Enable Lottie animation support (rlottie)" ON)
 option(ULTRAGUI_VIDEO "Enable MPEG-1 video playback (pl_mpeg)" ON)
 option(ULTRAGUI_LUA "Enable built-in Lua scripting runtime" ON)
 option(ULTRAGUI_DEFAULT_OPEN_URL "Compile a default Platform::OpenURL implementation" ON)
+option(ULTRAGUI_BUILD_SHADERS "Compile the bundled GLSL shaders with glslc" ${ULTRAGUI_BACKEND_VULKAN})
+# A platform with no window of its own, which the host feeds (see
+# ugui/platform/platform_host.h): for embedding where the host keeps its
+# window to itself, a game's say. Pairs with draw-data mode.
+option(ULTRAGUI_PLATFORM_HOST "Use the host-driven platform instead of GLFW" OFF)
 # A host that supplies its own ugui::Platform (ULTRAGUI_PLATFORM_SOURCE) and
 # renders the draw list with its own pipelines does not need GLFW or the bundled
 # GLSL shaders; turn these off to drop those build dependencies.
-option(ULTRAGUI_PLATFORM_GLFW "Build the bundled GLFW platform backend" ON)
-option(ULTRAGUI_BUILD_SHADERS "Compile the bundled GLSL shaders with glslc" ON)
+if(ULTRAGUI_PLATFORM_HOST)
+    set(_default_platform_glfw OFF)
+else()
+    set(_default_platform_glfw ON)
+endif()
+option(ULTRAGUI_PLATFORM_GLFW "Build the bundled GLFW platform backend" ${_default_platform_glfw})
+# Draw-data renderer and input backends compiled into the library (Dear ImGui
+# style). ugui_impl_dx11 renders into a host's D3D11 device; ugui_impl_win32
+# turns window messages into input for the host platform.
+option(ULTRAGUI_IMPL_DX11 "Build the ugui_impl_dx11 draw-data backend" OFF)
+if(WIN32 AND ULTRAGUI_PLATFORM_HOST)
+    set(_default_impl_win32 ON)
+else()
+    set(_default_impl_win32 OFF)
+endif()
+option(ULTRAGUI_IMPL_WIN32 "Build the ugui_impl_win32 input backend" ${_default_impl_win32})
+# Where pkg-config has nothing to offer, build freetype, harfbuzz and Lua from
+# pinned sources (cmake/BundledDeps.cmake).
+option(ULTRAGUI_BUNDLED_DEPS "Build freetype, harfbuzz and Lua from source" ${WIN32})
 
 # Compiler warnings
 add_library(ultragui_warnings INTERFACE)
@@ -43,7 +65,16 @@ target_compile_options(ultragui_warnings INTERFACE
 )
 
 # --- Dependencies ---
-find_package(PkgConfig REQUIRED)
+if(ULTRAGUI_BUNDLED_DEPS)
+    include(cmake/BundledDeps.cmake)
+endif()
+# pkg-config is only asked for what nobody handed over.
+if(NOT (TARGET freetype AND TARGET harfbuzz)
+   OR (ULTRAGUI_LUA AND NOT TARGET ultragui_lua)
+   OR ULTRAGUI_BACKEND_D3D12
+   OR (NOT WIN32 AND (ULTRAGUI_BACKEND_D3D11 OR ULTRAGUI_IMPL_DX11)))
+    find_package(PkgConfig REQUIRED)
+endif()
 
 if(ULTRAGUI_BACKEND_VULKAN OR ULTRAGUI_BACKEND_D3D12)
     find_package(Vulkan REQUIRED)
@@ -61,7 +92,12 @@ else()
     set(ULTRAGUI_TEXT_LIBS PkgConfig::FREETYPE PkgConfig::HARFBUZZ)
 endif()
 if(ULTRAGUI_LUA)
-    pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
+    if(TARGET ultragui_lua)
+        set(ULTRAGUI_LUA_LIBS ultragui_lua)
+    else()
+        pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
+        set(ULTRAGUI_LUA_LIBS PkgConfig::LUA)
+    endif()
 endif()
 
 # GLFW (bundled platform backend + examples)
@@ -148,12 +184,12 @@ if(ULTRAGUI_BACKEND_D3D12)
     add_custom_target(ultragui_hlsl_shaders DEPENDS ${HLSL_OUTPUTS})
 endif()
 
-# --- HLSL source embedding (D3D11) ---
+# --- HLSL source embedding (D3D11 and ugui_impl_dx11) ---
 # D3D11 consumes DXBC, which dxc no longer emits, so the backend compiles the
 # HLSL at startup. Embedding the shader text keeps shaders/hlsl as the single
 # source for both D3D backends, and leaves the D3D11 path with no shader files
 # to ship.
-if(ULTRAGUI_BACKEND_D3D11)
+if(ULTRAGUI_BACKEND_D3D11 OR ULTRAGUI_IMPL_DX11)
     set(HLSL_EMBED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
     set(HLSL_EMBED_HEADER ${HLSL_EMBED_DIR}/ugui_hlsl_embedded.h)
     file(MAKE_DIRECTORY ${HLSL_EMBED_DIR})
@@ -168,14 +204,19 @@ if(ULTRAGUI_BACKEND_D3D11)
             ${CMAKE_CURRENT_SOURCE_DIR}/shaders/hlsl/text.hlsl
             ${CMAKE_CURRENT_SOURCE_DIR}/shaders/hlsl/video.hlsl
             ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedHlsl.cmake
-        COMMENT "Embedding HLSL sources for the D3D11 backend"
+        COMMENT "Embedding HLSL sources for the D3D11 backends"
     )
     add_custom_target(ultragui_hlsl_embed DEPENDS ${HLSL_EMBED_HEADER})
 endif()
 
 # --- Swappable implementation sources ---
 # Point these at your own .cc file to provide a custom backend.
-set(ULTRAGUI_PLATFORM_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ugui/platform/platform_glfw.cc"
+if(ULTRAGUI_PLATFORM_HOST)
+    set(_default_platform_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/platform/platform_host.cc")
+else()
+    set(_default_platform_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/platform/platform_glfw.cc")
+endif()
+set(ULTRAGUI_PLATFORM_SOURCE "${_default_platform_src}"
     CACHE FILEPATH "Platform implementation source file")
 # The library compiles exactly one RHI translation unit, because they all
 # define ugui::RHI. The backend switches pick it, most specific first. Vulkan
@@ -186,6 +227,9 @@ elseif(ULTRAGUI_BACKEND_D3D12)
     set(_default_rhi_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/d3d12/d3d12_rhi.cc")
 elseif(ULTRAGUI_BACKEND_OPENGL AND NOT ULTRAGUI_BACKEND_VULKAN)
     set(_default_rhi_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/opengl/opengl_rhi.cc")
+elseif(NOT ULTRAGUI_BACKEND_VULKAN)
+    # No backend at all: a host that renders the draw data itself.
+    set(_default_rhi_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/null/null_rhi.cc")
 else()
     set(_default_rhi_src "${CMAKE_CURRENT_SOURCE_DIR}/ugui/rhi/vulkan/vulkan_rhi.cc")
 endif()
@@ -249,6 +293,16 @@ list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_PLATFORM_SOURCE})
 list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_RHI_SOURCE})
 list(APPEND ULTRAGUI_SOURCES ${ULTRAGUI_SCRIPT_SOURCE})
 
+if(ULTRAGUI_BACKEND_D3D11 OR ULTRAGUI_IMPL_DX11)
+    list(APPEND ULTRAGUI_SOURCES ugui/rhi/d3d11/d3d_shader_compiler.cc)
+endif()
+if(ULTRAGUI_IMPL_DX11)
+    list(APPEND ULTRAGUI_SOURCES ugui/backends/ugui_impl_dx11.cc)
+endif()
+if(ULTRAGUI_IMPL_WIN32)
+    list(APPEND ULTRAGUI_SOURCES ugui/backends/ugui_impl_win32.cc)
+endif()
+
 if(ULTRAGUI_LUA)
     list(APPEND ULTRAGUI_SOURCES
         ugui/scripting/lua_anim.cc
@@ -290,7 +344,7 @@ endif()
 if(ULTRAGUI_BACKEND_D3D12)
     add_dependencies(ultragui ultragui_hlsl_shaders)
 endif()
-if(ULTRAGUI_BACKEND_D3D11)
+if(ULTRAGUI_BACKEND_D3D11 OR ULTRAGUI_IMPL_DX11)
     add_dependencies(ultragui ultragui_hlsl_embed)
     target_include_directories(ultragui PRIVATE ${HLSL_EMBED_DIR})
 endif()
@@ -308,6 +362,8 @@ target_include_directories(ultragui
 
 target_compile_definitions(ultragui PRIVATE
     ULTRAGUI_SHADER_DIR="${SHADER_OUT_DIR}"
+    # The portable C file API (fopen and friends) is what the library uses.
+    $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
 # Public-API export macro (ugui/core/export.h). No-op for the static library;
@@ -322,7 +378,7 @@ target_link_libraries(ultragui
     PRIVATE
         ultragui_warnings
         ${ULTRAGUI_TEXT_LIBS}
-        $<$<BOOL:${ULTRAGUI_LUA}>:PkgConfig::LUA>
+        $<$<BOOL:${ULTRAGUI_LUA}>:${ULTRAGUI_LUA_LIBS}>
         $<$<BOOL:${ULTRAGUI_PLATFORM_GLFW}>:glfw>
         yogacore
 )
@@ -340,6 +396,7 @@ target_compile_definitions(ultragui PUBLIC
     ULTRAGUI_LOTTIE=$<BOOL:${ULTRAGUI_LOTTIE}>
     ULTRAGUI_VIDEO=$<BOOL:${ULTRAGUI_VIDEO}>
     ULTRAGUI_DEFAULT_OPEN_URL=$<BOOL:${ULTRAGUI_DEFAULT_OPEN_URL}>
+    ULTRAGUI_PLATFORM_HOST=$<BOOL:${ULTRAGUI_PLATFORM_HOST}>
 )
 
 if(ULTRAGUI_BACKEND_VULKAN)
@@ -369,6 +426,13 @@ if(ULTRAGUI_BACKEND_D3D11)
         pkg_check_modules(VKD3D_UTILS_D3D11 REQUIRED IMPORTED_TARGET libvkd3d-utils)
         target_link_libraries(ultragui PRIVATE PkgConfig::DXVK_D3D11 PkgConfig::DXVK_DXGI PkgConfig::VKD3D_UTILS_D3D11)
     endif()
+endif()
+
+if(ULTRAGUI_IMPL_DX11 AND NOT WIN32 AND NOT ULTRAGUI_BACKEND_D3D11)
+    # The backend only calls through the host's device, so it needs DXVK's
+    # headers and nothing to link; vkd3d-utils is dlopened for D3DCompile.
+    pkg_check_modules(DXVK_D3D11_HEADERS REQUIRED IMPORTED_TARGET dxvk-d3d11)
+    target_include_directories(ultragui SYSTEM PRIVATE ${DXVK_D3D11_HEADERS_INCLUDE_DIRS})
 endif()
 
 if(ULTRAGUI_BACKEND_OPENGL)

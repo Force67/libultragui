@@ -90,7 +90,7 @@ bool SliderClick(WidgetRegistry& world, wid e) {
   return true;
 }
 
-void SliderUpdate(WidgetRegistry& world, wid e, f64 dt) {
+void SliderUpdate(WidgetRegistry& world, wid e, f64 /*dt*/) {
   SliderContent* c = world.Get<SliderContent>(e);
   if (!c) return;
   const WidgetContext* ctx = WidgetContextOf(world, e);

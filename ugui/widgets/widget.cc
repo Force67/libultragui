@@ -342,10 +342,10 @@ void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer,
         renderer.DrawBorderedRect(rect, Color::Transparent(), bc,
                                   s.border_width, radii);
         Rect inner = rect.Shrunk(s.border_width);
-        f32 tl = (radii & 0xFFu);
-        f32 tr = ((radii >> 8) & 0xFFu);
-        f32 br = ((radii >> 16) & 0xFFu);
-        f32 bl = ((radii >> 24) & 0xFFu);
+        f32 tl = static_cast<f32>(radii & 0xFFu);
+        f32 tr = static_cast<f32>((radii >> 8) & 0xFFu);
+        f32 br = static_cast<f32>((radii >> 16) & 0xFFu);
+        f32 bl = static_cast<f32>((radii >> 24) & 0xFFu);
         u32 inner_radii = Vertex2D::PackRadii(
             tl > s.border_width ? tl - s.border_width : 0.0f,
             tr > s.border_width ? tr - s.border_width : 0.0f,
@@ -358,10 +358,10 @@ void PaintWidget(WidgetRegistry& world, wid e, Renderer2D& renderer,
         renderer.DrawBorderedRect(rect, Color::Transparent(), bc,
                                   s.border_width, radii);
         Rect inner = rect.Shrunk(s.border_width);
-        f32 tl = (radii & 0xFFu);
-        f32 tr = ((radii >> 8) & 0xFFu);
-        f32 br = ((radii >> 16) & 0xFFu);
-        f32 bl = ((radii >> 24) & 0xFFu);
+        f32 tl = static_cast<f32>(radii & 0xFFu);
+        f32 tr = static_cast<f32>((radii >> 8) & 0xFFu);
+        f32 br = static_cast<f32>((radii >> 16) & 0xFFu);
+        f32 bl = static_cast<f32>((radii >> 24) & 0xFFu);
         u32 inner_radii = Vertex2D::PackRadii(
             tl > s.border_width ? tl - s.border_width : 0.0f,
             tr > s.border_width ? tr - s.border_width : 0.0f,

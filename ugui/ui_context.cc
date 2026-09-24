@@ -54,7 +54,9 @@ UIContext::~UIContext() {
 bool UIContext::Init(const UIConfig& config) {
   config_ = config;
 
-  if (config.draw_data && !config.external_window) {
+  // The GLFW platform attaches to the host's window; the host platform has
+  // none, and is fed by the host instead.
+  if (config.draw_data && !config.external_window && !ULTRAGUI_PLATFORM_HOST) {
     std::fprintf(stderr, "ultragui: draw_data mode requires external_window\n");
     return false;
   }

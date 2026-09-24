@@ -72,6 +72,17 @@ VSOutput VSMain(VSInput input) {
     return o;
 }
 
+// Blending happens in linear light when the render target is sRGB and encodes
+// on write. A host drawing into a UNORM target, a game's back buffer, compiles
+// with UGUI_ENCODE_SRGB so the colours come out the same there.
+float4 encode_output(float4 c) {
+#ifdef UGUI_ENCODE_SRGB
+    float3 x = max(c.rgb, 0.0);
+    c.rgb = lerp(x * 12.92, 1.055 * pow(x, 1.0 / 2.4) - 0.055, step(0.0031308, x));
+#endif
+    return c;
+}
+
 float sdf_rounded_rect_4(float2 p, float2 b, float4 radii) {
     // radii = (tl, tr, br, bl)
     float radius = (p.x > 0.0) ? ((p.y > 0.0) ? radii.z : radii.y) : ((p.y > 0.0) ? radii.w : radii.x);
@@ -123,11 +134,13 @@ float4 PSMain(VSOutput input) : SV_Target {
             float4 fill = color;
             fill.a *= inner_alpha;
 
-            // Pre-multiplied alpha compositing
-            color = fill + border_col * (1.0 - fill.a);
-            color.a = fill.a + border_col.a * (1.0 - fill.a);
+            // The fill over the border, in straight alpha, which is how the
+            // pipeline blends: weight each colour by its own alpha.
+            float a = fill.a + border_col.a * (1.0 - fill.a);
+            float3 rgb = fill.rgb * fill.a + border_col.rgb * border_col.a * (1.0 - fill.a);
+            color = float4(a > 0.0 ? rgb / a : rgb, a);
         }
     }
 
-    return color;
+    return encode_output(color);
 }

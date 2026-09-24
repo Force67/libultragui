@@ -43,3 +43,4 @@ tests/cmake_install.cmake
 *.log
 examples/ultragui_video_demo
 examples/ultragui_game_overlay
+build-*/
