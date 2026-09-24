@@ -256,6 +256,33 @@ panel root {
   ASSERT(root.children[1].name == "after");
 }
 
+TEST(pointer_events_none_is_not_hit) {
+  // A widget drawn over a button, as a drawn cursor is, lets the button take
+  // the click when it says pointer-events: none.
+  ugui::World& world = *ugui::WidgetRegistry::Active();
+  ugui::wid root = BuildString(R"(
+panel root {
+  width: 200; height: 100;
+  button under { width: 200; height: 100; text: "x"; }
+  panel over {
+    position: absolute; left: 0; top: 0; width: 200; height: 100;
+    pointer-events: none;
+  }
+}
+)");
+  ugui::LayoutEngine engine;
+  ugui::ComputeWidgetLayout(root, {800.0f, 600.0f, 1.0f}, engine);
+  ugui::wid under = FindByName(world, root, "under");
+  ugui::wid over = FindByName(world, root, "over");
+  ASSERT(ugui::HitTest(world, root, {50.0f, 50.0f}) == under);
+  // Without it, the overlay is what the pointer hits.
+  ugui::Style s = world.Get<ugui::StyleC>(over)->style;
+  s.pointer_events = ugui::PointerEvents::kAuto;
+  ugui::SetStyle(world, over, s);
+  ASSERT(ugui::HitTest(world, root, {50.0f, 50.0f}) == over);
+  ugui::DestroyWidget(world, root);
+}
+
 TEST(flexbox_properties_parse) {
   ugui::World& world = *ugui::WidgetRegistry::Active();
   ugui::wid root = BuildString(R"(

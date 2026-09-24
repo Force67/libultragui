@@ -228,6 +228,8 @@ Vec2 InputToLayoutPoint(WidgetRegistry& world, wid e, Vec2 point) {
 }
 
 wid HitTest(WidgetRegistry& world, wid e, Vec2 point) {
+  if (ComputedStyle(world, e).pointer_events == PointerEvents::kNone)
+    return kNullWidget;
   const WidgetVTable& vt = WidgetVTableFor(world.Get<WidgetNode>(e)->kind);
   if (vt.hit_test) return vt.hit_test(world, e, point);
 

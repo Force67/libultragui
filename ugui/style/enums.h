@@ -157,6 +157,14 @@ enum class GradientType : u8 {
   kRadial,
 };
 
+/// Whether a widget takes the pointer: `none` leaves it and everything under
+/// it out of hit testing, so clicks and hover reach whatever is beneath. For
+/// overlays that only show something, a drawn cursor or a tooltip.
+enum class PointerEvents : u8 {
+  kAuto,
+  kNone,
+};
+
 /// Cursor style
 enum class Cursor : u8 {
   kAuto,
