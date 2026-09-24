@@ -225,6 +225,37 @@ TEST(multiple_style_classes_apply_in_order) {
   ugui::DestroyWidget(world, root);
 }
 
+TEST(at_rules_parse_on_nested_elements) {
+  // Every depth parses @keyframes and @media, not just the root, and the
+  // widgets after them still land where they belong.
+  auto doc = Parse(R"(
+panel root {
+  panel card {
+    opacity: 0;
+    panel inner {
+      @media (max-width: 800) { width: 100; }
+    }
+    @keyframes fade {
+      duration: 0.8s;
+      0% { opacity: 0; }
+      100% { opacity: 1; }
+    }
+  }
+  text after { text: "x"; }
+}
+)");
+  ASSERT(doc.roots.size() == 1);
+  const ugui::UguiNode& root = doc.roots[0];
+  ASSERT(root.children.size() == 2);
+  const ugui::UguiNode& card = root.children[0];
+  ASSERT(card.name == "card");
+  ASSERT(card.children.size() == 1);
+  ASSERT(card.children[0].media_queries.size() == 1);
+  ASSERT(card.keyframe_blocks.size() == 1);
+  ASSERT(card.keyframe_blocks[0].stops.size() == 2);
+  ASSERT(root.children[1].name == "after");
+}
+
 TEST(flexbox_properties_parse) {
   ugui::World& world = *ugui::WidgetRegistry::Active();
   ugui::wid root = BuildString(R"(
