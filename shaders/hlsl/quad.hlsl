@@ -123,11 +123,13 @@ float4 PSMain(VSOutput input) : SV_Target {
             float4 fill = color;
             fill.a *= inner_alpha;
 
-            // Pre-multiplied alpha compositing
-            color = fill + border_col * (1.0 - fill.a);
-            color.a = fill.a + border_col.a * (1.0 - fill.a);
+            // The fill over the border, in straight alpha, which is how the
+            // pipeline blends: weight each colour by its own alpha.
+            float a = fill.a + border_col.a * (1.0 - fill.a);
+            float3 rgb = fill.rgb * fill.a + border_col.rgb * border_col.a * (1.0 - fill.a);
+            color = float4(a > 0.0 ? rgb / a : rgb, a);
         }
     }
 
-    return color;
+    return encode_output(color);
 }
