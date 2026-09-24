@@ -429,8 +429,8 @@ class Parser {
     return "?";
   }
 
-  // element = identifier [identifier] '{' (property | state_block | element)*
-  // '}'
+  // element = identifier [identifier] '{' (property | state_block | at_rule
+  //           | element)* '}'
   UguiNode parse_element() {
     UguiNode node;
     node.source_line = current_.line;
@@ -444,42 +444,39 @@ class Parser {
       advance();
     }
 
+    return parse_element_body(std::move(node));
+  }
+
+  // The '{' ... '}' of an element, at any depth: children go through here
+  // too, so @media and @keyframes work on nested widgets the same as on the
+  // root.
+  UguiNode parse_element_body(UguiNode node) {
     expect(TokenType::kLBrace);
 
     while (current_.type != TokenType::kRBrace &&
            current_.type != TokenType::kEof) {
       if (current_.type == TokenType::kAt) {
-        // Peek at the next token to distinguish @media from @keyframes
-        Token at_tok = current_;
         advance();  // skip '@'
         if (current_.type == TokenType::kIdentifier &&
             current_.value == "media") {
-          auto mq = parse_media_query();
-          node.media_queries.push_back(std::move(mq));
+          node.media_queries.push_back(parse_media_query());
         } else {
-          // Put back: parse_keyframe_block expects current_ to be '@'
-          // We already consumed '@', so call the inner keyframe logic directly
-          auto kb = parse_keyframe_block_inner();
-          node.keyframe_blocks.push_back(std::move(kb));
+          node.keyframe_blocks.push_back(parse_keyframe_block_inner());
         }
       } else if (current_.type == TokenType::kColon) {
         // State block: :hover { ... }
-        auto sb = parse_state_block();
-        node.state_blocks.push_back(std::move(sb));
+        node.state_blocks.push_back(parse_state_block());
       } else if (current_.type == TokenType::kIdentifier) {
-        // Peek ahead: is this a property (identifier: value;) or a child
-        // element?
+        // A property (identifier: value;) or a child element.
         Token id = current_;
         advance();
         if (current_.type == TokenType::kColon) {
-          // Property
           advance();  // skip ':'
           String value = parse_value();
           if (current_.type == TokenType::kSemicolon) advance();
           node.properties[id.value] = value;
         } else if (current_.type == TokenType::kLBrace ||
                    current_.type == TokenType::kIdentifier) {
-          // Child element (push back the identifier)
           UguiNode child;
           child.source_line = id.line;
           child.type = id.value;
@@ -487,41 +484,7 @@ class Parser {
             child.name = current_.value;
             advance();
           }
-          expect(TokenType::kLBrace);
-          // Parse child body
-          while (current_.type != TokenType::kRBrace &&
-                 current_.type != TokenType::kEof) {
-            if (current_.type == TokenType::kColon) {
-              child.state_blocks.push_back(parse_state_block());
-            } else if (current_.type == TokenType::kIdentifier) {
-              Token cid = current_;
-              advance();
-              if (current_.type == TokenType::kColon) {
-                advance();
-                String val = parse_value();
-                if (current_.type == TokenType::kSemicolon) advance();
-                child.properties[cid.value] = val;
-              } else {
-                // Nested child
-                UguiNode nested;
-                nested.source_line = cid.line;
-                nested.type = cid.value;
-                if (current_.type == TokenType::kIdentifier) {
-                  nested.name = current_.value;
-                  advance();
-                }
-                if (current_.type == TokenType::kLBrace) {
-                  // Recursively parse (simplified: only 3 levels deep here)
-                  nested = parse_element_body(nested);
-                }
-                child.children.push_back(std::move(nested));
-              }
-            } else {
-              advance();  // skip unexpected tokens
-            }
-          }
-          if (current_.type == TokenType::kRBrace) advance();
-          node.children.push_back(std::move(child));
+          node.children.push_back(parse_element_body(std::move(child)));
         } else {
           error("unexpected token after identifier '" + id.value + "'");
         }
@@ -531,43 +494,6 @@ class Parser {
       }
     }
 
-    if (current_.type == TokenType::kRBrace) advance();
-
-    return node;
-  }
-
-  UguiNode parse_element_body(UguiNode node) {
-    expect(TokenType::kLBrace);
-    while (current_.type != TokenType::kRBrace &&
-           current_.type != TokenType::kEof) {
-      if (current_.type == TokenType::kColon) {
-        node.state_blocks.push_back(parse_state_block());
-      } else if (current_.type == TokenType::kIdentifier) {
-        Token id = current_;
-        advance();
-        if (current_.type == TokenType::kColon) {
-          advance();
-          String val = parse_value();
-          if (current_.type == TokenType::kSemicolon) advance();
-          node.properties[id.value] = val;
-        } else {
-          // Nested element
-          UguiNode child;
-          child.source_line = id.line;
-          child.type = id.value;
-          if (current_.type == TokenType::kIdentifier) {
-            child.name = current_.value;
-            advance();
-          }
-          if (current_.type == TokenType::kLBrace) {
-            child = parse_element_body(child);
-          }
-          node.children.push_back(std::move(child));
-        }
-      } else {
-        advance();
-      }
-    }
     if (current_.type == TokenType::kRBrace) advance();
     return node;
   }
