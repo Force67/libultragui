@@ -35,6 +35,17 @@ float3 srgb_to_linear(float3 c) {
     return lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c));
 }
 
+// Blending happens in linear light when the render target is sRGB and encodes
+// on write. A host drawing into a UNORM target, a game's back buffer, compiles
+// with UGUI_ENCODE_SRGB so the colours come out the same there.
+float4 encode_output(float4 c) {
+#ifdef UGUI_ENCODE_SRGB
+    float3 x = max(c.rgb, 0.0);
+    c.rgb = lerp(x * 12.92, 1.055 * pow(x, 1.0 / 2.4) - 0.055, step(0.0031308, x));
+#endif
+    return c;
+}
+
 VSOutput VSMain(VSInput input) {
     VSOutput o;
     o.pos = float4(input.pos * scale + translate, 0.0, 1.0);
@@ -53,5 +64,5 @@ VSOutput VSMain(VSInput input) {
 
 float4 PSMain(VSOutput input) : SV_Target {
     float alpha = tex.Sample(samp_nearest, input.uv).r;
-    return float4(input.color.rgb, input.color.a * alpha);
+    return encode_output(float4(input.color.rgb, input.color.a * alpha));
 }

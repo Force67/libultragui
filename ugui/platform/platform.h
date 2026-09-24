@@ -61,6 +61,9 @@ class Platform {
   InputQueue& input_queue();
 
   struct Impl;
+  /// The implementation's own state, for functions that implementation adds
+  /// (see platform_host.h).
+  Impl* impl() const { return impl_; }
 
  private:
   Impl* impl_;

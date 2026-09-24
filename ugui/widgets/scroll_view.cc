@@ -19,7 +19,7 @@ bool ScrollViewScroll(WidgetRegistry& world, wid e, Vec2 delta) {
   return true;
 }
 
-void ScrollViewLayout(WidgetRegistry& world, wid e, const Rect& rect,
+void ScrollViewLayout(WidgetRegistry& world, wid e, const Rect& /*rect*/,
                       const Rect& content_rect) {
   ScrollViewContent* c = world.Get<ScrollViewContent>(e);
   if (!c) return;

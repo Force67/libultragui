@@ -52,13 +52,16 @@ struct UIConfig {
   f32 design_height = 720.0f;
 
   /// Attach to a host-created window (GLFWwindow*) instead of creating one.
+  /// Not needed with the host platform (ULTRAGUI_PLATFORM_HOST), which the
+  /// host feeds instead.
   /// With embedded=true the host clears and presents. See examples/embed_gl.
   void* external_window = nullptr;
   bool embedded = false;
 
   /// No graphics device; RenderDrawData() returns a draw list for the host's
-  /// backend (see ugui_impl_vulkan.h). Requires external_window. Host owns the
-  /// GPU and uploads the glyph atlas (TextEngine::atlas_pixels()).
+  /// backend (see ugui_impl_vulkan.h). Requires external_window, or the host
+  /// platform. Host owns the GPU and uploads the glyph atlas
+  /// (TextEngine::atlas_pixels()).
   bool draw_data = false;
 };
 

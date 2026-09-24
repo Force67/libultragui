@@ -177,6 +177,50 @@ screen unchanged. Offscreen render targets hold sRGB bytes like any other
 texture. An sRGB view writes them and a UNORM view samples them, so the
 hardware encodes once and the shader decodes once.
 
+### Embedding in a host that owns everything (games, Windows)
+
+When the host keeps its device and its window to itself, as a game hooked
+at `Present` does, run ultragui in draw-data mode on the host platform:
+
+```cmake
+set(ULTRAGUI_PLATFORM_HOST ON)    # no window of its own; the host feeds it
+set(ULTRAGUI_IMPL_DX11 ON)        # renders the draw list on the host's device
+set(ULTRAGUI_BACKEND_VULKAN OFF)  # no RHI at all: a null one is linked
+```
+
+```cpp
+ugui::UIConfig config;
+config.draw_data = true;  // no external_window needed on the host platform
+ui.Init(config);
+ugui::dx11::Init(device, context);
+ui.set_texture_backend(&ugui::dx11::texture_backend());
+
+// each frame, with the host's render target bound:
+ugui::host::SetViewport(*ui.platform(), size, size);
+const ugui::DrawData& dd = ui.RenderDrawData();
+if (ui.text_engine().atlas_revision() != font_revision) { /* UpdateFontAtlas */ }
+ugui::dx11::RenderDrawData(dd);
+
+// in the window procedure:
+ugui::win32::HandleMessage(*ui.platform(), hwnd, msg, wparam, lparam, scale);
+```
+
+- `ugui/platform/platform_host.h`: the host sets the viewport and pushes
+  input, from any thread; the context takes both when its frame starts.
+  On Windows its clipboard is the system's.
+- `ugui/backends/ugui_impl_dx11.h`: renders into whatever render target is
+  bound and restores all the pipeline state it touched. On a render target
+  that isn't sRGB, such as the usual game back buffer, it switches to shaders
+  that encode sRGB themselves, so colours match.
+- `ugui/backends/ugui_impl_win32.h`: Win32 mouse, wheel, key and character
+  messages as ultragui input, with virtual keys mapped to the GLFW key codes
+  the widgets read.
+
+`ULTRAGUI_BUNDLED_DEPS`, which is on by default on Windows, builds freetype,
+harfbuzz and Lua 5.4 from pinned release archives instead of asking
+pkg-config. Offline, point `FETCHCONTENT_SOURCE_DIR_UGUI_FREETYPE` (and
+`_HARFBUZZ`, `_LUA`) at unpacked copies of the same releases.
+
 ## .ugui
 
 `panel`, `text`, `button`, `image`, `scroll` widgets. Flexbox layout. `:hover`/`:pressed`/`:focused` selectors. `vw`/`vh`/`%`/`fr` units. Shadows, gradients, rounded corners, text transforms, transitions, keyframe animations.
