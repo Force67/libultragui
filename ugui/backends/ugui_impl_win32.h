@@ -15,7 +15,7 @@
 #include <ugui/core/math.h>
 #include <ugui/core/types.h>
 
-#include <cstdint>
+#include <stdint.h>
 
 namespace ugui {
 
@@ -29,13 +29,13 @@ namespace win32 {
 /// in the back buffer's. True when `message` was input of a kind handled
 /// here; whether to keep it from the window is the caller's choice.
 bool HandleMessage(Platform& platform, void* window, u32 message,
-                   std::uintptr_t wparam, std::intptr_t lparam,
+                   uintptr_t wparam, intptr_t lparam,
                    Vec2 scale = {1.0f, 1.0f});
 
 /// The GLFW key code for a Win32 virtual key; `lparam` tells the keypad
 /// Enter and the right-hand modifiers apart. -1 (GLFW_KEY_UNKNOWN) for a key
 /// GLFW has no code for.
-i32 KeyFromVirtualKey(u32 virtual_key, std::intptr_t lparam);
+i32 KeyFromVirtualKey(u32 virtual_key, intptr_t lparam);
 
 /// GLFW modifier bits for the keyboard's state right now.
 i32 CurrentMods();

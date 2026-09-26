@@ -1,7 +1,7 @@
 #include <ugui/anim/json.h>
 
-#include <cstdlib>
-#include <cstring>
+#include <stdlib.h>
+#include <string.h>
 
 namespace ugui {
 
@@ -115,7 +115,7 @@ struct JsonParser {
   bool parse_number(JsonValue& out) {
     out.type = JsonValue::kNumber;
     char* num_end = nullptr;
-    out.number_val = std::strtod(p, &num_end);
+    out.number_val = strtod(p, &num_end);
     if (num_end == p) return false;
     p = num_end;
     return true;
@@ -123,12 +123,12 @@ struct JsonParser {
 
   bool parse_bool(JsonValue& out) {
     out.type = JsonValue::kBool;
-    if (end - p >= 4 && std::memcmp(p, "true", 4) == 0) {
+    if (end - p >= 4 && memcmp(p, "true", 4) == 0) {
       out.bool_val = true;
       p += 4;
       return true;
     }
-    if (end - p >= 5 && std::memcmp(p, "false", 5) == 0) {
+    if (end - p >= 5 && memcmp(p, "false", 5) == 0) {
       out.bool_val = false;
       p += 5;
       return true;
@@ -138,7 +138,7 @@ struct JsonParser {
 
   bool parse_null(JsonValue& out) {
     out.type = JsonValue::kNull;
-    if (end - p >= 4 && std::memcmp(p, "null", 4) == 0) {
+    if (end - p >= 4 && memcmp(p, "null", 4) == 0) {
       p += 4;
       return true;
     }
@@ -168,8 +168,8 @@ struct JsonParser {
 
       JsonValue val;
       if (!parse_value(val)) return false;
-      out.object_keys.push_back(std::move(key.string_val));
-      out.object_vals.push_back(std::move(val));
+      out.object_keys.push_back(ugui::move(key.string_val));
+      out.object_vals.push_back(ugui::move(val));
 
       skip_ws();
       if (p < end && *p == ',') {
@@ -198,7 +198,7 @@ struct JsonParser {
     while (p < end) {
       JsonValue val;
       if (!parse_value(val)) return false;
-      out.array_val.push_back(std::move(val));
+      out.array_val.push_back(ugui::move(val));
 
       skip_ws();
       if (p < end && *p == ',') {

@@ -3,10 +3,8 @@
 #include <ugui/anim/json.h>
 #include <ugui/core/color.h>
 
-#include <charconv>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
+#include <stdio.h>
+#include <string.h>
 
 namespace ugui {
 
@@ -18,7 +16,7 @@ static Color parse_anim_color(const char* s) {
   if (!s || !*s) return Color::Transparent();
   if (s[0] == '#') {
     u32 hex = 0;
-    usize len = std::strlen(s);
+    usize len = strlen(s);
     ugui::from_chars(s + 1, s + len, hex, 16);
     if (len == 7) return Color::FromHex(hex);
     if (len == 9) {
@@ -27,51 +25,49 @@ static Color parse_anim_color(const char* s) {
       return Color::FromHex(rgb, alpha);
     }
   }
-  if (std::strcmp(s, "none") == 0 || std::strcmp(s, "transparent") == 0)
+  if (strcmp(s, "none") == 0 || strcmp(s, "transparent") == 0)
     return Color::Transparent();
-  if (std::strcmp(s, "white") == 0) return Color::White();
-  if (std::strcmp(s, "black") == 0) return Color::Black();
+  if (strcmp(s, "white") == 0) return Color::White();
+  if (strcmp(s, "black") == 0) return Color::Black();
   return Color::Transparent();
 }
 
 static EasingType parse_anim_easing(const char* s) {
   if (!s) return EasingType::kLinear;
-  if (std::strcmp(s, "ease-in-out") == 0) return EasingType::kEaseInOut;
-  if (std::strcmp(s, "ease-in") == 0) return EasingType::kEaseIn;
-  if (std::strcmp(s, "ease-out") == 0) return EasingType::kEaseOut;
+  if (strcmp(s, "ease-in-out") == 0) return EasingType::kEaseInOut;
+  if (strcmp(s, "ease-in") == 0) return EasingType::kEaseIn;
+  if (strcmp(s, "ease-out") == 0) return EasingType::kEaseOut;
   return EasingType::kLinear;
 }
 
 static AnimShapeType parse_shape_type(const char* s) {
   if (!s) return AnimShapeType::kRect;
-  if (std::strcmp(s, "rect") == 0) return AnimShapeType::kRect;
-  if (std::strcmp(s, "circle") == 0) return AnimShapeType::kCircle;
-  if (std::strcmp(s, "ellipse") == 0) return AnimShapeType::kEllipse;
-  if (std::strcmp(s, "path") == 0) return AnimShapeType::kPath;
-  if (std::strcmp(s, "group") == 0) return AnimShapeType::kGroup;
+  if (strcmp(s, "rect") == 0) return AnimShapeType::kRect;
+  if (strcmp(s, "circle") == 0) return AnimShapeType::kCircle;
+  if (strcmp(s, "ellipse") == 0) return AnimShapeType::kEllipse;
+  if (strcmp(s, "path") == 0) return AnimShapeType::kPath;
+  if (strcmp(s, "group") == 0) return AnimShapeType::kGroup;
   return AnimShapeType::kRect;
 }
 
 static AnimProperty parse_property_name(const char* s) {
-  if (std::strcmp(s, "x") == 0) return AnimProperty::kX;
-  if (std::strcmp(s, "y") == 0) return AnimProperty::kY;
-  if (std::strcmp(s, "w") == 0 || std::strcmp(s, "width") == 0)
-    return AnimProperty::kW;
-  if (std::strcmp(s, "h") == 0 || std::strcmp(s, "height") == 0)
-    return AnimProperty::kH;
-  if (std::strcmp(s, "r") == 0) return AnimProperty::kR;
-  if (std::strcmp(s, "cx") == 0) return AnimProperty::kCx;
-  if (std::strcmp(s, "cy") == 0) return AnimProperty::kCy;
-  if (std::strcmp(s, "rx") == 0) return AnimProperty::kRx;
-  if (std::strcmp(s, "ry") == 0) return AnimProperty::kRy;
-  if (std::strcmp(s, "rotation") == 0) return AnimProperty::kRotation;
-  if (std::strcmp(s, "scale-x") == 0) return AnimProperty::kScaleX;
-  if (std::strcmp(s, "scale-y") == 0) return AnimProperty::kScaleY;
-  if (std::strcmp(s, "opacity") == 0) return AnimProperty::kOpacity;
-  if (std::strcmp(s, "stroke-width") == 0) return AnimProperty::kStrokeWidth;
-  if (std::strcmp(s, "corner-radius") == 0) return AnimProperty::kCornerRadius;
-  if (std::strcmp(s, "fill") == 0) return AnimProperty::kFill;
-  if (std::strcmp(s, "stroke") == 0) return AnimProperty::kStroke;
+  if (strcmp(s, "x") == 0) return AnimProperty::kX;
+  if (strcmp(s, "y") == 0) return AnimProperty::kY;
+  if (strcmp(s, "w") == 0 || strcmp(s, "width") == 0) return AnimProperty::kW;
+  if (strcmp(s, "h") == 0 || strcmp(s, "height") == 0) return AnimProperty::kH;
+  if (strcmp(s, "r") == 0) return AnimProperty::kR;
+  if (strcmp(s, "cx") == 0) return AnimProperty::kCx;
+  if (strcmp(s, "cy") == 0) return AnimProperty::kCy;
+  if (strcmp(s, "rx") == 0) return AnimProperty::kRx;
+  if (strcmp(s, "ry") == 0) return AnimProperty::kRy;
+  if (strcmp(s, "rotation") == 0) return AnimProperty::kRotation;
+  if (strcmp(s, "scale-x") == 0) return AnimProperty::kScaleX;
+  if (strcmp(s, "scale-y") == 0) return AnimProperty::kScaleY;
+  if (strcmp(s, "opacity") == 0) return AnimProperty::kOpacity;
+  if (strcmp(s, "stroke-width") == 0) return AnimProperty::kStrokeWidth;
+  if (strcmp(s, "corner-radius") == 0) return AnimProperty::kCornerRadius;
+  if (strcmp(s, "fill") == 0) return AnimProperty::kFill;
+  if (strcmp(s, "stroke") == 0) return AnimProperty::kStroke;
   return AnimProperty::kOpacity;  // fallback
 }
 
@@ -182,19 +178,22 @@ bool parse_anim_document(const JsonValue& root, AnimDocument& out) {
 }
 
 bool parse_anim_file(const char* path, AnimDocument& out) {
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  FILE* file = fopen(path, "rb");
   if (!file) {
-    std::fprintf(stderr, "ugui/anim: failed to open '%s'\n", path);
+    fprintf(stderr, "ugui/anim: failed to open '%s'\n", path);
     return false;
   }
-  auto size = file.tellg();
-  file.seekg(0);
+  fseek(file, 0, SEEK_END);
+  auto size = ftell(file);
+  fseek(file, 0, SEEK_SET);
   String data(static_cast<usize>(size), '\0');
-  file.read(data.data(), size);
+  size_t read = fread(data.data(), 1, static_cast<usize>(size), file);
+  (void)read;
+  fclose(file);
 
   JsonValue root;
   if (!ParseJson(data.c_str(), data.size(), root)) {
-    std::fprintf(stderr, "ugui/anim: JSON parse error in '%s'\n", path);
+    fprintf(stderr, "ugui/anim: JSON parse error in '%s'\n", path);
     return false;
   }
 

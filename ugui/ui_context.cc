@@ -1,4 +1,5 @@
 #include <ugui/scripting/lua_widgets.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/ui_context.h>
 #include <ugui/widgets/panel.h>
 #include <ugui/widgets/text.h>
@@ -16,10 +17,9 @@
 #endif
 #endif  // ULTRAGUI_LUA
 
-#include <algorithm>
-#include <cmath>
-#include <cstdio>
-#include <cstring>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
 
 namespace ugui {
 
@@ -34,13 +34,13 @@ static f32 ComputeViewportScale(const UIConfig& cfg, Vec2 display, f32 override_
       f32 sw = (cfg.design_width > 0.0f) ? display.x / cfg.design_width : 1.0f;
       f32 sh =
           (cfg.design_height > 0.0f) ? display.y / cfg.design_height : 1.0f;
-      return std::fmin(sw, sh);
+      return fminf(sw, sh);
     }
     case ViewportScaleMode::kCover: {
       f32 sw = (cfg.design_width > 0.0f) ? display.x / cfg.design_width : 1.0f;
       f32 sh =
           (cfg.design_height > 0.0f) ? display.y / cfg.design_height : 1.0f;
-      return std::fmax(sw, sh);
+      return fmaxf(sw, sh);
     }
     default:
       return 1.0f;
@@ -57,7 +57,7 @@ bool UIContext::Init(const UIConfig& config) {
   // The GLFW platform attaches to the host's window; the host platform has
   // none, and is fed by the host instead.
   if (config.draw_data && !config.external_window && !ULTRAGUI_PLATFORM_HOST) {
-    std::fprintf(stderr, "ultragui: draw_data mode requires external_window\n");
+    fprintf(stderr, "ultragui: draw_data mode requires external_window\n");
     return false;
   }
 
@@ -74,7 +74,7 @@ bool UIContext::Init(const UIConfig& config) {
 #endif
 
   if (!platform_.Init(wcfg)) {
-    std::fprintf(stderr, "ultragui: failed to initialize platform\n");
+    fprintf(stderr, "ultragui: failed to initialize platform\n");
     return false;
   }
 
@@ -90,7 +90,7 @@ bool UIContext::Init(const UIConfig& config) {
     rcfg.embedded = config.embedded;
 
     if (!rhi_.Init(rcfg)) {
-      std::fprintf(stderr, "ultragui: failed to initialize RHI\n");
+      fprintf(stderr, "ultragui: failed to initialize RHI\n");
       platform_.Shutdown();
       return false;
     }
@@ -109,7 +109,7 @@ bool UIContext::Init(const UIConfig& config) {
 
   // Text engine
   if (!text_engine_.Init(rhi_ptr)) {
-    std::fprintf(stderr, "ultragui: failed to initialize text engine\n");
+    fprintf(stderr, "ultragui: failed to initialize text engine\n");
   }
 
   // Input
@@ -148,7 +148,7 @@ bool UIContext::Init(const UIConfig& config) {
 
 #if ULTRAGUI_AUDIO
   if (!audio_->Init()) {
-    std::fprintf(stderr, "ultragui: audio init failed (non-fatal)\n");
+    fprintf(stderr, "ultragui: audio init failed (non-fatal)\n");
   }
 #endif
 
@@ -175,7 +175,7 @@ bool UIContext::Init(const UIConfig& config) {
 FontHandle UIContext::LoadFont(const char* path) {
   FontHandle font = text_engine_.LoadFont(path);
   if (font == kInvalidFont) {
-    std::fprintf(stderr, "ultragui: failed to load font '%s'\n", path);
+    fprintf(stderr, "ultragui: failed to load font '%s'\n", path);
   }
   return font;
 }
@@ -183,8 +183,8 @@ FontHandle UIContext::LoadFont(const char* path) {
 FontHandle UIContext::LoadFontMemory(const char* data, usize length) {
   FontHandle font = text_engine_.LoadFontMemory(data, length);
   if (font == kInvalidFont) {
-    std::fprintf(stderr, "ultragui: failed to load font from %zu bytes\n",
-                 static_cast<size_t>(length));
+    fprintf(stderr, "ultragui: failed to load font from %zu bytes\n",
+            static_cast<size_t>(length));
   }
   return font;
 }
@@ -200,8 +200,8 @@ wid UIContext::LoadUi(const char* path) {
 
   if (!ParseUguiFile(path, doc, errors)) {
     for (auto& e : errors) {
-      std::fprintf(stderr, "ultragui: parse error in %s:%u:%u: %s\n",
-                   e.file.c_str(), e.line, e.column, e.message.c_str());
+      fprintf(stderr, "ultragui: parse error in %s:%u:%u: %s\n", e.file.c_str(),
+              e.line, e.column, e.message.c_str());
     }
     return kNullWidget;
   }
@@ -235,10 +235,10 @@ wid UIContext::LoadUiString(const char* source, const char* name) {
   UguiDocument doc;
   Vector<ParseError> errors;
 
-  if (!ParseUgui(source, std::strlen(source), name, doc, errors)) {
+  if (!ParseUgui(source, strlen(source), name, doc, errors)) {
     for (auto& e : errors) {
-      std::fprintf(stderr, "ultragui: parse error in %s:%u:%u: %s\n",
-                   e.file.c_str(), e.line, e.column, e.message.c_str());
+      fprintf(stderr, "ultragui: parse error in %s:%u:%u: %s\n", e.file.c_str(),
+              e.line, e.column, e.message.c_str());
     }
     return kNullWidget;
   }
@@ -425,12 +425,12 @@ void UIContext::Update() {
   auto update_anim = [dt = dt_](auto* anim) {
     if (anim) anim->Update(dt);
   };
-  std::for_each(vector_anims_.begin(), vector_anims_.end(), update_anim);
+  for (auto* anim : vector_anims_) update_anim(anim);
 #if ULTRAGUI_LOTTIE
-  std::for_each(lottie_anims_.begin(), lottie_anims_.end(), update_anim);
+  for (auto* anim : lottie_anims_) update_anim(anim);
 #endif
 #if ULTRAGUI_VIDEO
-  std::for_each(video_players_.begin(), video_players_.end(), update_anim);
+  for (auto* anim : video_players_) update_anim(anim);
 #endif
 
 #if ULTRAGUI_VIDEO
@@ -690,10 +690,10 @@ const DrawData& UIContext::RenderDrawData() {
     stats_.reused = true;  // "would have been", in this mode
     if (HashDrawData(dd) != last_draw_hash_) {
       ++reuse_mismatches_;
-      std::fprintf(stderr,
-                   "ultragui: frame reuse would have shown a stale frame "
-                   "(mismatch %llu)\n",
-                   static_cast<unsigned long long>(reuse_mismatches_));
+      fprintf(stderr,
+              "ultragui: frame reuse would have shown a stale frame "
+              "(mismatch %llu)\n",
+              static_cast<unsigned long long>(reuse_mismatches_));
     }
   }
   RecordBuiltFrame(dd);
@@ -873,14 +873,11 @@ void UIContext::ShowOverlay(wid widget, Vec2 position) {
 }
 
 void UIContext::HideOverlay(wid widget) {
-  overlays_.erase(std::remove_if(overlays_.begin(), overlays_.end(),
-                                 [widget](const OverlayEntry& e) {
-                                   return e.widget == widget;
-                                 }),
-                  overlays_.end());
+  EraseIf(overlays_,
+          [widget](const OverlayEntry& e) { return e.widget == widget; });
 }
 
-void UIContext::SetOnPaint(PaintCallback cb) { on_paint_cb_ = std::move(cb); }
+void UIContext::SetOnPaint(PaintCallback cb) { on_paint_cb_ = ugui::move(cb); }
 
 void UIContext::SetTheme(const Theme& theme) {
   current_theme_name_ = theme.name;
@@ -896,9 +893,8 @@ void UIContext::SetTheme(const Theme& theme) {
 
 wid UIContext::FindWidgetEntity(const char* name) const {
   if (widget_cache_dirty_) RebuildWidgetCache();
-  auto it = widget_cache_.find(name);
-  if (it != widget_cache_.end()) return it->second;
-  return kNullWidget;
+  const wid* hit = widget_cache_.find(name);
+  return hit ? *hit : kNullWidget;
 }
 
 WidgetId UIContext::FindWidget(const char* name) const {
@@ -927,8 +923,8 @@ void UIContext::RebuildWidgetCache() const {
 
 wid UIContext::WidgetById(u32 id) const {
   if (widget_cache_dirty_) RebuildWidgetCache();
-  auto it = id_cache_.find(id);
-  return it != id_cache_.end() ? it->second : kNullWidget;
+  const wid* hit = id_cache_.find(id);
+  return hit ? *hit : kNullWidget;
 }
 
 }  // namespace ugui

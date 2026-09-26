@@ -1,5 +1,5 @@
-#include <algorithm>
 #include <ugui/layout/layout_tree.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
@@ -109,7 +109,7 @@ static void apply_layout_results(WidgetRegistry& world, wid e, u32& node_index,
       if (node.computed_rect.y < sticky_min_y) {
         node.computed_rect.y = sticky_min_y;
         f32 max_y = visible.y + visible.h - node.computed_rect.h;
-        node.computed_rect.y = std::min(node.computed_rect.y, max_y);
+        node.computed_rect.y = Min(node.computed_rect.y, max_y);
       }
     }
   }

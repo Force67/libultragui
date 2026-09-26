@@ -1,10 +1,9 @@
 #include <ugui/render/renderer2d.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/render/vertex.h>
 #include <ugui/widgets/checkbox.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
-#include <string>
 
 namespace ugui {
 namespace {
@@ -36,7 +35,7 @@ void CheckboxMeasure(WidgetRegistry& world, wid e, f32& out_width,
                          st.font_size * sc, st.letter_spacing * sc,
                          st.line_height_multiplier);
     out_width = box_size + kGap + run.total_advance;
-    out_height = std::max(box_size, run.line_height);
+    out_height = Max(box_size, run.line_height);
   } else {
     out_width = box_size;
     out_height = box_size;
@@ -51,7 +50,7 @@ void CheckboxDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   f32 alpha = s.opacity;
   f32 box_size = s.font_size * 1.0f;
   constexpr f32 kGap = 8.0f;
-  f32 corner = std::min(box_size * 0.2f, 4.0f);
+  f32 corner = Min(box_size * 0.2f, 4.0f);
   u32 radii = Vertex2D::PackRadii(corner);
 
   Rect content = world.Get<Transform>(e)->content_rect;
@@ -67,14 +66,14 @@ void CheckboxDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
     Color border = (s.border_color.a > 0.0f)
                        ? s.border_color.WithAlpha(s.border_color.a * alpha)
                        : accent;
-    f32 bw = std::max(s.border_width, 1.5f);
+    f32 bw = Max(s.border_width, 1.5f);
     renderer.DrawBorderedRect({box_x, box_y, box_size, box_size}, accent, border,
                               bw, radii);
 
     f32 inner_size = box_size * 0.45f;
     f32 inner_x = box_x + (box_size - inner_size) * 0.5f;
     f32 inner_y = box_y + (box_size - inner_size) * 0.5f;
-    f32 inner_corner = std::min(inner_size * 0.2f, 2.0f);
+    f32 inner_corner = Min(inner_size * 0.2f, 2.0f);
     u32 inner_radii = Vertex2D::PackRadii(inner_corner);
     renderer.DrawRect({inner_x, inner_y, inner_size, inner_size},
                       Color(1.0f, 1.0f, 1.0f, alpha), inner_radii);
@@ -82,7 +81,7 @@ void CheckboxDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
     Color border = (s.border_color.a > 0.0f)
                        ? s.border_color.WithAlpha(s.border_color.a * alpha)
                        : Color(0.6f, 0.6f, 0.6f, alpha);
-    f32 bw = std::max(s.border_width, 1.5f);
+    f32 bw = Max(s.border_width, 1.5f);
     renderer.DrawBorderedRect({box_x, box_y, box_size, box_size},
                               Color::Transparent(), border, bw, radii);
   }
@@ -151,7 +150,7 @@ void SetCheckboxChange(wid e, Function<void(bool)> handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kCheckbox) return;
-  world.GetOrAdd<CheckboxContent>(e).on_change = std::move(handler);
+  world.GetOrAdd<CheckboxContent>(e).on_change = ugui::move(handler);
 }
 
 void SetChecked(wid e, bool checked) {

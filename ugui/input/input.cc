@@ -1,12 +1,10 @@
-#include <algorithm>
-#include <functional>
 #include <ugui/input/input.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/platform/platform.h>
 #include <ugui/style/style.h>
 #include <ugui/widgets/components.h>
 #include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
-#include <vector>
 
 namespace ugui {
 
@@ -70,10 +68,11 @@ static void CollectFocusRing(WidgetRegistry& world, wid root, Vector<wid>& out,
     CollectFocusable(world, root, out, /*implicit=*/true);
 }
 
-// Order the ring by tab index. std::sort is unstable, so ties would shuffle
-// between frames; the widget id breaks them to keep the walk repeatable.
+// Order the ring by tab index; the widget index breaks ties so the walk is
+// repeatable. Each widget is collected once, so the keys are unique and the
+// order is fully determined.
 static void SortFocusable(WidgetRegistry& world, Vector<wid>& ring) {
-  std::sort(ring.begin(), ring.end(), [&world](wid a, wid b) {
+  IntroSort(ring, [&world](wid a, wid b) {
     const i32 ta = world.Get<WidgetNode>(a)->tab_index;
     const i32 tb = world.Get<WidgetNode>(b)->tab_index;
     if (ta != tb) return ta < tb;
@@ -95,7 +94,7 @@ static bool IsWidgetVisible(WidgetRegistry& world, wid w) {
 }
 
 // Collect a widget and all of its ancestors up to the root.
-static void CollectAncestorChain(World& world, wid w, std::vector<wid>& out) {
+static void CollectAncestorChain(World& world, wid w, Vector<wid>& out) {
   while (w.valid()) {
     out.push_back(w);
     Hierarchy* h = world.Get<Hierarchy>(w);
@@ -109,10 +108,10 @@ static void CollectAncestorChain(World& world, wid w, std::vector<wid>& out) {
 // hover transition fires once on enter, not per internal child boundary.
 static void UpdateHoverChain(World& world, wid old_leaf, wid new_leaf) {
   if (old_leaf == new_leaf) return;
-  std::vector<wid> old_chain, new_chain;
+  Vector<wid> old_chain, new_chain;
   CollectAncestorChain(world, old_leaf, old_chain);
   CollectAncestorChain(world, new_leaf, new_chain);
-  auto contains = [](const std::vector<wid>& v, wid x) {
+  auto contains = [](const Vector<wid>& v, wid x) {
     for (wid w : v)
       if (w == x) return true;
     return false;
@@ -320,17 +319,18 @@ bool InputRouter::Process(wid root) {
       CollectFocusRing(world, root, focusable, keyboard_nav_);
       if (focusable.empty()) continue;
       SortFocusable(world, focusable);
-      auto it = std::find(focusable.begin(), focusable.end(), focused_);
+      const usize at = IndexOf(focusable, focused_);
+      const usize count = focusable.size();
       if (reverse) {
-        if (it == focusable.begin() || it == focusable.end())
+        if (at == 0 || at == count)
           set_focus(focusable.back());
         else
-          set_focus(*std::prev(it));
+          set_focus(focusable[at - 1]);
       } else {
-        if (it == focusable.end() || std::next(it) == focusable.end())
+        if (at == count || at + 1 == count)
           set_focus(focusable.front());
         else
-          set_focus(*std::next(it));
+          set_focus(focusable[at + 1]);
       }
       consumed = true;
     }
@@ -542,7 +542,7 @@ void InputRouter::ResetState() {
 }
 
 void InputRouter::RegisterShortcut(i32 key, i32 mods, ShortcutHandler handler) {
-  shortcuts_.push_back({key, mods, std::move(handler)});
+  shortcuts_.push_back({key, mods, ugui::move(handler)});
 }
 
 void InputRouter::ClearShortcuts() { shortcuts_.clear(); }
@@ -581,7 +581,7 @@ static wid NearestInDirection(WidgetRegistry& world, const Vector<wid>& ring,
     const f32 dx = to.x - origin.x, dy = to.y - origin.y;
     const f32 along = dx * dir_x + dy * dir_y;
     if (along < kMinTravel) continue;  // level with, or behind, the focus
-    const f32 drift = std::abs(dx * -dir_y + dy * dir_x);
+    const f32 drift = fabsf(dx * -dir_y + dy * dir_x);
     const f32 score = along + drift * kDriftPenalty;
     if (!best.valid() || score < best_score) {
       best = candidate;
@@ -627,8 +627,7 @@ void InputRouter::NavigateFocus(wid root, i8 dir_x, i8 dir_y) {
 
   // Nothing focused yet (a screen just opened, or the mouse has been driving):
   // the first press lands on the ring's head rather than moving from nowhere.
-  if (!focused_.valid() ||
-      std::find(focusable.begin(), focusable.end(), focused_) == focusable.end()) {
+  if (!focused_.valid() || IndexOf(focusable, focused_) == focusable.size()) {
     set_focus(focusable.front());
     if (on_hover_) on_hover_(focusable.front(), true);
     return;

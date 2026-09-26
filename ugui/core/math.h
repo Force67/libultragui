@@ -3,7 +3,7 @@
 
 #include <ugui/core/types.h>
 
-#include <cmath>
+#include <math.h>
 
 namespace ugui {
 
@@ -37,7 +37,7 @@ struct Vec2 {
   }
 
   constexpr f32 Dot(Vec2 rhs) const { return x * rhs.x + y * rhs.y; }
-  f32 length() const { return std::sqrt(x * x + y * y); }
+  f32 length() const { return sqrtf(x * x + y * y); }
   constexpr f32 LengthSq() const { return x * x + y * y; }
 
   Vec2 Normalized() const {

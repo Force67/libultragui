@@ -1,6 +1,6 @@
 #include <ugui/animation/animator.h>
+#include <ugui/core/algorithm.h>
 
-#include <algorithm>
 
 namespace ugui {
 
@@ -24,7 +24,7 @@ Style KeyframeAnimation::Evaluate(f64 current_time, bool& done) const {
   }
 
   f32 local_t = (total_elapsed - iteration * duration) / duration;
-  local_t = std::clamp(local_t, 0.0f, 1.0f);
+  local_t = ClampMinMax(local_t, 0.0f, 1.0f);
 
   if (alternate && (iteration % 2 == 1)) {
     local_t = 1.0f - local_t;
@@ -41,7 +41,7 @@ Style KeyframeAnimation::Evaluate(f64 current_time, bool& done) const {
     }
     lo = i;
   }
-  usize hi = std::min(lo + 1, keyframes.size() - 1);
+  usize hi = Min<usize>(lo + 1, keyframes.size() - 1);
 
   if (lo == hi) {
     done = false;
@@ -50,7 +50,7 @@ Style KeyframeAnimation::Evaluate(f64 current_time, bool& done) const {
 
   f32 segment_t =
       (eased - keyframes[lo].time) / (keyframes[hi].time - keyframes[lo].time);
-  segment_t = std::clamp(segment_t, 0.0f, 1.0f);
+  segment_t = ClampMinMax(segment_t, 0.0f, 1.0f);
 
   done = false;
   return Style::Lerp(keyframes[lo].style, keyframes[hi].style, segment_t);
@@ -75,7 +75,7 @@ void Animator::StartAnimation(const KeyframeAnimation& anim, f64 current_time) {
   auto copy = anim;
   copy.start_time = current_time;
   copy.active = true;
-  animations_.push_back(std::move(copy));
+  animations_.push_back(ugui::move(copy));
 }
 
 void Animator::Cancel(u32 widget_id) {
@@ -118,14 +118,8 @@ bool Animator::Update(f64 current_time, ApplyFn apply, void* user_data,
   }
 
   // Compact: remove inactive entries
-  transitions_.erase(
-      std::remove_if(transitions_.begin(), transitions_.end(),
-                     [](const StyleTransition& t) { return !t.active; }),
-      transitions_.end());
-  animations_.erase(
-      std::remove_if(animations_.begin(), animations_.end(),
-                     [](const KeyframeAnimation& a) { return !a.active; }),
-      animations_.end());
+  EraseIf(transitions_, [](const StyleTransition& t) { return !t.active; });
+  EraseIf(animations_, [](const KeyframeAnimation& a) { return !a.active; });
 
   return any_active;
 }

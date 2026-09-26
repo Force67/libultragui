@@ -8,6 +8,7 @@
 // it with DXVK_WSI_DRIVER=GLFW.
 #include <ugui/platform/platform.h>
 #include <ugui/rhi/d3d11/d3d_shader_compiler.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/rhi/rhi.h>
 
 // Use the C-style COM interface. DXVK-native exposes a C API, where the C++
@@ -36,9 +37,8 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
-#include <algorithm>
-#include <cstdio>
-#include <cstring>
+#include <stdio.h>
+#include <string.h>
 
 #if defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -213,7 +213,7 @@ ID3D11Buffer* RHI::Impl::create_dynamic_buffer(u64 size, UINT bind_flags) {
   // ByteWidth is 32-bit. Refuse rather than wrap, which would hand back a
   // buffer far smaller than the caller is about to write into.
   if (size > 0xFFFFFFFFull) {
-    std::fprintf(stderr, "ultragui-d3d11: buffer of %llu bytes is too large\n",
+    fprintf(stderr, "ultragui-d3d11: buffer of %llu bytes is too large\n",
                  static_cast<unsigned long long>(size));
     return nullptr;
   }
@@ -227,7 +227,7 @@ ID3D11Buffer* RHI::Impl::create_dynamic_buffer(u64 size, UINT bind_flags) {
   ID3D11Buffer* buf = nullptr;
   HRESULT hr = ID3D11Device_CreateBuffer(device_, &desc, nullptr, &buf);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreateBuffer failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d11: CreateBuffer failed: 0x%08lx\n", hr);
     return nullptr;
   }
   return buf;
@@ -247,8 +247,8 @@ bool RHI::Impl::ensure_buffer(ID3D11Buffer*& buf, u32& capacity, u32 required,
     buf = nullptr;
   }
 
-  u32 new_cap = std::max(required, capacity * 2);
-  new_cap = std::max(new_cap, 16384u);
+  u32 new_cap = Max(required, capacity * 2);
+  new_cap = Max(new_cap, 16384u);
   buf = create_dynamic_buffer(static_cast<u64>(new_cap) * stride, bind_flags);
   capacity = buf ? new_cap : 0;
   return true;
@@ -272,7 +272,7 @@ void RHI::Impl::update_projection(f32 width, f32 height) {
   HRESULT hr = ID3D11DeviceContext_Map(ctx_, (ID3D11Resource*)projection_cb_, 0,
                                        D3D11_MAP_WRITE_DISCARD, 0, &mapped);
   if (SUCCEEDED(hr)) {
-    std::memcpy(mapped.pData, push, sizeof(push));
+    memcpy(mapped.pData, push, sizeof(push));
     ID3D11DeviceContext_Unmap(ctx_, (ID3D11Resource*)projection_cb_, 0);
   }
 
@@ -318,7 +318,7 @@ bool RHI::Impl::create_shaders() {
   HRESULT hr = ID3D11Device_CreateVertexShader(
       device_, bytecode.data(), bytecode.size(), nullptr, &quad_vs_);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreateVertexShader (quad) failed\n");
+    fprintf(stderr, "ultragui-d3d11: CreateVertexShader (quad) failed\n");
     return false;
   }
 
@@ -330,7 +330,7 @@ bool RHI::Impl::create_shaders() {
   hr = ID3D11Device_CreatePixelShader(device_, bytecode.data(), bytecode.size(),
                                       nullptr, &quad_ps_);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreatePixelShader (quad) failed\n");
+    fprintf(stderr, "ultragui-d3d11: CreatePixelShader (quad) failed\n");
     return false;
   }
 
@@ -339,7 +339,7 @@ bool RHI::Impl::create_shaders() {
   hr = ID3D11Device_CreateVertexShader(device_, bytecode.data(),
                                        bytecode.size(), nullptr, &text_vs_);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreateVertexShader (text) failed\n");
+    fprintf(stderr, "ultragui-d3d11: CreateVertexShader (text) failed\n");
     return false;
   }
 
@@ -348,7 +348,7 @@ bool RHI::Impl::create_shaders() {
   hr = ID3D11Device_CreatePixelShader(device_, bytecode.data(), bytecode.size(),
                                       nullptr, &text_ps_);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreatePixelShader (text) failed\n");
+    fprintf(stderr, "ultragui-d3d11: CreatePixelShader (text) failed\n");
     return false;
   }
 
@@ -378,8 +378,7 @@ bool RHI::Impl::create_input_layout(const void* vs_bytecode, size_t vs_size) {
   HRESULT hr = ID3D11Device_CreateInputLayout(device_, layout, 9, vs_bytecode,
                                               vs_size, &input_layout_);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreateInputLayout failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr, "ultragui-d3d11: CreateInputLayout failed: 0x%08lx\n", hr);
     return false;
   }
   return true;
@@ -398,8 +397,7 @@ bool RHI::Impl::create_blend_state() {
 
   HRESULT hr = ID3D11Device_CreateBlendState(device_, &bd, &blend_state_);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreateBlendState failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr, "ultragui-d3d11: CreateBlendState failed: 0x%08lx\n", hr);
     return false;
   }
   return true;
@@ -414,8 +412,8 @@ bool RHI::Impl::create_rasterizer_state() {
 
   HRESULT hr = ID3D11Device_CreateRasterizerState(device_, &rd, &raster_state_);
   if (FAILED(hr)) {
-    std::fprintf(stderr,
-                 "ultragui-d3d11: CreateRasterizerState failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d11: CreateRasterizerState failed: 0x%08lx\n",
+            hr);
     return false;
   }
   return true;
@@ -436,9 +434,9 @@ bool RHI::Impl::create_samplers() {
     HRESULT hr =
         ID3D11Device_CreateSamplerState(device_, &sd, &sampler_linear_);
     if (FAILED(hr)) {
-      std::fprintf(
-          stderr,
-          "ultragui-d3d11: CreateSamplerState (linear) failed: 0x%08lx\n", hr);
+      fprintf(stderr,
+              "ultragui-d3d11: CreateSamplerState (linear) failed: 0x%08lx\n",
+              hr);
       return false;
     }
   }
@@ -457,9 +455,9 @@ bool RHI::Impl::create_samplers() {
     HRESULT hr =
         ID3D11Device_CreateSamplerState(device_, &sd, &sampler_nearest_);
     if (FAILED(hr)) {
-      std::fprintf(
-          stderr,
-          "ultragui-d3d11: CreateSamplerState (nearest) failed: 0x%08lx\n", hr);
+      fprintf(stderr,
+              "ultragui-d3d11: CreateSamplerState (nearest) failed: 0x%08lx\n",
+              hr);
       return false;
     }
   }
@@ -478,9 +476,9 @@ bool RHI::Impl::create_projection_cb() {
   HRESULT hr =
       ID3D11Device_CreateBuffer(device_, &desc, nullptr, &projection_cb_);
   if (FAILED(hr)) {
-    std::fprintf(
-        stderr,
-        "ultragui-d3d11: CreateBuffer (projection CB) failed: 0x%08lx\n", hr);
+    fprintf(stderr,
+            "ultragui-d3d11: CreateBuffer (projection CB) failed: 0x%08lx\n",
+            hr);
     return false;
   }
   return true;
@@ -491,8 +489,8 @@ bool RHI::Impl::create_default_resources() {
   u32 white_pixel = 0xFFFFFFFF;
   white_texture_ = CreateTexture(1, 1, RHIFormat::kRgba8Unorm, &white_pixel);
   if (white_texture_ == kInvalidTexture) {
-    std::fprintf(stderr,
-                 "ultragui-d3d11: failed to create white fallback texture\n");
+    fprintf(stderr,
+            "ultragui-d3d11: failed to create white fallback texture\n");
     return false;
   }
   return true;
@@ -506,7 +504,7 @@ bool RHI::Impl::ensure_video_shaders() {
   HRESULT hr = ID3D11Device_CreateVertexShader(
       device_, bytecode.data(), bytecode.size(), nullptr, &video_vs_);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreateVertexShader (video) failed\n");
+    fprintf(stderr, "ultragui-d3d11: CreateVertexShader (video) failed\n");
     return false;
   }
 
@@ -514,7 +512,7 @@ bool RHI::Impl::ensure_video_shaders() {
   hr = ID3D11Device_CreatePixelShader(device_, bytecode.data(), bytecode.size(),
                                       nullptr, &video_ps_);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreatePixelShader (video) failed\n");
+    fprintf(stderr, "ultragui-d3d11: CreatePixelShader (video) failed\n");
     return false;
   }
 
@@ -532,7 +530,7 @@ static bool create_backbuffer_rtv(ID3D11Device* device,
   HRESULT hr = IDXGISwapChain_GetBuffer(swapchain, 0, IID_ID3D11Texture2D,
                                         reinterpret_cast<void**>(&backbuffer));
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: GetBuffer failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d11: GetBuffer failed: 0x%08lx\n", hr);
     return false;
   }
 
@@ -540,8 +538,8 @@ static bool create_backbuffer_rtv(ID3D11Device* device,
                                            nullptr, rtv_out);
   ID3D11Texture2D_Release(backbuffer);
   if (FAILED(hr)) {
-    std::fprintf(
-        stderr, "ultragui-d3d11: CreateRenderTargetView failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d11: CreateRenderTargetView failed: 0x%08lx\n",
+            hr);
     return false;
   }
   return true;
@@ -616,21 +614,18 @@ bool RHI::Impl::Init(const RHIConfig& config) {
                                  &achieved_level, &ctx_);
 
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: D3D11CreateDevice failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr, "ultragui-d3d11: D3D11CreateDevice failed: 0x%08lx\n", hr);
     return false;
   }
 
-  std::fprintf(stderr, "ultragui-d3d11: device created (FL 0x%x)\n",
-               achieved_level);
+  fprintf(stderr, "ultragui-d3d11: device created (FL 0x%x)\n", achieved_level);
 
   // Get DXGI factory from device to create swapchain
   IDXGIDevice* dxgi_device = nullptr;
   hr = ID3D11Device_QueryInterface(device_, IID_IDXGIDevice,
                                    (void**)&dxgi_device);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: QI for IDXGIDevice failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr, "ultragui-d3d11: QI for IDXGIDevice failed: 0x%08lx\n", hr);
     return false;
   }
 
@@ -638,7 +633,7 @@ bool RHI::Impl::Init(const RHIConfig& config) {
   hr = IDXGIDevice_GetAdapter(dxgi_device, &adapter);
   IDXGIDevice_Release(dxgi_device);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: GetAdapter failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d11: GetAdapter failed: 0x%08lx\n", hr);
     return false;
   }
 
@@ -646,41 +641,38 @@ bool RHI::Impl::Init(const RHIConfig& config) {
   hr = IDXGIAdapter_GetParent(adapter, IID_IDXGIFactory, (void**)&factory);
   IDXGIAdapter_Release(adapter);
   if (FAILED(hr)) {
-    std::fprintf(stderr,
-                 "ultragui-d3d11: GetParent for IDXGIFactory failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr,
+            "ultragui-d3d11: GetParent for IDXGIFactory failed: 0x%08lx\n", hr);
     return false;
   }
 
-  std::fprintf(stderr,
-               "ultragui-d3d11: got DXGI factory, creating swapchain\n");
+  fprintf(stderr, "ultragui-d3d11: got DXGI factory, creating swapchain\n");
 
   hr = IDXGIFactory_CreateSwapChain(factory, (IUnknown*)device_, &sc_desc,
                                     &swapchain_);
   IDXGIFactory_Release(factory);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreateSwapChain failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr, "ultragui-d3d11: CreateSwapChain failed: 0x%08lx\n", hr);
     return false;
   }
 
-  std::fprintf(stderr, "ultragui-d3d11: swapchain created\n");
+  fprintf(stderr, "ultragui-d3d11: swapchain created\n");
 
   // Get back buffer RTV
-  std::fprintf(stderr, "ultragui-d3d11: creating backbuffer RTV\n");
+  fprintf(stderr, "ultragui-d3d11: creating backbuffer RTV\n");
   if (!create_backbuffer_rtv(device_, swapchain_, &backbuffer_rtv_))
     return false;
-  std::fprintf(stderr, "ultragui-d3d11: compiling shaders\n");
+  fprintf(stderr, "ultragui-d3d11: compiling shaders\n");
   if (!create_shaders()) return false;
-  std::fprintf(stderr, "ultragui-d3d11: creating states\n");
+  fprintf(stderr, "ultragui-d3d11: creating states\n");
   if (!create_blend_state()) return false;
   if (!create_rasterizer_state()) return false;
   if (!create_samplers()) return false;
   if (!create_projection_cb()) return false;
   if (!create_default_resources()) return false;
 
-  std::printf("ultragui-d3d11: initialization complete (%ux%u)\n",
-              swapchain_width_, swapchain_height_);
+  printf("ultragui-d3d11: initialization complete (%ux%u)\n", swapchain_width_,
+         swapchain_height_);
   return true;
 }
 
@@ -724,8 +716,7 @@ bool RHI::Impl::BeginFrame(Color clear_color) {
         IDXGISwapChain_ResizeBuffers(swapchain_, 0, swapchain_width_,
                                      swapchain_height_, DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) {
-      std::fprintf(stderr, "ultragui-d3d11: ResizeBuffers failed: 0x%08lx\n",
-                   hr);
+      fprintf(stderr, "ultragui-d3d11: ResizeBuffers failed: 0x%08lx\n", hr);
       return false;
     }
 
@@ -863,8 +854,8 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
     HRESULT hr = ID3D11DeviceContext_Map(ctx_, (ID3D11Resource*)vertex_buf_, 0,
                                          map_type, 0, &mapped);
     if (SUCCEEDED(hr)) {
-      std::memcpy(static_cast<u8*>(mapped.pData) + vb_byte_offset, vertices,
-                  vertex_count * sizeof(Vertex2D));
+      memcpy(static_cast<u8*>(mapped.pData) + vb_byte_offset, vertices,
+             vertex_count * sizeof(Vertex2D));
       ID3D11DeviceContext_Unmap(ctx_, (ID3D11Resource*)vertex_buf_, 0);
     }
 
@@ -890,8 +881,8 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
     HRESULT hr = ID3D11DeviceContext_Map(ctx_, (ID3D11Resource*)index_buf_, 0,
                                          map_type, 0, &mapped);
     if (SUCCEEDED(hr)) {
-      std::memcpy(static_cast<u8*>(mapped.pData) + ib_byte_offset, indices,
-                  index_count * sizeof(u32));
+      memcpy(static_cast<u8*>(mapped.pData) + ib_byte_offset, indices,
+             index_count * sizeof(u32));
       ID3D11DeviceContext_Unmap(ctx_, (ID3D11Resource*)index_buf_, 0);
     }
   }
@@ -963,8 +954,8 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
     HRESULT hr = ID3D11DeviceContext_Map(
         ctx_, (ID3D11Resource*)text_vertex_buf_, 0, map_type, 0, &mapped);
     if (SUCCEEDED(hr)) {
-      std::memcpy(static_cast<u8*>(mapped.pData) + vb_byte_offset, vertices,
-                  vertex_count * sizeof(Vertex2D));
+      memcpy(static_cast<u8*>(mapped.pData) + vb_byte_offset, vertices,
+             vertex_count * sizeof(Vertex2D));
       ID3D11DeviceContext_Unmap(ctx_, (ID3D11Resource*)text_vertex_buf_, 0);
     }
 
@@ -990,8 +981,8 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
     HRESULT hr = ID3D11DeviceContext_Map(ctx_, (ID3D11Resource*)text_index_buf_,
                                          0, map_type, 0, &mapped);
     if (SUCCEEDED(hr)) {
-      std::memcpy(static_cast<u8*>(mapped.pData) + ib_byte_offset, indices,
-                  index_count * sizeof(u32));
+      memcpy(static_cast<u8*>(mapped.pData) + ib_byte_offset, indices,
+             index_count * sizeof(u32));
       ID3D11DeviceContext_Unmap(ctx_, (ID3D11Resource*)text_index_buf_, 0);
     }
   }
@@ -1092,8 +1083,7 @@ RHITextureHandle RHI::Impl::CreateTexture(u32 width, u32 height,
   HRESULT hr = ID3D11Device_CreateTexture2D(
       device_, &tex_desc, pixels ? &init_data : nullptr, &slot.texture);
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d11: CreateTexture2D failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr, "ultragui-d3d11: CreateTexture2D failed: 0x%08lx\n", hr);
     return kInvalidTexture;
   }
 
@@ -1101,9 +1091,8 @@ RHITextureHandle RHI::Impl::CreateTexture(u32 width, u32 height,
   hr = ID3D11Device_CreateShaderResourceView(
       device_, (ID3D11Resource*)slot.texture, nullptr, &slot.srv);
   if (FAILED(hr)) {
-    std::fprintf(stderr,
-                 "ultragui-d3d11: CreateShaderResourceView failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr,
+            "ultragui-d3d11: CreateShaderResourceView failed: 0x%08lx\n", hr);
     ID3D11Texture2D_Release(slot.texture);
     slot.texture = nullptr;
     return kInvalidTexture;
@@ -1176,8 +1165,8 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
   HRESULT hr =
       ID3D11Device_CreateTexture2D(device_, &tex_desc, nullptr, &slot.texture);
   if (FAILED(hr)) {
-    std::fprintf(stderr,
-                 "ultragui-d3d11: CreateTexture2D (RT) failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d11: CreateTexture2D (RT) failed: 0x%08lx\n",
+            hr);
     return kInvalidTexture;
   }
 
@@ -1189,9 +1178,9 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
   hr = ID3D11Device_CreateShaderResourceView(
       device_, (ID3D11Resource*)slot.texture, &srv_desc, &slot.srv);
   if (FAILED(hr)) {
-    std::fprintf(
-        stderr,
-        "ultragui-d3d11: CreateShaderResourceView (RT) failed: 0x%08lx\n", hr);
+    fprintf(stderr,
+            "ultragui-d3d11: CreateShaderResourceView (RT) failed: 0x%08lx\n",
+            hr);
     ID3D11Texture2D_Release(slot.texture);
     slot.texture = nullptr;
     return kInvalidTexture;
@@ -1204,9 +1193,9 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
   hr = ID3D11Device_CreateRenderTargetView(
       device_, (ID3D11Resource*)slot.texture, &rtv_desc, &slot.rtv);
   if (FAILED(hr)) {
-    std::fprintf(
-        stderr, "ultragui-d3d11: CreateRenderTargetView (RT) failed: 0x%08lx\n",
-        hr);
+    fprintf(stderr,
+            "ultragui-d3d11: CreateRenderTargetView (RT) failed: 0x%08lx\n",
+            hr);
     ID3D11ShaderResourceView_Release(slot.srv);
     ID3D11Texture2D_Release(slot.texture);
     slot.srv = nullptr;

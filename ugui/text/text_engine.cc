@@ -3,15 +3,12 @@
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
-#include <cassert>
-#include <cmath>
-#include <cstdio>
-#include <cstring>
+#include <assert.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include <hb-ft.h>
 #include <hb.h>
-#include <string>
-#include <unordered_map>
-#include <vector>
 
 namespace ugui {
 
@@ -52,7 +49,7 @@ struct FontSlot {
   // Only set for a font loaded from memory. FreeType reads the buffer for the
   // life of the face instead of copying it, so the slot has to hold it; a
   // caller's buffer is free to go away the moment LoadFontMemory returns.
-  std::vector<unsigned char> data;
+  Vector<unsigned char> data;
 };
 
 struct FontInfo {
@@ -87,8 +84,8 @@ struct ShapeKeyHash {
     h = h * 1099511628211u + k.pixel_size;
     h = h * 1099511628211u + k.text_len;
     u32 ls, lh;
-    std::memcpy(&ls, &k.letter_spacing, 4);
-    std::memcpy(&lh, &k.line_height_mult, 4);
+    memcpy(&ls, &k.letter_spacing, 4);
+    memcpy(&lh, &k.line_height_mult, 4);
     h = h * 1099511628211u + ls;
     h = h * 1099511628211u + lh;
     return h;
@@ -96,7 +93,7 @@ struct ShapeKeyHash {
 };
 
 struct CachedRun {
-  std::vector<TextRun::Glyph> glyphs;
+  Vector<TextRun::Glyph> glyphs;
   f32 total_advance = 0.0f;
   f32 ascent = 0.0f;
   f32 descent = 0.0f;
@@ -126,18 +123,19 @@ struct TextEngine::Impl {
   u32 atlas_cursor_y = 1;
   u32 atlas_row_height = 0;
 
-  std::unordered_map<GlyphKey, CachedGlyph, GlyphKeyHash> glyph_cache;
+  HashMap<GlyphKey, CachedGlyph, GlyphKeyHash> glyph_cache;
 
   // Scratch for runs the cache will not keep; inner vectors don't move their
   // heap data when the outer vector grows, so glyph pointers stay valid for a
   // frame.
-  std::vector<std::vector<TextRun::Glyph>> glyph_runs;
+  Vector<Vector<TextRun::Glyph>> glyph_runs;
   Vector<TextLayout::Line> scratch_lines;
 
-  // Shaped runs kept across frames. Entries stay put in the map, so the glyph
-  // pointers a TextRun hands out stay valid until the entry is evicted, which
-  // only happens between frames.
-  std::unordered_map<ShapeKey, CachedRun, ShapeKeyHash> shape_cache;
+  // Shaped runs kept across frames. A run may move when the map grows, but its
+  // glyphs live in the run's own heap buffer, which moves with it, so the
+  // glyph pointers a TextRun hands out stay valid until the entry is evicted,
+  // which only happens between frames.
+  HashMap<ShapeKey, CachedRun, ShapeKeyHash> shape_cache;
   u32 frame_index = 0;
   u32 shape_calls = 0;
   u32 shape_hits = 0;
@@ -157,7 +155,7 @@ bool TextEngine::Init(RHI* rhi) {
   impl_ = new Impl();
 
   if (FT_Init_FreeType(&impl_->ft_library) != 0) {
-    std::fprintf(stderr, "ultragui: FT_Init_FreeType failed\n");
+    fprintf(stderr, "ultragui: FT_Init_FreeType failed\n");
     delete impl_;
     impl_ = nullptr;
     return false;
@@ -165,7 +163,7 @@ bool TextEngine::Init(RHI* rhi) {
 
   // Initialize atlas with transparent pixels. The GPU texture is created
   // on the first FlushAtlas() call, which happens before the render pass.
-  std::memset(impl_->atlas_pixels, 0, sizeof(impl_->atlas_pixels));
+  memset(impl_->atlas_pixels, 0, sizeof(impl_->atlas_pixels));
   impl_->atlas_dirty = true;
 
   return true;
@@ -225,7 +223,7 @@ FontHandle TextEngine::OpenFace(const char* path, const char* data,
   }
 
   if (FT_Open_Face(impl_->ft_library, &args, 0, &slot.ft_face) != 0) {
-    std::fprintf(stderr, "ultragui: failed to load font '%s'\n", origin);
+    fprintf(stderr, "ultragui: failed to load font '%s'\n", origin);
     slot.data.clear();
     slot.data.shrink_to_fit();
     slot.ft_face = nullptr;
@@ -241,8 +239,8 @@ FontHandle TextEngine::OpenFace(const char* path, const char* data,
   info.weight = FontWeight::kRegular;
   info.style = FontStyle::kNormal;
 
-  std::printf("ultragui: loaded font '%s' (%s)\n", origin,
-              slot.ft_face->family_name);
+  printf("ultragui: loaded font '%s' (%s)\n", origin,
+         slot.ft_face->family_name);
   return handle;
 }
 
@@ -290,7 +288,7 @@ FontHandle TextEngine::ResolveFont(FontHandle base_font, FontWeight weight,
   // Prefer exact style match; break ties by closest weight.
   FontHandle best = base_font;
   i32 best_weight_dist =
-      std::abs(static_cast<i32>(weight) - static_cast<i32>(base_info.weight));
+      abs(static_cast<i32>(weight) - static_cast<i32>(base_info.weight));
   bool best_style_match = (base_info.style == style);
 
   for (u32 i = 0; i < MAX_FONTS; ++i) {
@@ -300,7 +298,7 @@ FontHandle TextEngine::ResolveFont(FontHandle base_font, FontWeight weight,
 
     bool style_match = (info.style == style);
     i32 weight_dist =
-        std::abs(static_cast<i32>(weight) - static_cast<i32>(info.weight));
+        abs(static_cast<i32>(weight) - static_cast<i32>(info.weight));
 
     // Prefer style match over weight proximity
     if (style_match && !best_style_match) {
@@ -324,8 +322,7 @@ FontHandle TextEngine::ResolveFont(FontHandle base_font, FontWeight weight,
 CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id,
                                                u32 pixel_size) {
   GlyphKey key{font, glyph_id, pixel_size};
-  auto it = glyph_cache.find(key);
-  if (it != glyph_cache.end()) return &it->second;
+  if (CachedGlyph* hit = glyph_cache.find(key)) return hit;
 
   auto& face = fonts[font].ft_face;
   if (font_pixel_size[font] != pixel_size) {
@@ -345,7 +342,7 @@ CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id,
     atlas_row_height = 0;
   }
   if (atlas_cursor_y + bh + 1 >= ATLAS_SIZE) {
-    std::fprintf(stderr, "ultragui: glyph atlas full!\n");
+    fprintf(stderr, "ultragui: glyph atlas full!\n");
     return nullptr;
   }
 
@@ -354,7 +351,7 @@ CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id,
     u8* dst =
         atlas_pixels + (atlas_cursor_y + row) * ATLAS_SIZE + atlas_cursor_x;
     u8* src = bmp.buffer + row * bmp.pitch;
-    std::memcpy(dst, src, bw);
+    memcpy(dst, src, bw);
   }
 
   CachedGlyph cg{};
@@ -373,8 +370,8 @@ CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id,
 
   atlas_dirty = true;
   ++atlas_revision;
-  auto [inserted, _] = glyph_cache.emplace(key, cg);
-  return &inserted->second;
+  // Callers copy the glyph out before the next insert can move it.
+  return glyph_cache.emplace(key, cg).first;
 }
 
 // ---------------------------------------------------------------------------
@@ -399,13 +396,12 @@ void TextEngine::BeginFrame() {
   constexpr u32 kShapeCacheSweepEvery = 60;  // frames
   if (impl_->frame_index % kShapeCacheSweepEvery == 0 &&
       impl_->shape_cache.size() > kShapeCacheSoftCap) {
-    for (auto it = impl_->shape_cache.begin();
-         it != impl_->shape_cache.end();) {
-      if (impl_->frame_index - it->second.last_used_frame > kShapeCacheMaxAge)
-        it = impl_->shape_cache.erase(it);
-      else
-        ++it;
+    Vector<ShapeKey> stale;
+    for (const auto& [key, run] : impl_->shape_cache) {
+      if (impl_->frame_index - run.last_used_frame > kShapeCacheMaxAge)
+        stale.push_back(key);
     }
+    for (const ShapeKey& key : stale) impl_->shape_cache.erase(key);
   }
 }
 
@@ -428,11 +424,10 @@ TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
   ++impl_->shape_calls;
   const ShapeKey key{HashText(text, text_len), font,        pixel_size,
                      letter_spacing,           line_height_mult, text_len};
-  auto cached_it = impl_->shape_cache.find(key);
-  if (cached_it != impl_->shape_cache.end()) {
+  if (CachedRun* cached = impl_->shape_cache.find(key)) {
     // The atlas only ever appends, so a glyph keeps the UVs it was packed at
     // and a cached run stays valid however much text is shaped after it.
-    CachedRun& cr = cached_it->second;
+    CachedRun& cr = *cached;
     cr.last_used_frame = impl_->frame_index;
     ++impl_->shape_hits;
     TextRun run{};
@@ -524,14 +519,15 @@ TextRun TextEngine::Shape(FontHandle font, const char* text, u32 text_len,
   run.line_height = line_height;
 
   if (all_packed) {
-    // Node-based map: the entry, and so the glyph pointer handed out here,
-    // stays put until the run is evicted in some later BeginFrame.
-    auto [it, _] = impl_->shape_cache.emplace(key, std::move(fresh));
-    run.glyphs = it->second.glyphs.data();
+    // The glyph buffer handed out here stays put until the run is evicted in
+    // some later BeginFrame (see shape_cache).
+    CachedRun* stored =
+        impl_->shape_cache.emplace(key, ugui::move(fresh)).first;
+    run.glyphs = stored->glyphs.data();
   } else {
     // A glyph that would not pack (a full atlas) must not be remembered, or
     // the run would keep its blank UVs for the rest of the session.
-    impl_->glyph_runs.push_back(std::move(fresh.glyphs));
+    impl_->glyph_runs.push_back(ugui::move(fresh.glyphs));
     run.glyphs = impl_->glyph_runs.back().data();
   }
   return run;

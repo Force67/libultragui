@@ -64,6 +64,7 @@ class LayoutEngine {
     Vector<LayoutNode> nodes;
     Vector<u32> widget_keys;  ///< widget id per index, to spot a changed tree
   };
+  /// Valid until StoreFor is next called for a root not seen before.
   NodeStore& StoreFor(u32 root_id);
 
   /// Compute layout for all nodes. The root node fills the viewport.

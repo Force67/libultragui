@@ -3,8 +3,7 @@
 #include <ugui/widgets/toggle.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
-#include <cmath>
+#include <math.h>
 
 namespace ugui {
 namespace {
@@ -78,7 +77,7 @@ void ToggleUpdate(WidgetRegistry& world, wid e, f64 dt) {
   f32 speed = Clamp(static_cast<f32>(dt) * 12.0f, 0.0f, 1.0f);
   c->thumb_anim += (target - c->thumb_anim) * speed;
 
-  if (std::abs(c->thumb_anim - target) < 0.001f) c->thumb_anim = target;
+  if (fabsf(c->thumb_anim - target) < 0.001f) c->thumb_anim = target;
 
   if (c->thumb_anim != prev) MarkPaintDirty(world, e);
 }
@@ -128,7 +127,7 @@ void SetToggleChange(wid e, Function<void(bool)> handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* node = world.Get<WidgetNode>(e);
   if (!node || node->kind != WidgetKind::kToggle) return;
-  world.GetOrAdd<ToggleContent>(e).on_change = std::move(handler);
+  world.GetOrAdd<ToggleContent>(e).on_change = ugui::move(handler);
 }
 
 }  // namespace ugui

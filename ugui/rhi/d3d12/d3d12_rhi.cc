@@ -1,4 +1,5 @@
 #include <ugui/platform/platform.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/rhi/rhi.h>
 
 // Prevent vkd3d_windows.h min/max macros from breaking C++ headers
@@ -25,13 +26,9 @@
 // Vulkan for swapchain presentation (no DXGI on Linux)
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
-#include <algorithm>
-#include <cassert>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <string>
-#include <vector>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
@@ -43,12 +40,15 @@ namespace ugui {
 // ---------------------------------------------------------------------------
 
 static Vector<char> read_file(const String& path) {
-  std::ifstream file(path, std::ios::ate | std::ios::binary);
-  if (!file.is_open()) return {};
-  auto size = static_cast<size_t>(file.tellg());
+  FILE* file = fopen(path.c_str(), "rb");
+  if (!file) return {};
+  fseek(file, 0, SEEK_END);
+  auto size = static_cast<size_t>(ftell(file));
+  fseek(file, 0, SEEK_SET);
   Vector<char> buf(size);
-  file.seekg(0);
-  file.read(buf.data(), static_cast<std::streamsize>(size));
+  size_t read = fread(buf.data(), 1, size, file);
+  (void)read;
+  fclose(file);
   return buf;
 }
 
@@ -82,10 +82,10 @@ static VkExtent2D choose_extent(const VkSurfaceCapabilitiesKHR& caps,
   int w, h;
   glfwGetFramebufferSize(window, &w, &h);
   VkExtent2D ext = {static_cast<u32>(w), static_cast<u32>(h)};
-  ext.width = std::clamp(ext.width, caps.minImageExtent.width,
-                         caps.maxImageExtent.width);
-  ext.height = std::clamp(ext.height, caps.minImageExtent.height,
-                          caps.maxImageExtent.height);
+  ext.width = ClampMinMax(ext.width, caps.minImageExtent.width,
+                          caps.maxImageExtent.width);
+  ext.height = ClampMinMax(ext.height, caps.minImageExtent.height,
+                           caps.maxImageExtent.height);
   return ext;
 }
 
@@ -321,8 +321,8 @@ Vector<char> RHI::Impl::load_shader_cso(const char* filename) {
   String path = shader_dir_ + "/" + filename;
   auto data = read_file(path);
   if (data.empty()) {
-    std::fprintf(stderr, "ultragui-d3d12: failed to load shader '%s'\n",
-                 path.c_str());
+    fprintf(stderr, "ultragui-d3d12: failed to load shader '%s'\n",
+            path.c_str());
   }
   return data;
 }
@@ -350,7 +350,7 @@ ID3D12Resource* RHI::Impl::create_upload_buffer(u32 size, void** mapped) {
       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, &IID_ID3D12Resource,
       reinterpret_cast<void**>(&buf));
   if (FAILED(hr)) {
-    std::fprintf(
+    fprintf(
         stderr,
         "ultragui-d3d12: CreateCommittedResource (upload) failed: 0x%08lx\n",
         hr);
@@ -380,8 +380,8 @@ void RHI::Impl::ensure_buffer_capacity(ID3D12Resource*& buf, void*& mapped,
     mapped = nullptr;
   }
 
-  u32 new_cap = std::max(required, capacity * 2);
-  new_cap = std::max(new_cap, 16384u);
+  u32 new_cap = Max(required, capacity * 2);
+  new_cap = Max(new_cap, 16384u);
   buf = create_upload_buffer(new_cap * stride, &mapped);
   capacity = new_cap;
 }
@@ -439,8 +439,7 @@ void RHI::Impl::upload_texture_data(ID3D12Resource* dest, u32 width, u32 height,
   auto* src = static_cast<const u8*>(pixels);
   auto* dst = static_cast<u8*>(staging_mapped) + footprint.Offset;
   for (u32 row = 0; row < height; ++row) {
-    std::memcpy(dst + row * dst_row_pitch, src + row * src_row_pitch,
-                src_row_pitch);
+    memcpy(dst + row * dst_row_pitch, src + row * src_row_pitch, src_row_pitch);
   }
 
   // Record copy commands
@@ -542,7 +541,7 @@ bool RHI::Impl::Init(const RHIConfig& config) {
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     if (vkCreateFence(vk_device_, &fci, nullptr, &vk_acquire_fence_) !=
         VK_SUCCESS) {
-      std::fprintf(stderr, "ultragui-d3d12: vkCreateFence (acquire) failed\n");
+      fprintf(stderr, "ultragui-d3d12: vkCreateFence (acquire) failed\n");
       return false;
     }
   }
@@ -558,8 +557,8 @@ bool RHI::Impl::create_vkd3d_instance() {
   u32 glfw_ext_count = 0;
   const char** glfw_exts = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
   if (!glfw_exts) {
-    std::fprintf(stderr,
-                 "ultragui-d3d12: glfwGetRequiredInstanceExtensions failed\n");
+    fprintf(stderr,
+            "ultragui-d3d12: glfwGetRequiredInstanceExtensions failed\n");
     return false;
   }
 
@@ -575,27 +574,26 @@ bool RHI::Impl::create_vkd3d_instance() {
 
   HRESULT hr = vkd3d_create_instance(&inst_ci, &vkd3d_inst_);
   if (FAILED(hr)) {
-    std::fprintf(stderr,
-                 "ultragui-d3d12: vkd3d_create_instance failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d12: vkd3d_create_instance failed: 0x%08lx\n",
+            hr);
     return false;
   }
 
   vk_instance_ = vkd3d_instance_get_vk_instance(vkd3d_inst_);
   if (!vk_instance_) {
-    std::fprintf(
-        stderr,
-        "ultragui-d3d12: vkd3d_instance_get_vk_instance returned null\n");
+    fprintf(stderr,
+            "ultragui-d3d12: vkd3d_instance_get_vk_instance returned null\n");
     return false;
   }
 
-  std::printf("ultragui-d3d12: vkd3d instance created\n");
+  printf("ultragui-d3d12: vkd3d instance created\n");
   return true;
 }
 
 bool RHI::Impl::create_vk_surface() {
   if (glfwCreateWindowSurface(vk_instance_, window_, nullptr, &vk_surface_) !=
       VK_SUCCESS) {
-    std::fprintf(stderr, "ultragui-d3d12: glfwCreateWindowSurface failed\n");
+    fprintf(stderr, "ultragui-d3d12: glfwCreateWindowSurface failed\n");
     return false;
   }
   return true;
@@ -609,7 +607,7 @@ bool RHI::Impl::pick_physical_device() {
   u32 count = 0;
   vkEnumeratePhysicalDevices(vk_instance_, &count, nullptr);
   if (count == 0) {
-    std::fprintf(stderr, "ultragui-d3d12: no Vulkan physical devices found\n");
+    fprintf(stderr, "ultragui-d3d12: no Vulkan physical devices found\n");
     return false;
   }
 
@@ -643,12 +641,12 @@ bool RHI::Impl::pick_physical_device() {
       vk_physical_ = dev;
       VkPhysicalDeviceProperties props;
       vkGetPhysicalDeviceProperties(dev, &props);
-      std::printf("ultragui-d3d12: using GPU '%s'\n", props.deviceName);
+      printf("ultragui-d3d12: using GPU '%s'\n", props.deviceName);
       return true;
     }
   }
 
-  std::fprintf(stderr, "ultragui-d3d12: no suitable physical device found\n");
+  fprintf(stderr, "ultragui-d3d12: no suitable physical device found\n");
   return false;
 }
 
@@ -672,22 +670,22 @@ bool RHI::Impl::create_d3d12_device() {
   HRESULT hr = vkd3d_create_device(&dev_ci, &IID_ID3D12Device,
                                    reinterpret_cast<void**>(&device_));
   if (FAILED(hr)) {
-    std::fprintf(stderr,
-                 "ultragui-d3d12: vkd3d_create_device failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d12: vkd3d_create_device failed: 0x%08lx\n",
+            hr);
     return false;
   }
 
   // Get the Vulkan device that vkd3d created internally
   vk_device_ = vkd3d_get_vk_device(device_);
   if (!vk_device_) {
-    std::fprintf(stderr, "ultragui-d3d12: vkd3d_get_vk_device returned null\n");
+    fprintf(stderr, "ultragui-d3d12: vkd3d_get_vk_device returned null\n");
     return false;
   }
 
   // Get the present queue from the vkd3d-created VkDevice
   vkGetDeviceQueue(vk_device_, vk_present_family_, 0, &vk_present_queue_);
 
-  std::printf("ultragui-d3d12: D3D12 device created via vkd3d\n");
+  printf("ultragui-d3d12: D3D12 device created via vkd3d\n");
   return true;
 }
 
@@ -748,7 +746,7 @@ bool RHI::Impl::create_vk_swapchain() {
 
   if (vkCreateSwapchainKHR(vk_device_, &ci, nullptr, &vk_swapchain_) !=
       VK_SUCCESS) {
-    std::fprintf(stderr, "ultragui-d3d12: vkCreateSwapchainKHR failed\n");
+    fprintf(stderr, "ultragui-d3d12: vkCreateSwapchainKHR failed\n");
     return false;
   }
 
@@ -757,7 +755,7 @@ bool RHI::Impl::create_vk_swapchain() {
   swapchain_extent_ = extent;
 
   vkGetSwapchainImagesKHR(vk_device_, vk_swapchain_, &image_count, nullptr);
-  swapchain_count_ = std::min(image_count, MAX_SWAPCHAIN);
+  swapchain_count_ = Min(image_count, MAX_SWAPCHAIN);
   vkGetSwapchainImagesKHR(vk_device_, vk_swapchain_, &swapchain_count_,
                           vk_swapchain_images_);
 
@@ -786,7 +784,7 @@ bool RHI::Impl::create_vk_swapchain() {
     HRESULT hr =
         vkd3d_create_image_resource(device_, &img_ci, &swapchain_resources_[i]);
     if (FAILED(hr)) {
-      std::fprintf(
+      fprintf(
           stderr,
           "ultragui-d3d12: vkd3d_create_image_resource[%u] failed: 0x%08lx\n",
           i, hr);
@@ -860,8 +858,7 @@ bool RHI::Impl::create_command_resources() {
       device_, &queue_desc, &IID_ID3D12CommandQueue,
       reinterpret_cast<void**>(&cmd_queue_));
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d12: CreateCommandQueue failed: 0x%08lx\n",
-                 hr);
+    fprintf(stderr, "ultragui-d3d12: CreateCommandQueue failed: 0x%08lx\n", hr);
     return false;
   }
 
@@ -871,8 +868,7 @@ bool RHI::Impl::create_command_resources() {
         device_, D3D12_COMMAND_LIST_TYPE_DIRECT, &IID_ID3D12CommandAllocator,
         reinterpret_cast<void**>(&cmd_allocs_[i]));
     if (FAILED(hr)) {
-      std::fprintf(stderr,
-                   "ultragui-d3d12: CreateCommandAllocator[%u] failed\n", i);
+      fprintf(stderr, "ultragui-d3d12: CreateCommandAllocator[%u] failed\n", i);
       return false;
     }
 
@@ -881,7 +877,7 @@ bool RHI::Impl::create_command_resources() {
         &IID_ID3D12GraphicsCommandList,
         reinterpret_cast<void**>(&cmd_lists_[i]));
     if (FAILED(hr)) {
-      std::fprintf(stderr, "ultragui-d3d12: CreateCommandList[%u] failed\n", i);
+      fprintf(stderr, "ultragui-d3d12: CreateCommandList[%u] failed\n", i);
       return false;
     }
     // Command lists are created in the recording state; close them
@@ -893,7 +889,7 @@ bool RHI::Impl::create_command_resources() {
                                 &IID_ID3D12Fence,
                                 reinterpret_cast<void**>(&fence_));
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d12: CreateFence failed\n");
+    fprintf(stderr, "ultragui-d3d12: CreateFence failed\n");
     return false;
   }
 
@@ -929,8 +925,7 @@ bool RHI::Impl::create_descriptor_heaps() {
         device_, &desc, &IID_ID3D12DescriptorHeap,
         reinterpret_cast<void**>(&rtv_heap_));
     if (FAILED(hr)) {
-      std::fprintf(stderr,
-                   "ultragui-d3d12: CreateDescriptorHeap (RTV) failed\n");
+      fprintf(stderr, "ultragui-d3d12: CreateDescriptorHeap (RTV) failed\n");
       return false;
     }
     rtv_descriptor_size_ = ID3D12Device_GetDescriptorHandleIncrementSize(
@@ -948,8 +943,7 @@ bool RHI::Impl::create_descriptor_heaps() {
         device_, &desc, &IID_ID3D12DescriptorHeap,
         reinterpret_cast<void**>(&srv_heap_));
     if (FAILED(hr)) {
-      std::fprintf(stderr,
-                   "ultragui-d3d12: CreateDescriptorHeap (SRV) failed\n");
+      fprintf(stderr, "ultragui-d3d12: CreateDescriptorHeap (SRV) failed\n");
       return false;
     }
     srv_descriptor_size_ = ID3D12Device_GetDescriptorHandleIncrementSize(
@@ -1021,7 +1015,7 @@ bool RHI::Impl::create_root_signature() {
       &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig_blob, &error_blob);
   if (FAILED(hr)) {
     if (error_blob) {
-      std::fprintf(
+      fprintf(
           stderr, "ultragui-d3d12: root signature error: %s\n",
           static_cast<const char*>(ID3D10Blob_GetBufferPointer(error_blob)));
       ID3D10Blob_Release(error_blob);
@@ -1038,7 +1032,7 @@ bool RHI::Impl::create_root_signature() {
   if (error_blob) ID3D10Blob_Release(error_blob);
 
   if (FAILED(hr)) {
-    std::fprintf(stderr, "ultragui-d3d12: CreateRootSignature failed\n");
+    fprintf(stderr, "ultragui-d3d12: CreateRootSignature failed\n");
     return false;
   }
 
@@ -1088,7 +1082,7 @@ bool RHI::Impl::create_pipelines() {
     auto vs_code = load_shader_cso("quad_vs.cso");
     auto ps_code = load_shader_cso("quad_ps.cso");
     if (vs_code.empty() || ps_code.empty()) {
-      std::fprintf(stderr, "ultragui-d3d12: failed to load quad shaders\n");
+      fprintf(stderr, "ultragui-d3d12: failed to load quad shaders\n");
       return false;
     }
 
@@ -1117,10 +1111,10 @@ bool RHI::Impl::create_pipelines() {
         device_, &pso_desc, &IID_ID3D12PipelineState,
         reinterpret_cast<void**>(&quad_pso_));
     if (FAILED(hr)) {
-      std::fprintf(stderr,
-                   "ultragui-d3d12: CreateGraphicsPipelineState (quad) failed: "
-                   "0x%08lx\n",
-                   hr);
+      fprintf(stderr,
+              "ultragui-d3d12: CreateGraphicsPipelineState (quad) failed: "
+              "0x%08lx\n",
+              hr);
       return false;
     }
   }
@@ -1130,7 +1124,7 @@ bool RHI::Impl::create_pipelines() {
     auto vs_code = load_shader_cso("text_vs.cso");
     auto ps_code = load_shader_cso("text_ps.cso");
     if (vs_code.empty() || ps_code.empty()) {
-      std::fprintf(stderr, "ultragui-d3d12: failed to load text shaders\n");
+      fprintf(stderr, "ultragui-d3d12: failed to load text shaders\n");
       return false;
     }
 
@@ -1159,10 +1153,10 @@ bool RHI::Impl::create_pipelines() {
         device_, &pso_desc, &IID_ID3D12PipelineState,
         reinterpret_cast<void**>(&text_pso_));
     if (FAILED(hr)) {
-      std::fprintf(stderr,
-                   "ultragui-d3d12: CreateGraphicsPipelineState (text) failed: "
-                   "0x%08lx\n",
-                   hr);
+      fprintf(stderr,
+              "ultragui-d3d12: CreateGraphicsPipelineState (text) failed: "
+              "0x%08lx\n",
+              hr);
       return false;
     }
   }
@@ -1262,7 +1256,7 @@ bool RHI::Impl::ensure_video_pipeline() {
       &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig_blob, &error_blob);
   if (FAILED(hr)) {
     if (error_blob) {
-      std::fprintf(
+      fprintf(
           stderr, "ultragui-d3d12: video root sig error: %s\n",
           static_cast<const char*>(ID3D10Blob_GetBufferPointer(error_blob)));
       ID3D10Blob_Release(error_blob);
@@ -1310,7 +1304,7 @@ bool RHI::Impl::ensure_video_pipeline() {
       device_, &pso_desc, &IID_ID3D12PipelineState,
       reinterpret_cast<void**>(&video_pso_));
   if (FAILED(hr)) {
-    std::fprintf(
+    fprintf(
         stderr,
         "ultragui-d3d12: CreateGraphicsPipelineState (video) failed: 0x%08lx\n",
         hr);
@@ -1539,8 +1533,8 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
                            fb.vertex_write_pos + vertex_count,
                            sizeof(Vertex2D));
     vb_byte_offset = fb.vertex_write_pos * sizeof(Vertex2D);
-    std::memcpy(static_cast<u8*>(fb.vertex_mapped) + vb_byte_offset, vertices,
-                vertex_count * sizeof(Vertex2D));
+    memcpy(static_cast<u8*>(fb.vertex_mapped) + vb_byte_offset, vertices,
+           vertex_count * sizeof(Vertex2D));
     last_quad_verts_ = vertices;
     last_quad_vert_count_ = vertex_count;
     last_quad_vb_offset_ = vb_byte_offset;
@@ -1551,8 +1545,8 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
   ensure_buffer_capacity(fb.index_buf, fb.index_mapped, fb.index_capacity,
                          fb.index_write_pos + index_count, sizeof(u32));
   u32 ib_byte_offset = fb.index_write_pos * sizeof(u32);
-  std::memcpy(static_cast<u8*>(fb.index_mapped) + ib_byte_offset, indices,
-              index_count * sizeof(u32));
+  memcpy(static_cast<u8*>(fb.index_mapped) + ib_byte_offset, indices,
+         index_count * sizeof(u32));
   fb.index_write_pos += index_count;
 
   // Bind texture
@@ -1603,8 +1597,8 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
         fb.text_vertex_buf, fb.text_vertex_mapped, fb.text_vertex_capacity,
         fb.text_vertex_write_pos + vertex_count, sizeof(Vertex2D));
     vb_byte_offset = fb.text_vertex_write_pos * sizeof(Vertex2D);
-    std::memcpy(static_cast<u8*>(fb.text_vertex_mapped) + vb_byte_offset,
-                vertices, vertex_count * sizeof(Vertex2D));
+    memcpy(static_cast<u8*>(fb.text_vertex_mapped) + vb_byte_offset, vertices,
+           vertex_count * sizeof(Vertex2D));
     last_text_verts_ = vertices;
     last_text_vert_count_ = vertex_count;
     last_text_vb_offset_ = vb_byte_offset;
@@ -1615,8 +1609,8 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
                          fb.text_index_capacity,
                          fb.text_index_write_pos + index_count, sizeof(u32));
   u32 ib_byte_offset = fb.text_index_write_pos * sizeof(u32);
-  std::memcpy(static_cast<u8*>(fb.text_index_mapped) + ib_byte_offset, indices,
-              index_count * sizeof(u32));
+  memcpy(static_cast<u8*>(fb.text_index_mapped) + ib_byte_offset, indices,
+         index_count * sizeof(u32));
   fb.text_index_write_pos += index_count;
 
   // Switch to text pipeline
@@ -1734,8 +1728,8 @@ RHITextureHandle RHI::Impl::CreateTexture(u32 width, u32 height,
       D3D12_RESOURCE_STATE_COPY_DEST, nullptr, &IID_ID3D12Resource,
       reinterpret_cast<void**>(&slot.resource));
   if (FAILED(hr)) {
-    std::fprintf(
-        stderr, "ultragui-d3d12: CreateTexture resource failed: 0x%08lx\n", hr);
+    fprintf(stderr, "ultragui-d3d12: CreateTexture resource failed: 0x%08lx\n",
+            hr);
     return kInvalidTexture;
   }
 
@@ -1823,9 +1817,9 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear_val,
       &IID_ID3D12Resource, reinterpret_cast<void**>(&slot.resource));
   if (FAILED(hr)) {
-    std::fprintf(
-        stderr, "ultragui-d3d12: CreateRenderTarget resource failed: 0x%08lx\n",
-        hr);
+    fprintf(stderr,
+            "ultragui-d3d12: CreateRenderTarget resource failed: 0x%08lx\n",
+            hr);
     return kInvalidTexture;
   }
 

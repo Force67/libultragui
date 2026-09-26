@@ -1,8 +1,6 @@
 #ifndef UGUI_WIDGETS_WIDGET_REGISTRY_H_
 #define UGUI_WIDGETS_WIDGET_REGISTRY_H_
 
-#include <memory>
-
 #include <ugui/core/component_store.h>
 #include <ugui/core/config.h>
 #include <ugui/core/handle.h>
@@ -36,12 +34,12 @@ class WidgetRegistry {
   ComponentStore<C>& Store() {
     u32 tid = ComponentTypeId<C>();
     if (tid >= stores_.size()) stores_.resize(tid + 1);
-    if (!stores_[tid]) stores_[tid] = std::make_unique<ComponentStore<C>>();
-    return *static_cast<ComponentStore<C>*>(stores_[tid].get());
+    if (!stores_[tid]) stores_[tid] = MakeUnique<ComponentStore<C>>();
+    return static_cast<ComponentStore<C>&>(*stores_[tid]);
   }
   template <class C>
   C& Add(WidgetId id, C value) {
-    return Store<C>().Add(id, std::move(value));
+    return Store<C>().Add(id, ugui::move(value));
   }
   /// Get the component for `id`, creating a default-constructed one if absent.
   template <class C>
@@ -86,7 +84,7 @@ class WidgetRegistry {
   };
   Vector<Slot> slots_;  // slots_[0] is the reserved null slot
   Vector<u32> free_;    // indices available for reuse
-  Vector<std::unique_ptr<IComponentStore>> stores_;  // indexed by component id
+  Vector<UniquePtr<IComponentStore>> stores_;  // indexed by component id
 };
 
 /// The registry is the entity-and-component world.

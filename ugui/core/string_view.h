@@ -3,48 +3,85 @@
 
 #include <ugui/core/types.h>
 
-#include <cstring>
-#include <string_view>
-
 namespace ugui {
 
-/// Non-owning string reference. Thin wrapper around std::string_view
-/// with convenience methods for the library's needs.
+/// Non-owning string reference with std::string_view's semantics for the
+/// members it has (substr clamps count; find returns npos on a miss).
 class StringView {
  public:
+  static constexpr usize npos = static_cast<usize>(-1);
+
   constexpr StringView() = default;
-  constexpr StringView(const char* str) : sv_(str ? str : "") {}
-  constexpr StringView(const char* str, usize len) : sv_(str, len) {}
-  constexpr StringView(std::string_view sv) : sv_(sv) {}
+  constexpr StringView(const char* str)
+      : data_(str ? str : ""), size_(str ? Length(str) : 0) {}
+  constexpr StringView(const char* str, usize len) : data_(str), size_(len) {}
+  StringView(const String& str) : data_(str.data()), size_(str.size()) {}
 
-  constexpr const char* data() const { return sv_.data(); }
-  constexpr usize size() const { return sv_.size(); }
-  constexpr bool empty() const { return sv_.empty(); }
+  constexpr const char* data() const { return data_; }
+  constexpr usize size() const { return size_; }
+  constexpr bool empty() const { return size_ == 0; }
 
-  constexpr char operator[](usize i) const { return sv_[i]; }
+  constexpr char operator[](usize i) const { return data_[i]; }
 
-  constexpr StringView substr(usize pos,
-                              usize count = std::string_view::npos) const {
-    return sv_.substr(pos, count);
+  /// Precondition: pos <= size() (std::string_view throws; this is a bug).
+  constexpr StringView substr(usize pos, usize count = npos) const {
+    usize rest = size_ - pos;
+    return StringView(data_ + pos, count < rest ? count : rest);
+  }
+
+  constexpr void remove_prefix(usize n) {
+    data_ += n;
+    size_ -= n;
+  }
+
+  constexpr usize find(char c, usize pos = 0) const {
+    for (usize i = pos; i < size_; ++i) {
+      if (data_[i] == c) return i;
+    }
+    return npos;
+  }
+
+  constexpr usize find(StringView s, usize pos = 0) const {
+    if (pos > size_ || s.size_ > size_ - pos) return npos;
+    for (usize i = pos; i + s.size_ <= size_; ++i) {
+      if (Equal(data_ + i, s.data_, s.size_)) return i;
+    }
+    return npos;
   }
 
   constexpr bool starts_with(StringView prefix) const {
-    return sv_.starts_with(prefix.sv_);
+    return size_ >= prefix.size_ && Equal(data_, prefix.data_, prefix.size_);
   }
   constexpr bool ends_with(StringView suffix) const {
-    return sv_.ends_with(suffix.sv_);
+    return size_ >= suffix.size_ &&
+           Equal(data_ + size_ - suffix.size_, suffix.data_, suffix.size_);
   }
 
-  constexpr bool operator==(StringView rhs) const { return sv_ == rhs.sv_; }
-  constexpr bool operator!=(StringView rhs) const { return sv_ != rhs.sv_; }
+  constexpr bool operator==(StringView rhs) const {
+    return size_ == rhs.size_ && Equal(data_, rhs.data_, size_);
+  }
+  constexpr bool operator!=(StringView rhs) const { return !(*this == rhs); }
 
-  constexpr operator std::string_view() const { return sv_; }
+  constexpr const char* begin() const { return data_; }
+  constexpr const char* end() const { return data_ + size_; }
 
-  constexpr auto begin() const { return sv_.begin(); }
-  constexpr auto end() const { return sv_.end(); }
+  String ToString() const { return String(data_, size_); }
 
  private:
-  std::string_view sv_;
+  static constexpr usize Length(const char* s) {
+    usize n = 0;
+    while (s[n] != '\0') ++n;
+    return n;
+  }
+  static constexpr bool Equal(const char* a, const char* b, usize n) {
+    for (usize i = 0; i < n; ++i) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  const char* data_ = "";
+  usize size_ = 0;
 };
 
 }  // namespace ugui

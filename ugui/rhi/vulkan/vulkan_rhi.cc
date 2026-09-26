@@ -1,15 +1,13 @@
 #include "vulkan_rhi.h"
 
+#include <ugui/core/algorithm.h>
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
 
-#include <algorithm>
-#include <cassert>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <set>
-#include <vector>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
 
 namespace ugui {
 
@@ -24,7 +22,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
     VkDebugUtilsMessageTypeFlagsEXT /*type*/,
     const VkDebugUtilsMessengerCallbackDataEXT* data, void* /*user*/) {
   if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-    std::fprintf(stderr, "[vulkan] %s\n", data->pMessage);
+    fprintf(stderr, "[vulkan] %s\n", data->pMessage);
   }
   return VK_FALSE;
 }
@@ -34,12 +32,15 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
 // ---------------------------------------------------------------------------
 
 static Vector<char> read_file(const String& path) {
-  std::ifstream file(path, std::ios::ate | std::ios::binary);
-  if (!file.is_open()) return {};
-  auto size = static_cast<size_t>(file.tellg());
+  FILE* file = fopen(path.c_str(), "rb");
+  if (!file) return {};
+  fseek(file, 0, SEEK_END);
+  auto size = static_cast<size_t>(ftell(file));
+  fseek(file, 0, SEEK_SET);
   Vector<char> buf(size);
-  file.seekg(0);
-  file.read(buf.data(), static_cast<std::streamsize>(size));
+  size_t read = fread(buf.data(), 1, size, file);
+  (void)read;
+  fclose(file);
   return buf;
 }
 
@@ -77,10 +78,10 @@ static VkExtent2D choose_extent(const VkSurfaceCapabilitiesKHR& caps,
   int w, h;
   glfwGetFramebufferSize(window, &w, &h);
   VkExtent2D ext = {static_cast<u32>(w), static_cast<u32>(h)};
-  ext.width = std::clamp(ext.width, caps.minImageExtent.width,
-                         caps.maxImageExtent.width);
-  ext.height = std::clamp(ext.height, caps.minImageExtent.height,
-                          caps.maxImageExtent.height);
+  ext.width = ClampMinMax(ext.width, caps.minImageExtent.width,
+                          caps.maxImageExtent.width);
+  ext.height = ClampMinMax(ext.height, caps.minImageExtent.height,
+                           caps.maxImageExtent.height);
   return ext;
 }
 
@@ -157,7 +158,7 @@ bool RHI::Impl::create_instance() {
   ci.ppEnabledLayerNames = layers.data();
 
   if (vkCreateInstance(&ci, nullptr, &instance_) != VK_SUCCESS) {
-    std::fprintf(stderr, "ultragui: vkCreateInstance failed\n");
+    fprintf(stderr, "ultragui: vkCreateInstance failed\n");
     return false;
   }
 
@@ -216,7 +217,7 @@ bool RHI::Impl::pick_physical_device() {
       physical_device_ = dev;
       VkPhysicalDeviceProperties props;
       vkGetPhysicalDeviceProperties(dev, &props);
-      std::printf("ultragui: using GPU '%s'\n", props.deviceName);
+      printf("ultragui: using GPU '%s'\n", props.deviceName);
       return true;
     }
   }
@@ -224,10 +225,14 @@ bool RHI::Impl::pick_physical_device() {
 }
 
 bool RHI::Impl::create_device() {
-  std::set<u32> unique_families = {graphics_family_, present_family_};
+  // Distinct families in ascending order.
+  u32 unique_families[2] = {Min(graphics_family_, present_family_),
+                            Max(graphics_family_, present_family_)};
+  const u32 family_count = graphics_family_ == present_family_ ? 1u : 2u;
   float priority = 1.0f;
   Vector<VkDeviceQueueCreateInfo> queue_cis;
-  for (u32 family : unique_families) {
+  for (u32 i = 0; i < family_count; ++i) {
+    const u32 family = unique_families[i];
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = family;
     qci.queueCount = 1;
@@ -425,8 +430,8 @@ bool RHI::Impl::create_descriptor_layout() {
 VkShaderModule RHI::Impl::load_shader(const char* filename) {
   auto code = read_file(shader_dir_ + "/" + filename);
   if (code.empty()) {
-    std::fprintf(stderr, "ultragui: failed to load shader '%s/%s'\n",
-                 shader_dir_.c_str(), filename);
+    fprintf(stderr, "ultragui: failed to load shader '%s/%s'\n",
+            shader_dir_.c_str(), filename);
     return VK_NULL_HANDLE;
   }
 
@@ -806,8 +811,8 @@ void RHI::Impl::ensure_vertex_capacity(u32 vertex_count) {
   last_quad_verts_ = nullptr;
   last_quad_vert_count_ = 0;
 
-  u32 new_cap = std::max(vertex_count, f.vertex_capacity * 2);
-  new_cap = std::max(new_cap, 16384u);
+  u32 new_cap = Max(vertex_count, f.vertex_capacity * 2);
+  new_cap = Max(new_cap, 16384u);
   create_buffer(new_cap * sizeof(Vertex2D), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -821,8 +826,8 @@ void RHI::Impl::ensure_index_capacity(u32 index_count) {
 
   retire_buffer(f.index_buffer, f.index_memory);
 
-  u32 new_cap = std::max(index_count, f.index_capacity * 2);
-  new_cap = std::max(new_cap, 32768u);
+  u32 new_cap = Max(index_count, f.index_capacity * 2);
+  new_cap = Max(new_cap, 32768u);
   create_buffer(new_cap * sizeof(u32), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -838,8 +843,8 @@ void RHI::Impl::ensure_text_vertex_capacity(u32 vertex_count) {
   last_text_verts_ = nullptr;
   last_text_vert_count_ = 0;
 
-  u32 new_cap = std::max(vertex_count, f.text_vertex_capacity * 2);
-  new_cap = std::max(new_cap, 16384u);
+  u32 new_cap = Max(vertex_count, f.text_vertex_capacity * 2);
+  new_cap = Max(new_cap, 16384u);
   create_buffer(new_cap * sizeof(Vertex2D), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -853,8 +858,8 @@ void RHI::Impl::ensure_text_index_capacity(u32 index_count) {
 
   retire_buffer(f.text_index_buffer, f.text_index_memory);
 
-  u32 new_cap = std::max(index_count, f.text_index_capacity * 2);
-  new_cap = std::max(new_cap, 32768u);
+  u32 new_cap = Max(index_count, f.text_index_capacity * 2);
+  new_cap = Max(new_cap, 32768u);
   create_buffer(new_cap * sizeof(u32), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -942,7 +947,7 @@ RHITextureHandle RHI::Impl::CreateTexture(u32 width, u32 height,
 
   void* data;
   vkMapMemory(device_, staging_mem, 0, image_size, 0, &data);
-  std::memcpy(data, pixels, image_size);
+  memcpy(data, pixels, image_size);
   vkUnmapMemory(device_, staging_mem);
 
   // Image
@@ -1073,7 +1078,7 @@ void RHI::Impl::UpdateTexture(RHITextureHandle handle, const void* pixels) {
 
   void* data;
   vkMapMemory(device_, staging_mem, 0, image_size, 0, &data);
-  std::memcpy(data, pixels, image_size);
+  memcpy(data, pixels, image_size);
   vkUnmapMemory(device_, staging_mem);
 
   // Upload via temporary command buffer
@@ -1316,7 +1321,7 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
     void* data;
     vkMapMemory(device_, f.vertex_memory, vb_byte_offset,
                 vertex_count * sizeof(Vertex2D), 0, &data);
-    std::memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
+    memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
     vkUnmapMemory(device_, f.vertex_memory);
     last_quad_verts_ = vertices;
     last_quad_vert_count_ = vertex_count;
@@ -1330,7 +1335,7 @@ void RHI::Impl::DrawTriangles(const Vertex2D* vertices, u32 vertex_count,
   void* data;
   vkMapMemory(device_, f.index_memory, ib_byte_offset,
               index_count * sizeof(u32), 0, &data);
-  std::memcpy(data, indices, index_count * sizeof(u32));
+  memcpy(data, indices, index_count * sizeof(u32));
   vkUnmapMemory(device_, f.index_memory);
   f.index_write_pos += index_count;
 
@@ -1368,7 +1373,7 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
     void* data;
     vkMapMemory(device_, f.text_vertex_memory, vb_byte_offset,
                 vertex_count * sizeof(Vertex2D), 0, &data);
-    std::memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
+    memcpy(data, vertices, vertex_count * sizeof(Vertex2D));
     vkUnmapMemory(device_, f.text_vertex_memory);
     last_text_verts_ = vertices;
     last_text_vert_count_ = vertex_count;
@@ -1381,7 +1386,7 @@ void RHI::Impl::DrawTextTriangles(const Vertex2D* vertices, u32 vertex_count,
   void* data;
   vkMapMemory(device_, f.text_index_memory, ib_byte_offset,
               index_count * sizeof(u32), 0, &data);
-  std::memcpy(data, indices, index_count * sizeof(u32));
+  memcpy(data, indices, index_count * sizeof(u32));
   vkUnmapMemory(device_, f.text_index_memory);
   f.text_index_write_pos += index_count;
 

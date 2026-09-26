@@ -1,4 +1,5 @@
 #include <ugui/widgets/context_menu.h>
+#include <ugui/core/algorithm.h>
 
 #include <ugui/platform/platform.h>
 #include <ugui/render/renderer2d.h>
@@ -7,7 +8,6 @@
 #include <ugui/ui_context.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
 
 namespace ugui {
 namespace {
@@ -50,7 +50,7 @@ void ContextMenuMeasure(WidgetRegistry& world, wid e, f32& out_width,
           auto run = te->Shape(fh, item.label.c_str(),
                                static_cast<u32>(item.label.size()), font_size,
                                letter_sp, st.line_height_multiplier);
-          max_width = std::max(max_width, run.total_advance);
+          max_width = Max(max_width, run.total_advance);
         }
       }
     }
@@ -193,7 +193,7 @@ void AddContextMenuItem(wid e, const String& label, Function<void()> action) {
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kContextMenu) return;
   world.GetOrAdd<ContextMenuContent>(e).items.push_back(
-      {label, std::move(action), false});
+      {label, ugui::move(action), false});
   MarkDirty(world, e);
 }
 

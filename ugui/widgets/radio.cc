@@ -1,10 +1,9 @@
 #include <ugui/render/renderer2d.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/render/vertex.h>
 #include <ugui/widgets/radio.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
-#include <string>
 
 namespace ugui {
 namespace {
@@ -46,7 +45,7 @@ void RadioMeasure(WidgetRegistry& world, wid e, f32& out_width,
                          st.font_size * sc, st.letter_spacing * sc,
                          st.line_height_multiplier);
     out_width = circle_size + kGap + run.total_advance;
-    out_height = std::max(circle_size, run.line_height);
+    out_height = Max(circle_size, run.line_height);
   } else {
     out_width = circle_size;
     out_height = circle_size;
@@ -73,7 +72,7 @@ void RadioDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   Color border_color = (s.border_color.a > 0.0f)
                            ? s.border_color.WithAlpha(s.border_color.a * alpha)
                            : Color(0.6f, 0.6f, 0.6f, alpha);
-  f32 bw = std::max(s.border_width, 1.5f);
+  f32 bw = Max(s.border_width, 1.5f);
 
   if (is_selected) {
     Color accent = Color::FromHex(0x4a7aff, alpha);
@@ -158,7 +157,7 @@ void SetRadioGroup(wid e, const String& group) {
 
 void SetRadioChange(wid e, Function<void(bool)> handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
-  world.GetOrAdd<RadioContent>(e).on_change = std::move(handler);
+  world.GetOrAdd<RadioContent>(e).on_change = ugui::move(handler);
 }
 
 void SetRadioSelected(wid e, bool selected) {

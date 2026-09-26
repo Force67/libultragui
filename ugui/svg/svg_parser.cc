@@ -1,9 +1,10 @@
-#include <algorithm>
-#include <cctype>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <ctype.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <ugui/core/algorithm.h>
 
 #include "svg_types.h"
 
@@ -32,7 +33,7 @@ struct XmlNode {
 
   f32 attr_f(const char* name, f32 def = 0) const {
     auto* v = attr(name);
-    return v ? static_cast<f32>(std::atof(v)) : def;
+    return v ? static_cast<f32>(atof(v)) : def;
   }
 
   const XmlNode* child(const char* tag_name) const {
@@ -51,13 +52,13 @@ struct XmlParser {
   char next() { return eof() ? 0 : *p++; }
 
   void skip_ws() {
-    while (!eof() && std::isspace(static_cast<u8>(*p))) ++p;
+    while (!eof() && isspace(static_cast<u8>(*p))) ++p;
   }
 
   void skip_until(const char* seq) {
-    usize len = std::strlen(seq);
+    usize len = strlen(seq);
     while (!eof()) {
-      if (static_cast<usize>(end - p) >= len && std::memcmp(p, seq, len) == 0) {
+      if (static_cast<usize>(end - p) >= len && memcmp(p, seq, len) == 0) {
         p += len;
         return;
       }
@@ -67,8 +68,8 @@ struct XmlParser {
 
   String read_name() {
     const char* start = p;
-    while (!eof() && (std::isalnum(static_cast<u8>(*p)) || *p == '-' ||
-                      *p == '_' || *p == ':' || *p == '.'))
+    while (!eof() && (isalnum(static_cast<u8>(*p)) || *p == '-' || *p == '_' ||
+                      *p == ':' || *p == '.'))
       ++p;
     return String(start, p);
   }
@@ -126,7 +127,7 @@ struct XmlParser {
         skip_ws();
         if (peek() == '"' || peek() == '\'') attr.value = read_quoted();
       }
-      node.attrs.push_back(std::move(attr));
+      node.attrs.push_back(ugui::move(attr));
     }
 
     bool self_closing = false;
@@ -153,7 +154,7 @@ struct XmlParser {
         }
         XmlNode child;
         if (parse_node(child) && !child.tag.empty())
-          node.children.push_back(std::move(child));
+          node.children.push_back(ugui::move(child));
       } else {
         // Text content: skip for SVG
         while (!eof() && peek() != '<') ++p;
@@ -336,8 +337,7 @@ static Color parse_color(const char* s) {
     const char* b = nc.name;
     bool match = true;
     while (*a && *b) {
-      if (std::tolower(static_cast<u8>(*a)) !=
-          std::tolower(static_cast<u8>(*b))) {
+      if (tolower(static_cast<u8>(*a)) != tolower(static_cast<u8>(*b))) {
         match = false;
         break;
       }
@@ -350,7 +350,7 @@ static Color parse_color(const char* s) {
   // #RGB, #RRGGBB, #RRGGBBAA
   if (s[0] == '#') {
     ++s;
-    usize len = std::strlen(s);
+    usize len = strlen(s);
     u8 digits[8] = {};
     for (usize i = 0; i < len && i < 8; ++i) parse_hex_digit(s[i], digits[i]);
 
@@ -379,18 +379,17 @@ static Color parse_color(const char* s) {
   }
 
   // rgb(r, g, b) or rgba(r, g, b, a)
-  if (std::strncmp(s, "rgb", 3) == 0) {
+  if (strncmp(s, "rgb", 3) == 0) {
     const char* p = s + 3;
     if (*p == 'a') ++p;
     if (*p == '(') ++p;
     f32 vals[4] = {0, 0, 0, 1};
     for (int i = 0; i < 4 && *p; ++i) {
-      while (*p && (std::isspace(static_cast<u8>(*p)) || *p == ',')) ++p;
+      while (*p && (isspace(static_cast<u8>(*p)) || *p == ',')) ++p;
       if (*p == ')') break;
-      vals[i] = static_cast<f32>(std::atof(p));
+      vals[i] = static_cast<f32>(atof(p));
       // Check for percentage
-      while (*p && *p != ',' && *p != ')' &&
-             !std::isspace(static_cast<u8>(*p))) {
+      while (*p && *p != ',' && *p != ')' && !isspace(static_cast<u8>(*p))) {
         if (*p == '%') {
           vals[i] /= 100.0f;
           if (i < 3) vals[i] *= 255.0f;
@@ -413,15 +412,14 @@ static Color parse_color(const char* s) {
 
 static Paint parse_paint(const char* s) {
   Paint paint;
-  if (!s || !*s || std::strcmp(s, "none") == 0 ||
-      std::strcmp(s, "transparent") == 0) {
+  if (!s || !*s || strcmp(s, "none") == 0 || strcmp(s, "transparent") == 0) {
     paint.type = Paint::kNone;
     return paint;
   }
   // url(#id) reference
-  if (std::strncmp(s, "url(#", 5) == 0) {
+  if (strncmp(s, "url(#", 5) == 0) {
     const char* start = s + 5;
-    const char* end = std::strchr(start, ')');
+    const char* end = strchr(start, ')');
     if (end) {
       paint.type = Paint::kGradientRef;
       paint.gradient_id = String(start, end);
@@ -438,14 +436,14 @@ static Paint parse_paint(const char* s) {
 // ============================================================================
 
 static const char* skip_ws_comma(const char* p) {
-  while (*p && (std::isspace(static_cast<u8>(*p)) || *p == ',')) ++p;
+  while (*p && (isspace(static_cast<u8>(*p)) || *p == ',')) ++p;
   return p;
 }
 
 static f32 parse_number(const char*& p) {
   p = skip_ws_comma(p);
   char* end;
-  f32 val = std::strtof(p, &end);
+  f32 val = strtof(p, &end);
   p = end;
   return val;
 }
@@ -453,7 +451,7 @@ static f32 parse_number(const char*& p) {
 static f32 parse_coord_value(const char* s) {
   if (!s) return 0;
   char* end;
-  f32 val = std::strtof(s, &end);
+  f32 val = strtof(s, &end);
   // Skip units like px, pt, em, etc.
   return val;
 }
@@ -469,12 +467,12 @@ static Transform parse_transform(const char* s) {
   const char* p = s;
 
   while (*p) {
-    while (*p && std::isspace(static_cast<u8>(*p))) ++p;
+    while (*p && isspace(static_cast<u8>(*p))) ++p;
     if (!*p) break;
 
     Transform t = Transform::Identity();
 
-    if (std::strncmp(p, "matrix", 6) == 0) {
+    if (strncmp(p, "matrix", 6) == 0) {
       p += 6;
       while (*p && *p != '(') ++p;
       if (*p) ++p;
@@ -486,7 +484,7 @@ static Transform parse_transform(const char* s) {
       t.f = parse_number(p);
       while (*p && *p != ')') ++p;
       if (*p) ++p;
-    } else if (std::strncmp(p, "translate", 9) == 0) {
+    } else if (strncmp(p, "translate", 9) == 0) {
       p += 9;
       while (*p && *p != '(') ++p;
       if (*p) ++p;
@@ -496,7 +494,7 @@ static Transform parse_transform(const char* s) {
       t = Transform::Translate(tx, ty);
       while (*p && *p != ')') ++p;
       if (*p) ++p;
-    } else if (std::strncmp(p, "scale", 5) == 0) {
+    } else if (strncmp(p, "scale", 5) == 0) {
       p += 5;
       while (*p && *p != '(') ++p;
       if (*p) ++p;
@@ -506,7 +504,7 @@ static Transform parse_transform(const char* s) {
       t = Transform::Scale(sx, sy);
       while (*p && *p != ')') ++p;
       if (*p) ++p;
-    } else if (std::strncmp(p, "rotate", 6) == 0) {
+    } else if (strncmp(p, "rotate", 6) == 0) {
       p += 6;
       while (*p && *p != '(') ++p;
       if (*p) ++p;
@@ -522,22 +520,22 @@ static Transform parse_transform(const char* s) {
       }
       while (*p && *p != ')') ++p;
       if (*p) ++p;
-    } else if (std::strncmp(p, "skewX", 5) == 0) {
+    } else if (strncmp(p, "skewX", 5) == 0) {
       p += 5;
       while (*p && *p != '(') ++p;
       if (*p) ++p;
       f32 angle = parse_number(p);
       f32 rad = angle * 3.14159265358979323846f / 180.0f;
-      t.c = std::tan(rad);
+      t.c = tanf(rad);
       while (*p && *p != ')') ++p;
       if (*p) ++p;
-    } else if (std::strncmp(p, "skewY", 5) == 0) {
+    } else if (strncmp(p, "skewY", 5) == 0) {
       p += 5;
       while (*p && *p != '(') ++p;
       if (*p) ++p;
       f32 angle = parse_number(p);
       f32 rad = angle * 3.14159265358979323846f / 180.0f;
-      t.b = std::tan(rad);
+      t.b = tanf(rad);
       while (*p && *p != ')') ++p;
       if (*p) ++p;
     } else {
@@ -565,21 +563,21 @@ static void arc_to_cubics(Path& path, Vec2 from, f32 rx, f32 ry, f32 x_rotation,
   }
 
   f32 phi = x_rotation * PI / 180.0f;
-  f32 cos_phi = std::cos(phi);
-  f32 sin_phi = std::sin(phi);
+  f32 cos_phi = cosf(phi);
+  f32 sin_phi = sinf(phi);
 
   f32 dx = (from.x - to.x) * 0.5f;
   f32 dy = (from.y - to.y) * 0.5f;
   f32 x1p = cos_phi * dx + sin_phi * dy;
   f32 y1p = -sin_phi * dx + cos_phi * dy;
 
-  rx = std::fabs(rx);
-  ry = std::fabs(ry);
+  rx = fabsf(rx);
+  ry = fabsf(ry);
 
   // Correct radii
   f32 lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
   if (lambda > 1.0f) {
-    f32 s = std::sqrt(lambda);
+    f32 s = sqrtf(lambda);
     rx *= s;
     ry *= s;
   }
@@ -589,7 +587,7 @@ static void arc_to_cubics(Path& path, Vec2 from, f32 rx, f32 ry, f32 x_rotation,
 
   f32 num = rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2;
   f32 den = rx2 * y1p2 + ry2 * x1p2;
-  f32 sq = (den > 0) ? std::sqrt(std::fmax(0.0f, num / den)) : 0;
+  f32 sq = (den > 0) ? sqrtf(fmaxf(0.0f, num / den)) : 0;
   if (large_arc == sweep) sq = -sq;
 
   f32 cxp = sq * rx * y1p / ry;
@@ -599,11 +597,11 @@ static void arc_to_cubics(Path& path, Vec2 from, f32 rx, f32 ry, f32 x_rotation,
   f32 cy = sin_phi * cxp + cos_phi * cyp + (from.y + to.y) * 0.5f;
 
   auto angle_between = [](f32 ux, f32 uy, f32 vx, f32 vy) -> f32 {
-    f32 n = std::sqrt((ux * ux + uy * uy) * (vx * vx + vy * vy));
+    f32 n = sqrtf((ux * ux + uy * uy) * (vx * vx + vy * vy));
     if (n == 0) return 0;
     f32 c = (ux * vx + uy * vy) / n;
     c = Clamp(c, -1.0f, 1.0f);
-    f32 a = std::acos(c);
+    f32 a = acosf(c);
     if (ux * vy - uy * vx < 0) a = -a;
     return a;
   };
@@ -616,17 +614,17 @@ static void arc_to_cubics(Path& path, Vec2 from, f32 rx, f32 ry, f32 x_rotation,
   if (sweep && dtheta < 0) dtheta += 2 * PI;
 
   // Split into segments of at most PI/2
-  i32 segments = static_cast<i32>(std::ceil(std::fabs(dtheta) / (PI * 0.5f)));
+  i32 segments = static_cast<i32>(ceilf(fabsf(dtheta) / (PI * 0.5f)));
   if (segments < 1) segments = 1;
   f32 seg_angle = dtheta / segments;
-  f32 alpha = 4.0f / 3.0f * std::tan(seg_angle * 0.25f);
+  f32 alpha = 4.0f / 3.0f * tanf(seg_angle * 0.25f);
 
   f32 cur_angle = theta1;
   for (i32 i = 0; i < segments; ++i) {
     f32 a0 = cur_angle;
     f32 a1 = cur_angle + seg_angle;
-    f32 cos0 = std::cos(a0), sin0 = std::sin(a0);
-    f32 cos1 = std::cos(a1), sin1 = std::sin(a1);
+    f32 cos0 = cosf(a0), sin0 = sinf(a0);
+    f32 cos1 = cosf(a1), sin1 = sinf(a1);
 
     // Unit circle control points
     f32 ep1x = cos0 - alpha * sin0;
@@ -672,7 +670,7 @@ void ParsePathData(const char* d, Path& path) {
     if (!*p) break;
 
     // Check for command letter
-    if (std::isalpha(static_cast<u8>(*p))) {
+    if (isalpha(static_cast<u8>(*p))) {
       cmd = *p++;
     }
 
@@ -889,7 +887,7 @@ static void parse_style_attr(const char* style_str, StyleAttrs& out) {
   out.storage.reserve(8);  // prevent reallocation invalidating c_str() pointers
   const char* p = style_str;
   while (*p) {
-    while (*p && std::isspace(static_cast<u8>(*p))) ++p;
+    while (*p && isspace(static_cast<u8>(*p))) ++p;
     const char* key_start = p;
     while (*p && *p != ':' && *p != ';') ++p;
     if (*p != ':') {
@@ -898,12 +896,12 @@ static void parse_style_attr(const char* style_str, StyleAttrs& out) {
     }
     String key(key_start, p);
     ++p;  // skip ':'
-    while (*p && std::isspace(static_cast<u8>(*p))) ++p;
+    while (*p && isspace(static_cast<u8>(*p))) ++p;
     const char* val_start = p;
     while (*p && *p != ';') ++p;
     // Trim trailing whitespace
     const char* val_end = p;
-    while (val_end > val_start && std::isspace(static_cast<u8>(val_end[-1])))
+    while (val_end > val_start && isspace(static_cast<u8>(val_end[-1])))
       --val_end;
     out.storage.emplace_back(val_start, val_end);
     const char* val = out.storage.back().c_str();
@@ -939,16 +937,15 @@ static void parse_gradient_stops(const XmlNode& node, Gradient& grad) {
     GradientStop stop;
     const char* offset_str = child.attr("offset");
     if (offset_str) {
-      stop.offset = static_cast<f32>(std::atof(offset_str));
-      if (std::strchr(offset_str, '%')) stop.offset /= 100.0f;
+      stop.offset = static_cast<f32>(atof(offset_str));
+      if (strchr(offset_str, '%')) stop.offset /= 100.0f;
     }
     const char* color_str = child.attr("stop-color");
     stop.color = color_str ? parse_color(color_str) : Color::Black();
 
     const char* opacity_str = child.attr("stop-opacity");
     if (opacity_str)
-      stop.color =
-          stop.color.WithAlpha(static_cast<f32>(std::atof(opacity_str)));
+      stop.color = stop.color.WithAlpha(static_cast<f32>(atof(opacity_str)));
 
     // Check style attribute for stop-color/stop-opacity
     StyleAttrs sa;
@@ -956,10 +953,11 @@ static void parse_gradient_stops(const XmlNode& node, Gradient& grad) {
 
     grad.stops.push_back(stop);
   }
-  std::sort(grad.stops.begin(), grad.stops.end(),
-            [](const GradientStop& a, const GradientStop& b) {
-              return a.offset < b.offset;
-            });
+  // Coincident stops (a hard color edge) are a tie whose order decides the
+  // color on each side, so this must be std::sort's exact order: IntroSort.
+  IntroSort(grad.stops, [](const GradientStop& a, const GradientStop& b) {
+    return a.offset < b.offset;
+  });
 }
 
 static void parse_linear_gradient(const XmlNode& node, Document& doc) {
@@ -975,7 +973,7 @@ static void parse_linear_gradient(const XmlNode& node, Document& doc) {
 
   // Check for percentage values (default for objectBoundingBox)
   auto IsPercent = [](const char* s) -> bool {
-    return s && std::strchr(s, '%') != nullptr;
+    return s && strchr(s, '%') != nullptr;
   };
   if (IsPercent(node.attr("x1")) || IsPercent(node.attr("y1")) ||
       IsPercent(node.attr("x2")) || IsPercent(node.attr("y2"))) {
@@ -986,16 +984,16 @@ static void parse_linear_gradient(const XmlNode& node, Document& doc) {
   }
 
   const char* units = node.attr("gradientUnits");
-  grad.user_space = units && std::strcmp(units, "userSpaceOnUse") == 0;
+  grad.user_space = units && strcmp(units, "userSpaceOnUse") == 0;
 
   const char* xform = node.attr("gradientTransform");
   if (xform) grad.transform = parse_transform(xform);
 
   const char* spread = node.attr("spreadMethod");
   if (spread) {
-    if (std::strcmp(spread, "reflect") == 0)
+    if (strcmp(spread, "reflect") == 0)
       grad.spread = SpreadMethod::kReflect;
-    else if (std::strcmp(spread, "repeat") == 0)
+    else if (strcmp(spread, "repeat") == 0)
       grad.spread = SpreadMethod::kRepeat;
   }
 
@@ -1003,13 +1001,12 @@ static void parse_linear_gradient(const XmlNode& node, Document& doc) {
   const char* href = node.attr("href");
   if (!href) href = node.attr("xlink:href");
   if (href && href[0] == '#') {
-    auto it = doc.gradients.find(href + 1);
-    if (it != doc.gradients.end() && grad.stops.empty())
-      grad.stops = it->second.stops;
+    const Gradient* base_grad = doc.gradients.find(href + 1);
+    if (base_grad && grad.stops.empty()) grad.stops = base_grad->stops;
   }
 
   parse_gradient_stops(node, grad);
-  doc.gradients[id] = std::move(grad);
+  doc.gradients[id] = ugui::move(grad);
 }
 
 static void parse_radial_gradient(const XmlNode& node, Document& doc) {
@@ -1025,29 +1022,28 @@ static void parse_radial_gradient(const XmlNode& node, Document& doc) {
   grad.fy = node.attr_f("fy", -1);
 
   const char* units = node.attr("gradientUnits");
-  grad.user_space = units && std::strcmp(units, "userSpaceOnUse") == 0;
+  grad.user_space = units && strcmp(units, "userSpaceOnUse") == 0;
 
   const char* xform = node.attr("gradientTransform");
   if (xform) grad.transform = parse_transform(xform);
 
   const char* spread = node.attr("spreadMethod");
   if (spread) {
-    if (std::strcmp(spread, "reflect") == 0)
+    if (strcmp(spread, "reflect") == 0)
       grad.spread = SpreadMethod::kReflect;
-    else if (std::strcmp(spread, "repeat") == 0)
+    else if (strcmp(spread, "repeat") == 0)
       grad.spread = SpreadMethod::kRepeat;
   }
 
   const char* href = node.attr("href");
   if (!href) href = node.attr("xlink:href");
   if (href && href[0] == '#') {
-    auto it = doc.gradients.find(href + 1);
-    if (it != doc.gradients.end() && grad.stops.empty())
-      grad.stops = it->second.stops;
+    const Gradient* base_grad = doc.gradients.find(href + 1);
+    if (base_grad && grad.stops.empty()) grad.stops = base_grad->stops;
   }
 
   parse_gradient_stops(node, grad);
-  doc.gradients[id] = std::move(grad);
+  doc.gradients[id] = ugui::move(grad);
 }
 
 // ============================================================================
@@ -1083,20 +1079,20 @@ static void apply_attrs(const XmlNode& node, ParseCtx& ctx) {
   if (stroke_str) ctx.stroke = parse_paint(stroke_str);
 
   const char* sw = Resolve("stroke-width", sa.stroke_width);
-  if (sw) ctx.stroke_width = static_cast<f32>(std::atof(sw));
+  if (sw) ctx.stroke_width = static_cast<f32>(atof(sw));
 
   const char* op = Resolve("opacity", sa.opacity);
-  if (op) ctx.opacity = static_cast<f32>(std::atof(op));
+  if (op) ctx.opacity = static_cast<f32>(atof(op));
 
   const char* fo = Resolve("fill-opacity", sa.fill_opacity);
-  if (fo) ctx.fill_opacity = static_cast<f32>(std::atof(fo));
+  if (fo) ctx.fill_opacity = static_cast<f32>(atof(fo));
 
   const char* so = Resolve("stroke-opacity", sa.stroke_opacity);
-  if (so) ctx.stroke_opacity = static_cast<f32>(std::atof(so));
+  if (so) ctx.stroke_opacity = static_cast<f32>(atof(so));
 
   const char* fr = Resolve("fill-rule", sa.fill_rule);
   if (fr) {
-    if (std::strcmp(fr, "evenodd") == 0)
+    if (strcmp(fr, "evenodd") == 0)
       ctx.fill_rule = FillRule::kEvenOdd;
     else
       ctx.fill_rule = FillRule::kNonZero;
@@ -1108,7 +1104,7 @@ static void apply_attrs(const XmlNode& node, ParseCtx& ctx) {
 
 static void add_shape(Document& doc, Path&& path, const ParseCtx& ctx) {
   Shape shape;
-  shape.path = std::move(path);
+  shape.path = ugui::move(path);
   shape.fill = ctx.fill;
   shape.stroke = ctx.stroke;
   shape.stroke_width = ctx.stroke_width;
@@ -1117,7 +1113,7 @@ static void add_shape(Document& doc, Path&& path, const ParseCtx& ctx) {
   shape.stroke_opacity = ctx.stroke_opacity;
   shape.fill_rule = ctx.fill_rule;
   shape.transform = ctx.transform;
-  doc.shapes.push_back(std::move(shape));
+  doc.shapes.push_back(ugui::move(shape));
 }
 
 static void parse_element(const XmlNode& node, Document& doc,
@@ -1148,7 +1144,7 @@ static void parse_element(const XmlNode& node, Document& doc,
   } else if (node.tag == "path") {
     Path path;
     ParsePathData(node.attr("d"), path);
-    if (!path.entries.empty()) add_shape(doc, std::move(path), ctx);
+    if (!path.entries.empty()) add_shape(doc, ugui::move(path), ctx);
   } else if (node.tag == "g" || node.tag == "svg" || node.tag == "symbol" ||
              node.tag == "use") {
     // Group: recurse with inherited context
@@ -1199,7 +1195,7 @@ bool ParseSvg(const char* data, usize length, Document& out) {
     XmlNode node;
     if (xml.parse_node(node)) {
       if (node.tag == "svg") {
-        root = std::move(node);
+        root = ugui::move(node);
         break;
       }
     }

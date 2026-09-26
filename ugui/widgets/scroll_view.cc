@@ -1,10 +1,10 @@
 #include <ugui/render/renderer2d.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/render/vertex.h>
 #include <ugui/widgets/scroll_view.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
-#include <cmath>
+#include <math.h>
 
 namespace ugui {
 namespace {
@@ -28,14 +28,14 @@ void ScrollViewLayout(WidgetRegistry& world, wid e, const Rect& /*rect*/,
   c->content_size = Vec2{0, 0};
   for (wid child : world.Get<Hierarchy>(e)->children) {
     Rect cr = world.Get<Transform>(child)->rect;
-    c->content_size.x = std::max(c->content_size.x, cr.x + cr.w - content_rect.x);
-    c->content_size.y = std::max(c->content_size.y, cr.y + cr.h - content_rect.y);
+    c->content_size.x = Max(c->content_size.x, cr.x + cr.w - content_rect.x);
+    c->content_size.y = Max(c->content_size.y, cr.y + cr.h - content_rect.y);
   }
 
-  f32 max_scroll_x = std::max(0.0f, c->content_size.x - content_rect.w);
-  f32 max_scroll_y = std::max(0.0f, c->content_size.y - content_rect.h);
-  c->offset.x = std::clamp(c->offset.x, 0.0f, max_scroll_x);
-  c->offset.y = std::clamp(c->offset.y, 0.0f, max_scroll_y);
+  f32 max_scroll_x = Max(0.0f, c->content_size.x - content_rect.w);
+  f32 max_scroll_y = Max(0.0f, c->content_size.y - content_rect.h);
+  c->offset.x = ClampMinMax(c->offset.x, 0.0f, max_scroll_x);
+  c->offset.y = ClampMinMax(c->offset.y, 0.0f, max_scroll_y);
 }
 
 WidgetId ScrollViewHitTest(WidgetRegistry& world, wid e, Vec2 point) {
@@ -63,14 +63,14 @@ void ScrollViewUpdate(WidgetRegistry& world, wid e, f64 dt) {
     c->offset += c->velocity * static_cast<f32>(dt);
 
     // Decay normalized to 60fps so momentum feels identical at any framerate.
-    f32 decay = std::pow(c->deceleration, static_cast<f32>(dt) * 60.0f);
+    f32 decay = powf(c->deceleration, static_cast<f32>(dt) * 60.0f);
     c->velocity *= decay;
 
     Rect content = world.Get<Transform>(e)->content_rect;
-    f32 max_scroll_x = std::max(0.0f, c->content_size.x - content.w);
-    f32 max_scroll_y = std::max(0.0f, c->content_size.y - content.h);
-    c->offset.x = std::clamp(c->offset.x, 0.0f, max_scroll_x);
-    c->offset.y = std::clamp(c->offset.y, 0.0f, max_scroll_y);
+    f32 max_scroll_x = Max(0.0f, c->content_size.x - content.w);
+    f32 max_scroll_y = Max(0.0f, c->content_size.y - content.h);
+    c->offset.x = ClampMinMax(c->offset.x, 0.0f, max_scroll_x);
+    c->offset.y = ClampMinMax(c->offset.y, 0.0f, max_scroll_y);
 
     // Kill velocity at the edges to prevent jitter.
     if (c->offset.y <= 0.0f || c->offset.y >= max_scroll_y) c->velocity.y = 0.0f;
@@ -107,7 +107,7 @@ void ScrollViewDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   Vec2 offset = c ? c->offset : Vec2::Zero();
   if (content_size.y > content.h) {
     f32 visible_ratio = content.h / content_size.y;
-    f32 bar_height = std::max(content.h * visible_ratio, 20.0f);
+    f32 bar_height = Max(content.h * visible_ratio, 20.0f);
     f32 scroll_ratio = offset.y / (content_size.y - content.h);
     f32 bar_y = content.y + scroll_ratio * (content.h - bar_height);
 

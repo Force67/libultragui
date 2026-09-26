@@ -3,9 +3,7 @@
 
 #include <ugui/core/types.h>
 
-#include <cstdlib>
 #include <new>
-#include <utility>
 
 namespace ugui {
 
@@ -22,13 +20,13 @@ class Arena {
   Arena& operator=(Arena&& other) noexcept;
 
   /// Allocate `size` bytes with given alignment
-  void* Alloc(usize size, usize alignment = alignof(std::max_align_t));
+  void* Alloc(usize size, usize alignment = alignof(max_align_t));
 
   /// Allocate and construct a T
   template <typename T, typename... Args>
   T* create(Args&&... args) {
     void* mem = Alloc(sizeof(T), alignof(T));
-    return new (mem) T(std::forward<Args>(args)...);
+    return new (mem) T(ugui::forward<Args>(args)...);
   }
 
   /// Allocate an array of T (default-constructed)

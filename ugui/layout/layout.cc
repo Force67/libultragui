@@ -1,8 +1,6 @@
 #include <ugui/layout/layout.h>
+#include <ugui/core/algorithm.h>
 
-#include <algorithm>
-#include <unordered_map>
-#include <vector>
 #include <yoga/Yoga.h>
 
 namespace ugui {
@@ -349,8 +347,8 @@ static void readback_results(YGNodeRef yg, LayoutNode* nodes, u32 node_index,
   node.content_rect = {
       x + node.computed_padding.left,
       y + node.computed_padding.top,
-      std::max(w - node.computed_padding.horizontal(), 0.0f),
-      std::max(h - node.computed_padding.vertical(), 0.0f),
+      Max(w - node.computed_padding.horizontal(), 0.0f),
+      Max(h - node.computed_padding.vertical(), 0.0f),
   };
 
   node.layout_dirty = false;
@@ -395,30 +393,33 @@ static RetainedShape ShapeOf(const LayoutNode& n) {
 
 // One retained Yoga tree.
 struct RetainedTree {
-  std::vector<YGNodeRef> nodes;
-  std::vector<RetainedShape> shape;
+  Vector<YGNodeRef> nodes;
+  Vector<RetainedShape> shape;
   // The style last written to each node. apply_style is a pure function of
   // (style, viewport), so a node whose style has not moved since the last pass
   // can skip it: seventy-odd setter calls that would each compare and find
   // nothing changed.
-  std::vector<Style> applied;
+  Vector<Style> applied;
   LayoutViewport applied_viewport{0.0f, 0.0f, 0.0f};
   // Last intrinsic size handed to each measured node. Yoga caches what a
   // measure function returned and has no way to know the answer changed, so a
   // node whose text was re-shaped has to be marked dirty by hand.
-  std::vector<Vec2> intrinsic;
+  Vector<Vec2> intrinsic;
 };
 
 // One engine serves several trees - the main root, each overlay, each
 // offscreen pass - and they interleave within a frame. Keyed by root widget so
 // they do not evict one another; a single tree would rebuild on every call.
+// Entries may move when a map grows; what Yoga points at (the Yoga nodes, the
+// LayoutNode arrays) lives in their vectors' heap buffers, which move along.
 struct LayoutEngine::Retained {
   YGConfigRef config = nullptr;
-  std::unordered_map<u32, RetainedTree> trees;
-  std::unordered_map<u32, LayoutEngine::NodeStore> stores;
+  HashMap<u32, RetainedTree> trees;
+  HashMap<u32, LayoutEngine::NodeStore> stores;
 
   ~Retained() {
-    for (auto& [root_id, tree] : trees)
+    // Each tree frees independently, so the map's order does not matter.
+    for (const auto& [root_id, tree] : trees)
       if (!tree.nodes.empty()) YGNodeFreeRecursive(tree.nodes[0]);
     if (config) YGConfigFree(config);
   }

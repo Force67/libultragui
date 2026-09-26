@@ -1,6 +1,6 @@
 #include <ugui/svg/svg.h>
 
-#include <cstdio>
+#include <stdio.h>
 
 #include "svg_types.h"
 
@@ -8,25 +8,25 @@ namespace ugui {
 
 bool LoadSvg(const char* path, SvgImage& out, u32 target_width,
              u32 target_height) {
-  std::FILE* f = std::fopen(path, "rb");
+  FILE* f = fopen(path, "rb");
   if (!f) {
-    std::fprintf(stderr, "ultragui: failed to open SVG file '%s'\n", path);
+    fprintf(stderr, "ultragui: failed to open SVG file '%s'\n", path);
     return false;
   }
 
-  std::fseek(f, 0, SEEK_END);
-  long size = std::ftell(f);
-  std::fseek(f, 0, SEEK_SET);
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
 
   if (size <= 0) {
-    std::fclose(f);
+    fclose(f);
     return false;
   }
 
   Vector<char> data(static_cast<usize>(size));
-  usize read = std::fread(data.data(), 1, static_cast<usize>(size), f);
+  usize read = fread(data.data(), 1, static_cast<usize>(size), f);
   (void)read;
-  std::fclose(f);
+  fclose(f);
 
   return LoadSvgMemory(data.data(), static_cast<usize>(size), out, target_width,
                        target_height);

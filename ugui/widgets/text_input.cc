@@ -1,12 +1,12 @@
 #include <ugui/platform/platform.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
 #include <ugui/text/text_engine.h>
 #include <ugui/widgets/text_input.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
-#include <cstring>
+#include <string.h>
 
 // GLFW key codes (avoid including GLFW in widget code).
 namespace {
@@ -46,13 +46,21 @@ FontHandle effective_font(WidgetRegistry& world, wid e,
 
 // --- UTF-8 navigation -------------------------------------------------------
 
+// String::insert(pos, ptr, len), which base::String does not have.
+void InsertText(String& text, usize pos, const char* data, usize len) {
+  String tail = text.substr(pos);
+  text.resize(pos);
+  text.append(data, len);
+  text.append(tail);
+}
+
 u32 NextPos(const String& text, u32 pos) {
   if (pos >= text.size()) return static_cast<u32>(text.size());
   u8 c = static_cast<u8>(text[pos]);
   if (c < 0x80) return pos + 1;
-  if ((c & 0xE0) == 0xC0) return std::min(pos + 2, static_cast<u32>(text.size()));
-  if ((c & 0xF0) == 0xE0) return std::min(pos + 3, static_cast<u32>(text.size()));
-  return std::min(pos + 4, static_cast<u32>(text.size()));
+  if ((c & 0xE0) == 0xC0) return Min(pos + 2, static_cast<u32>(text.size()));
+  if ((c & 0xF0) == 0xE0) return Min(pos + 3, static_cast<u32>(text.size()));
+  return Min(pos + 4, static_cast<u32>(text.size()));
 }
 
 u32 PrevPos(const String& text, u32 pos) {
@@ -90,8 +98,8 @@ u32 PosFromX(const String& text, f32 local_x, const TextRun& run) {
 
 void DeleteSelection(TextInputContent& c) {
   if (c.sel_start == c.sel_end) return;
-  u32 lo = std::min(c.sel_start, c.sel_end);
-  u32 hi = std::max(c.sel_start, c.sel_end);
+  u32 lo = Min(c.sel_start, c.sel_end);
+  u32 hi = Max(c.sel_start, c.sel_end);
   c.text.erase(lo, hi - lo);
   c.cursor = lo;
   c.sel_start = c.sel_end = c.cursor;
@@ -139,7 +147,7 @@ bool TextInputCharInput(WidgetRegistry& world, wid e, u32 codepoint) {
     len = 4;
   }
 
-  c.text.insert(c.cursor, buf, len);
+  InsertText(c.text, c.cursor, buf, len);
   c.cursor += len;
   c.sel_start = c.sel_end = c.cursor;
   ResetBlink(c);
@@ -257,8 +265,8 @@ bool TextInputKeyDown(WidgetRegistry& world, wid e, i32 key, i32 mods) {
 
     case kKeyC:
       if (ctrl && c.sel_start != c.sel_end && ctx && ctx->platform) {
-        u32 lo = std::min(c.sel_start, c.sel_end);
-        u32 hi = std::max(c.sel_start, c.sel_end);
+        u32 lo = Min(c.sel_start, c.sel_end);
+        u32 hi = Max(c.sel_start, c.sel_end);
         String sel = c.text.substr(lo, hi - lo);
         ctx->platform->set_clipboard_text(sel.c_str());
         return true;
@@ -267,8 +275,8 @@ bool TextInputKeyDown(WidgetRegistry& world, wid e, i32 key, i32 mods) {
 
     case kKeyX:
       if (ctrl && c.sel_start != c.sel_end && ctx && ctx->platform) {
-        u32 lo = std::min(c.sel_start, c.sel_end);
-        u32 hi = std::max(c.sel_start, c.sel_end);
+        u32 lo = Min(c.sel_start, c.sel_end);
+        u32 hi = Max(c.sel_start, c.sel_end);
         String sel = c.text.substr(lo, hi - lo);
         ctx->platform->set_clipboard_text(sel.c_str());
         DeleteSelection(c);
@@ -283,8 +291,8 @@ bool TextInputKeyDown(WidgetRegistry& world, wid e, i32 key, i32 mods) {
         const char* clip = ctx->platform->clipboard_text();
         if (clip && clip[0]) {
           DeleteSelection(c);
-          u32 len = static_cast<u32>(std::strlen(clip));
-          c.text.insert(c.cursor, clip, len);
+          u32 len = static_cast<u32>(strlen(clip));
+          InsertText(c.text, c.cursor, clip, len);
           c.cursor += len;
           c.sel_start = c.sel_end = c.cursor;
           MarkDirty(world, e);
@@ -407,8 +415,8 @@ void TextInputDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
     auto text_run =
         te->Shape(fh, c.text.c_str(), static_cast<u32>(c.text.size()),
                   s.font_size, s.letter_spacing, s.line_height_multiplier);
-    u32 lo = std::min(c.sel_start, c.sel_end);
-    u32 hi = std::max(c.sel_start, c.sel_end);
+    u32 lo = Min(c.sel_start, c.sel_end);
+    u32 hi = Max(c.sel_start, c.sel_end);
     f32 sel_x0 = CursorXFromPos(c.text, lo, text_run);
     f32 sel_x1 = CursorXFromPos(c.text, hi, text_run);
     Color sel_color = {0.3f, 0.5f, 0.9f, 0.4f * alpha};
@@ -493,35 +501,35 @@ void SetTextInputChange(wid e, TextInputContent::ChangeHandler handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kTextInput) return;
-  world.GetOrAdd<TextInputContent>(e).on_change = std::move(handler);
+  world.GetOrAdd<TextInputContent>(e).on_change = ugui::move(handler);
 }
 
 void SetTextInputSubmit(wid e, TextInputContent::SubmitHandler handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kTextInput) return;
-  world.GetOrAdd<TextInputContent>(e).on_submit = std::move(handler);
+  world.GetOrAdd<TextInputContent>(e).on_submit = ugui::move(handler);
 }
 
 void SetTextInputCancel(wid e, TextInputContent::CancelHandler handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kTextInput) return;
-  world.GetOrAdd<TextInputContent>(e).on_cancel = std::move(handler);
+  world.GetOrAdd<TextInputContent>(e).on_cancel = ugui::move(handler);
 }
 
 void SetTextInputHistoryPrev(wid e, TextInputContent::HistoryHandler handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kTextInput) return;
-  world.GetOrAdd<TextInputContent>(e).on_history_prev = std::move(handler);
+  world.GetOrAdd<TextInputContent>(e).on_history_prev = ugui::move(handler);
 }
 
 void SetTextInputHistoryNext(wid e, TextInputContent::HistoryHandler handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kTextInput) return;
-  world.GetOrAdd<TextInputContent>(e).on_history_next = std::move(handler);
+  world.GetOrAdd<TextInputContent>(e).on_history_next = ugui::move(handler);
 }
 
 }  // namespace ugui

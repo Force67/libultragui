@@ -2,8 +2,8 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
-#include <cassert>
-#include <cstdio>
+#include <assert.h>
+#include <stdio.h>
 
 namespace ugui {
 
@@ -52,7 +52,7 @@ bool Platform::Init(const WindowConfig& config) {
     impl_->external = true;
   } else {
     if (!glfwInit()) {
-      std::fprintf(stderr, "ultragui: glfwInit() failed\n");
+      fprintf(stderr, "ultragui: glfwInit() failed\n");
       return false;
     }
 
@@ -71,7 +71,7 @@ bool Platform::Init(const WindowConfig& config) {
     impl_->window = glfwCreateWindow(config.width, config.height, config.title,
                                      nullptr, nullptr);
     if (!impl_->window) {
-      std::fprintf(stderr, "ultragui: glfwCreateWindow() failed\n");
+      fprintf(stderr, "ultragui: glfwCreateWindow() failed\n");
       glfwTerminate();
       return false;
     }

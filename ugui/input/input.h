@@ -44,8 +44,8 @@ class InputRouter {
   // Event callbacks (optional, for the application layer)
   using ClickHandler = Function<void(wid, MouseButton)>;
   using HoverHandler = Function<void(wid, bool)>;
-  void set_on_click(ClickHandler handler) { on_click_ = std::move(handler); }
-  void set_on_hover(HoverHandler handler) { on_hover_ = std::move(handler); }
+  void set_on_click(ClickHandler handler) { on_click_ = ugui::move(handler); }
+  void set_on_hover(HoverHandler handler) { on_hover_ = ugui::move(handler); }
 
   /// Register a global keyboard shortcut. Checked before dispatching to focused
   /// widget.
@@ -56,7 +56,7 @@ class InputRouter {
   /// Gamepad B-button callback for "back" / "cancel" navigation.
   using GamepadBackHandler = Function<void()>;
   void set_on_gamepad_back(GamepadBackHandler handler) {
-    on_gamepad_back_ = std::move(handler);
+    on_gamepad_back_ = ugui::move(handler);
   }
 
   /// Whether gamepad navigation is currently active (last input was from

@@ -61,9 +61,9 @@ constexpr i32 kModSuper = 0x8;
 constexpr i32 kModCapsLock = 0x10;
 constexpr i32 kModNumLock = 0x20;
 
-bool Extended(std::intptr_t lparam) { return (HIWORD(lparam) & KF_EXTENDED) != 0; }
+bool Extended(intptr_t lparam) { return (HIWORD(lparam) & KF_EXTENDED) != 0; }
 
-Vec2 MousePosition(std::intptr_t lparam, Vec2 scale) {
+Vec2 MousePosition(intptr_t lparam, Vec2 scale) {
   return {static_cast<f32>(GET_X_LPARAM(lparam)) * scale.x,
           static_cast<f32>(GET_Y_LPARAM(lparam)) * scale.y};
 }
@@ -73,7 +73,7 @@ WCHAR g_high_surrogate = 0;
 
 }  // namespace
 
-i32 KeyFromVirtualKey(u32 vk, std::intptr_t lparam) {
+i32 KeyFromVirtualKey(u32 vk, intptr_t lparam) {
   if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z'))
     return static_cast<i32>(vk);
   if (vk >= VK_F1 && vk <= VK_F24) return kF1 + static_cast<i32>(vk - VK_F1);
@@ -149,7 +149,7 @@ i32 CurrentMods() {
 }
 
 bool HandleMessage(Platform& platform, void* window, u32 message,
-                   std::uintptr_t wparam, std::intptr_t lparam, Vec2 scale) {
+                   uintptr_t wparam, intptr_t lparam, Vec2 scale) {
   switch (message) {
     case WM_MOUSEMOVE:
       host::PushMouseMove(platform, MousePosition(lparam, scale));
@@ -200,7 +200,7 @@ bool HandleMessage(Platform& platform, void* window, u32 message,
     case WM_SYSKEYUP: {
       const bool pressed = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
       const i32 key = KeyFromVirtualKey(static_cast<u32>(wparam), lparam);
-      const i32 scancode = static_cast<i32>((static_cast<std::uintptr_t>(lparam) >> 16) & 0x1FF);
+      const i32 scancode = static_cast<i32>((static_cast<uintptr_t>(lparam) >> 16) & 0x1FF);
       const bool repeat = pressed && (lparam & (1 << 30)) != 0;
       host::PushKey(platform, key, scancode, pressed, repeat, CurrentMods());
       return true;

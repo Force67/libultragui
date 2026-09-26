@@ -1,6 +1,6 @@
 #include <ugui/style/transition.h>
 
-#include <cmath>
+#include <math.h>
 
 namespace ugui {
 
@@ -24,9 +24,9 @@ static f32 cubic_bezier(f32 p1x, f32 p1y, f32 p2x, f32 p2y, f32 t) {
   f32 s = t;
   for (int i = 0; i < 8; ++i) {
     f32 x = sample_x(s) - t;
-    if (std::abs(x) < 1e-6f) break;
+    if (fabsf(x) < 1e-6f) break;
     f32 dx = sample_dx(s);
-    if (std::abs(dx) < 1e-6f) break;
+    if (fabsf(dx) < 1e-6f) break;
     s -= x / dx;
   }
   s = s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
@@ -47,7 +47,7 @@ f32 EvalEasing(EasingType type, f32 t, const f32 bezier[4]) {
     }
     case EasingType::kEaseInOut:
       return t < 0.5f ? 4.0f * t * t * t
-                      : 1.0f - 0.5f * std::pow(-2.0f * t + 2.0f, 3.0f);
+                      : 1.0f - 0.5f * powf(-2.0f * t + 2.0f, 3.0f);
     case EasingType::kCubicBezier:
       if (bezier)
         return cubic_bezier(bezier[0], bezier[1], bezier[2], bezier[3], t);
@@ -59,16 +59,16 @@ f32 EvalEasing(EasingType type, f32 t, const f32 bezier[4]) {
 }
 
 static f32 eval_spring(f32 stiffness, f32 damping, f32 mass, f32 t) {
-  f32 omega = std::sqrt(stiffness / mass);
-  f32 zeta = damping / (2.0f * std::sqrt(stiffness * mass));
+  f32 omega = sqrtf(stiffness / mass);
+  f32 zeta = damping / (2.0f * sqrtf(stiffness * mass));
 
   if (zeta < 1.0f) {
-    f32 omega_d = omega * std::sqrt(1.0f - zeta * zeta);
-    return 1.0f - std::exp(-zeta * omega * t) *
-                      (std::cos(omega_d * t) +
-                       (zeta * omega / omega_d) * std::sin(omega_d * t));
+    f32 omega_d = omega * sqrtf(1.0f - zeta * zeta);
+    return 1.0f - expf(-zeta * omega * t) *
+                      (cosf(omega_d * t) +
+                       (zeta * omega / omega_d) * sinf(omega_d * t));
   }
-  return 1.0f - std::exp(-omega * t) * (1.0f + omega * t);
+  return 1.0f - expf(-omega * t) * (1.0f + omega * t);
 }
 
 f32 EvalEasing(const Transition& transition, f32 t) {

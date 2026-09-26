@@ -18,8 +18,8 @@ struct Theme {
   /// Get a token value, or empty string if not found.
   const String& Get(const String& token_name) const {
     static const String empty;
-    auto it = tokens.find(token_name);
-    return it != tokens.end() ? it->second : empty;
+    const String* value = tokens.find(token_name);
+    return value ? *value : empty;
   }
 
   /// Dark theme preset with common design tokens.

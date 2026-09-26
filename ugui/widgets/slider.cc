@@ -154,7 +154,7 @@ void SetSliderMax(wid e, f32 max) {
 
 void SetSliderChange(wid e, Function<void(f32)> handler) {
   WidgetRegistry::Active()->GetOrAdd<SliderContent>(e).on_change =
-      std::move(handler);
+      ugui::move(handler);
 }
 
 }  // namespace ugui

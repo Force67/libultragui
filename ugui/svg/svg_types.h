@@ -6,9 +6,7 @@
 #include <ugui/core/math.h>
 #include <ugui/core/types.h>
 
-#include <string>
-#include <unordered_map>
-#include <vector>
+
 
 namespace ugui {
 namespace svg {
@@ -26,8 +24,8 @@ struct Transform {
 
   static Transform Rotate(f32 degrees) {
     f32 rad = degrees * 3.14159265358979323846f / 180.0f;
-    f32 cs = std::cos(rad);
-    f32 sn = std::sin(rad);
+    f32 cs = cosf(rad);
+    f32 sn = sinf(rad);
     return {cs, sn, -sn, cs, 0, 0};
   }
 

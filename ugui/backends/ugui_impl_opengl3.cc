@@ -3,12 +3,12 @@
 // OpenGL RHI so it renders ultragui::DrawData identically, into the host's
 // framebuffer.
 
-#include <cstddef>
-#include <cstdio>
+#include <stddef.h>
+#include <stdio.h>
 #include <ugui/backends/ugui_impl_opengl3.h>
 #include <ugui/render/vertex.h>
 
-#include <unordered_map>
+
 
 namespace ugui {
 namespace gl {
@@ -127,7 +127,7 @@ struct State {
   GLint quad_scale = -1, quad_translate = -1, quad_tex = -1;
   GLint text_scale = -1, text_translate = -1, text_tex = -1;
   GLuint white = 0, font = 0;
-  std::unordered_map<TextureId, UserTextureGl> user_textures;
+  HashMap<TextureId, UserTextureGl> user_textures;
   TextureId next_user_id = 1;  // 0 = white, ~0 = font; user ids start at 1
 };
 State g;
@@ -322,7 +322,7 @@ GLuint Compile(GLenum type, const char* src) {
   if (!ok) {
     char log[1024];
     glGetShaderInfoLog(s, sizeof(log), nullptr, log);
-    std::fprintf(stderr, "ugui_impl_opengl3: shader compile failed: %s\n", log);
+    fprintf(stderr, "ugui_impl_opengl3: shader compile failed: %s\n", log);
   }
   return s;
 }
@@ -336,7 +336,7 @@ GLuint Program(const char* vs_src, const char* fs_src) {
   glLinkProgram(p);
   GLint ok = 0;
   glGetProgramiv(p, GL_LINK_STATUS, &ok);
-  if (!ok) std::fprintf(stderr, "ugui_impl_opengl3: program link failed\n");
+  if (!ok) fprintf(stderr, "ugui_impl_opengl3: program link failed\n");
   glDeleteShader(vs);
   glDeleteShader(fs);
   return p;
@@ -401,7 +401,7 @@ void Upload(GLuint buf, GLenum target, const void* data, GLsizeiptr bytes) {
 bool Init(const InitInfo& info) {
   if (!info.get_proc_address) return false;
   if (!LoadGL(info.get_proc_address)) {
-    std::fprintf(stderr, "ugui_impl_opengl3: failed to load GL functions\n");
+    fprintf(stderr, "ugui_impl_opengl3: failed to load GL functions\n");
     return false;
   }
   g.quad_prog = Program(kQuadVert, kQuadFrag);
@@ -432,8 +432,9 @@ void Shutdown() {
   if (g.vao) glDeleteVertexArrays(1, &g.vao);
   GLuint bufs[] = {g.quad_vbo, g.quad_ibo, g.text_vbo, g.text_ibo};
   glDeleteBuffers(4, bufs);
-  for (auto& kv : g.user_textures)
-    if (kv.second.tex) glDeleteTextures(1, &kv.second.tex);
+  // Each texture frees independently, so the map's order does not matter.
+  for (auto [id, ut] : g.user_textures)
+    if (ut.tex) glDeleteTextures(1, &ut.tex);
   g.user_textures.clear();
   if (g.white) glDeleteTextures(1, &g.white);
   if (g.font) glDeleteTextures(1, &g.font);
@@ -510,8 +511,8 @@ void RenderDrawData(const DrawData& dd) {
     } else if (c.texture_id == kNullTextureId) {
       tex = g.white;
     } else {
-      auto it = g.user_textures.find(c.texture_id);
-      tex = it != g.user_textures.end() ? it->second.tex : g.white;
+      const UserTextureGl* ut = g.user_textures.find(c.texture_id);
+      tex = ut ? ut->tex : g.white;
     }
     glBindTexture(GL_TEXTURE_2D, tex);
 
@@ -558,9 +559,9 @@ TextureId CreateTexture(u32 width, u32 height, RHIFormat format,
 }
 
 void UpdateTexture(TextureId id, const void* pixels) {
-  auto it = g.user_textures.find(id);
-  if (it == g.user_textures.end() || !pixels) return;
-  UserTextureGl& ut = it->second;
+  UserTextureGl* found = g.user_textures.find(id);
+  if (!found || !pixels) return;
+  UserTextureGl& ut = *found;
   glBindTexture(GL_TEXTURE_2D, ut.tex);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
   glTexImage2D(GL_TEXTURE_2D, 0, ut.internal, static_cast<GLsizei>(ut.width),
@@ -569,10 +570,10 @@ void UpdateTexture(TextureId id, const void* pixels) {
 }
 
 void DestroyTexture(TextureId id) {
-  auto it = g.user_textures.find(id);
-  if (it == g.user_textures.end()) return;
-  if (it->second.tex) glDeleteTextures(1, &it->second.tex);
-  g.user_textures.erase(it);
+  UserTextureGl* ut = g.user_textures.find(id);
+  if (!ut) return;
+  if (ut->tex) glDeleteTextures(1, &ut->tex);
+  g.user_textures.erase(id);
 }
 
 namespace {

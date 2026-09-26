@@ -20,8 +20,8 @@
 #undef max
 #endif
 
-#include <cstdio>
-#include <cstring>
+#include <stdio.h>
+#include <string.h>
 #include <ugui/backends/ugui_impl_dx11.h>
 #include <ugui/rhi/d3d11/d3d_shader_compiler.h>
 
@@ -96,7 +96,7 @@ Backend g;
 
 bool Check(HRESULT hr, const char* what) {
   if (SUCCEEDED(hr)) return true;
-  std::fprintf(stderr, "ugui_impl_dx11: %s failed: 0x%08lx\n", what,
+  fprintf(stderr, "ugui_impl_dx11: %s failed: 0x%08lx\n", what,
                static_cast<unsigned long>(hr));
   return false;
 }
@@ -302,7 +302,7 @@ bool Upload(ID3D11Buffer* buffer, const void* data, u32 bytes) {
                                      D3D11_MAP_WRITE_DISCARD, 0, &mapped),
              "Map"))
     return false;
-  std::memcpy(mapped.pData, data, bytes);
+  memcpy(mapped.pData, data, bytes);
   ID3D11DeviceContext_Unmap(g.context, (ID3D11Resource*)buffer, 0);
   return true;
 }

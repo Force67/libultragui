@@ -1,12 +1,11 @@
 #include <ugui/platform/platform.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
 #include <ugui/widgets/dropdown.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
-#include <cctype>
-#include <string>
+#include <ctype.h>
 
 namespace ugui {
 namespace {
@@ -115,13 +114,13 @@ void DropdownMeasure(WidgetRegistry& world, wid e, f32& out_width,
   for (auto& opt : c->options) {
     auto run = te->Shape(fh, opt.c_str(), static_cast<u32>(opt.size()),
                          font_size, letter_sp, st.line_height_multiplier);
-    max_width = std::max(max_width, run.total_advance);
+    max_width = Max(max_width, run.total_advance);
   }
 
   const char* placeholder = "Select...";
   auto ph_run = te->Shape(fh, placeholder, 9, font_size, letter_sp,
                           st.line_height_multiplier);
-  max_width = std::max(max_width, ph_run.total_advance);
+  max_width = Max(max_width, ph_run.total_advance);
 
   out_width =
       max_width + kChevronWidth + kHPadding * 2.0f + st.padding.horizontal();
@@ -187,7 +186,7 @@ void DropdownDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
   f32 chevron_x = content.x + content.w - kChevronWidth;
   f32 chevron_cy = content.y + content.h * 0.5f;
   f32 chevron_size = font_size * 0.3f;
-  f32 line_thickness = std::max(1.5f, font_size / 10.0f);
+  f32 line_thickness = Max(1.5f, font_size / 10.0f);
   Color chevron_color = s.text_color.WithAlpha(s.text_color.a * alpha * 0.7f);
 
   if (c->open) {
@@ -328,7 +327,7 @@ void SetDropdownChange(wid e, Function<void(i32, const String&)> handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* n = world.Get<WidgetNode>(e);
   if (!n || n->kind != WidgetKind::kDropdown) return;
-  world.GetOrAdd<DropdownContent>(e).on_change = std::move(handler);
+  world.GetOrAdd<DropdownContent>(e).on_change = ugui::move(handler);
 }
 
 }  // namespace ugui

@@ -1,9 +1,6 @@
 #include <ugui/core/string_utils.h>
 #include <ugui/core/from_chars_compat.h>
 
-#include <charconv>
-#include <cstring>
-
 namespace ugui {
 
 bool ParseHexColor(StringView str, u32& out) {
@@ -21,7 +18,7 @@ bool ParseHexColor(StringView str, u32& out) {
   if (len != 6 && len != 8) return false;
 
   auto result = ugui::from_chars(begin, begin + len, out, 16);
-  return result.ec == std::errc{};
+  return result.ec == FromCharsError::kNone;
 }
 
 bool starts_with(StringView str, StringView prefix) {
