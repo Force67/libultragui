@@ -13,7 +13,18 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Options
 option(ULTRAGUI_BUILD_EXAMPLES "Build example applications" ON)
 option(ULTRAGUI_BUILD_TESTS "Build tests" ON)
-option(ULTRAGUI_BACKEND_VULKAN "Enable Vulkan backend" ON)
+# A platform with no window of its own, which the host feeds (see
+# ugui/platform/platform_host.h): for embedding where the host keeps its
+# window to itself, a game's say. Pairs with draw-data mode.
+option(ULTRAGUI_PLATFORM_HOST "Use the host-driven platform instead of GLFW" OFF)
+# Every RHI presents to the platform's window, and the host platform has none,
+# so on it the default is no RHI: the host renders the draw data.
+if(ULTRAGUI_PLATFORM_HOST)
+    set(_default_backend_vulkan OFF)
+else()
+    set(_default_backend_vulkan ON)
+endif()
+option(ULTRAGUI_BACKEND_VULKAN "Enable Vulkan backend" ${_default_backend_vulkan})
 option(ULTRAGUI_BACKEND_D3D12 "Enable D3D12 backend" OFF)
 option(ULTRAGUI_BACKEND_D3D11 "Enable D3D11 backend (DXVK-native)" OFF)
 option(ULTRAGUI_BACKEND_OPENGL "Enable OpenGL 3.3 backend" OFF)
@@ -23,10 +34,6 @@ option(ULTRAGUI_VIDEO "Enable MPEG-1 video playback (pl_mpeg)" ON)
 option(ULTRAGUI_LUA "Enable built-in Lua scripting runtime" ON)
 option(ULTRAGUI_DEFAULT_OPEN_URL "Compile a default Platform::OpenURL implementation" ON)
 option(ULTRAGUI_BUILD_SHADERS "Compile the bundled GLSL shaders with glslc" ${ULTRAGUI_BACKEND_VULKAN})
-# A platform with no window of its own, which the host feeds (see
-# ugui/platform/platform_host.h): for embedding where the host keeps its
-# window to itself, a game's say. Pairs with draw-data mode.
-option(ULTRAGUI_PLATFORM_HOST "Use the host-driven platform instead of GLFW" OFF)
 # A host that supplies its own ugui::Platform (ULTRAGUI_PLATFORM_SOURCE) and
 # renders the draw list with its own pipelines does not need GLFW or the bundled
 # GLSL shaders; turn these off to drop those build dependencies.
@@ -46,6 +53,13 @@ else()
     set(_default_impl_win32 OFF)
 endif()
 option(ULTRAGUI_IMPL_WIN32 "Build the ugui_impl_win32 input backend" ${_default_impl_win32})
+if(ULTRAGUI_PLATFORM_HOST AND (ULTRAGUI_BACKEND_VULKAN OR ULTRAGUI_BACKEND_D3D12 OR
+                               ULTRAGUI_BACKEND_D3D11 OR ULTRAGUI_BACKEND_OPENGL))
+    message(FATAL_ERROR
+        "ULTRAGUI_PLATFORM_HOST has no window for an RHI to present to; turn the "
+        "ULTRAGUI_BACKEND_* options off and render the draw data from the host "
+        "(ULTRAGUI_IMPL_DX11, or your own renderer)")
+endif()
 # Where pkg-config has nothing to offer, build freetype, harfbuzz and Lua from
 # pinned sources (cmake/BundledDeps.cmake).
 option(ULTRAGUI_BUNDLED_DEPS "Build freetype, harfbuzz and Lua from source" ${WIN32})
@@ -123,7 +137,7 @@ if(ULTRAGUI_LUA)
 endif()
 
 # GLFW (bundled platform backend + examples)
-if(ULTRAGUI_PLATFORM_GLFW OR ULTRAGUI_BUILD_EXAMPLES)
+if(ULTRAGUI_PLATFORM_GLFW OR (ULTRAGUI_BUILD_EXAMPLES AND NOT ULTRAGUI_PLATFORM_HOST))
     find_package(glfw3 3.3 REQUIRED)
 endif()
 
@@ -508,6 +522,8 @@ endif()
 if(ULTRAGUI_BUILD_EXAMPLES)
     if(ULTRAGUI_USE_BASE)
         message(STATUS "ultragui: examples use the STL; skipped with ULTRAGUI_USE_BASE")
+    elseif(ULTRAGUI_PLATFORM_HOST)
+        message(STATUS "ultragui: examples open their own window; skipped with ULTRAGUI_PLATFORM_HOST")
     else()
         add_subdirectory(examples)
     endif()

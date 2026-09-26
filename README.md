@@ -185,7 +185,6 @@ at `Present` does, run ultragui in draw-data mode on the host platform:
 ```cmake
 set(ULTRAGUI_PLATFORM_HOST ON)    # no window of its own; the host feeds it
 set(ULTRAGUI_IMPL_DX11 ON)        # renders the draw list on the host's device
-set(ULTRAGUI_BACKEND_VULKAN OFF)  # no RHI at all: a null one is linked
 ```
 
 ```cpp
