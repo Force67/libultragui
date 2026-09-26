@@ -4,7 +4,7 @@
 #include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <utility>
+
 
 namespace ugui {
 namespace {
@@ -72,7 +72,8 @@ void SetModalBackdropColor(wid e, Color c) {
 
 void SetModalDismiss(wid e, Function<void()> handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
-  if (ModalContent* mc = content(world, e)) mc->on_dismiss = std::move(handler);
+  if (ModalContent* mc = content(world, e))
+    mc->on_dismiss = ugui::move(handler);
 }
 
 bool ModalVisible(wid e) {

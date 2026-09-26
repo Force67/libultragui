@@ -1,7 +1,8 @@
-#include <cstddef>
-#include <cstdio>
+#include <stddef.h>
+#include <stdio.h>
 #define PL_MPEG_IMPLEMENTATION
 #include <ugui/core/config.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/rhi/rhi.h>
 #include <ugui/video/video.h>
 
@@ -11,9 +12,8 @@
 #include <miniaudio.h>
 #endif
 
-#include <algorithm>
-#include <cstdio>
-#include <cstring>
+#include <stdio.h>
+#include <string.h>
 
 namespace ugui {
 
@@ -81,8 +81,8 @@ struct AudioBridge {
         MA_SUCCESS)
       return;
     if (frames > 0) {
-      std::memcpy(write_buf, interleaved,
-                  frames * 2 * sizeof(float));  // 2 channels
+      memcpy(write_buf, interleaved,
+             frames * 2 * sizeof(float));  // 2 channels
       ma_pcm_rb_commit_write(&ring_buffer, frames);
     }
   }
@@ -104,11 +104,10 @@ struct AudioBridge {
 
       // Zero remaining if we didn't get enough
       if (frames < frame_count) {
-        std::memset(dst + frames * 2, 0,
-                    (frame_count - frames) * 2 * sizeof(float));
+        memset(dst + frames * 2, 0, (frame_count - frames) * 2 * sizeof(float));
       }
     } else {
-      std::memset(dst, 0, frame_count * 2 * sizeof(float));
+      memset(dst, 0, frame_count * 2 * sizeof(float));
     }
   }
 };
@@ -221,12 +220,12 @@ bool VideoPlayer::Load(RHI* rhi, const char* path, AudioBackend* audio) {
 
   plm_t* plm = plm_create_with_filename(path);
   if (!plm) {
-    std::fprintf(stderr, "ugui/video: failed to load '%s'\n", path);
+    fprintf(stderr, "ugui/video: failed to load '%s'\n", path);
     return false;
   }
 
   if (plm_get_num_video_streams(plm) == 0) {
-    std::fprintf(stderr, "ugui/video: no video stream in '%s'\n", path);
+    fprintf(stderr, "ugui/video: no video stream in '%s'\n", path);
     plm_destroy(plm);
     return false;
   }
@@ -264,8 +263,7 @@ bool VideoPlayer::Load(RHI* rhi, const char* path, AudioBackend* audio) {
       plm_set_audio_decode_callback(plm, Impl::OnAudioSamples, impl_);
       plm_set_audio_lead_time(plm, 1024.0 / sample_rate);
     } else {
-      std::fprintf(stderr,
-                   "ugui/video: audio bridge init failed (non-fatal)\n");
+      fprintf(stderr, "ugui/video: audio bridge init failed (non-fatal)\n");
       delete impl_->audio_bridge;
       impl_->audio_bridge = nullptr;
       plm_set_audio_enabled(plm, FALSE);
@@ -276,10 +274,9 @@ bool VideoPlayer::Load(RHI* rhi, const char* path, AudioBackend* audio) {
 #else
   (void)audio;
   if (has_audio) {
-    std::fprintf(
-        stderr,
-        "ugui/video: '%s' has audio but ULTRAGUI_AUDIO is disabled\n",
-        path);
+    fprintf(stderr,
+            "ugui/video: '%s' has audio but ULTRAGUI_AUDIO is disabled\n",
+            path);
   }
   plm_set_audio_enabled(plm, FALSE);
 #endif
@@ -397,7 +394,7 @@ void VideoPlayer::Stop() {
 
 void VideoPlayer::Seek(f64 seconds) {
   if (!impl_) return;
-  seconds = std::clamp(seconds, 0.0, impl_->duration);
+  seconds = ClampMinMax(seconds, 0.0, impl_->duration);
   plm_seek(impl_->plm, seconds, TRUE);
   impl_->finished = false;
 #if ULTRAGUI_AUDIO

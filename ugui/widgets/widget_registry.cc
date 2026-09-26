@@ -35,7 +35,9 @@ wid WidgetRegistry::New(u32 id) {
   wid e{index, s.generation};
 
   // Attach the core components every widget entity carries.
-  Add<WidgetNode>(e, WidgetNode{id == 0 ? NextWidgetId() : id});
+  WidgetNode node;
+  node.id = id == 0 ? NextWidgetId() : id;
+  Add<WidgetNode>(e, ugui::move(node));
   Add<Transform>(e, Transform{});
   Add<StyleC>(e, StyleC{});
   Add<Hierarchy>(e, Hierarchy{});

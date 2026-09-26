@@ -2,8 +2,14 @@
 #include <ugui/platform/platform.h>
 #include <ugui/platform/platform_host.h>
 
+#if defined(ULTRAGUI_USE_BASE)
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#else
 #include <chrono>
 #include <mutex>
+#endif
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -16,8 +22,26 @@
 
 namespace ugui {
 
+namespace {
+#if defined(ULTRAGUI_USE_BASE)
+using HostMutex = base::Mutex;
+using HostLock = base::LockGuard<base::Mutex>;
+using HostTime = base::TimeTicks;
+HostTime HostNow() { return base::TimeTicks::Now(); }
+f64 SecondsSince(HostTime start) { return (HostNow() - start).InSecondsF(); }
+#else
+using HostMutex = std::mutex;
+using HostLock = std::lock_guard<std::mutex>;
+using HostTime = std::chrono::steady_clock::time_point;
+HostTime HostNow() { return std::chrono::steady_clock::now(); }
+f64 SecondsSince(HostTime start) {
+  return std::chrono::duration<f64>(HostNow() - start).count();
+}
+#endif
+}  // namespace
+
 struct Platform::Impl {
-  std::mutex lock;
+  HostMutex lock;
   // Filled by the host between polls; handed to `queue` by PollEvents.
   InputQueue pending;
   // What the input router reads this frame.
@@ -25,7 +49,7 @@ struct Platform::Impl {
   Vec2 window_size = {0.0f, 0.0f};
   Vec2 framebuffer_size = {0.0f, 0.0f};
   Cursor cursor = Cursor::kDefault;
-  std::chrono::steady_clock::time_point start;
+  HostTime start;
   String clipboard;
 };
 
@@ -33,7 +57,7 @@ Platform::Platform() : impl_(new Impl()) {}
 Platform::~Platform() { delete impl_; }
 
 bool Platform::Init(const WindowConfig& config) {
-  impl_->start = std::chrono::steady_clock::now();
+  impl_->start = HostNow();
   const Vec2 size = {static_cast<f32>(config.width),
                      static_cast<f32>(config.height)};
   impl_->window_size = size;
@@ -46,7 +70,7 @@ void Platform::Shutdown() {}
 bool Platform::ShouldClose() const { return false; }
 
 void Platform::PollEvents() {
-  std::lock_guard<std::mutex> hold(impl_->lock);
+  HostLock hold(impl_->lock);
   impl_->queue = impl_->pending;
   impl_->pending.clear();
   // The pointer stays where it last was, with or without new events.
@@ -54,31 +78,30 @@ void Platform::PollEvents() {
 }
 
 Vec2 Platform::window_size() const {
-  std::lock_guard<std::mutex> hold(impl_->lock);
+  HostLock hold(impl_->lock);
   return impl_->window_size;
 }
 
 Vec2 Platform::framebuffer_size() const {
-  std::lock_guard<std::mutex> hold(impl_->lock);
+  HostLock hold(impl_->lock);
   return impl_->framebuffer_size;
 }
 
 f32 Platform::dpi_scale() const {
-  std::lock_guard<std::mutex> hold(impl_->lock);
+  HostLock hold(impl_->lock);
   return impl_->window_size.x > 0.0f
              ? impl_->framebuffer_size.x / impl_->window_size.x
              : 1.0f;
 }
 
 f64 Platform::time() const {
-  const auto elapsed = std::chrono::steady_clock::now() - impl_->start;
-  return std::chrono::duration<f64>(elapsed).count();
+  return SecondsSince(impl_->start);
 }
 
 void* Platform::native_handle() const { return nullptr; }
 
 void Platform::SetCursor(Cursor cursor) {
-  std::lock_guard<std::mutex> hold(impl_->lock);
+  HostLock hold(impl_->lock);
   impl_->cursor = cursor;
 }
 
@@ -135,45 +158,45 @@ namespace host {
 
 void SetViewport(Platform& platform, Vec2 window_size, Vec2 framebuffer_size) {
   Platform::Impl& impl = *platform.impl();
-  std::lock_guard<std::mutex> hold(impl.lock);
+  HostLock hold(impl.lock);
   impl.window_size = window_size;
   impl.framebuffer_size = framebuffer_size;
 }
 
 void PushMouseMove(Platform& platform, Vec2 position) {
   Platform::Impl& impl = *platform.impl();
-  std::lock_guard<std::mutex> hold(impl.lock);
+  HostLock hold(impl.lock);
   impl.pending.PushMove(position);
 }
 
 void PushMouseButton(Platform& platform, MouseButton button, bool pressed) {
   Platform::Impl& impl = *platform.impl();
-  std::lock_guard<std::mutex> hold(impl.lock);
+  HostLock hold(impl.lock);
   impl.pending.PushButton(button, pressed);
 }
 
 void PushScroll(Platform& platform, Vec2 delta) {
   Platform::Impl& impl = *platform.impl();
-  std::lock_guard<std::mutex> hold(impl.lock);
+  HostLock hold(impl.lock);
   impl.pending.PushScroll(delta);
 }
 
 void PushKey(Platform& platform, i32 key, i32 scancode, bool pressed,
              bool repeat, i32 mods) {
   Platform::Impl& impl = *platform.impl();
-  std::lock_guard<std::mutex> hold(impl.lock);
+  HostLock hold(impl.lock);
   impl.pending.PushKey(key, scancode, pressed, repeat, mods);
 }
 
 void PushChar(Platform& platform, u32 codepoint) {
   Platform::Impl& impl = *platform.impl();
-  std::lock_guard<std::mutex> hold(impl.lock);
+  HostLock hold(impl.lock);
   impl.pending.PushChar(codepoint);
 }
 
 Cursor RequestedCursor(const Platform& platform) {
   Platform::Impl& impl = *platform.impl();
-  std::lock_guard<std::mutex> hold(impl.lock);
+  HostLock hold(impl.lock);
   return impl.cursor;
 }
 

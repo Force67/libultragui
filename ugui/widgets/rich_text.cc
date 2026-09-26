@@ -1,9 +1,9 @@
 #include <ugui/render/renderer2d.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/text/text_engine.h>
 #include <ugui/widgets/rich_text.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
 
 namespace ugui {
 namespace {
@@ -67,7 +67,7 @@ f32 LayoutSpans(WidgetRegistry& world, wid e, const RichTextContent& c,
         ShapedSpan{run, span.color, span.decoration, size, line_x, line_y});
 
     line_x += run.total_advance;
-    line_height = std::max(line_height, run.line_height);
+    line_height = Max(line_height, run.line_height);
   }
 
   return line_y + line_height;
@@ -88,8 +88,7 @@ void RichTextMeasure(WidgetRegistry& world, wid e, f32& out_width,
   f32 total_h = LayoutSpans(world, e, *c, shaped, 1e6f);  // measure no wrapping
 
   f32 max_w = 0;
-  for (const auto& ss : shaped)
-    max_w = std::max(max_w, ss.x + ss.run.total_advance);
+  for (const auto& ss : shaped) max_w = Max(max_w, ss.x + ss.run.total_advance);
   out_width = max_w;
   out_height = total_h;
 }
@@ -117,7 +116,7 @@ void RichTextDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
     renderer.DrawText(Vec2{x, y}, ss.run, col, te->atlas_texture());
 
     if (ss.decoration != TextDecoration::kNone) {
-      f32 thickness = std::max(1.0f, ss.font_size / 14.0f);
+      f32 thickness = Max(1.0f, ss.font_size / 14.0f);
       f32 baseline = y + ss.run.ascent;
 
       if (HasDecoration(ss.decoration, TextDecoration::kUnderline)) {

@@ -1,7 +1,7 @@
 #include <ugui/core/math.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/style/style.h>
 
-#include <span>
 
 namespace ugui {
 
@@ -87,7 +87,7 @@ Style Style::Lerp(const Style& a, const Style& b, f32 t) {
 
   // Gradient stops
   result.gradient_stop_count =
-      std::max(a.gradient_stop_count, b.gradient_stop_count);
+      Max(a.gradient_stop_count, b.gradient_stop_count);
   for (u32 i = 0; i < result.gradient_stop_count; ++i) {
     const auto& sa = (i < a.gradient_stop_count)
                          ? a.gradient_stops[i]
@@ -133,7 +133,7 @@ Style Style::Lerp(const Style& a, const Style& b, f32 t) {
 
 using MaskApply = void (*)(Style&, const Style&);
 
-static const std::pair<u64, MaskApply> kMaskApplicators[] = {
+static const Pair<u64, MaskApply> kMaskApplicators[] = {
     {StyleMask::kBackground,
      [](Style& r, const Style& s) { r.background = s.background; }},
     {StyleMask::kBackgroundEnd,
@@ -180,8 +180,8 @@ Style ResolveStyle(const Style& base, const StyleOverride* overrides,
   auto is_active = [current_state](const StyleOverride& ov) {
     return ov.state == WidgetState::kNone || HasState(current_state, ov.state);
   };
-  for (auto& ov : std::span(overrides, override_count)) {
-    if (is_active(ov)) ApplyMaskedOverride(result, ov);
+  for (u32 i = 0; i < override_count; ++i) {
+    if (is_active(overrides[i])) ApplyMaskedOverride(result, overrides[i]);
   }
   return result;
 }

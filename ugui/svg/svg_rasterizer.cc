@@ -1,7 +1,7 @@
-#include <algorithm>
-#include <cmath>
-#include <cstring>
-#include <vector>
+#include <math.h>
+#include <string.h>
+
+#include <ugui/core/algorithm.h>
 
 #include "svg_types.h"
 
@@ -34,8 +34,8 @@ static void flatten_cubic(Vector<Vec2>& out, Vec2 p0, Vec2 c1, Vec2 c2, Vec2 p3,
   // Adaptive subdivision based on flatness
   f32 dx = p3.x - p0.x;
   f32 dy = p3.y - p0.y;
-  f32 d2 = std::fabs((c1.x - p3.x) * dy - (c1.y - p3.y) * dx);
-  f32 d3 = std::fabs((c2.x - p3.x) * dy - (c2.y - p3.y) * dx);
+  f32 d2 = fabsf((c1.x - p3.x) * dy - (c1.y - p3.y) * dx);
+  f32 d3 = fabsf((c2.x - p3.x) * dy - (c2.y - p3.y) * dx);
 
   f32 flatness = (d2 + d3);
   f32 len_sq = dx * dx + dy * dy;
@@ -222,13 +222,13 @@ static Color sample_gradient(const Gradient& grad, f32 t) {
       t = Clamp(t, 0.0f, 1.0f);
       break;
     case SpreadMethod::kReflect: {
-      t = std::fmod(t, 2.0f);
+      t = fmodf(t, 2.0f);
       if (t < 0) t += 2.0f;
       if (t > 1.0f) t = 2.0f - t;
       break;
     }
     case SpreadMethod::kRepeat:
-      t = t - std::floor(t);
+      t = t - floorf(t);
       break;
   }
 
@@ -281,12 +281,12 @@ static Color eval_gradient_at(const Gradient& grad, f32 px, f32 py, f32 bbox_x,
     } else {
       gcx = bbox_x + grad.cx * bbox_w;
       gcy = bbox_y + grad.cy * bbox_h;
-      gr = grad.r * std::max(bbox_w, bbox_h);
+      gr = grad.r * Max(bbox_w, bbox_h);
     }
 
     Vec2 center = grad.transform.Apply({gcx, gcy});
-    f32 dist = std::sqrt((px - center.x) * (px - center.x) +
-                         (py - center.y) * (py - center.y));
+    f32 dist = sqrtf((px - center.x) * (px - center.x) +
+                     (py - center.y) * (py - center.y));
     t = (gr > 0) ? dist / gr : 0;
   }
 
@@ -329,10 +329,10 @@ static Color resolve_paint(const Paint& paint, f32 px, f32 py, f32 alpha,
   if (paint.type == Paint::kSolid)
     return paint.color.WithAlpha(paint.color.a * alpha);
   if (paint.type == Paint::kGradientRef) {
-    auto it = doc.gradients.find(paint.gradient_id);
-    if (it == doc.gradients.end()) return Color::Black().WithAlpha(alpha);
-    Color c = eval_gradient_at(it->second, px, py, bbox.x0, bbox.y0,
-                               bbox.width(), bbox.height());
+    const Gradient* grad = doc.gradients.find(paint.gradient_id);
+    if (!grad) return Color::Black().WithAlpha(alpha);
+    Color c = eval_gradient_at(*grad, px, py, bbox.x0, bbox.y0, bbox.width(),
+                               bbox.height());
     return c.WithAlpha(c.a * alpha);
   }
   return Color::Transparent();
@@ -397,7 +397,9 @@ static void rasterize_edges(const Vector<Edge>& edges, FillRule rule,
   static thread_local Vector<usize> sorted;
   sorted.resize(edges.size());
   for (usize i = 0; i < edges.size(); ++i) sorted[i] = i;
-  std::sort(sorted.begin(), sorted.end(),
+  // Edges sharing a y0 activate in the order this leaves them, which feeds the
+  // x sort below; see there for why that has to be std::sort's order.
+  IntroSort(sorted,
             [&](usize a, usize b) { return edges[a].y0 < edges[b].y0; });
 
   // Coverage buffer for one pixel row
@@ -411,7 +413,7 @@ static void rasterize_edges(const Vector<Edge>& edges, FillRule rule,
   f32 fwidth = static_cast<f32>(width);
 
   for (u32 py = 0; py < height; ++py) {
-    std::memset(coverage.data(), 0, width * sizeof(f32));
+    memset(coverage.data(), 0, width * sizeof(f32));
 
     for (i32 sub = 0; sub < AA_LEVEL; ++sub) {
       f32 scan_y = static_cast<f32>(py) + (sub + 0.5f) * INV_AA;
@@ -429,16 +431,16 @@ static void rasterize_edges(const Vector<Edge>& edges, FillRule rule,
       }
 
       // Remove expired edges
-      active.erase(std::remove_if(active.begin(), active.end(),
-                                  [scan_y](const ActiveEdge& ae) {
-                                    return ae.y1 <= scan_y;
-                                  }),
-                   active.end());
+      EraseIf(active,
+              [scan_y](const ActiveEdge& ae) { return ae.y1 <= scan_y; });
 
-      // Sort active edges by x
-      std::sort(
-          active.begin(), active.end(),
-          [](const ActiveEdge& a, const ActiveEdge& b) { return a.x < b.x; });
+      // Sort active edges by x. Coincident edges tie, and under the non-zero
+      // rule their order decides whether a span closes and reopens at that x,
+      // which sums coverage differently in the last bit, so this has to leave
+      // ties exactly where std::sort did: IntroSort.
+      IntroSort(active, [](const ActiveEdge& a, const ActiveEdge& b) {
+        return a.x < b.x;
+      });
 
       // Fill spans based on fill rule
       if (rule == FillRule::kEvenOdd) {
@@ -447,13 +449,13 @@ static void rasterize_edges(const Vector<Edge>& edges, FillRule rule,
           f32 x1 = Clamp(active[i + 1].x, 0.0f, fwidth);
 
           i32 ix0 = static_cast<i32>(x0);
-          i32 ix1 = static_cast<i32>(std::ceil(x1));
-          ix0 = std::max(ix0, 0);
-          ix1 = std::min(ix1, static_cast<i32>(width));
+          i32 ix1 = static_cast<i32>(ceilf(x1));
+          ix0 = Max(ix0, 0);
+          ix1 = Min(ix1, static_cast<i32>(width));
 
           for (i32 x = ix0; x < ix1; ++x) {
-            f32 left = std::max(static_cast<f32>(x), x0);
-            f32 right = std::min(static_cast<f32>(x + 1), x1);
+            f32 left = Max(static_cast<f32>(x), x0);
+            f32 right = Min(static_cast<f32>(x + 1), x1);
             coverage[x] += (right - left) * INV_AA;
           }
         }
@@ -477,13 +479,13 @@ static void rasterize_edges(const Vector<Edge>& edges, FillRule rule,
                 f32 x0 = Clamp(span_start, 0.0f, fwidth);
                 f32 x1 = Clamp(span_end, 0.0f, fwidth);
                 i32 ix0 = static_cast<i32>(x0);
-                i32 ix1 = static_cast<i32>(std::ceil(x1));
-                ix0 = std::max(ix0, 0);
-                ix1 = std::min(ix1, static_cast<i32>(width));
+                i32 ix1 = static_cast<i32>(ceilf(x1));
+                ix0 = Max(ix0, 0);
+                ix1 = Min(ix1, static_cast<i32>(width));
 
                 for (i32 x = ix0; x < ix1; ++x) {
-                  f32 left = std::max(static_cast<f32>(x), x0);
-                  f32 right = std::min(static_cast<f32>(x + 1), x1);
+                  f32 left = Max(static_cast<f32>(x), x0);
+                  f32 right = Min(static_cast<f32>(x + 1), x1);
                   coverage[x] += (right - left) * INV_AA;
                 }
                 ++i;
@@ -519,7 +521,7 @@ static void rasterize_edges(const Vector<Edge>& edges, FillRule rule,
 // ============================================================================
 
 void Rasterize(const Document& doc, u8* pixels, u32 width, u32 height) {
-  std::memset(pixels, 0, width * height * 4);
+  memset(pixels, 0, width * height * 4);
 
   // Compute viewBox -> target transform
   Transform view_xform = Transform::Identity();
@@ -568,7 +570,7 @@ void Rasterize(const Document& doc, u8* pixels, u32 width, u32 height) {
       flatten_path(shape.path, xform, points, subpath_starts);
 
       // Compute stroke width in transformed space (approximate)
-      f32 scale = std::sqrt(std::fabs(xform.a * xform.d - xform.b * xform.c));
+      f32 scale = sqrtf(fabsf(xform.a * xform.d - xform.b * xform.c));
       f32 sw = shape.stroke_width * scale;
 
       // Expand stroke to fill outline

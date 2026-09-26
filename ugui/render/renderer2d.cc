@@ -1,8 +1,9 @@
 #include <ugui/render/renderer2d.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/style/style.h>
 
-#include <cmath>
-#include <cstring>
+#include <math.h>
+#include <string.h>
 
 namespace ugui {
 
@@ -141,10 +142,10 @@ void Renderer2D::DrawRectGradient(Rect rect, Color start_color, Color end_color,
   f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
   if (dpi != 1.0f) {
     f32 inv = 1.0f / dpi;
-    f32 x0 = std::round(rect.x * dpi) * inv;
-    f32 y0 = std::round(rect.y * dpi) * inv;
-    f32 x1 = std::round((rect.x + rect.w) * dpi) * inv;
-    f32 y1 = std::round((rect.y + rect.h) * dpi) * inv;
+    f32 x0 = roundf(rect.x * dpi) * inv;
+    f32 y0 = roundf(rect.y * dpi) * inv;
+    f32 x1 = roundf((rect.x + rect.w) * dpi) * inv;
+    f32 y1 = roundf((rect.y + rect.h) * dpi) * inv;
     rect = {x0, y0, x1 - x0, y1 - y0};
   }
 
@@ -153,11 +154,11 @@ void Renderer2D::DrawRectGradient(Rect rect, Color start_color, Color end_color,
 
   // Gradient direction (CSS: 0deg=to-top, 90deg=to-right, 180deg=to-bottom)
   f32 angle_rad = angle_deg * (3.14159265f / 180.0f);
-  f32 dx = std::sin(angle_rad);
-  f32 dy = -std::cos(angle_rad);
+  f32 dx = sinf(angle_rad);
+  f32 dy = -cosf(angle_rad);
 
   // Max projection onto gradient axis (for normalization to [0,1])
-  f32 max_proj = std::abs(hw * dx) + std::abs(hh * dy);
+  f32 max_proj = fabsf(hw * dx) + fabsf(hh * dy);
   if (max_proj < 0.001f) max_proj = 1.0f;
 
   // Corner offsets from center: TL, TR, BR, BL
@@ -230,8 +231,7 @@ TextureId Renderer2D::GetRadialGradientTexture(Color center, Color edge) {
   u32 c2 = Vertex2D::PackColor(edge.r, edge.g, edge.b, edge.a);
   u64 key = static_cast<u64>(c1) | (static_cast<u64>(c2) << 32);
 
-  auto it = gradient_cache_.find(key);
-  if (it != gradient_cache_.end()) return it->second;
+  if (const TextureId* cached = gradient_cache_.find(key)) return *cached;
 
   constexpr u32 kSize = 64;
   u8 pixels[kSize * kSize * 4];
@@ -240,7 +240,7 @@ TextureId Renderer2D::GetRadialGradientTexture(Color center, Color edge) {
     for (u32 x = 0; x < kSize; ++x) {
       f32 dx = (static_cast<f32>(x) + 0.5f - half) / half;
       f32 dy = (static_cast<f32>(y) + 0.5f - half) / half;
-      f32 t = Clamp(std::sqrt(dx * dx + dy * dy), 0.0f, 1.0f);
+      f32 t = Clamp(sqrtf(dx * dx + dy * dy), 0.0f, 1.0f);
       u32 idx = (y * kSize + x) * 4;
       pixels[idx + 0] = static_cast<u8>(
           Clamp(center.r + (edge.r - center.r) * t, 0.0f, 1.0f) * 255.0f);
@@ -300,23 +300,22 @@ TextureId Renderer2D::GetMultiStopGradientTexture(const GradientStop* stops,
                                  stops[i].color.b, stops[i].color.a);
     hash ^= static_cast<u64>(pc) << ((i * 7) % 32);
     u32 pos_bits;
-    std::memcpy(&pos_bits, &stops[i].position, sizeof(u32));
+    memcpy(&pos_bits, &stops[i].position, sizeof(u32));
     hash ^= static_cast<u64>(pos_bits) << ((i * 13) % 32);
   }
   u32 angle_bits;
-  std::memcpy(&angle_bits, &angle_deg, sizeof(u32));
+  memcpy(&angle_bits, &angle_deg, sizeof(u32));
   hash ^= static_cast<u64>(angle_bits) << 48;
 
-  auto it = gradient_cache_.find(hash);
-  if (it != gradient_cache_.end()) return it->second;
+  if (const TextureId* cached = gradient_cache_.find(hash)) return *cached;
 
   // Always generate a 64x64 2D texture for both linear and radial
   constexpr u32 kSize = 64;
   u8 pixels[kSize * kSize * 4];
 
   f32 angle_rad = angle_deg * (3.14159265f / 180.0f);
-  f32 dx = std::sin(angle_rad);
-  f32 dy = -std::cos(angle_rad);
+  f32 dx = sinf(angle_rad);
+  f32 dy = -cosf(angle_rad);
 
   for (u32 y = 0; y < kSize; ++y) {
     for (u32 x = 0; x < kSize; ++x) {
@@ -326,9 +325,9 @@ TextureId Renderer2D::GetMultiStopGradientTexture(const GradientStop* stops,
       if (type == GradientType::kRadial) {
         f32 cx = u - 0.5f;
         f32 cy = v - 0.5f;
-        t = Clamp(std::sqrt(cx * cx + cy * cy) * 2.0f, 0.0f, 1.0f);
+        t = Clamp(sqrtf(cx * cx + cy * cy) * 2.0f, 0.0f, 1.0f);
       } else {
-        f32 max_proj = std::abs(0.5f * dx) + std::abs(0.5f * dy);
+        f32 max_proj = fabsf(0.5f * dx) + fabsf(0.5f * dy);
         if (max_proj > 0.001f)
           t = Clamp(
               ((u - 0.5f) * dx + (v - 0.5f) * dy) / (max_proj * 2.0f) + 0.5f,
@@ -394,10 +393,10 @@ void Renderer2D::DrawInsetShadow(Rect rect, Color shadow_color, f32 blur,
   u32 br = ((corner_radii >> 16) & 0xFFu);
   u32 bl = ((corner_radii >> 24) & 0xFFu);
   u32 inner_radii =
-      Vertex2D::PackRadii(std::max(0.0f, static_cast<f32>(tl) - spread),
-                          std::max(0.0f, static_cast<f32>(tr) - spread),
-                          std::max(0.0f, static_cast<f32>(br) - spread),
-                          std::max(0.0f, static_cast<f32>(bl) - spread));
+      Vertex2D::PackRadii(Max(0.0f, static_cast<f32>(tl) - spread),
+                          Max(0.0f, static_cast<f32>(tr) - spread),
+                          Max(0.0f, static_cast<f32>(br) - spread),
+                          Max(0.0f, static_cast<f32>(bl) - spread));
   // Negative softness signals inset mode to the shader
   EmitQuad(shadow_rect, packed, packed, inner_radii, -blur, 0.0f, 0,
            kNullTextureId);
@@ -432,7 +431,7 @@ void Renderer2D::PushTransform(Vec2 pivot, f32 degrees) {
   xform_stack_.push_back(xform_);
   if (degrees == 0.0f) return;  // identity push (keeps stack balanced)
   const f32 r = degrees * 0.01745329252f;  // deg -> rad
-  const f32 cs = std::cos(r), sn = std::sin(r);
+  const f32 cs = cosf(r), sn = sinf(r);
   // Rotation about `pivot`: p' = pivot + R*(p - pivot).
   Affine2D rot;
   rot.a = cs;
@@ -498,10 +497,10 @@ void Renderer2D::EmitQuad(Rect rect, u32 color, u32 color2, u32 corner_radii,
   f32 dpi = rhi_ ? rhi_->dpi_scale() : 1.0f;
   if (dpi != 1.0f && xform_.identity) {
     f32 inv = 1.0f / dpi;
-    f32 x0 = std::round(rect.x * dpi) * inv;
-    f32 y0 = std::round(rect.y * dpi) * inv;
-    f32 x1 = std::round((rect.x + rect.w) * dpi) * inv;
-    f32 y1 = std::round((rect.y + rect.h) * dpi) * inv;
+    f32 x0 = roundf(rect.x * dpi) * inv;
+    f32 y0 = roundf(rect.y * dpi) * inv;
+    f32 x1 = roundf((rect.x + rect.w) * dpi) * inv;
+    f32 y1 = roundf((rect.y + rect.h) * dpi) * inv;
     rect = {x0, y0, x1 - x0, y1 - y0};
   }
 
@@ -621,10 +620,10 @@ void Renderer2D::DrawText(Vec2 pos, const TextRun& run, Color color,
     }
 
     // Snap glyph position and size to the physical pixel grid.
-    f32 x = std::round((cursor_x + g.bearing_x + g.x_offset) * dpi) * inv_dpi;
-    f32 y = std::round((baseline_y - g.bearing_y + g.y_offset) * dpi) * inv_dpi;
-    f32 w = std::round(g.bmp_w * dpi) * inv_dpi;
-    f32 h = std::round(g.bmp_h * dpi) * inv_dpi;
+    f32 x = roundf((cursor_x + g.bearing_x + g.x_offset) * dpi) * inv_dpi;
+    f32 y = roundf((baseline_y - g.bearing_y + g.y_offset) * dpi) * inv_dpi;
+    f32 w = roundf(g.bmp_w * dpi) * inv_dpi;
+    f32 h = roundf(g.bmp_h * dpi) * inv_dpi;
 
     // Glyph quad corners, rotated through the active transform so text in a
     // rotated subtree rotates rigidly with it (each glyph stays a sharp quad).

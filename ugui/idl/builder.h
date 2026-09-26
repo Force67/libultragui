@@ -66,6 +66,8 @@ class UguiBuilder {
   void ApplyMediaStyle(wid widget) const;
   bool ApplyOneStyleClass(wid widget, const String& name) const;
   Style ParseStyle(const HashMap<String, String>& props) const;
+  void ApplyPropertySetters(const HashMap<String, String>& props,
+                            Style& style) const;
 
   void CollectVariables(const UguiNode& node);
   String ResolveValue(const String& value) const;

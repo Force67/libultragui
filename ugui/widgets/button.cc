@@ -1,11 +1,10 @@
 #include <ugui/render/renderer2d.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/text/text_engine.h>
 #include <ugui/widgets/button.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
-#include <cctype>
-#include <string>
+#include <ctype.h>
 
 namespace ugui {
 namespace {
@@ -15,15 +14,15 @@ String apply_transform(const String& s, TextTransform t) {
   String out = s;
   if (t == TextTransform::kUppercase) {
     for (auto& c : out)
-      c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
   } else if (t == TextTransform::kLowercase) {
     for (auto& c : out)
-      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
   } else if (t == TextTransform::kCapitalize) {
     bool next = true;
     for (auto& c : out) {
-      if (next && std::isalpha(static_cast<unsigned char>(c))) {
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      if (next && isalpha(static_cast<unsigned char>(c))) {
+        c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
         next = false;
       }
       if (c == ' ') next = true;
@@ -111,7 +110,7 @@ void ButtonDraw(WidgetRegistry& world, wid e, Renderer2D& renderer) {
                           ? s.text_decoration_color.WithAlpha(
                                 s.text_decoration_color.a * alpha)
                           : text_color;
-    f32 thickness = std::max(1.0f, s.font_size / 14.0f);
+    f32 thickness = Max(1.0f, s.font_size / 14.0f);
     f32 baseline = y + run.ascent;
 
     if (HasDecoration(s.text_decoration, TextDecoration::kUnderline)) {
@@ -164,7 +163,7 @@ void SetButtonClick(wid e, Function<void()> handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   WidgetNode* node = world.Get<WidgetNode>(e);
   if (!node || node->kind != WidgetKind::kButton) return;
-  world.GetOrAdd<ButtonContent>(e).on_click = std::move(handler);
+  world.GetOrAdd<ButtonContent>(e).on_click = ugui::move(handler);
 }
 
 }  // namespace ugui

@@ -7,7 +7,7 @@
 #include <ugui/widgets/widget.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <utility>
+
 
 namespace ugui {
 namespace {
@@ -154,7 +154,7 @@ void SetupMessageBox(wid e, const char* title, const char* message,
 void SetMessageBoxResult(wid e, Function<void(MessageBoxResult)> handler) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   if (MessageBoxContent* c = content(world, e))
-    c->on_result = std::move(handler);
+    c->on_result = ugui::move(handler);
 }
 
 void ShowMessageBox(wid e, UIContext* ctx) {

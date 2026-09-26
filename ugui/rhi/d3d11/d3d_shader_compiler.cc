@@ -13,8 +13,8 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 
-#include <cstdio>
-#include <cstring>
+#include <stdio.h>
+#include <string.h>
 
 // D3D11 consumes DXBC, which dxc no longer emits, so this backend compiles the
 // HLSL at startup. Windows keeps that compiler in d3dcompiler_47.dll, Linux in
@@ -51,7 +51,7 @@ static bool load_d3dcompile() {
   HMODULE lib = LoadLibraryA("d3dcompiler_47.dll");
   if (!lib) lib = LoadLibraryA("d3dcompiler_43.dll");
   if (!lib) {
-    std::fprintf(stderr, "ultragui-d3d11: failed to load d3dcompiler\n");
+    fprintf(stderr, "ultragui-d3d11: failed to load d3dcompiler\n");
     return false;
   }
   s_D3DCompile = reinterpret_cast<PFN_D3DCompile_ugui>(
@@ -60,14 +60,14 @@ static bool load_d3dcompile() {
   void* lib = dlopen("libvkd3d-utils.so.1", RTLD_LAZY);
   if (!lib) lib = dlopen("libvkd3d-utils.so", RTLD_LAZY);
   if (!lib) {
-    std::fprintf(stderr, "ultragui-d3d11: failed to load libvkd3d-utils.so\n");
+    fprintf(stderr, "ultragui-d3d11: failed to load libvkd3d-utils.so\n");
     return false;
   }
   s_D3DCompile =
       reinterpret_cast<PFN_D3DCompile_ugui>(dlsym(lib, "D3DCompile"));
 #endif
   if (!s_D3DCompile) {
-    std::fprintf(stderr, "ultragui-d3d11: D3DCompile not found\n");
+    fprintf(stderr, "ultragui-d3d11: D3DCompile not found\n");
     return false;
   }
   return true;
@@ -122,18 +122,18 @@ bool CompileHlsl(const char* source, const char* entry, const char* target,
   CompilerBlob* blob = nullptr;
   CompilerBlob* errors = nullptr;
   HRESULT hr =
-      s_D3DCompile(source, std::strlen(source), "shader",
+      s_D3DCompile(source, strlen(source), "shader",
                    count > 0 ? macros : nullptr, nullptr, entry, target, 0, 0,
                    reinterpret_cast<ID3D10Blob**>(&blob),
                    reinterpret_cast<ID3D10Blob**>(&errors));
   if (FAILED(hr)) {
     if (errors) {
-      std::fprintf(stderr,
+      fprintf(stderr,
                    "ultragui-d3d11: shader compile error (%s/%s):\n%s\n", entry,
                    target, static_cast<const char*>(blob_data(errors)));
       blob_release(errors);
     } else {
-      std::fprintf(stderr, "ultragui-d3d11: shader compile failed: 0x%08lx\n",
+      fprintf(stderr, "ultragui-d3d11: shader compile failed: 0x%08lx\n",
                    static_cast<unsigned long>(hr));
     }
     return false;

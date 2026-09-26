@@ -4,16 +4,11 @@
 // a command buffer and render pass owned by the host application.
 
 #include <ugui/backends/ugui_impl_vulkan.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/render/vertex.h>
 
-#include <algorithm>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <functional>
-#include <string>
-#include <unordered_map>
-#include <vector>
+#include <stdio.h>
+#include <string.h>
 
 namespace ugui {
 namespace vk {
@@ -57,9 +52,9 @@ struct Backend {
   Texture white;
   Texture font;
   u32 font_revision = ~0u;
-  std::unordered_map<TextureId, UserTexture> user_textures;
+  HashMap<TextureId, UserTexture> user_textures;
   TextureId next_user_id = 1;  // 0 = white, ~0 = font; user ids start at 1
-  std::vector<FrameBuffers> frames;
+  Vector<FrameBuffers> frames;
   u32 frame_index = 0;
 };
 
@@ -126,7 +121,7 @@ void UploadBuffer(GpuBuffer& b, VkBufferUsageFlags usage, const void* src,
   if (bytes == 0) return;
   if (b.capacity < bytes) {
     DestroyBuffer(b);
-    VkDeviceSize cap = std::max<VkDeviceSize>(bytes, 4096);
+    VkDeviceSize cap = Max<VkDeviceSize>(bytes, 4096);
     CreateBuffer(cap, usage,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -134,26 +129,29 @@ void UploadBuffer(GpuBuffer& b, VkBufferUsageFlags usage, const void* src,
   }
   void* dst = nullptr;
   vkMapMemory(g.info.device, b.memory, 0, bytes, 0, &dst);
-  std::memcpy(dst, src, static_cast<size_t>(bytes));
+  memcpy(dst, src, static_cast<size_t>(bytes));
   vkUnmapMemory(g.info.device, b.memory);
 }
 
-std::vector<char> ReadFile(const std::string& path) {
-  std::ifstream f(path, std::ios::ate | std::ios::binary);
+Vector<char> ReadFile(const String& path) {
+  FILE* f = fopen(path.c_str(), "rb");
   if (!f) return {};
-  size_t size = static_cast<size_t>(f.tellg());
-  std::vector<char> buf(size);
-  f.seekg(0);
-  f.read(buf.data(), static_cast<std::streamsize>(size));
+  fseek(f, 0, SEEK_END);
+  size_t size = static_cast<size_t>(ftell(f));
+  fseek(f, 0, SEEK_SET);
+  Vector<char> buf(size);
+  size_t read = fread(buf.data(), 1, size, f);
+  (void)read;
+  fclose(f);
   return buf;
 }
 
 VkShaderModule LoadShader(const char* name) {
-  std::string dir = g.info.shader_dir ? g.info.shader_dir : ".";
+  String dir = g.info.shader_dir ? g.info.shader_dir : ".";
   auto code = ReadFile(dir + "/" + name);
   if (code.empty()) {
-    std::fprintf(stderr, "ugui_impl_vulkan: missing shader %s/%s\n",
-                 dir.c_str(), name);
+    fprintf(stderr, "ugui_impl_vulkan: missing shader %s/%s\n", dir.c_str(),
+            name);
     return VK_NULL_HANDLE;
   }
   VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -267,7 +265,8 @@ VkPipeline CreatePipeline(const char* vert, const char* frag) {
   return pipeline;
 }
 
-void OneTimeSubmit(const std::function<void(VkCommandBuffer)>& fn) {
+template <typename Fn>
+void OneTimeSubmit(const Fn& fn) {
   VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
   pci.queueFamilyIndex = g.info.queue_family;
   pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -306,7 +305,7 @@ Texture MakeTexture(u32 w, u32 h, VkFormat fmt, u32 pixel_size,
                staging);
   void* data = nullptr;
   vkMapMemory(g.info.device, staging.memory, 0, size, 0, &data);
-  std::memcpy(data, pixels, static_cast<size_t>(size));
+  memcpy(data, pixels, static_cast<size_t>(size));
   vkUnmapMemory(g.info.device, staging.memory);
 
   VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -462,7 +461,8 @@ void Shutdown() {
     DestroyBuffer(f.text_idx);
   }
   g.frames.clear();
-  for (auto& kv : g.user_textures) FreeTexture(kv.second.tex);
+  // Each texture frees independently, so the map's order does not matter.
+  for (auto [id, ut] : g.user_textures) FreeTexture(ut.tex);
   g.user_textures.clear();
   FreeTexture(g.font);
   FreeTexture(g.white);
@@ -544,8 +544,8 @@ void RenderDrawData(const DrawData& dd, VkCommandBuffer cmd) {
     } else if (c.texture_id == kNullTextureId) {
       set = g.white.set;
     } else {
-      auto it = g.user_textures.find(c.texture_id);
-      set = it != g.user_textures.end() ? it->second.tex.set : g.white.set;
+      const UserTexture* ut = g.user_textures.find(c.texture_id);
+      set = ut ? ut->tex.set : g.white.set;
     }
     if (set == VK_NULL_HANDLE) set = g.white.set;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -553,13 +553,13 @@ void RenderDrawData(const DrawData& dd, VkCommandBuffer cmd) {
 
     // Scissor in framebuffer pixels, clamped to >= 0.
     VkRect2D scissor{};
-    f32 x0 = std::max(0.0f, c.clip_rect.x) * sx;
-    f32 y0 = std::max(0.0f, c.clip_rect.y) * sy;
-    f32 x1 = std::max(0.0f, c.clip_rect.x + c.clip_rect.w) * sx;
-    f32 y1 = std::max(0.0f, c.clip_rect.y + c.clip_rect.h) * sy;
+    f32 x0 = Max(0.0f, c.clip_rect.x) * sx;
+    f32 y0 = Max(0.0f, c.clip_rect.y) * sy;
+    f32 x1 = Max(0.0f, c.clip_rect.x + c.clip_rect.w) * sx;
+    f32 y1 = Max(0.0f, c.clip_rect.y + c.clip_rect.h) * sy;
     scissor.offset = {static_cast<i32>(x0), static_cast<i32>(y0)};
-    scissor.extent = {static_cast<u32>(std::max(0.0f, x1 - x0)),
-                      static_cast<u32>(std::max(0.0f, y1 - y0))};
+    scissor.extent = {static_cast<u32>(Max(0.0f, x1 - x0)),
+                      static_cast<u32>(Max(0.0f, y1 - y0))};
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     GpuBuffer& vb = c.is_text ? fb.text_vtx : fb.quad_vtx;
@@ -590,9 +590,9 @@ TextureId CreateTexture(u32 width, u32 height, RHIFormat format,
 }
 
 void UpdateTexture(TextureId id, const void* pixels) {
-  auto it = g.user_textures.find(id);
-  if (it == g.user_textures.end() || !pixels) return;
-  UserTexture& ut = it->second;
+  UserTexture* found = g.user_textures.find(id);
+  if (!found || !pixels) return;
+  UserTexture& ut = *found;
   // Re-upload by rebuilding the image in place (the id and map entry persist).
   vkDeviceWaitIdle(g.info.device);
   FreeTexture(ut.tex);
@@ -601,11 +601,11 @@ void UpdateTexture(TextureId id, const void* pixels) {
 }
 
 void DestroyTexture(TextureId id) {
-  auto it = g.user_textures.find(id);
-  if (it == g.user_textures.end()) return;
+  UserTexture* ut = g.user_textures.find(id);
+  if (!ut) return;
   vkDeviceWaitIdle(g.info.device);
-  FreeTexture(it->second.tex);
-  g.user_textures.erase(it);
+  FreeTexture(ut->tex);
+  g.user_textures.erase(id);
 }
 
 namespace {

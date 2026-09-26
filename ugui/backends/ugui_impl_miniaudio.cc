@@ -1,11 +1,7 @@
-#include <cstdio>
+#include <stdio.h>
 #include <miniaudio.h>
-#include <mutex>
-#include <string>
 #include <ugui/backends/ugui_impl_miniaudio.h>
 #include <ugui/core/config.h>
-#include <unordered_map>
-#include <vector>
 
 namespace ugui {
 
@@ -86,7 +82,7 @@ bool AudioEngine::Init() {
   config.sampleRate = 44100;
 
   if (ma_engine_init(&config, &impl_->engine) != MA_SUCCESS) {
-    std::fprintf(stderr, "ugui/audio: failed to initialize audio engine\n");
+    fprintf(stderr, "ugui/audio: failed to initialize audio engine\n");
     delete impl_;
     impl_ = nullptr;
     return false;
@@ -127,7 +123,7 @@ SoundHandle AudioEngine::Play(const char* path, f32 volume, bool loop) {
 
   SoundSlot* slot = impl_->alloc_slot();
   if (!slot) {
-    std::fprintf(stderr, "ugui/audio: sound pool full\n");
+    fprintf(stderr, "ugui/audio: sound pool full\n");
     return kInvalidSound;
   }
 
@@ -135,7 +131,7 @@ SoundHandle AudioEngine::Play(const char* path, f32 volume, bool loop) {
       MA_SOUND_FLAG_DECODE;  // decode to memory for low-latency playback
   if (ma_sound_init_from_file(&impl_->engine, path, flags, nullptr, nullptr,
                               &slot->sound) != MA_SUCCESS) {
-    std::fprintf(stderr, "ugui/audio: failed to load '%s'\n", path);
+    fprintf(stderr, "ugui/audio: failed to load '%s'\n", path);
     return kInvalidSound;
   }
 
@@ -160,7 +156,7 @@ SoundHandle AudioEngine::Load(const char* path) {
   u32 flags = MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_SPATIALIZATION;
   if (ma_sound_init_from_file(&impl_->engine, path, flags, nullptr, nullptr,
                               &slot->sound) != MA_SUCCESS) {
-    std::fprintf(stderr, "ugui/audio: failed to load '%s'\n", path);
+    fprintf(stderr, "ugui/audio: failed to load '%s'\n", path);
     return kInvalidSound;
   }
 

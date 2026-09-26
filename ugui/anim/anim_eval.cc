@@ -1,8 +1,7 @@
 #include <ugui/anim/anim_types.h>
 #include <ugui/style/transition.h>
 
-#include <algorithm>
-#include <cmath>
+#include <math.h>
 
 namespace ugui {
 

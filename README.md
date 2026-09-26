@@ -97,7 +97,7 @@ ui.Shutdown();
 
 ### Custom allocators
 
-All container types (`std::vector`, `std::string`, `std::function`, etc.) are aliased through `core/config.h`. Point `ULTRAGUI_CUSTOM_CONFIG` at your own header to swap them for engine-native types:
+All container types (`ugui::Vector`, `ugui::String`, `ugui::HashMap`, `ugui::Function`, etc.) are aliased through `core/config.h`, which documents the API each one must provide. By default they are the STL. `-DULTRAGUI_USE_BASE=ON` builds against equilibrium base instead, with no C++ standard library and no exceptions; set `ULTRAGUI_EQUILIBRIUM_DIR` to its checkout unless the parent project already defines `equilibrium::base`. Point `ULTRAGUI_CUSTOM_CONFIG` at your own header to swap them for engine-native types:
 
 ```cmake
 add_definitions(-DULTRAGUI_CUSTOM_CONFIG="my_engine/ugui_types.h")

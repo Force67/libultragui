@@ -1,5 +1,7 @@
 #include <ugui/animation/animator.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/core/from_chars_compat.h>
+#include <ugui/core/string_view.h>
 #include <ugui/idl/builder.h>
 #include <ugui/widgets/button.h>
 #include <ugui/widgets/checkbox.h>
@@ -17,14 +19,8 @@
 #include <ugui/widgets/toggle.h>
 #include <ugui/widgets/widget_registry.h>
 
-#include <algorithm>
-#include <cctype>
-#include <charconv>
-#include <cstdio>
-#include <iterator>
-#include <numeric>
-#include <optional>
-#include <string_view>
+#include <ctype.h>
+#include <stdio.h>
 
 namespace ugui {
 
@@ -88,85 +84,79 @@ static f32 parse_duration(const String& val) {
 // Declarative enum/value lookup tables
 // ---------------------------------------------------------------------------
 
-template <typename E, std::size_t N>
-static Optional<E> LookupEnum(const std::pair<std::string_view, E> (&table)[N],
-                              std::string_view key) {
+template <typename E, size_t N>
+static Optional<E> LookupEnum(const Pair<StringView, E> (&table)[N],
+                              StringView key) {
   for (auto& [k, v] : table) {
     if (k == key) return v;
   }
-  return std::nullopt;
+  return {};
 }
 
-static constexpr std::pair<std::string_view, FlexDirection>
-    kFlexDirectionTable[] = {
-        {"row", FlexDirection::kRow},
-        {"column", FlexDirection::kColumn},
-        {"row-reverse", FlexDirection::kRowReverse},
-        {"column-reverse", FlexDirection::kColumnReverse},
+static constexpr Pair<StringView, FlexDirection> kFlexDirectionTable[] = {
+    {"row", FlexDirection::kRow},
+    {"column", FlexDirection::kColumn},
+    {"row-reverse", FlexDirection::kRowReverse},
+    {"column-reverse", FlexDirection::kColumnReverse},
 };
 
-static constexpr std::pair<std::string_view, JustifyContent>
-    kJustifyContentTable[] = {
-        {"start", JustifyContent::kStart},
-        {"end", JustifyContent::kEnd},
-        {"center", JustifyContent::kCenter},
-        {"space-between", JustifyContent::kSpaceBetween},
-        {"space-around", JustifyContent::kSpaceAround},
-        {"space-evenly", JustifyContent::kSpaceEvenly},
+static constexpr Pair<StringView, JustifyContent> kJustifyContentTable[] = {
+    {"start", JustifyContent::kStart},
+    {"end", JustifyContent::kEnd},
+    {"center", JustifyContent::kCenter},
+    {"space-between", JustifyContent::kSpaceBetween},
+    {"space-around", JustifyContent::kSpaceAround},
+    {"space-evenly", JustifyContent::kSpaceEvenly},
 };
 
-static constexpr std::pair<std::string_view, AlignItems> kAlignItemsTable[] = {
-    {"start", AlignItems::kStart},
-    {"end", AlignItems::kEnd},
-    {"center", AlignItems::kCenter},
-    {"stretch", AlignItems::kStretch},
+static constexpr Pair<StringView, AlignItems> kAlignItemsTable[] = {
+    {"start", AlignItems::kStart},       {"end", AlignItems::kEnd},
+    {"center", AlignItems::kCenter},     {"stretch", AlignItems::kStretch},
     {"baseline", AlignItems::kBaseline},
 };
 
-static constexpr std::pair<std::string_view, AlignSelf> kAlignSelfTable[] = {
+static constexpr Pair<StringView, AlignSelf> kAlignSelfTable[] = {
     {"auto", AlignSelf::kAuto},       {"start", AlignSelf::kStart},
     {"end", AlignSelf::kEnd},         {"center", AlignSelf::kCenter},
     {"stretch", AlignSelf::kStretch},
 };
 
-static constexpr std::pair<std::string_view, AlignContent>
-    kAlignContentTable[] = {
-        {"start", AlignContent::kStart},
-        {"end", AlignContent::kEnd},
-        {"center", AlignContent::kCenter},
-        {"stretch", AlignContent::kStretch},
-        {"space-between", AlignContent::kSpaceBetween},
-        {"space-around", AlignContent::kSpaceAround},
-        {"space-evenly", AlignContent::kSpaceEvenly},
+static constexpr Pair<StringView, AlignContent> kAlignContentTable[] = {
+    {"start", AlignContent::kStart},
+    {"end", AlignContent::kEnd},
+    {"center", AlignContent::kCenter},
+    {"stretch", AlignContent::kStretch},
+    {"space-between", AlignContent::kSpaceBetween},
+    {"space-around", AlignContent::kSpaceAround},
+    {"space-evenly", AlignContent::kSpaceEvenly},
 };
 
-static constexpr std::pair<std::string_view, FlexWrap> kFlexWrapTable[] = {
+static constexpr Pair<StringView, FlexWrap> kFlexWrapTable[] = {
     {"nowrap", FlexWrap::kNoWrap},
     {"wrap", FlexWrap::kWrap},
     {"wrap-reverse", FlexWrap::kWrapReverse},
 };
 
-static constexpr std::pair<std::string_view, TextAlign> kTextAlignTable[] = {
+static constexpr Pair<StringView, TextAlign> kTextAlignTable[] = {
     {"left", TextAlign::kLeft},
     {"center", TextAlign::kCenter},
     {"right", TextAlign::kRight},
 };
 
-static constexpr std::pair<std::string_view, Overflow> kOverflowTable[] = {
+static constexpr Pair<StringView, Overflow> kOverflowTable[] = {
     {"visible", Overflow::kVisible},
     {"hidden", Overflow::kHidden},
     {"scroll", Overflow::kScroll},
 };
 
-static constexpr std::pair<std::string_view, TextTransform>
-    kTextTransformTable[] = {
-        {"uppercase", TextTransform::kUppercase},
-        {"lowercase", TextTransform::kLowercase},
-        {"capitalize", TextTransform::kCapitalize},
-        {"none", TextTransform::kNone},
+static constexpr Pair<StringView, TextTransform> kTextTransformTable[] = {
+    {"uppercase", TextTransform::kUppercase},
+    {"lowercase", TextTransform::kLowercase},
+    {"capitalize", TextTransform::kCapitalize},
+    {"none", TextTransform::kNone},
 };
 
-static constexpr std::pair<std::string_view, Cursor> kCursorTable[] = {
+static constexpr Pair<StringView, Cursor> kCursorTable[] = {
     {"default", Cursor::kDefault},
     {"pointer", Cursor::kPointer},
     {"text", Cursor::kText},
@@ -174,37 +164,36 @@ static constexpr std::pair<std::string_view, Cursor> kCursorTable[] = {
     {"not-allowed", Cursor::kNotAllowed},
 };
 
-static constexpr std::pair<std::string_view, WidgetState> kWidgetStateTable[] =
-    {
-        {"hover", WidgetState::kHovered},
-        {"hovered", WidgetState::kHovered},
-        {"pressed", WidgetState::kPressed},
-        {"focused", WidgetState::kFocused},
-        {"focus", WidgetState::kFocused},
-        {"disabled", WidgetState::kDisabled},
-        {"checked", WidgetState::kChecked},
-        // `:selected`/`:active`: app-driven highlight state, toggled from
-        // C++ via Widget::set_selected(). Distinct from `:pressed`.
-        {"selected", WidgetState::kSelected},
-        {"active", WidgetState::kSelected},
+static constexpr Pair<StringView, WidgetState> kWidgetStateTable[] = {
+    {"hover", WidgetState::kHovered},
+    {"hovered", WidgetState::kHovered},
+    {"pressed", WidgetState::kPressed},
+    {"focused", WidgetState::kFocused},
+    {"focus", WidgetState::kFocused},
+    {"disabled", WidgetState::kDisabled},
+    {"checked", WidgetState::kChecked},
+    // `:selected`/`:active`: app-driven highlight state, toggled from
+    // C++ via Widget::set_selected(). Distinct from `:pressed`.
+    {"selected", WidgetState::kSelected},
+    {"active", WidgetState::kSelected},
 };
 
-static constexpr std::pair<std::string_view, EasingType> kEasingTable[] = {
+static constexpr Pair<StringView, EasingType> kEasingTable[] = {
     {"ease-in-out", EasingType::kEaseInOut}, {"ease-in", EasingType::kEaseIn},
     {"ease-out", EasingType::kEaseOut},      {"linear", EasingType::kLinear},
     {"spring", EasingType::kSpring},
 };
 
 // Easing substring match: order matters (ease-in-out before ease-in)
-static Optional<EasingType> FindEasingSubstring(std::string_view text) {
+static Optional<EasingType> FindEasingSubstring(StringView text) {
   for (auto& [substr, easing] : kEasingTable) {
-    if (text.find(substr) != std::string_view::npos) return easing;
+    if (text.find(substr) != StringView::npos) return easing;
   }
-  return std::nullopt;
+  return {};
 }
 
 // Named color table
-static constexpr std::pair<std::string_view, Color> kNamedColors[] = {
+static constexpr Pair<StringView, Color> kNamedColors[] = {
     {"white", Color::White()}, {"black", Color::Black()},
     {"red", Color::Red()},     {"green", Color::Green()},
     {"blue", Color::Blue()},   {"transparent", Color::Transparent()},
@@ -230,7 +219,7 @@ static Color parse_color(const String& s) {
 
 using StyleSetter = void (*)(Style&, const String&);
 
-static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
+static const Pair<StringView, StyleSetter> kPropertyTable[] = {
     // Layout enums
     {"layout", [](Style& s, const String& v) {
         if (auto e = LookupEnum(kFlexDirectionTable, v)) s.flex_direction = *e;
@@ -260,7 +249,7 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
         s.text_transform = LookupEnum(kTextTransformTable, v).value_or(TextTransform::kNone);
     }},
     {"font-weight", [](Style& s, const String& v) {
-        static constexpr std::pair<std::string_view, FontWeight> kWeightTable[] = {
+        static constexpr Pair<StringView, FontWeight> kWeightTable[] = {
             {"thin", FontWeight::kThin},
             {"extra-light", FontWeight::kExtraLight},
             {"light", FontWeight::kLight},
@@ -354,7 +343,7 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
         // Parse comma-separated "color position%" pairs
         // e.g. "#ff0000 0%, #00ff00 50%, #0000ff 100%"
         s.gradient_stop_count = 0;
-        std::string_view sv(v);
+        StringView sv(v);
         while (!sv.empty() && s.gradient_stop_count < Style::kMaxGradientStops) {
             // Skip whitespace and commas
             while (!sv.empty() && (sv[0] == ' ' || sv[0] == ','))
@@ -363,8 +352,8 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
 
             // Find the color token (starts with # or is a name)
             auto space = sv.find(' ');
-            if (space == std::string_view::npos) break;
-            String color_str(sv.substr(0, space));
+            if (space == StringView::npos) break;
+            String color_str = sv.substr(0, space).ToString();
             sv.remove_prefix(space + 1);
 
             // Skip whitespace
@@ -451,7 +440,7 @@ static const std::pair<std::string_view, StyleSetter> kPropertyTable[] = {
     {"text-shadow-y", [](Style& s, const String& v) { s.text_shadow_offset.y = parse_float(v); }},
 };
 
-static StyleSetter FindPropertySetter(std::string_view key) {
+static StyleSetter FindPropertySetter(StringView key) {
   for (auto& [name, setter] : kPropertyTable) {
     if (name == key) return setter;
   }
@@ -462,7 +451,7 @@ static StyleSetter FindPropertySetter(std::string_view key) {
 // Style mask lookup: maps property names to StyleMask bits
 // ---------------------------------------------------------------------------
 
-static constexpr std::pair<std::string_view, u64> kStyleMaskTable[] = {
+static constexpr Pair<StringView, u64> kStyleMaskTable[] = {
     {"background", StyleMask::kBackground},
     {"border-color", StyleMask::kBorderColor},
     {"border-width", StyleMask::kBorderWidth},
@@ -491,7 +480,7 @@ static constexpr std::pair<std::string_view, u64> kStyleMaskTable[] = {
     {"shadow-inset", StyleMask::kShadow},
 };
 
-static u64 LookupStyleMask(std::string_view key) {
+static u64 LookupStyleMask(StringView key) {
   for (auto& [k, v] : kStyleMaskTable) {
     if (k == key) return v;
   }
@@ -521,14 +510,29 @@ static Transition parse_transition_shorthand(const String& val) {
 // Style parsing: dispatch table driven
 // ---------------------------------------------------------------------------
 
-Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) const {
-  Style s;
-  for (auto& [key, val] : props) {
-    if (auto setter = FindPropertySetter(key)) {
-      String resolved = ResolveValue(val);
-      setter(s, resolved);
+// Properties apply in key order, not hash order: two that set the same field
+// (`layout` and `flex-direction`, `border-radius` and `corner-radius-tl`)
+// would otherwise resolve differently per container configuration. Key order
+// also puts a shorthand before its longhands, so the longhand wins.
+void UguiBuilder::ApplyPropertySetters(const HashMap<String, String>& props,
+                                       Style& style) const {
+  for (const auto& [key, val] : SortedEntries(props)) {
+    if (auto setter = FindPropertySetter(*key)) {
+      String resolved = ResolveValue(*val);
+      setter(style, resolved);
     }
   }
+}
+
+static u64 StyleMaskOf(const HashMap<String, String>& props) {
+  u64 mask = 0;
+  for (const auto& [key, val] : props) mask |= LookupStyleMask(key);
+  return mask;
+}
+
+Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) const {
+  Style s;
+  ApplyPropertySetters(props, s);
   return s;
 }
 
@@ -537,7 +541,7 @@ Style UguiBuilder::ParseStyle(const HashMap<String, String>& props) const {
 // ---------------------------------------------------------------------------
 
 void UguiBuilder::RegisterType(const String& type_name, WidgetFactory factory) {
-  factories_[type_name] = std::move(factory);
+  factories_[type_name] = ugui::move(factory);
 }
 
 // ---------------------------------------------------------------------------
@@ -545,7 +549,7 @@ void UguiBuilder::RegisterType(const String& type_name, WidgetFactory factory) {
 // ---------------------------------------------------------------------------
 
 void UguiBuilder::CollectVariables(const UguiNode& node) {
-  for (auto& [key, val] : node.properties) {
+  for (const auto& [key, val] : node.properties) {
     if (key.size() > 2 && key[0] == '-' && key[1] == '-') variables_[key] = val;
   }
   for (auto& child : node.children) CollectVariables(child);
@@ -553,8 +557,7 @@ void UguiBuilder::CollectVariables(const UguiNode& node) {
 
 String UguiBuilder::ResolveValue(const String& value) const {
   if (value.size() > 2 && value[0] == '-' && value[1] == '-') {
-    auto it = variables_.find(value);
-    if (it != variables_.end()) return it->second;
+    if (const String* resolved = variables_.find(value)) return *resolved;
   }
   return value;
 }
@@ -578,20 +581,19 @@ static String SubstituteProps(const String& value,
       continue;
     }
     usize j = i + 1;
-    while (j < value.size() &&
-           (std::isalnum(static_cast<unsigned char>(value[j])) ||
-            value[j] == '_' || value[j] == '-'))
+    while (j < value.size() && (isalnum(static_cast<unsigned char>(value[j])) ||
+                                value[j] == '_' || value[j] == '-'))
       ++j;
     String key = value.substr(i + 1, j - i - 1);
-    auto it = props.find(key);
-    while (it == props.end()) {
+    const String* prop = props.find(key);
+    while (!prop) {
       auto dash = key.rfind('-');
       if (dash == String::npos) break;
       key.resize(dash);
-      it = props.find(key);
+      prop = props.find(key);
     }
-    if (it != props.end()) {
-      out += it->second;
+    if (prop) {
+      out += *prop;
       i += 1 + key.size();
     } else {
       out += value[i++];
@@ -602,17 +604,16 @@ static String SubstituteProps(const String& value,
 
 static void SubstituteNodeProps(UguiNode& node,
                                 const HashMap<String, String>& props) {
-  for (auto& [key, val] : node.properties) val = SubstituteProps(val, props);
+  for (auto [key, val] : node.properties) val = SubstituteProps(val, props);
   for (auto& sb : node.state_blocks)
-    for (auto& [key, val] : sb.properties) val = SubstituteProps(val, props);
+    for (auto [key, val] : sb.properties) val = SubstituteProps(val, props);
   for (auto& kb : node.keyframe_blocks) {
-    for (auto& [key, val] : kb.properties) val = SubstituteProps(val, props);
+    for (auto [key, val] : kb.properties) val = SubstituteProps(val, props);
     for (auto& stop : kb.stops)
-      for (auto& [key, val] : stop.properties)
-        val = SubstituteProps(val, props);
+      for (auto [key, val] : stop.properties) val = SubstituteProps(val, props);
   }
   for (auto& mq : node.media_queries)
-    for (auto& [key, val] : mq.properties) val = SubstituteProps(val, props);
+    for (auto [key, val] : mq.properties) val = SubstituteProps(val, props);
   for (auto& child : node.children) SubstituteNodeProps(child, props);
 }
 
@@ -632,15 +633,19 @@ static void PrefixNames(UguiNode& node, const String& prefix) {
 static bool ReplaceSlot(UguiNode& node, Vector<UguiNode>& fill) {
   for (usize i = 0; i < node.children.size(); ++i) {
     if (node.children[i].type == "slot") {
-      Vector<UguiNode> content =
-          fill.empty() ? std::move(node.children[i].children)
-                       : std::move(fill);
-      node.children.erase(node.children.begin() +
-                          static_cast<std::ptrdiff_t>(i));
-      node.children.insert(node.children.begin() +
-                               static_cast<std::ptrdiff_t>(i),
-                           std::make_move_iterator(content.begin()),
-                           std::make_move_iterator(content.end()));
+      Vector<UguiNode> content = fill.empty()
+                                     ? ugui::move(node.children[i].children)
+                                     : ugui::move(fill);
+      // Rebuilt rather than spliced in place: both configurations can move
+      // elements this way, and UguiNode subtrees are too big to copy.
+      Vector<UguiNode> children;
+      children.reserve(node.children.size() - 1 + content.size());
+      for (usize k = 0; k < i; ++k)
+        children.push_back(ugui::move(node.children[k]));
+      for (auto& c : content) children.push_back(ugui::move(c));
+      for (usize k = i + 1; k < node.children.size(); ++k)
+        children.push_back(ugui::move(node.children[k]));
+      node.children = ugui::move(children);
       return true;
     }
     if (ReplaceSlot(node.children[i], fill)) return true;
@@ -653,10 +658,10 @@ UguiNode UguiBuilder::ExpandComponent(const UguiDocument::Component& comp,
   // Resolve props: declared defaults, overridden by instance values.
   // `$name` is implicit and resolves to the instance (or component) name.
   HashMap<String, String> props = comp.props;
-  for (auto& [key, val] : instance.properties) {
-    if (comp.props.find(key) != comp.props.end()) props[key] = val;
+  for (const auto& [key, val] : instance.properties) {
+    if (comp.props.contains(key)) props[key] = val;
   }
-  if (props.find("name") == props.end())
+  if (!props.contains("name"))
     props["name"] = instance.name.empty() ? comp.name : instance.name;
 
   UguiNode expanded = comp.root;
@@ -669,18 +674,15 @@ UguiNode UguiBuilder::ExpandComponent(const UguiDocument::Component& comp,
 
   // Instance children fill the slot (or append to the root).
   Vector<UguiNode> fill = instance.children;
-  if (!ReplaceSlot(expanded, fill) && !fill.empty()) {
-    expanded.children.insert(expanded.children.end(),
-                             std::make_move_iterator(fill.begin()),
-                             std::make_move_iterator(fill.end()));
+  if (!ReplaceSlot(expanded, fill)) {
+    for (auto& child : fill) expanded.children.push_back(ugui::move(child));
   }
 
   // Non-prop instance properties override the root element's, so call
   // sites can tweak layout/visuals (`width`, `margin`, `class`...) per
   // instance without a dedicated prop.
-  for (auto& [key, val] : instance.properties) {
-    if (comp.props.find(key) == comp.props.end())
-      expanded.properties[key] = val;
+  for (const auto& [key, val] : instance.properties) {
+    if (!comp.props.contains(key)) expanded.properties[key] = val;
   }
   for (auto& sb : instance.state_blocks)
     expanded.state_blocks.push_back(sb);
@@ -736,8 +738,7 @@ wid UguiBuilder::Build(const UguiDocument& doc) {
 
 const UguiDocument::StyleClass* UguiBuilder::FindStyleClass(
     const String& name) const {
-  auto it = style_classes_.find(name);
-  return it == style_classes_.end() ? nullptr : &it->second;
+  return style_classes_.find(name);
 }
 
 bool UguiBuilder::ApplyStyleClass(wid widget,
@@ -768,12 +769,7 @@ bool UguiBuilder::ApplyOneStyleClass(wid widget,
   // base style. The class wins for any property it explicitly sets;
   // unspecified properties are left untouched.
   Style merged = world.Get<StyleC>(widget)->style;
-  for (auto& [key, val] : sc->properties) {
-    if (auto setter = FindPropertySetter(key)) {
-      String resolved = ResolveValue(val);
-      setter(merged, resolved);
-    }
-  }
+  ApplyPropertySetters(sc->properties, merged);
   SetStyle(world, widget, merged);
 
   // Class state-blocks (`:hover { ... }` etc.) are appended as state
@@ -782,11 +778,8 @@ bool UguiBuilder::ApplyOneStyleClass(wid widget,
     WidgetState state =
         LookupEnum(kWidgetStateTable, sb.state).value_or(WidgetState::kNone);
     Style override_style = ParseStyle(sb.properties);
-    u64 mask = std::accumulate(sb.properties.begin(), sb.properties.end(),
-                               u64{0}, [](u64 acc, const auto& kv) {
-                                 return acc | LookupStyleMask(kv.first);
-                               });
-    AddStateOverride(world, widget, state, override_style, mask);
+    AddStateOverride(world, widget, state, override_style,
+                     StyleMaskOf(sb.properties));
   }
   return true;
 }
@@ -798,17 +791,16 @@ wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
   // Component instance: expand the template and build the result. The
   // expanded tree may itself instantiate components; the depth guard
   // catches (mutually) recursive definitions.
-  if (auto comp_it = components_.find(node.type);
-      comp_it != components_.end()) {
+  if (const UguiDocument::Component* comp = components_.find(node.type)) {
     if (expand_depth_ >= 32) {
-      std::fprintf(stderr,
-                   "ultragui: component expansion too deep at '%s' line %u "
-                   "(recursive component?)\n",
-                   node.type.c_str(), node.source_line);
+      fprintf(stderr,
+              "ultragui: component expansion too deep at '%s' line %u "
+              "(recursive component?)\n",
+              node.type.c_str(), node.source_line);
       return kNullWidget;
     }
     ++expand_depth_;
-    UguiNode expanded = ExpandComponent(comp_it->second, node);
+    UguiNode expanded = ExpandComponent(*comp, node);
     wid result = BuildNode(expanded, id_counter);
     --expand_depth_;
     return result;
@@ -817,24 +809,21 @@ wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
   u32 id = id_counter++;
 
   // Try registered factory
-  auto it = factories_.find(node.type);
-  if (it != factories_.end()) {
-    widget = it->second(node.name);
+  if (const WidgetFactory* factory = factories_.find(node.type)) {
+    widget = (*factory)(node.name);
   } else if (node.type == "panel" || node.type == "div" ||
              node.type == "container") {
     widget = CreatePanel(id);
   } else if (node.type == "text" || node.type == "label") {
     widget = CreateText(id);
-    auto text_it = node.properties.find("content");
-    if (text_it == node.properties.end())
-      text_it = node.properties.find("text");
-    if (text_it != node.properties.end()) SetText(widget, text_it->second);
+    const auto* text_prop = node.properties.find("content");
+    if (!text_prop) text_prop = node.properties.find("text");
+    if (text_prop) SetText(widget, *text_prop);
   } else if (node.type == "button") {
     widget = CreateButton(id);
-    auto text_it = node.properties.find("text");
-    if (text_it == node.properties.end())
-      text_it = node.properties.find("label");
-    if (text_it != node.properties.end()) SetButtonLabel(widget, text_it->second);
+    const auto* text_prop = node.properties.find("text");
+    if (!text_prop) text_prop = node.properties.find("label");
+    if (text_prop) SetButtonLabel(widget, *text_prop);
   } else if (node.type == "modal" || node.type == "dialog") {
     widget = CreateModal(id);
   } else if (node.type == "image" || node.type == "img") {
@@ -844,64 +833,53 @@ wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     world.Get<StyleC>(widget)->style.overflow = Overflow::kScroll;
   } else if (node.type == "text-input" || node.type == "input") {
     widget = CreateTextInput(id);
-    auto text_it = node.properties.find("placeholder");
-    if (text_it != node.properties.end())
-      SetTextInputPlaceholder(widget, text_it->second);
-    auto val_it = node.properties.find("value");
-    if (val_it != node.properties.end()) SetTextInputValue(widget, val_it->second);
+    const auto* text_prop = node.properties.find("placeholder");
+    if (text_prop) SetTextInputPlaceholder(widget, *text_prop);
+    const auto* val_prop = node.properties.find("value");
+    if (val_prop) SetTextInputValue(widget, *val_prop);
   } else if (node.type == "checkbox") {
     widget = CreateCheckbox(id);
-    auto text_it = node.properties.find("label");
-    if (text_it == node.properties.end())
-      text_it = node.properties.find("text");
-    if (text_it != node.properties.end()) SetCheckboxLabel(widget, text_it->second);
-    auto checked_it = node.properties.find("checked");
-    if (checked_it != node.properties.end() && checked_it->second == "true")
-      SetChecked(widget, true);
+    const auto* text_prop = node.properties.find("label");
+    if (!text_prop) text_prop = node.properties.find("text");
+    if (text_prop) SetCheckboxLabel(widget, *text_prop);
+    const auto* checked_prop = node.properties.find("checked");
+    if (checked_prop && *checked_prop == "true") SetChecked(widget, true);
   } else if (node.type == "slider" || node.type == "range") {
     widget = CreateSlider(id);
-    auto min_it = node.properties.find("min");
-    if (min_it != node.properties.end())
-      SetSliderMin(widget, parse_float(min_it->second));
-    auto max_it = node.properties.find("max");
-    if (max_it != node.properties.end())
-      SetSliderMax(widget, parse_float(max_it->second));
-    auto val_it = node.properties.find("value");
-    if (val_it != node.properties.end())
-      SetSliderValue(widget, parse_float(val_it->second));
+    const auto* min_prop = node.properties.find("min");
+    if (min_prop) SetSliderMin(widget, parse_float(*min_prop));
+    const auto* max_prop = node.properties.find("max");
+    if (max_prop) SetSliderMax(widget, parse_float(*max_prop));
+    const auto* val_prop = node.properties.find("value");
+    if (val_prop) SetSliderValue(widget, parse_float(*val_prop));
   } else if (node.type == "radio") {
     widget = CreateRadio(id);
-    auto text_it = node.properties.find("label");
-    if (text_it == node.properties.end())
-      text_it = node.properties.find("text");
-    if (text_it != node.properties.end()) SetRadioLabel(widget, text_it->second);
-    auto group_it = node.properties.find("group");
-    if (group_it != node.properties.end())
-      SetRadioGroup(widget, group_it->second);
-    auto checked_it = node.properties.find("checked");
-    if (checked_it != node.properties.end() && checked_it->second == "true")
-      SetRadioSelected(widget, true);
+    const auto* text_prop = node.properties.find("label");
+    if (!text_prop) text_prop = node.properties.find("text");
+    if (text_prop) SetRadioLabel(widget, *text_prop);
+    const auto* group_prop = node.properties.find("group");
+    if (group_prop) SetRadioGroup(widget, *group_prop);
+    const auto* checked_prop = node.properties.find("checked");
+    if (checked_prop && *checked_prop == "true") SetRadioSelected(widget, true);
   } else if (node.type == "toggle" || node.type == "switch") {
     widget = CreateToggle(id);
-    auto checked_it = node.properties.find("checked");
-    if (checked_it != node.properties.end() && checked_it->second == "true")
-      SetToggleOn(widget, true);
+    const auto* checked_prop = node.properties.find("checked");
+    if (checked_prop && *checked_prop == "true") SetToggleOn(widget, true);
   } else if (node.type == "dropdown" || node.type == "select") {
     widget = CreateDropdown(id);
     Vector<String> opts;
     for (auto& child_node : node.children) {
-      auto text_it = child_node.properties.find("text");
-      if (text_it == child_node.properties.end())
-        text_it = child_node.properties.find("label");
-      if (text_it != child_node.properties.end())
-        opts.push_back(text_it->second);
+      const auto* text_prop = child_node.properties.find("text");
+      if (!text_prop) text_prop = child_node.properties.find("label");
+      if (text_prop)
+        opts.push_back(*text_prop);
       else if (!child_node.name.empty())
         opts.push_back(child_node.name);
     }
     SetDropdownOptions(widget, opts);
-    auto sel_it = node.properties.find("selected");
-    if (sel_it != node.properties.end())
-      SetDropdownSelected(widget, static_cast<i32>(parse_float(sel_it->second)));
+    const auto* sel_prop = node.properties.find("selected");
+    if (sel_prop)
+      SetDropdownSelected(widget, static_cast<i32>(parse_float(*sel_prop)));
     // Return early: option children are data, not child widgets
     world.Get<WidgetNode>(widget)->id = id;
     world.Get<WidgetNode>(widget)->name = node.name;
@@ -913,11 +891,9 @@ wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
       if (child_node.type == "separator") {
         AddContextMenuSeparator(menu);
       } else {
-        auto text_it = child_node.properties.find("text");
-        if (text_it == child_node.properties.end())
-          text_it = child_node.properties.find("label");
-        String label = text_it != child_node.properties.end() ? text_it->second
-                                                              : child_node.name;
+        const auto* text_prop = child_node.properties.find("text");
+        if (!text_prop) text_prop = child_node.properties.find("label");
+        String label = text_prop ? *text_prop : child_node.name;
         AddContextMenuItem(menu, label, nullptr);
       }
     }
@@ -933,54 +909,48 @@ wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     for (const auto& child_node : node.children) {
       if (child_node.type == "span") {
         TextSpan span;
-        auto text_it = child_node.properties.find("text");
-        if (text_it == child_node.properties.end())
-          text_it = child_node.properties.find("content");
-        if (text_it != child_node.properties.end()) span.text = text_it->second;
+        const auto* text_prop = child_node.properties.find("text");
+        if (!text_prop) text_prop = child_node.properties.find("content");
+        if (text_prop) span.text = *text_prop;
 
-        auto color_it = child_node.properties.find("color");
-        if (color_it != child_node.properties.end())
-          span.color = parse_color(color_it->second);
+        const auto* color_prop = child_node.properties.find("color");
+        if (color_prop) span.color = parse_color(*color_prop);
 
-        auto size_it = child_node.properties.find("font-size");
-        if (size_it != child_node.properties.end())
-          span.font_size = parse_float(size_it->second);
+        const auto* size_prop = child_node.properties.find("font-size");
+        if (size_prop) span.font_size = parse_float(*size_prop);
 
-        auto weight_it = child_node.properties.find("font-weight");
-        if (weight_it != child_node.properties.end()) {
-          static constexpr std::pair<std::string_view, FontWeight>
-              kSpanWeightTable[] = {
-                  {"thin", FontWeight::kThin},
-                  {"extra-light", FontWeight::kExtraLight},
-                  {"light", FontWeight::kLight},
-                  {"regular", FontWeight::kRegular},
-                  {"normal", FontWeight::kRegular},
-                  {"medium", FontWeight::kMedium},
-                  {"semi-bold", FontWeight::kSemiBold},
-                  {"semibold", FontWeight::kSemiBold},
-                  {"bold", FontWeight::kBold},
-                  {"extra-bold", FontWeight::kExtraBold},
-                  {"black", FontWeight::kBlack},
-              };
-          if (auto w = LookupEnum(kSpanWeightTable, weight_it->second))
+        const auto* weight_prop = child_node.properties.find("font-weight");
+        if (weight_prop) {
+          static constexpr Pair<StringView, FontWeight> kSpanWeightTable[] = {
+              {"thin", FontWeight::kThin},
+              {"extra-light", FontWeight::kExtraLight},
+              {"light", FontWeight::kLight},
+              {"regular", FontWeight::kRegular},
+              {"normal", FontWeight::kRegular},
+              {"medium", FontWeight::kMedium},
+              {"semi-bold", FontWeight::kSemiBold},
+              {"semibold", FontWeight::kSemiBold},
+              {"bold", FontWeight::kBold},
+              {"extra-bold", FontWeight::kExtraBold},
+              {"black", FontWeight::kBlack},
+          };
+          if (auto w = LookupEnum(kSpanWeightTable, *weight_prop))
             span.font_weight = *w;
         }
 
-        auto style_it = child_node.properties.find("font-style");
-        if (style_it != child_node.properties.end() &&
-            style_it->second == "italic") {
+        const auto* style_prop = child_node.properties.find("font-style");
+        if (style_prop && *style_prop == "italic") {
           span.font_style = FontStyle::kItalic;
         }
 
-        auto dec_it = child_node.properties.find("text-decoration");
-        if (dec_it != child_node.properties.end()) {
-          if (dec_it->second == "underline")
+        const auto* dec_prop = child_node.properties.find("text-decoration");
+        if (dec_prop) {
+          if (*dec_prop == "underline")
             span.decoration = TextDecoration::kUnderline;
-          else if (dec_it->second == "line-through" ||
-                   dec_it->second == "strikethrough")
+          else if (*dec_prop == "line-through" || *dec_prop == "strikethrough")
             span.decoration = TextDecoration::kStrikethrough;
-          else if (dec_it->second == "underline line-through" ||
-                   dec_it->second == "underline strikethrough")
+          else if (*dec_prop == "underline line-through" ||
+                   *dec_prop == "underline strikethrough")
             span.decoration =
                 TextDecoration::kUnderline | TextDecoration::kStrikethrough;
         }
@@ -996,8 +966,8 @@ wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
     return widget;
   } else {
     // Unknown type: treat as panel
-    std::fprintf(stderr, "ultragui: unknown element type '%s' at line %u\n",
-                 node.type.c_str(), node.source_line);
+    fprintf(stderr, "ultragui: unknown element type '%s' at line %u\n",
+            node.type.c_str(), node.source_line);
     widget = CreatePanel(id);
   }
 
@@ -1017,87 +987,69 @@ wid UguiBuilder::BuildNode(const UguiNode& node, u32& id_counter) {
 void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
   WidgetRegistry& world = *WidgetRegistry::Active();
   // Style class from `class: name;` first; inline properties below win.
-  auto class_it = node.properties.find("class");
-  if (class_it != node.properties.end()) {
-    ApplyStyleClass(widget, class_it->second);
+  const auto* class_prop = node.properties.find("class");
+  if (class_prop) {
+    ApplyStyleClass(widget, *class_prop);
   }
 
   // Apply inline properties on top of any class defaults. Properties
   // not set inline keep whatever the class supplied.
   Style merged = world.Get<StyleC>(widget)->style;
-  for (auto& [key, val] : node.properties) {
-    if (auto setter = FindPropertySetter(key)) {
-      setter(merged, ResolveValue(val));
-    }
-  }
+  ApplyPropertySetters(node.properties, merged);
   SetStyle(world, widget, merged);
 
   // Per-widget font: `font: <name>` selects a face registered via RegisterFont
   // (e.g. "mono"). Sets the text/button font override; unknown names are left
   // on the context default. font-size/weight/style still apply on top.
-  if (auto font_it = node.properties.find("font"); font_it != node.properties.end()) {
-    if (auto fit = fonts_.find(font_it->second); fit != fonts_.end()) {
-      if (auto* tc = world.Get<TextContent>(widget)) tc->font = fit->second;
-      if (auto* bc = world.Get<ButtonContent>(widget)) bc->font = fit->second;
+  if (const auto* font_prop = node.properties.find("font")) {
+    if (const auto* font = fonts_.find(*font_prop)) {
+      if (auto* tc = world.Get<TextContent>(widget)) tc->font = *font;
+      if (auto* bc = world.Get<ButtonContent>(widget)) bc->font = *font;
     }
   }
 
   // Tooltip
-  auto tooltip_it = node.properties.find("tooltip");
-  if (tooltip_it != node.properties.end())
-    SetTooltip(world, widget, tooltip_it->second);
+  const auto* tooltip_prop = node.properties.find("tooltip");
+  if (tooltip_prop) SetTooltip(world, widget, *tooltip_prop);
 
   // Tab navigation
-  auto tab_it = node.properties.find("tab-index");
-  if (tab_it != node.properties.end())
+  const auto* tab_prop = node.properties.find("tab-index");
+  if (tab_prop)
     world.Get<WidgetNode>(widget)->tab_index =
-        static_cast<i32>(parse_float(tab_it->second));
+        static_cast<i32>(parse_float(*tab_prop));
 
   // State overrides
   for (auto& sb : node.state_blocks) {
     WidgetState state =
         LookupEnum(kWidgetStateTable, sb.state).value_or(WidgetState::kNone);
     Style override_style = ParseStyle(sb.properties);
-
-    // Build mask via fold over property keys
-    u64 mask = std::accumulate(sb.properties.begin(), sb.properties.end(),
-                               u64{0}, [](u64 acc, const auto& kv) {
-                                 return acc | LookupStyleMask(kv.first);
-                               });
-
-    AddStateOverride(world, widget, state, override_style, mask);
+    AddStateOverride(world, widget, state, override_style,
+                     StyleMaskOf(sb.properties));
 
     // Parse transition
     Transition trans;
     bool has_transition = false;
 
-    if (auto t_it = sb.properties.find("transition");
-        t_it != sb.properties.end()) {
-      trans = parse_transition_shorthand(t_it->second);
+    if (const auto* t_prop = sb.properties.find("transition")) {
+      trans = parse_transition_shorthand(*t_prop);
       has_transition = true;
     }
-    if (auto td_it = sb.properties.find("transition-duration");
-        td_it != sb.properties.end()) {
-      trans.duration = parse_duration(td_it->second);
+    if (const auto* td_prop = sb.properties.find("transition-duration")) {
+      trans.duration = parse_duration(*td_prop);
       has_transition = true;
     }
-    if (auto te_it = sb.properties.find("transition-easing");
-        te_it != sb.properties.end()) {
-      if (auto e = LookupEnum(kEasingTable, te_it->second)) trans.easing = *e;
+    if (const auto* te_prop = sb.properties.find("transition-easing")) {
+      if (auto e = LookupEnum(kEasingTable, *te_prop)) trans.easing = *e;
     }
-    if (auto tl_it = sb.properties.find("transition-delay");
-        tl_it != sb.properties.end()) {
-      trans.delay = parse_duration(tl_it->second);
+    if (const auto* tl_prop = sb.properties.find("transition-delay")) {
+      trans.delay = parse_duration(*tl_prop);
     }
-    if (auto ss_it = sb.properties.find("spring-stiffness");
-        ss_it != sb.properties.end())
-      trans.spring_stiffness = parse_float(ss_it->second);
-    if (auto sd_it = sb.properties.find("spring-damping");
-        sd_it != sb.properties.end())
-      trans.spring_damping = parse_float(sd_it->second);
-    if (auto sm_it = sb.properties.find("spring-mass");
-        sm_it != sb.properties.end())
-      trans.spring_mass = parse_float(sm_it->second);
+    if (const auto* ss_prop = sb.properties.find("spring-stiffness"))
+      trans.spring_stiffness = parse_float(*ss_prop);
+    if (const auto* sd_prop = sb.properties.find("spring-damping"))
+      trans.spring_damping = parse_float(*sd_prop);
+    if (const auto* sm_prop = sb.properties.find("spring-mass"))
+      trans.spring_mass = parse_float(*sm_prop);
 
     if (has_transition && state != WidgetState::kNone)
       AddStateTransition(world, widget, state, trans);
@@ -1111,7 +1063,7 @@ void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
     ms.queries.reserve(node.media_queries.size());
     for (auto& mq : node.media_queries)
       ms.queries.push_back({mq.condition, mq.value, mq.properties});
-    world.Add<MediaStyle>(widget, std::move(ms));
+    world.Add<MediaStyle>(widget, ugui::move(ms));
     ApplyMediaStyle(widget);
   }
 
@@ -1123,24 +1075,23 @@ void UguiBuilder::ApplyProperties(wid widget, const UguiNode& node) {
     anim.widget_id = world.Get<WidgetNode>(widget)->id;
 
     // Parse top-level properties
-    if (auto d_it = kb.properties.find("duration"); d_it != kb.properties.end())
-      anim.duration = parse_duration(d_it->second);
-    if (auto l_it = kb.properties.find("loop"); l_it != kb.properties.end())
-      anim.repeat_count = (l_it->second == "true") ? -1 : 1;
-    if (auto a_it = kb.properties.find("alternate");
-        a_it != kb.properties.end())
-      anim.alternate = (a_it->second == "true");
+    if (const auto* d_prop = kb.properties.find("duration"))
+      anim.duration = parse_duration(*d_prop);
+    if (const auto* l_prop = kb.properties.find("loop"))
+      anim.repeat_count = (*l_prop == "true") ? -1 : 1;
+    if (const auto* a_prop = kb.properties.find("alternate"))
+      anim.alternate = (*a_prop == "true");
 
-    // Transform stops -> sorted keyframes
+    // Transform stops -> sorted keyframes. Two stops may share a percent, and
+    // which one the animator reaches first depends on how the sort left the
+    // tie, so this is IntroSort (std::sort's exact order), not any sort.
     anim.keyframes.reserve(kb.stops.size());
-    std::transform(kb.stops.begin(), kb.stops.end(),
-                   std::back_inserter(anim.keyframes),
-                   [this](const auto& stop) {
-                     return Keyframe{stop.percent, ParseStyle(stop.properties)};
-                   });
-    std::sort(
-        anim.keyframes.begin(), anim.keyframes.end(),
-        [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
+    for (const auto& stop : kb.stops)
+      anim.keyframes.push_back(
+          Keyframe{stop.percent, ParseStyle(stop.properties)});
+    IntroSort(anim.keyframes, [](const Keyframe& a, const Keyframe& b) {
+      return a.time < b.time;
+    });
 
     anim.active = true;
     anim.start_time = 0;  // Will be set when UIContext starts the animator
@@ -1168,12 +1119,7 @@ void UguiBuilder::ApplyMediaStyle(wid widget) const {
       matches = viewport_size_.y <= q.value;
     if (!matches) continue;
 
-    for (auto& [key, val] : q.properties) {
-      if (auto setter = FindPropertySetter(key)) {
-        String resolved = ResolveValue(val);
-        setter(style, resolved);
-      }
-    }
+    ApplyPropertySetters(q.properties, style);
   }
   SetStyle(world, widget, style);
 }

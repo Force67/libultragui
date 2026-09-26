@@ -1,17 +1,15 @@
 #include <ugui/core/config.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/lottie/lottie.h>
 
-#include <algorithm>
-#include <cstdio>
-#include <cstring>
-#include <memory>
+#include <stdio.h>
+#include <string.h>
 #include <rlottie.h>
-#include <vector>
 
 namespace ugui {
 
 struct LottieAnimation::Impl {
-  std::unique_ptr<rlottie::Animation> anim;
+  std::unique_ptr<rlottie::Animation> anim;  // rlottie's own type (see above)
   TextureBackend* backend = nullptr;
   TextureId texture = kNullTextureId;
   u32 width = 0;
@@ -36,7 +34,7 @@ struct LottieAnimation::Impl {
     if (!anim || !backend || frame_no == last_rendered_frame) return;
 
     // Clear buffer to transparent
-    std::memset(pixel_buf.data(), 0, pixel_buf.size() * sizeof(u32));
+    memset(pixel_buf.data(), 0, pixel_buf.size() * sizeof(u32));
 
     rlottie::Surface surface(pixel_buf.data(), width, height,
                              width * sizeof(u32));
@@ -53,9 +51,9 @@ struct LottieAnimation::Impl {
       // Un-premultiply
       if (a > 0 && a < 255) {
         f32 inv_a = 255.0f / static_cast<f32>(a);
-        r = static_cast<u8>(std::min(255.0f, r * inv_a));
-        g = static_cast<u8>(std::min(255.0f, g * inv_a));
-        b = static_cast<u8>(std::min(255.0f, b * inv_a));
+        r = static_cast<u8>(Min(255.0f, r * inv_a));
+        g = static_cast<u8>(Min(255.0f, g * inv_a));
+        b = static_cast<u8>(Min(255.0f, b * inv_a));
       }
 
       u32 idx = i * 4;
@@ -107,12 +105,12 @@ bool LottieAnimation::Load(TextureBackend* backend, const char* path, u32 w,
 
   auto anim = rlottie::Animation::loadFromFile(path);
   if (!anim) {
-    std::fprintf(stderr, "ugui/lottie: failed to load '%s'\n", path);
+    fprintf(stderr, "ugui/lottie: failed to load '%s'\n", path);
     return false;
   }
 
   impl_ = new Impl();
-  impl_->anim = std::move(anim);
+  impl_->anim = ugui::move(anim);
   impl_->backend = backend;
   impl_->width = w;
   impl_->height = h;
@@ -132,14 +130,15 @@ bool LottieAnimation::LoadData(TextureBackend* backend, const char* json_data,
                                const char* key, u32 w, u32 h) {
   if (impl_) Unload();
 
-  auto anim = rlottie::Animation::loadFromData(String(json_data), String(key));
+  auto anim = rlottie::Animation::loadFromData(std::string(json_data),
+                                               std::string(key));
   if (!anim) {
-    std::fprintf(stderr, "ugui/lottie: failed to parse lottie data\n");
+    fprintf(stderr, "ugui/lottie: failed to parse lottie data\n");
     return false;
   }
 
   impl_ = new Impl();
-  impl_->anim = std::move(anim);
+  impl_->anim = ugui::move(anim);
   impl_->backend = backend;
   impl_->width = w;
   impl_->height = h;
@@ -179,7 +178,7 @@ void LottieAnimation::Update(f64 dt) {
 
   // Map time to frame
   f64 pos = impl_->current_time / dur;
-  pos = std::clamp(pos, 0.0, 1.0);
+  pos = ClampMinMax(pos, 0.0, 1.0);
   usize frame = impl_->anim->frameAtPos(pos);
   impl_->render_frame(static_cast<u32>(frame));
 }
@@ -219,7 +218,7 @@ void LottieAnimation::set_speed(f32 spd) {
 
 void LottieAnimation::Seek(f32 prog) {
   if (!impl_ || impl_->total_frames == 0) return;
-  prog = std::clamp(prog, 0.0f, 1.0f);
+  prog = ClampMinMax(prog, 0.0f, 1.0f);
   impl_->current_time = prog * impl_->duration;
   usize frame = impl_->anim->frameAtPos(prog);
   impl_->render_frame(static_cast<u32>(frame));
@@ -245,7 +244,7 @@ u32 LottieAnimation::total_frames() const {
 u32 LottieAnimation::current_frame() const {
   if (!impl_ || impl_->total_frames == 0) return 0;
   f64 pos = impl_->duration > 0 ? impl_->current_time / impl_->duration : 0;
-  pos = std::clamp(pos, 0.0, 1.0);
+  pos = ClampMinMax(pos, 0.0, 1.0);
   return static_cast<u32>(impl_->anim->frameAtPos(pos));
 }
 

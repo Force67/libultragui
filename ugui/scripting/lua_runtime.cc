@@ -1,4 +1,5 @@
 #include <ugui/platform/platform.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/core/from_chars_compat.h>
 #include <ugui/scripting/script_runtime.h>
 #include <ugui/widgets/button.h>
@@ -15,10 +16,8 @@ extern "C" {
 #include <lualib.h>
 }
 
-#include <algorithm>
-#include <charconv>
-#include <cstdio>
-#include <cstring>
+#include <stdio.h>
+#include <string.h>
 
 namespace ugui {
 
@@ -149,14 +148,13 @@ void ScriptRuntime::Shutdown() {
 
 bool ScriptRuntime::Exec(const char* script, const char* name) {
   if (luaL_loadbuffer(impl_->L, script, strlen(script), name) != LUA_OK) {
-    std::fprintf(stderr, "ugui/lua: load error: %s\n",
-                 lua_tostring(impl_->L, -1));
+    fprintf(stderr, "ugui/lua: load error: %s\n", lua_tostring(impl_->L, -1));
     lua_pop(impl_->L, 1);
     return false;
   }
   if (lua_pcall(impl_->L, 0, 0, 0) != LUA_OK) {
-    std::fprintf(stderr, "ugui/lua: runtime error: %s\n",
-                 lua_tostring(impl_->L, -1));
+    fprintf(stderr, "ugui/lua: runtime error: %s\n",
+            lua_tostring(impl_->L, -1));
     lua_pop(impl_->L, 1);
     return false;
   }
@@ -165,14 +163,14 @@ bool ScriptRuntime::Exec(const char* script, const char* name) {
 
 bool ScriptRuntime::ExecFile(const char* path) {
   if (luaL_loadfile(impl_->L, path) != LUA_OK) {
-    std::fprintf(stderr, "ugui/lua: failed to load '%s': %s\n", path,
-                 lua_tostring(impl_->L, -1));
+    fprintf(stderr, "ugui/lua: failed to load '%s': %s\n", path,
+            lua_tostring(impl_->L, -1));
     lua_pop(impl_->L, 1);
     return false;
   }
   if (lua_pcall(impl_->L, 0, 0, 0) != LUA_OK) {
-    std::fprintf(stderr, "ugui/lua: error in '%s': %s\n", path,
-                 lua_tostring(impl_->L, -1));
+    fprintf(stderr, "ugui/lua: error in '%s': %s\n", path,
+            lua_tostring(impl_->L, -1));
     lua_pop(impl_->L, 1);
     return false;
   }
@@ -198,8 +196,8 @@ void ScriptRuntime::UnregisterWidget(wid widget) {
 void ScriptRuntime::ClearWidgetRegistry() { impl_->widget_registry.clear(); }
 
 wid ScriptRuntime::FindRegisteredWidget(const char* name) const {
-  auto it = impl_->widget_registry.find(name);
-  return it != impl_->widget_registry.end() ? it->second : kNullWidget;
+  const wid* found = impl_->widget_registry.find(name);
+  return found ? *found : kNullWidget;
 }
 
 void ScriptRuntime::Impl::PushWidgetTable(wid widget) {
@@ -243,8 +241,8 @@ bool ScriptRuntime::CallHandler(const char* func_name, wid widget) {
   impl_->PushWidgetTable(widget);
 
   if (lua_pcall(impl_->L, 1, 0, 0) != LUA_OK) {
-    std::fprintf(stderr, "ugui/lua: error calling '%s': %s\n", func_name,
-                 lua_tostring(impl_->L, -1));
+    fprintf(stderr, "ugui/lua: error calling '%s': %s\n", func_name,
+            lua_tostring(impl_->L, -1));
     lua_pop(impl_->L, 1);
     return false;
   }
@@ -286,8 +284,8 @@ void ScriptRuntime::UpdateTimers(double current_time) {
   for (auto& entry : ready) {
     lua_rawgeti(impl_->L, LUA_REGISTRYINDEX, entry.func_ref);
     if (lua_pcall(impl_->L, 0, 0, 0) != LUA_OK) {
-      std::fprintf(stderr, "ugui/lua: timer error: %s\n",
-                   lua_tostring(impl_->L, -1));
+      fprintf(stderr, "ugui/lua: timer error: %s\n",
+              lua_tostring(impl_->L, -1));
       lua_pop(impl_->L, 1);
     }
     luaL_unref(impl_->L, LUA_REGISTRYINDEX, entry.func_ref);
@@ -311,14 +309,14 @@ void ScriptRuntime::UpdateTimers(double current_time) {
 
     if (tw.is_color) {
       auto lerp = [](f32 a, f32 b, f64 t) -> int {
-        return std::clamp(static_cast<int>(a + (b - a) * t), 0, 255);
+        return ClampMinMax(static_cast<int>(a + (b - a) * t), 0, 255);
       };
       int r = lerp(tw.from_r, tw.to_r, t);
       int g = lerp(tw.from_g, tw.to_g, t);
       int b = lerp(tw.from_b, tw.to_b, t);
       int a = lerp(tw.from_a, tw.to_a, t);
       char hex[10];
-      std::snprintf(hex, sizeof(hex), "#%02x%02x%02x%02x", r, g, b, a);
+      snprintf(hex, sizeof(hex), "#%02x%02x%02x%02x", r, g, b, a);
       lua_pushstring(L, hex);
     } else {
       f32 v = tw.from_num + (tw.to_num - tw.from_num) * static_cast<f32>(t);
@@ -348,21 +346,21 @@ static void WireChangeHandlersRecursive(ScriptRuntime& rt, wid w) {
     if (n->kind == WidgetKind::kDropdown) {
       SetDropdownChange(w, [&rt, w](i32, const String&) {
         World& wr = *WidgetRegistry::Active();
-        std::string handler = "on_" + wr.Get<WidgetNode>(w)->name;
+        String handler = "on_" + wr.Get<WidgetNode>(w)->name;
         rt.CallHandler(handler.c_str(), w);
       });
     }
     if (n->kind == WidgetKind::kCheckbox) {
       SetCheckboxChange(w, [&rt, w](bool) {
         World& wr = *WidgetRegistry::Active();
-        std::string handler = "on_" + wr.Get<WidgetNode>(w)->name;
+        String handler = "on_" + wr.Get<WidgetNode>(w)->name;
         rt.CallHandler(handler.c_str(), w);
       });
     }
     if (n->kind == WidgetKind::kSlider) {
       SetSliderChange(w, [&rt, w](f32) {
         World& wr = *WidgetRegistry::Active();
-        std::string handler = "on_" + wr.Get<WidgetNode>(w)->name;
+        String handler = "on_" + wr.Get<WidgetNode>(w)->name;
         rt.CallHandler(handler.c_str(), w);
       });
     }
@@ -382,7 +380,7 @@ void ScriptRuntime::RegisterFunction(const char* name, NativeFunction func) {
     return;
   }
 
-  auto* fn = new NativeFunction(std::move(func));
+  auto* fn = new NativeFunction(ugui::move(func));
   impl_->native_functions.push_back(fn);
   lua_pushlightuserdata(impl_->L, fn);
   lua_pushcclosure(
@@ -483,7 +481,7 @@ int ScriptRuntime::Impl::LuaUguiTween(lua_State* L) {
     }
   }
 
-  tweens.push_back(std::move(tw));
+  tweens.push_back(ugui::move(tw));
   return 0;
 }
 
@@ -498,8 +496,8 @@ int ScriptRuntime::Impl::LuaUguiFind(lua_State* L) {
   const char* name = luaL_checkstring(L, 1);
   World& world = *WidgetRegistry::Active();
 
-  auto it = rt->widget_registry.find(name);
-  wid w = (it != rt->widget_registry.end()) ? it->second : kNullWidget;
+  const wid* found = rt->widget_registry.find(name);
+  wid w = found ? *found : kNullWidget;
   WidgetNode* n = w.valid() ? world.Get<WidgetNode>(w) : nullptr;
   if (!n) {
     lua_pushnil(L);
@@ -521,8 +519,8 @@ int ScriptRuntime::Impl::LuaUguiGetProp(lua_State* L) {
   const char* prop = luaL_checkstring(L, 2);
   World& world = *WidgetRegistry::Active();
 
-  auto it = rt->widget_registry.find(name);
-  wid w = (it != rt->widget_registry.end()) ? it->second : kNullWidget;
+  const wid* found = rt->widget_registry.find(name);
+  wid w = found ? *found : kNullWidget;
   if (!w.valid() || !world.Get<StyleC>(w)) {
     lua_pushnil(L);
     return 1;
@@ -550,11 +548,11 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
   const char* prop = luaL_checkstring(L, 2);
   World& world = *WidgetRegistry::Active();
 
-  auto it = rt->widget_registry.find(name);
-  wid w = (it != rt->widget_registry.end()) ? it->second : kNullWidget;
+  const wid* found = rt->widget_registry.find(name);
+  wid w = found ? *found : kNullWidget;
   WidgetNode* n = w.valid() ? world.Get<WidgetNode>(w) : nullptr;
   if (!n) {
-    std::fprintf(stderr, "ugui/lua: ugui.set: widget '%s' not found\n", name);
+    fprintf(stderr, "ugui/lua: ugui.set: widget '%s' not found\n", name);
     return 0;
   }
 
@@ -711,7 +709,7 @@ int ScriptRuntime::Impl::LuaUguiSetProp(lua_State* L) {
 
 int ScriptRuntime::Impl::LuaUguiLog(lua_State* L) {
   const char* msg = luaL_checkstring(L, 1);
-  std::printf("[ugui/lua] %s\n", msg);
+  printf("[ugui/lua] %s\n", msg);
   return 0;
 }
 

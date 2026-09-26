@@ -1,8 +1,6 @@
 #ifndef UGUI_CORE_COMPONENT_STORE_H_
 #define UGUI_CORE_COMPONENT_STORE_H_
 
-#include <utility>
-
 #include <ugui/core/config.h>
 #include <ugui/core/handle.h>
 #include <ugui/core/types.h>
@@ -45,12 +43,12 @@ class ComponentStore : public IComponentStore {
     EnsureSparse(id.index);
     u32 d = sparse_[id.index];
     if (d != kInvalid && d < dense_ids_.size() && dense_ids_[d] == id) {
-      data_[d] = std::move(value);
+      data_[d] = ugui::move(value);
       return data_[d];
     }
     sparse_[id.index] = static_cast<u32>(data_.size());
     dense_ids_.push_back(id);
-    data_.push_back(std::move(value));
+    data_.push_back(ugui::move(value));
     return data_.back();
   }
 
@@ -70,7 +68,7 @@ class ComponentStore : public IComponentStore {
     u32 d = sparse_[id.index];
     if (d == kInvalid || d >= dense_ids_.size() || dense_ids_[d] != id) return;
     u32 last = static_cast<u32>(data_.size() - 1);
-    data_[d] = std::move(data_[last]);
+    data_[d] = ugui::move(data_[last]);
     dense_ids_[d] = dense_ids_[last];
     sparse_[dense_ids_[d].index] = d;
     data_.pop_back();

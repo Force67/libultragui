@@ -49,6 +49,18 @@ option(ULTRAGUI_IMPL_WIN32 "Build the ugui_impl_win32 input backend" ${_default_
 # Where pkg-config has nothing to offer, build freetype, harfbuzz and Lua from
 # pinned sources (cmake/BundledDeps.cmake).
 option(ULTRAGUI_BUNDLED_DEPS "Build freetype, harfbuzz and Lua from source" ${WIN32})
+# Build against equilibrium base instead of the C++ standard library, and
+# without exceptions (ugui/core/config.h). A parent project that already builds
+# equilibrium::base supplies it; otherwise ULTRAGUI_EQUILIBRIUM_DIR names the
+# checkout to build it from.
+option(ULTRAGUI_USE_BASE "Use equilibrium base instead of the STL" OFF)
+set(ULTRAGUI_EQUILIBRIUM_DIR ""
+    CACHE PATH "equilibrium checkout used when ULTRAGUI_USE_BASE=ON and no equilibrium::base target exists")
+
+# The equilibrium base headers require C++23.
+if(ULTRAGUI_USE_BASE)
+    set(CMAKE_CXX_STANDARD 23)
+endif()
 
 # Compiler warnings
 add_library(ultragui_warnings INTERFACE)
@@ -74,6 +86,16 @@ if(NOT (TARGET freetype AND TARGET harfbuzz)
    OR ULTRAGUI_BACKEND_D3D12
    OR (NOT WIN32 AND (ULTRAGUI_BACKEND_D3D11 OR ULTRAGUI_IMPL_DX11)))
     find_package(PkgConfig REQUIRED)
+endif()
+
+if(ULTRAGUI_USE_BASE AND NOT TARGET equilibrium::base)
+    if(NOT EXISTS "${ULTRAGUI_EQUILIBRIUM_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "ULTRAGUI_USE_BASE=ON needs an equilibrium checkout; set "
+            "ULTRAGUI_EQUILIBRIUM_DIR (now ${ULTRAGUI_EQUILIBRIUM_DIR})")
+    endif()
+    set(EQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${ULTRAGUI_EQUILIBRIUM_DIR}" equilibrium EXCLUDE_FROM_ALL)
 endif()
 
 if(ULTRAGUI_BACKEND_VULKAN OR ULTRAGUI_BACKEND_D3D12)
@@ -246,6 +268,7 @@ set(ULTRAGUI_SCRIPT_SOURCE "${_default_script_src}"
 # --- Core library ---
 set(ULTRAGUI_SOURCES
     ugui/core/arena.cc
+    ugui/core/from_chars.cc
     ugui/core/string_utils.cc
     ugui/render/renderer2d.cc
     ugui/style/style.cc
@@ -374,6 +397,18 @@ target_compile_definitions(ultragui
     PRIVATE $<$<STREQUAL:$<TARGET_PROPERTY:ultragui,TYPE>,SHARED_LIBRARY>:UGUI_BUILD>
 )
 
+if(ULTRAGUI_USE_BASE)
+    target_link_libraries(ultragui PUBLIC equilibrium::base)
+    target_compile_definitions(ultragui PUBLIC ULTRAGUI_USE_BASE)
+    # base's std::formatter interop would pull <format> into every TU that
+    # names a ugui::String; the library itself never formats with it.
+    target_compile_definitions(ultragui PRIVATE BASE_NO_STD_FORMAT)
+    # base's rules include no exceptions; the vendored C++ dependencies are
+    # separate targets and keep their own flags.
+    target_compile_options(ultragui PRIVATE
+        $<IF:$<CXX_COMPILER_ID:MSVC>,/EHs-c-,-fno-exceptions>)
+endif()
+
 target_link_libraries(ultragui
     PRIVATE
         ultragui_warnings
@@ -471,7 +506,11 @@ endif()
 
 # --- Examples ---
 if(ULTRAGUI_BUILD_EXAMPLES)
-    add_subdirectory(examples)
+    if(ULTRAGUI_USE_BASE)
+        message(STATUS "ultragui: examples use the STL; skipped with ULTRAGUI_USE_BASE")
+    else()
+        add_subdirectory(examples)
+    endif()
 endif()
 
 # --- Tests ---

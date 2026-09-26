@@ -1,5 +1,5 @@
-#include <algorithm>
 #include <ugui/animation/animator.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/layout/layout.h>
 #include <ugui/render/renderer2d.h>
 #include <ugui/render/vertex.h>
@@ -54,10 +54,10 @@ void RemoveChild(WidgetRegistry& world, wid parent, wid child) {
   Hierarchy* ph = world.Get<Hierarchy>(parent);
   if (!ph) return;
   auto& kids = ph->children;
-  auto it = std::find(kids.begin(), kids.end(), child);
-  if (it != kids.end()) {
+  usize index = IndexOf(kids, child);
+  if (index != kids.size()) {
     if (Hierarchy* ch = world.Get<Hierarchy>(child)) ch->parent = kNullWidget;
-    kids.erase(it);
+    kids.erase(kids.begin() + index);
     MarkDirty(world, parent);
   }
 }

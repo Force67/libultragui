@@ -1,11 +1,9 @@
 #include <ugui/anim/anim_types.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/core/from_chars_compat.h>
 
-#include <algorithm>
-#include <charconv>
-#include <cmath>
-#include <cstring>
-#include <unordered_map>
+#include <math.h>
+#include <string.h>
 
 #include <ugui/svg/svg_types.h>
 
@@ -86,7 +84,7 @@ static void build_rect_path(svg::Path& path, f32 x, f32 y, f32 w, f32 h,
     path.Close();
     return;
   }
-  cr = std::min(cr, std::min(w, h) * 0.5f);
+  cr = Min(cr, Min(w, h) * 0.5f);
   f32 k = cr * KAPPA;
   path.MoveTo({x + cr, y});
   path.LineTo({x + w - cr, y});
@@ -107,8 +105,9 @@ static void build_rect_path(svg::Path& path, f32 x, f32 y, f32 w, f32 h,
 static thread_local HashMap<const String*, svg::Path> s_path_cache;
 
 static const svg::Path& get_cached_path(const AnimLayer& layer) {
-  auto it = s_path_cache.find(&layer.path_data);
-  if (it != s_path_cache.end()) return it->second;
+  // The caller copies the path out before the next insert can move it.
+  if (const svg::Path* cached = s_path_cache.find(&layer.path_data))
+    return *cached;
   auto& path = s_path_cache[&layer.path_data];
   svg::ParsePathData(layer.path_data.c_str(), path);
   return path;
@@ -188,7 +187,7 @@ static void render_layers(const Vector<AnimLayer>& layers, f32 normalized_t,
       svg::Shape shape = build_shape(layer, eval);
       // Combine with parent transform
       shape.transform = parent_xform * shape.transform;
-      svg_doc.shapes.push_back(std::move(shape));
+      svg_doc.shapes.push_back(ugui::move(shape));
     }
   }
 }
@@ -203,7 +202,7 @@ static thread_local svg::Document s_svg_doc;
 void render_anim_frame(const AnimDocument& doc, f32 time, u8* pixels, u32 width,
                        u32 height) {
   f32 normalized_t = (doc.duration > 0) ? time / doc.duration : 0;
-  normalized_t = std::clamp(normalized_t, 0.0f, 1.0f);
+  normalized_t = ClampMinMax(normalized_t, 0.0f, 1.0f);
 
   // Reuse scratch document (avoid reallocating the shapes vector)
   s_svg_doc.shapes.clear();

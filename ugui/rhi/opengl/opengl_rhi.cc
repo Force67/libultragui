@@ -1,4 +1,5 @@
 #include <ugui/platform/platform.h>
+#include <ugui/core/algorithm.h>
 #include <ugui/rhi/rhi.h>
 
 #define GLFW_INCLUDE_NONE
@@ -9,11 +10,10 @@
 // and core-profile function pointers manually via glfwGetProcAddress so
 // that the binary does not depend on the system libGL exporting them.
 #include <GL/glcorearb.h>
-#include <algorithm>
-#include <cassert>
-#include <cmath>
-#include <cstdio>
-#include <cstring>
+#include <assert.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include <dlfcn.h>
 
 namespace ugui {
@@ -98,12 +98,11 @@ static bool load_gl_functions() {
     if (!p && libgl) p = dlsym(libgl, n);
     return p;
   };
-#define GL_LOAD(name)                                                   \
-  name = reinterpret_cast<PFN_##name>(load(#name));                     \
-  if (!name) {                                                          \
-    std::fprintf(stderr, "ultragui: failed to load GL function '%s'\n", \
-                 #name);                                                \
-    return false;                                                       \
+#define GL_LOAD(name)                                                      \
+  name = reinterpret_cast<PFN_##name>(load(#name));                        \
+  if (!name) {                                                             \
+    fprintf(stderr, "ultragui: failed to load GL function '%s'\n", #name); \
+    return false;                                                          \
   }
 
   GL_LOAD(glGenVertexArrays)
@@ -419,7 +418,7 @@ static GLuint compile_shader(GLenum type, const char* src) {
   if (!success) {
     char log[1024];
     glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-    std::fprintf(stderr, "ultragui: shader compile error:\n%s\n", log);
+    fprintf(stderr, "ultragui: shader compile error:\n%s\n", log);
     glDeleteShader(shader);
     return 0;
   }
@@ -446,7 +445,7 @@ static GLuint compile_program(const char* vs_src, const char* fs_src) {
   if (!success) {
     char log[1024];
     glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-    std::fprintf(stderr, "ultragui: program link error:\n%s\n", log);
+    fprintf(stderr, "ultragui: program link error:\n%s\n", log);
     glDeleteProgram(prog);
     prog = 0;
   }
@@ -696,8 +695,8 @@ void RHI::Impl::set_projection(GLuint program, f32 win_w, f32 win_h) {
 void RHI::Impl::ensure_vertex_capacity(u32 needed) {
   if (vertex_capacity_ >= needed) return;
 
-  u32 new_cap = std::max(needed, vertex_capacity_ * 2);
-  new_cap = std::max(new_cap, 16384u);
+  u32 new_cap = Max(needed, vertex_capacity_ * 2);
+  new_cap = Max(new_cap, 16384u);
 
   if (!vertex_buf_) glGenBuffers(1, &vertex_buf_);
 
@@ -711,8 +710,8 @@ void RHI::Impl::ensure_vertex_capacity(u32 needed) {
 void RHI::Impl::ensure_index_capacity(u32 needed) {
   if (index_capacity_ >= needed) return;
 
-  u32 new_cap = std::max(needed, index_capacity_ * 2);
-  new_cap = std::max(new_cap, 32768u);
+  u32 new_cap = Max(needed, index_capacity_ * 2);
+  new_cap = Max(new_cap, 32768u);
 
   if (!index_buf_) glGenBuffers(1, &index_buf_);
 
@@ -726,8 +725,8 @@ void RHI::Impl::ensure_index_capacity(u32 needed) {
 void RHI::Impl::ensure_text_vertex_capacity(u32 needed) {
   if (text_vertex_capacity_ >= needed) return;
 
-  u32 new_cap = std::max(needed, text_vertex_capacity_ * 2);
-  new_cap = std::max(new_cap, 16384u);
+  u32 new_cap = Max(needed, text_vertex_capacity_ * 2);
+  new_cap = Max(new_cap, 16384u);
 
   if (!text_vertex_buf_) glGenBuffers(1, &text_vertex_buf_);
 
@@ -741,8 +740,8 @@ void RHI::Impl::ensure_text_vertex_capacity(u32 needed) {
 void RHI::Impl::ensure_text_index_capacity(u32 needed) {
   if (text_index_capacity_ >= needed) return;
 
-  u32 new_cap = std::max(needed, text_index_capacity_ * 2);
-  new_cap = std::max(new_cap, 32768u);
+  u32 new_cap = Max(needed, text_index_capacity_ * 2);
+  new_cap = Max(new_cap, 32768u);
 
   if (!text_index_buf_) glGenBuffers(1, &text_index_buf_);
 
@@ -770,8 +769,8 @@ bool RHI::Impl::Init(const RHIConfig& config) {
   const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
   const char* renderer =
       reinterpret_cast<const char*>(glGetString(GL_RENDERER));
-  std::printf("ultragui: OpenGL %s (%s)\n", version ? version : "unknown",
-              renderer ? renderer : "unknown");
+  printf("ultragui: OpenGL %s (%s)\n", version ? version : "unknown",
+         renderer ? renderer : "unknown");
 
   {
     GLint count = 0;
@@ -779,13 +778,13 @@ bool RHI::Impl::Init(const RHIConfig& config) {
     for (GLint i = 0; i < count; ++i) {
       const char* ext = reinterpret_cast<const char*>(
           glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
-      if (ext && std::strcmp(ext, "GL_EXT_texture_sRGB_decode") == 0) {
+      if (ext && strcmp(ext, "GL_EXT_texture_sRGB_decode") == 0) {
         srgb_decode_control_ = true;
         break;
       }
     }
     if (!srgb_decode_control_) {
-      std::fprintf(stderr,
+      fprintf(stderr,
                    "ultragui: no EXT_texture_sRGB_decode; offscreen render "
                    "targets will render darker than on other backends\n");
     }
@@ -1291,7 +1290,7 @@ RHITextureHandle RHI::Impl::CreateRenderTarget(u32 width, u32 height) {
 
   GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
   if (status != GL_FRAMEBUFFER_COMPLETE) {
-    std::fprintf(stderr, "ultragui: framebuffer incomplete (0x%x)\n", status);
+    fprintf(stderr, "ultragui: framebuffer incomplete (0x%x)\n", status);
     glDeleteFramebuffers(1, &slot.fbo);
     glDeleteTextures(1, &slot.texture);
     slot = {};
