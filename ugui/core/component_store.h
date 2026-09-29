@@ -2,6 +2,7 @@
 #define UGUI_CORE_COMPONENT_STORE_H_
 
 #include <ugui/core/config.h>
+#include <ugui/core/export.h>
 #include <ugui/core/handle.h>
 #include <ugui/core/types.h>
 
@@ -19,11 +20,17 @@ namespace ugui {
 /// use. One table per process, keyed by name: a host that builds each module
 /// as its own shared object with hidden visibility would otherwise get one
 /// counter per object, give the same component type different ids in
-/// different objects, and read one component's store as another's. Default
-/// visibility makes the dynamic linker bind every object to a single copy of
-/// this function's statics. The key is the name rather than a per-type
-/// static because a template instantiation is never more visible than its
-/// arguments, and a host may compile the component types hidden.
+/// different objects, and read one component's store as another's. On ELF,
+/// default visibility makes the dynamic linker bind every object to a single
+/// copy of this function's statics. PE has no such binding, so there the
+/// table lives out of line in the library (component_store.cc), which a DLL
+/// build of ultragui (ULTRAGUI_SHARED) makes one per process. The key is the
+/// name rather than a per-type static because a template instantiation is
+/// never more visible than its arguments, and a host may compile the
+/// component types hidden.
+#if defined(_WIN32)
+UGUI_API u32 ComponentTypeIdFor(const char* type_signature);
+#else
 UGUI_SHARED_REGISTRY inline u32 ComponentTypeIdFor(const char* type_signature) {
   static HashMap<String, u32> ids;
   if (const u32* id = ids.find(String(type_signature))) return *id;
@@ -31,6 +38,7 @@ UGUI_SHARED_REGISTRY inline u32 ComponentTypeIdFor(const char* type_signature) {
   ids[String(type_signature)] = id;
   return id;
 }
+#endif
 
 /// Dense per-type id for components, so a World can look up each store in
 /// O(1). Header-only, no RTTI; host-defined component types get a fresh id
