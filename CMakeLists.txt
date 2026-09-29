@@ -282,6 +282,7 @@ set(ULTRAGUI_SCRIPT_SOURCE "${_default_script_src}"
 # --- Core library ---
 set(ULTRAGUI_SOURCES
     ugui/core/arena.cc
+    ugui/core/component_store.cc
     ugui/core/from_chars.cc
     ugui/core/string_utils.cc
     ugui/render/renderer2d.cc
@@ -374,7 +375,25 @@ if(ULTRAGUI_VIDEO)
     endif()
 endif()
 
-add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
+# A host that builds its own modules as DLLs needs ultragui as one too: PE gives
+# every DLL linking a static library its own copy of its globals (the UI
+# context, font caches, component ids), where ELF shares them.
+option(ULTRAGUI_SHARED "Build ultragui as a shared library" OFF)
+if(ULTRAGUI_SHARED)
+    add_library(ultragui SHARED ${ULTRAGUI_SOURCES})
+    set_target_properties(ultragui PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        # UGUI_API marks only the widget free functions; export the rest too.
+        WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    if(MINGW)
+        # WINDOWS_EXPORT_ALL_SYMBOLS drives MSVC-style linkers only. Keep the
+        # bundled static libraries (freetype, harfbuzz, yoga) and the runtime
+        # out of the export table.
+        target_link_options(ultragui PRIVATE -Wl,--export-all-symbols,--exclude-libs,ALL)
+    endif()
+else()
+    add_library(ultragui STATIC ${ULTRAGUI_SOURCES})
+endif()
 if(ULTRAGUI_BUILD_SHADERS)
     add_dependencies(ultragui ultragui_shaders)
 endif()
