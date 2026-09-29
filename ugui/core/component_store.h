@@ -7,16 +7,37 @@
 
 namespace ugui {
 
-/// Monotonic per-type id for components, assigned on first use so a World can
-/// look up each store in O(1). Header-only, no RTTI; host-defined component
-/// types get a fresh id automatically.
-inline u32 NextComponentTypeId() {
-  static u32 counter = 0;
-  return counter++;
+#if defined(__GNUC__) || defined(__clang__)
+#define UGUI_SHARED_REGISTRY __attribute__((visibility("default")))
+#define UGUI_TYPE_SIGNATURE __PRETTY_FUNCTION__
+#else
+#define UGUI_SHARED_REGISTRY
+#define UGUI_TYPE_SIGNATURE __FUNCSIG__
+#endif
+
+/// The id for the type whose signature is `type_signature`, assigned on first
+/// use. One table per process, keyed by name: a host that builds each module
+/// as its own shared object with hidden visibility would otherwise get one
+/// counter per object, give the same component type different ids in
+/// different objects, and read one component's store as another's. Default
+/// visibility makes the dynamic linker bind every object to a single copy of
+/// this function's statics. The key is the name rather than a per-type
+/// static because a template instantiation is never more visible than its
+/// arguments, and a host may compile the component types hidden.
+UGUI_SHARED_REGISTRY inline u32 ComponentTypeIdFor(const char* type_signature) {
+  static HashMap<String, u32> ids;
+  if (const u32* id = ids.find(String(type_signature))) return *id;
+  const u32 id = static_cast<u32>(ids.size());
+  ids[String(type_signature)] = id;
+  return id;
 }
+
+/// Dense per-type id for components, so a World can look up each store in
+/// O(1). Header-only, no RTTI; host-defined component types get a fresh id
+/// automatically.
 template <class C>
 u32 ComponentTypeId() {
-  static const u32 id = NextComponentTypeId();
+  static const u32 id = ComponentTypeIdFor(UGUI_TYPE_SIGNATURE);
   return id;
 }
 
