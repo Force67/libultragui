@@ -79,6 +79,10 @@
             # soname. On a distro they sit in the default search path; here
             # they only exist in the store, so name their directories.
             export LD_LIBRARY_PATH="${pkgs.vulkan-loader}/lib:${pkgs.lib.getLib vkd3d}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            # akiko links an aki program that carries C++ (yoga, the aki port
+            # in aki/) with -lstdc++ but adds no runpath for it, so name the
+            # toolchain's libstdc++ for programs run from this shell.
+            export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
             # DXVK-native has no default WSI; the D3D11 backend hands it a
             # GLFWwindow* as its HWND, so it has to use the GLFW backend.
             export DXVK_WSI_DRIVER=GLFW
