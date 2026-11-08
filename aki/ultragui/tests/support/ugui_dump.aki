@@ -1,0 +1,129 @@
+// The canonical text dump of a parsed .ugui document: the format
+// tools/dump_ugui.cc prints from the C++ AST (property maps in ascending key
+// order, strings with backslash/double quote/newline/tab backslash-escaped,
+// floats as 0x%08x bits, the repo root as $ROOT).
+
+module support::ugui_dump;
+
+import {List} from akikit::containers::list;
+import {HashMap} from akikit::containers::hash_map;
+import {String} from akikit::strings::string;
+import {sorted_entries} from ultragui::core::algorithm;
+import {ParseError, UguiDocument, UguiNode, UguiStateBlock} from ultragui::idl::parser;
+
+// `s` quoted with the dump's escapes. Runs of ordinary characters are copied
+// whole so multi-byte text survives.
+pub fn esc_into(var out&: String, s: str) {
+  out.push_c8('"');
+  var run: usize = 0;
+  for (let i in 0..#s) {
+    let c = s[i];
+    if (c == '\\' || c == '"' || c == '\n' || c == '\t') {
+      out.push_str(s[run..i]);
+      if (c == '\\') {
+        out.push_str("\\\\");
+      } else if (c == '"') {
+        out.push_str("\\\"");
+      } else if (c == '\n') {
+        out.push_str("\\n");
+      } else {
+        out.push_str("\\t");
+      }
+      run = i + 1;
+    }
+  }
+  out.push_str(s[run..]);
+  out.push_c8('"');
+}
+
+fn q(s: str): String {
+  var out = String();
+  esc_into(out, s);
+  return out;
+}
+
+// A path with the root prefix replaced by $ROOT, quoted.
+fn p(s: str, root: str): String {
+  if (#root > 0 && #s >= #root && s[..#root] == root) {
+    return q(f"$ROOT{s[#root..]}".as_str());
+  }
+  return q(s);
+}
+
+fn pad(var out&: String, depth: u32) {
+  for (let i in 0..depth) {
+    out.push_str("  ");
+  }
+}
+
+fn props(var out&: String, m&: HashMap<String, String>, depth: u32) {
+  let entries = sorted_entries(m);
+  for (let e& in entries) {
+    pad(out, depth);
+    out.push_str(f"p {q(e.0.as_str())} = {q(e.1.as_str())}\n");
+  }
+}
+
+fn state(var out&: String, sb&: UguiStateBlock, depth: u32) {
+  pad(out, depth);
+  out.push_str(f"state {q(sb.state.as_str())}\n");
+  props(out, sb.properties, depth + 1);
+}
+
+fn node(var out&: String, n&: UguiNode, depth: u32) {
+  pad(out, depth);
+  out.push_str(f"node type={q(n.type_.as_str())} name={q(n.name.as_str())} line={n.source_line}\n");
+  props(out, n.properties, depth + 1);
+  for (let sb& in n.state_blocks) {
+    state(out, sb, depth + 1);
+  }
+  for (let kb& in n.keyframe_blocks) {
+    pad(out, depth + 1);
+    out.push_str(f"keyframes {q(kb.name.as_str())}\n");
+    props(out, kb.properties, depth + 2);
+    for (let stop& in kb.stops) {
+      pad(out, depth + 2);
+      let bits = @bit_cast(u32, stop.percent);
+      out.push_str(f"stop 0x{bits:08x}\n");
+      props(out, stop.properties, depth + 3);
+    }
+  }
+  for (let mq& in n.media_queries) {
+    pad(out, depth + 1);
+    let bits = @bit_cast(u32, mq.value);
+    out.push_str(f"media {q(mq.condition.as_str())} 0x{bits:08x}\n");
+    props(out, mq.properties, depth + 2);
+  }
+  for (let c& in n.children) {
+    node(out, c, depth + 1);
+  }
+}
+
+// The dump of one parse, `label` the file's name (already $ROOT-relative).
+pub fn dump(label: str, ok: bool, doc&: UguiDocument, errors&: List<ParseError>, root: str): String {
+  var out = String();
+  out.push_str(f"== {label} ok={(ok ? 1i32 : 0i32)}\n");
+  out.push_str(f"source {p(doc.source_path.as_str(), root)}\n");
+  for (let i& in doc.imports) {
+    out.push_str(f"import {q(i.as_str())}\n");
+  }
+  for (let sc& in doc.style_classes) {
+    out.push_str(f"class {q(sc.name.as_str())}\n");
+    props(out, sc.properties, 1);
+    for (let sb& in sc.state_blocks) {
+      state(out, sb, 1);
+    }
+  }
+  for (let c& in doc.components) {
+    out.push_str(f"component {q(c.name.as_str())} line={c.source_line}\n");
+    props(out, c.props, 1);
+    node(out, c.root, 1);
+  }
+  for (let r& in doc.roots) {
+    node(out, r, 0);
+  }
+  for (let e& in errors) {
+    out.push_str(f"error file={p(e.file.as_str(), root)} line={e.line} col={e.column} msg={q(e.message.as_str())}\n");
+  }
+  return out;
+}

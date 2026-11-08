@@ -1,0 +1,23 @@
+class card {
+  background: #222;
+  padding: 12px;
+  :hover { background: #333; }
+  :pressed { background: #111 }
+  stray token;
+}
+class badge { color: red; }
+component user_row {
+  prop name: "Anonymous";
+  prop level: 1;
+  prop flag;
+  prop name: "Override";
+  panel row {
+    layout: row;
+    text label { content: $name; }
+    text lvl { content: $level; color: $accent; }
+    slot content { text fallback { content: "empty"; } }
+  }
+}
+user_row first { name: "Ada"; level: 7; }
+user_row second { }
+panel plain { class: card; }

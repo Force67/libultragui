@@ -1,0 +1,3 @@
+panel good { x: 1; }
+@@ ! ? ( ) [ ]
+panel after { y: 2; }

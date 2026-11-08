@@ -1,0 +1,3 @@
+import "../lib_b.ugui";
+import "/nonexistent/abs/path.ugui";
+class c_only { w: 4; }

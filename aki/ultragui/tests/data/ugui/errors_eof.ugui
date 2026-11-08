@@ -1,0 +1,3 @@
+panel a {
+  panel b {
+    text: "never closed";

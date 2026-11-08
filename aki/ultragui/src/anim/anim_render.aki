@@ -1,0 +1,206 @@
+// ugui/anim/anim_render.cc: an AnimDocument at a point in time, as SVG shapes
+// rasterized by the built-in rasterizer.
+//
+// Differences in shape (not behavior):
+//
+// * `render_anim_frame` takes the pixel buffer as `&var [u8]` and builds its
+//   svg Document per call. The C++ keeps a thread_local scratch Document
+//   (only to avoid allocating) and a thread_local cache of parsed layer
+//   paths keyed by the address of `AnimLayer::path_data` (stale when a
+//   document is freed and another takes its address); here a path layer is
+//   parsed each frame, which gives the shapes the cache would.
+// * `evaluate_layer` is imported (anim_eval), not forward-declared.
+
+module ultragui::anim::anim_render;
+
+import {List} from akikit::containers::list;
+import {from_str} from akikit::strings::string;
+import {AnimLayer, AnimShapeType, EvaluatedLayer} from ultragui::anim::anim_types;
+import {evaluate_layer} from ultragui::anim::anim_eval;
+import {clamp_min_max_f32, min_f32} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {from_chars_u32} from ultragui::core::from_chars;
+import {Vec2} from ultragui::core::math;
+import {AnimDocument} from ultragui::anim::anim_types;
+import {Document, Paint, PaintType, Path, Shape, Transform} from ultragui::svg::svg_types;
+import {parse_path_data} from ultragui::svg::svg_parser;
+import {rasterize} from ultragui::svg::svg_rasterizer;
+
+// ---------------------------------------------------------------------------
+// Color string -> svg::Paint
+// ---------------------------------------------------------------------------
+
+fn make_paint(s: str, animated_color: Color, was_animated: bool): Paint {
+  var p = Paint {};
+  if (was_animated) {
+    p.type_ = PaintType::Solid;
+    p.color = animated_color;
+    return p;
+  }
+  if (#s == 0 || s == "none" || s == "transparent") {
+    p.type_ = PaintType::None;
+    return p;
+  }
+  if (s[0] == '$') {
+    p.type_ = PaintType::GradientRef;
+    p.gradient_id = from_str(s[1..]);
+    return p;
+  }
+  // Parse as color
+  p.type_ = PaintType::Solid;
+  if (s[0] == '#') {
+    var hex: u32 = 0;
+    from_chars_u32(s[1..], hex, 16);
+    if (#s == 7) {
+      p.color = Color::from_hex(hex);
+    } else if (#s == 9) {
+      let rgb = hex >> 8;
+      let alpha = (hex & 0xFF) as f32 / 255.0;
+      p.color = Color::from_hex(rgb, alpha);
+    }
+  } else if (s == "white") {
+    p.color = Color::white();
+  } else if (s == "black") {
+    p.color = Color::black();
+  } else {
+    p.type_ = PaintType::None;
+  }
+  return p;
+}
+
+// ---------------------------------------------------------------------------
+// Build SVG shape from evaluated layer
+// ---------------------------------------------------------------------------
+
+// Kappa constant for circle-to-cubic approximation
+comptime let kKappa: f32 = 0.5522847498;
+
+fn pt(x: f32, y: f32): Vec2 => Vec2 { x, y };
+
+fn build_circle_path(var path&: Path, cx: f32, cy: f32, rx: f32, ry: f32) {
+  let kx = rx * kKappa;
+  let ky = ry * kKappa;
+  path.move_to(pt(cx, cy - ry));
+  path.cubic_to(pt(cx + kx, cy - ry), pt(cx + rx, cy - ky), pt(cx + rx, cy));
+  path.cubic_to(pt(cx + rx, cy + ky), pt(cx + kx, cy + ry), pt(cx, cy + ry));
+  path.cubic_to(pt(cx - kx, cy + ry), pt(cx - rx, cy + ky), pt(cx - rx, cy));
+  path.cubic_to(pt(cx - rx, cy - ky), pt(cx - kx, cy - ry), pt(cx, cy - ry));
+  path.close();
+}
+
+fn build_rect_path(var path&: Path, x: f32, y: f32, w: f32, h: f32, cr_in: f32) {
+  var cr = cr_in;
+  if (cr <= 0.0) {
+    path.move_to(pt(x, y));
+    path.line_to(pt(x + w, y));
+    path.line_to(pt(x + w, y + h));
+    path.line_to(pt(x, y + h));
+    path.close();
+    return;
+  }
+  let half = min_f32(w, h) * 0.5;
+  cr = min_f32(cr, half);
+  let k = cr * kKappa;
+  path.move_to(pt(x + cr, y));
+  path.line_to(pt(x + w - cr, y));
+  path.cubic_to(pt(x + w - cr + k, y), pt(x + w, y + cr - k), pt(x + w, y + cr));
+  path.line_to(pt(x + w, y + h - cr));
+  path.cubic_to(pt(x + w, y + h - cr + k), pt(x + w - cr + k, y + h), pt(x + w - cr, y + h));
+  path.line_to(pt(x + cr, y + h));
+  path.cubic_to(pt(x + cr - k, y + h), pt(x, y + h - cr + k), pt(x, y + h - cr));
+  path.line_to(pt(x, y + cr));
+  path.cubic_to(pt(x, y + cr - k), pt(x + cr - k, y), pt(x + cr, y));
+  path.close();
+}
+
+fn build_shape(layer&: AnimLayer, eval&: EvaluatedLayer): Shape {
+  var shape = Shape { path: Path() };
+  shape.opacity = eval.opacity;
+  shape.fill = make_paint(layer.fill_str.as_str(), eval.fill_color, eval.fill_animated);
+  shape.stroke = make_paint(layer.stroke_str.as_str(), eval.stroke_color, eval.stroke_animated);
+  shape.stroke_width = eval.stroke_width;
+
+  match (layer.shape_type) {
+    AnimShapeType::Rect => { build_rect_path(shape.path, eval.x, eval.y, eval.w, eval.h, eval.corner_radius); },
+    AnimShapeType::Circle => { build_circle_path(shape.path, eval.cx, eval.cy, eval.r, eval.r); },
+    AnimShapeType::Ellipse => { build_circle_path(shape.path, eval.cx, eval.cy, eval.rx, eval.ry); },
+    AnimShapeType::Path => {
+      if (!layer.path_data.is_empty()) {
+        var parsed = Path();
+        parse_path_data(layer.path_data.as_str(), parsed);
+        shape.path = parsed;
+      }
+    },
+    AnimShapeType::Group => {},
+  };
+
+  // Apply transform: translate to center, rotate, scale
+  var t = Transform::identity();
+  if (eval.rotation != 0.0 || eval.scale_x != 1.0 || eval.scale_y != 1.0) {
+    // Compute center for rotation
+    let pivot_x = (layer.shape_type == AnimShapeType::Rect) ? eval.x + eval.w * 0.5 : eval.cx;
+    let pivot_y = (layer.shape_type == AnimShapeType::Rect) ? eval.y + eval.h * 0.5 : eval.cy;
+    t = Transform::translate(pivot_x, pivot_y)
+      .mul(Transform::rotate(eval.rotation))
+      .mul(Transform::scale(eval.scale_x, eval.scale_y))
+      .mul(Transform::translate(-pivot_x, -pivot_y));
+  }
+  shape.transform = t;
+
+  return shape;
+}
+
+// ---------------------------------------------------------------------------
+// Render layers recursively
+// ---------------------------------------------------------------------------
+
+fn render_layers(layers&: List<AnimLayer>, normalized_t: f32, var svg_doc&: Document, parent_xform: Transform) {
+  for (let layer& in layers) {
+    let eval = evaluate_layer(layer, normalized_t);
+
+    if (eval.opacity <= 0.0) {
+      continue;
+    }
+
+    if (layer.shape_type == AnimShapeType::Group) {
+      // Apply group transform and recurse into children
+      var group_t = parent_xform;
+      if (eval.rotation != 0.0 || eval.scale_x != 1.0 || eval.scale_y != 1.0) {
+        group_t = parent_xform
+          .mul(Transform::translate(eval.x, eval.y))
+          .mul(Transform::rotate(eval.rotation))
+          .mul(Transform::scale(eval.scale_x, eval.scale_y));
+      } else if (eval.x != 0.0 || eval.y != 0.0) {
+        group_t = parent_xform.mul(Transform::translate(eval.x, eval.y));
+      }
+      render_layers(layer.children, normalized_t, svg_doc, group_t);
+    } else {
+      var shape = build_shape(layer, eval);
+      // Combine with parent transform
+      shape.transform = parent_xform.mul(shape.transform);
+      svg_doc.shapes.push(shape);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// Renders `doc` at `time` seconds into `pixels` (RGBA8, width * height * 4
+// bytes; cleared by the rasterizer).
+pub fn render_anim_frame(doc&: AnimDocument, time: f32, var pixels&: [u8], width: u32, height: u32) {
+  var normalized_t: f32 = (doc.duration > 0.0) ? time / doc.duration : 0.0;
+  normalized_t = clamp_min_max_f32(normalized_t, 0.0, 1.0);
+
+  var svg_doc = Document {};
+  svg_doc.width = width as f32;
+  svg_doc.height = height as f32;
+  svg_doc.view_w = doc.width;
+  svg_doc.view_h = doc.height;
+
+  render_layers(doc.layers, normalized_t, svg_doc, Transform::identity());
+
+  // Rasterize (clears pixels internally)
+  rasterize(svg_doc, pixels, width, height);
+}

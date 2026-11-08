@@ -1,0 +1,6 @@
+import 42;
+import;
+class;
+component;
+component c { prop 5; }
+panel ok { v: 1; }

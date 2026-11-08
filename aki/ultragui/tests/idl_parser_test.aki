@@ -1,0 +1,242 @@
+// The .ugui parser against the C++ parser. Every examples/**/*.ugui and every
+// file under tests/data/ugui (corpus: lexer corner cases, @keyframes, @media,
+// nested at-rules, classes, components, imports with cycles and missing files,
+// error recovery) is parsed and its canonical AST dump (support::ugui_dump)
+// compared with tests/data/ugui_ast/expected.txt, which tools/gen_ugui_ast.sh
+// produces from the C++ parser. Plus hand-checked cases.
+
+module idl_parser_test;
+
+import {List} from akikit::containers::list;
+import {get_str} from akikit::containers::hash_map;
+import {String} from akikit::strings::string;
+import {eprintln} from akikit::logging;
+import {read_file, real_path} from akikit::filesystem::file_util;
+import {parent} from akikit::filesystem::path;
+import {UguiDocument, ParseError, parse_ugui, parse_ugui_file} from ultragui::idl::parser;
+import {dump} from support::ugui_dump;
+import {Expect} from support::expect;
+
+// Splits the expected dumps into sections, each starting at a "== " line.
+fn sections(text: str): List<str> {
+  var out = List::<str>();
+  var start: usize = 0;
+  var i: usize = 0;
+  while (i < #text) {
+    // At a line start: does a new section begin here?
+    if (i > 0 && text[i - 1] == '\n' && i + 3 <= #text && text[i..i + 3] == "== ") {
+      out.push(text[start..i]);
+      start = i;
+    }
+    i += 1;
+  }
+  if (start < #text) {
+    out.push(text[start..]);
+  }
+  return out;
+}
+
+fn first_line(s: str): str {
+  for (let i in 0..#s) {
+    if (s[i] == '\n') {
+      return s[..i];
+    }
+  }
+  return s;
+}
+
+// Reports the first line where `got` and `want` differ.
+fn report_diff(label: str, got: str, want: str) {
+  var a: usize = 0;
+  var b: usize = 0;
+  var line: u32 = 1;
+  while (a < #got || b < #want) {
+    let g = first_line(got[a..]);
+    let w = first_line(want[b..]);
+    if (g != w) {
+      eprintln(f"  {label}: line {line} differs");
+      eprintln(f"    aki: {g}");
+      eprintln(f"    c++: {w}");
+      return;
+    }
+    a += #g + 1;
+    b += #w + 1;
+    line += 1;
+  }
+}
+
+fn parse_file(path: str, root: str, label: str): String {
+  var doc = UguiDocument {};
+  var errors = List::<ParseError>();
+  let ok = parse_ugui_file(path, doc, errors);
+  return dump(label, ok, doc, errors, root);
+}
+
+fn hand_checked(var t&: Expect) {
+  var doc = UguiDocument {};
+  var errors = List::<ParseError>();
+  let src = "panel root { w: 10px 50% -2.5 #fff \"a b\"; button go { text: \"Go\"; :hover { c: red; } } @keyframes k { duration: 2s; 50% { o: 0.5; } } @media (min-width: 800px) { l: row; } }";
+  let ok = parse_ugui(src, "mem.ugui", doc, errors);
+  t.that(ok, "hand: parses");
+  t.that(errors.is_empty(), "hand: no errors");
+  t.that(doc.roots.len() == 1, "hand: one root");
+  let r& = doc.roots[0];
+  t.that(r.type_ == "panel" && r.name == "root", "hand: type and name");
+  t.that(r.source_line == 1, "hand: line");
+  let w = get_str(r.properties, "w");
+  t.that(w != none && w! == "10px 50% -2.5 #fff a b", "hand: value text joined by spaces");
+  t.that(r.children.len() == 1 && r.children[0].type_ == "button" && r.children[0].name == "go", "hand: child");
+  t.that(r.children[0].state_blocks.len() == 1 && r.children[0].state_blocks[0].state == "hover", "hand: state block");
+  t.that(r.keyframe_blocks.len() == 1 && r.keyframe_blocks[0].name == "k", "hand: keyframes");
+  t.that(r.keyframe_blocks[0].stops.len() == 1, "hand: one stop");
+  t.bits(r.keyframe_blocks[0].stops[0].percent, 0x3f000000, "hand: 50% -> 0.5");
+  t.that(r.media_queries.len() == 1 && r.media_queries[0].condition == "min-width", "hand: media condition");
+  t.bits(r.media_queries[0].value, 0x44480000, "hand: media 800");
+  t.that(doc.source_path == "mem.ugui", "hand: source path");
+
+  // Errors: message, position, and recovery to the next '}'.
+  var doc2 = UguiDocument {};
+  var errors2 = List::<ParseError>();
+  let ok2 = parse_ugui("panel a {\n  width 100;\n  h: 1;\n}\npanel b { x: 2; }", "e.ugui", doc2, errors2);
+  t.that(!ok2, "error: reported");
+  t.that(errors2.len() == 1, "error: one error");
+  t.that(errors2[0].message == "unexpected token after identifier 'width'", "error: message");
+  t.eq_u32(errors2[0].line, 2, "error: line");
+  t.eq_u32(errors2[0].column, 9, "error: column");
+  t.that(errors2[0].file == "e.ugui", "error: file");
+  t.that(doc2.roots.len() == 2, "error: parsing resumes after recovery");
+
+  // Missing import: the failure is reported, nothing merges.
+  var doc3 = UguiDocument {};
+  var errors3 = List::<ParseError>();
+  let ok3 = parse_ugui("import \"/nonexistent/x.ugui\";\nclass c { a: b; }", "/tmp/i.ugui", doc3, errors3);
+  t.that(!ok3, "import: missing file fails");
+  t.that(errors3.len() == 1 && errors3[0].message == "failed to open file" && errors3[0].file == "/nonexistent/x.ugui", "import: error");
+  t.that(doc3.imports.len() == 1 && doc3.style_classes.len() == 1, "import: list and classes");
+}
+
+fn fnv(s: str): u64 {
+  var h: u64 = 1469598103934665603;
+  for (let c in s) {
+    h = h ^ (c as u64);
+    h = h *% 1099511628211;
+  }
+  return h;
+}
+
+// The mutated-source cases: parse each as text "<case N>" and compare the
+// length and FNV-1a hash of its dump with the C++ parser's (expected.txt in
+// tests/data/ugui_fuzz, "CASE n bytes 0xhash"). Cases are separated by lines
+// holding "=====CASE=====".
+fn fuzz_cases(pkg: str, var t&: Expect) {
+  let cases = read_file(f"{pkg}/tests/data/ugui_fuzz/cases.txt")!;
+  let expected = read_file(f"{pkg}/tests/data/ugui_fuzz/expected.txt")!;
+  let sep = "\n=====CASE=====\n";
+  var lines = expected.as_str();
+  var rest = cases.as_str();
+  var idx: u32 = 0;
+  var bad: u32 = 0;
+  while (true) {
+    var end = #rest;
+    var next = #rest;
+    var found = false;
+    var i: usize = 0;
+    while (i + #sep <= #rest) {
+      if (rest[i..i + #sep] == sep) {
+        end = i;
+        next = i + #sep;
+        found = true;
+        break;
+      }
+      i += 1;
+    }
+    let src = rest[..end];
+    let name = f"<case {idx}>";
+    var doc = UguiDocument {};
+    var errors = List::<ParseError>();
+    let ok = parse_ugui(src, name.as_str(), doc, errors);
+    let text = dump(name.as_str(), ok, doc, errors, "");
+    let want = first_line(lines);
+    lines = lines[#want..];
+    if (#lines > 0) {
+      lines = lines[1..];
+    }
+    let h = fnv(text.as_str());
+    let got = f"CASE {idx} {text.len()} 0x{h:016x}";
+    if (got.as_str() != want) {
+      bad += 1;
+      if (bad <= 5) {
+        eprintln(f"fuzz case {idx} differs: aki {got}, c++ {want}");
+      }
+    }
+    idx += 1;
+    if (!found) {
+      break;
+    }
+    rest = rest[next..];
+  }
+  t.that(bad == 0, f"{bad} of {idx} fuzz cases differ from the C++ parser");
+  t.that(idx >= 900, f"ran {idx} fuzz cases");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  hand_checked(t);
+
+  let pkg = real_path(@package_dir()) else {
+    eprintln("cannot resolve the package dir");
+    return 1;
+  };
+  let root = parent(parent(pkg.as_str()));
+  fuzz_cases(pkg.as_str(), t);
+  let expected = read_file(f"{pkg}/tests/data/ugui_ast/expected.txt") else {
+    eprintln("cannot read expected.txt");
+    return 1;
+  };
+
+  var compared: u32 = 0;
+  for (let sec in sections(expected.as_str())) {
+    let header = first_line(sec);
+    // "== LABEL ok=N"
+    var label = header[3..];
+    var cut = #label;
+    while (cut > 0 && label[cut - 1] != ' ') {
+      cut -= 1;
+    }
+    label = label[..cut - 1];
+    t.that(label.len() > 6 && label[..5] == "$ROOT", f"header: {header}");
+    let path = f"{root}{label[5..]}";
+    let got = parse_file(path.as_str(), root, label);
+    let same = got.as_str() == sec;
+    t.that(same, f"AST dump of {label}");
+    if (!same) {
+      report_diff(label, got.as_str(), sec);
+    }
+    // Parsing the same text in memory gives the same AST when there are no
+    // imports (those resolve relative to the file in both).
+    if (same && !(got.as_str().len() > 0 && sec.len() > 0 && has_import(sec))) {
+      let text = read_file(path.as_str());
+      if (let src = text) {
+        var doc = UguiDocument {};
+        var errors = List::<ParseError>();
+        let ok = parse_ugui(src.as_str(), path.as_str(), doc, errors);
+        let again = dump(label, ok, doc, errors, root);
+        t.that(again.as_str() == sec, f"in-memory parse of {label}");
+      }
+    }
+    compared += 1;
+  }
+  t.that(compared >= 20, f"compared {compared} files");
+  return t.finish();
+}
+
+fn has_import(dump_text: str): bool {
+  var i: usize = 0;
+  while (i + 7 <= #dump_text) {
+    if ((i == 0 || dump_text[i - 1] == '\n') && dump_text[i..i + 7] == "import ") {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}

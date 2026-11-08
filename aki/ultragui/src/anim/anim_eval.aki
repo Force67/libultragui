@@ -1,0 +1,141 @@
+// ugui/anim/anim_eval.cc: evaluating keyframe tracks at a normalized time.
+//
+// `lerp_f32` and the color lerp keep the C++ expression `a + (b - a) * t`,
+// which akiko fuses into an fma exactly as clang does on aarch64.
+
+module ultragui::anim::anim_eval;
+
+import {AnimLayer, AnimProperty, AnimPropertyTrack, EvaluatedLayer} from ultragui::anim::anim_types;
+import {Color} from ultragui::core::color;
+import {eval_easing} from ultragui::style::transition;
+
+fn lerp_f32(a: f32, b: f32, t: f32): f32 => a + (b - a) * t;
+
+fn lerp_anim_color(a: Color, b: Color, t: f32): Color =>
+  Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t };
+
+// ---------------------------------------------------------------------------
+// Evaluate a single property track at time t
+// ---------------------------------------------------------------------------
+
+fn eval_scalar_track(track&: AnimPropertyTrack, t: f32): f32 {
+  let kfs& = track.keyframes;
+  let n = kfs.len();
+  if (n == 0) {
+    return 0.0;
+  }
+  if (n == 1) {
+    return kfs[0].value;
+  }
+
+  // Before first keyframe
+  if (t <= kfs[0].t) {
+    return kfs[0].value;
+  }
+  // After last keyframe
+  if (t >= kfs[n - 1].t) {
+    return kfs[n - 1].value;
+  }
+
+  // Find bracketing keyframes
+  for (let i in 0..n - 1) {
+    if (t >= kfs[i].t && t <= kfs[i + 1].t) {
+      let segment_t: f32 = (kfs[i + 1].t - kfs[i].t) > 0.0 ? (t - kfs[i].t) / (kfs[i + 1].t - kfs[i].t) : 1.0;
+      let eased = eval_easing(kfs[i].easing, segment_t);
+      return lerp_f32(kfs[i].value, kfs[i + 1].value, eased);
+    }
+  }
+  return kfs[n - 1].value;
+}
+
+fn eval_color_track(track&: AnimPropertyTrack, t: f32): Color {
+  let kfs& = track.keyframes;
+  let n = kfs.len();
+  if (n == 0) {
+    return Color::transparent();
+  }
+  if (n == 1) {
+    return kfs[0].color;
+  }
+
+  if (t <= kfs[0].t) {
+    return kfs[0].color;
+  }
+  if (t >= kfs[n - 1].t) {
+    return kfs[n - 1].color;
+  }
+
+  for (let i in 0..n - 1) {
+    if (t >= kfs[i].t && t <= kfs[i + 1].t) {
+      let segment_t: f32 = (kfs[i + 1].t - kfs[i].t) > 0.0 ? (t - kfs[i].t) / (kfs[i + 1].t - kfs[i].t) : 1.0;
+      let eased = eval_easing(kfs[i].easing, segment_t);
+      return lerp_anim_color(kfs[i].color, kfs[i + 1].color, eased);
+    }
+  }
+  return kfs[n - 1].color;
+}
+
+// ---------------------------------------------------------------------------
+// Evaluate a full layer
+// ---------------------------------------------------------------------------
+
+// The layer's static values, overridden by its animated tracks at
+// `normalized_t`. The C++ fills an out-parameter that starts with
+// uninitialized colors; the colors here start at Color's default and, as in
+// the C++, are only meaningful when fill_animated / stroke_animated is set.
+pub fn evaluate_layer(layer&: AnimLayer, normalized_t: f32): EvaluatedLayer {
+  // Start with static defaults
+  var out = EvaluatedLayer {
+    x: layer.x,
+    y: layer.y,
+    w: layer.w,
+    h: layer.h,
+    r: layer.r,
+    cx: layer.cx,
+    cy: layer.cy,
+    rx: layer.rx,
+    ry: layer.ry,
+    corner_radius: layer.corner_radius,
+    rotation: layer.rotation,
+    scale_x: layer.scale_x,
+    scale_y: layer.scale_y,
+    opacity: layer.opacity,
+    stroke_width: layer.stroke_width,
+  };
+
+  // Override with animated values
+  for (let track& in layer.tracks) {
+    let is_color = track.property == AnimProperty::Fill || track.property == AnimProperty::Stroke;
+    if (is_color) {
+      let c = eval_color_track(track, normalized_t);
+      if (track.property == AnimProperty::Fill) {
+        out.fill_color = c;
+        out.fill_animated = true;
+      } else {
+        out.stroke_color = c;
+        out.stroke_animated = true;
+      }
+    } else {
+      let v = eval_scalar_track(track, normalized_t);
+      match (track.property) {
+        AnimProperty::X => { out.x = v; },
+        AnimProperty::Y => { out.y = v; },
+        AnimProperty::W => { out.w = v; },
+        AnimProperty::H => { out.h = v; },
+        AnimProperty::R => { out.r = v; },
+        AnimProperty::Cx => { out.cx = v; },
+        AnimProperty::Cy => { out.cy = v; },
+        AnimProperty::Rx => { out.rx = v; },
+        AnimProperty::Ry => { out.ry = v; },
+        AnimProperty::Rotation => { out.rotation = v; },
+        AnimProperty::ScaleX => { out.scale_x = v; },
+        AnimProperty::ScaleY => { out.scale_y = v; },
+        AnimProperty::Opacity => { out.opacity = v; },
+        AnimProperty::StrokeWidth => { out.stroke_width = v; },
+        AnimProperty::CornerRadius => { out.corner_radius = v; },
+        _ => {},
+      };
+    }
+  }
+  return out;
+}

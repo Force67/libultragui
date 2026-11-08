@@ -1,0 +1,9 @@
+import "lib_a.ugui";
+import "./lib_b.ugui";
+import "sub/../lib_b.ugui";
+import "missing_file.ugui";
+import "../imports/lib_a.ugui";
+import "sub/lib_c.ugui";
+class card { from: main; }
+component box { panel root { from: main; } }
+panel app { class: card; }
