@@ -48,8 +48,8 @@ pub extern struct Luid {
   pub var high_part: i32 = 0
 }
 
-// RECT (D3D12_RECT is the same struct).
-pub extern struct Rect {
+// RECT (D3D12_RECT is the same struct); named D3dRect and D3dBox where ultragui::core::rect::Rect and akikit's Box would clash.
+pub extern struct D3dRect {
   pub var left: i32 = 0
   pub var top: i32 = 0
   pub var right: i32 = 0
@@ -159,7 +159,7 @@ pub comptime let kVkd3dResourcePresentStateTransition: u32 = 2;
 
 // --- Structs -----------------------------------------------------------------
 
-pub extern struct Box {
+pub extern struct D3dBox {
   pub var left: u32 = 0
   pub var top: u32 = 0
   pub var front: u32 = 0
@@ -572,16 +572,16 @@ pub extern("D3D12SerializeRootSignature") fn d3d12_serialize_root_signature(desc
 
 // BEGIN GENERATED COM (tools/gen_d3d12.py)
 // IIDs (the values <vkd3d_d3d12.h> defines with INITGUID in the C++).
-pub comptime let kIidDevice: Guid = Guid { data1: 0x189819f1, data2: 0x1db6, data3: 0x4b57, data4: [0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7] };
-pub comptime let kIidCommandQueue: Guid = Guid { data1: 0x0ec870a6, data2: 0x5d7e, data3: 0x4c22, data4: [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed] };
-pub comptime let kIidCommandAllocator: Guid = Guid { data1: 0x6102dee4, data2: 0xaf59, data3: 0x4b09, data4: [0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24] };
-pub comptime let kIidGraphicsCommandList: Guid = Guid { data1: 0x5b160d0f, data2: 0xac1b, data3: 0x4185, data4: [0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55] };
-pub comptime let kIidFence: Guid = Guid { data1: 0x0a753dcf, data2: 0xc4d8, data3: 0x4b91, data4: [0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76] };
-pub comptime let kIidDescriptorHeap: Guid = Guid { data1: 0x8efb471d, data2: 0x616c, data3: 0x4f49, data4: [0x90, 0xf7, 0x12, 0x7b, 0xb7, 0x63, 0xfa, 0x51] };
-pub comptime let kIidResource: Guid = Guid { data1: 0x696442be, data2: 0xa72e, data3: 0x4059, data4: [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad] };
-pub comptime let kIidRootSignature: Guid = Guid { data1: 0xc54a6b66, data2: 0x72df, data3: 0x4ee8, data4: [0x8b, 0xe5, 0xa9, 0x46, 0xa1, 0x42, 0x92, 0x14] };
-pub comptime let kIidPipelineState: Guid = Guid { data1: 0x765a30f3, data2: 0xf624, data3: 0x4c6f, data4: [0xa8, 0x28, 0xac, 0xe9, 0x48, 0x62, 0x24, 0x45] };
-pub comptime let kIidD3D10Blob: Guid = Guid { data1: 0x8ba5fb08, data2: 0x5195, data3: 0x40e2, data4: [0xac, 0x58, 0x0d, 0x98, 0x9c, 0x3a, 0x01, 0x02] };
+pub static let kIidDevice: Guid = Guid { data1: 0x189819f1, data2: 0x1db6, data3: 0x4b57, data4: [0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7] };
+pub static let kIidCommandQueue: Guid = Guid { data1: 0x0ec870a6, data2: 0x5d7e, data3: 0x4c22, data4: [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed] };
+pub static let kIidCommandAllocator: Guid = Guid { data1: 0x6102dee4, data2: 0xaf59, data3: 0x4b09, data4: [0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24] };
+pub static let kIidGraphicsCommandList: Guid = Guid { data1: 0x5b160d0f, data2: 0xac1b, data3: 0x4185, data4: [0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55] };
+pub static let kIidFence: Guid = Guid { data1: 0x0a753dcf, data2: 0xc4d8, data3: 0x4b91, data4: [0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76] };
+pub static let kIidDescriptorHeap: Guid = Guid { data1: 0x8efb471d, data2: 0x616c, data3: 0x4f49, data4: [0x90, 0xf7, 0x12, 0x7b, 0xb7, 0x63, 0xfa, 0x51] };
+pub static let kIidResource: Guid = Guid { data1: 0x696442be, data2: 0xa72e, data3: 0x4059, data4: [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad] };
+pub static let kIidRootSignature: Guid = Guid { data1: 0xc54a6b66, data2: 0x72df, data3: 0x4ee8, data4: [0x8b, 0xe5, 0xa9, 0x46, 0xa1, 0x42, 0x92, 0x14] };
+pub static let kIidPipelineState: Guid = Guid { data1: 0x765a30f3, data2: 0xf624, data3: 0x4c6f, data4: [0xa8, 0x28, 0xac, 0xe9, 0x48, 0x62, 0x24, 0x45] };
+pub static let kIidD3D10Blob: Guid = Guid { data1: 0x8ba5fb08, data2: 0x5195, data3: 0x40e2, data4: [0xac, 0x58, 0x0d, 0x98, 0x9c, 0x3a, 0x01, 0x02] };
 
 pub extern struct IUnknown { pub var vtbl: *const IUnknownVtbl = null }
 
@@ -714,13 +714,13 @@ pub extern struct ID3D12GraphicsCommandListVtbl {
   pub var draw_indexed_instanced: extern fn(*var ID3D12GraphicsCommandList, u32, u32, u32, i32, u32): ()
   pub var dispatch: *const u8 = null
   pub var copy_buffer_region: *const u8 = null
-  pub var copy_texture_region: extern fn(*var ID3D12GraphicsCommandList, *const TextureCopyLocation, u32, u32, u32, *const TextureCopyLocation, *const Box): ()
+  pub var copy_texture_region: extern fn(*var ID3D12GraphicsCommandList, *const TextureCopyLocation, u32, u32, u32, *const TextureCopyLocation, *const D3dBox): ()
   pub var copy_resource: *const u8 = null
   pub var copy_tiles: *const u8 = null
   pub var resolve_subresource: *const u8 = null
   pub var ia_set_primitive_topology: extern fn(*var ID3D12GraphicsCommandList, u32): ()
   pub var rs_set_viewports: extern fn(*var ID3D12GraphicsCommandList, u32, *const Viewport): ()
-  pub var rs_set_scissor_rects: extern fn(*var ID3D12GraphicsCommandList, u32, *const Rect): ()
+  pub var rs_set_scissor_rects: extern fn(*var ID3D12GraphicsCommandList, u32, *const D3dRect): ()
   pub var om_set_blend_factor: *const u8 = null
   pub var om_set_stencil_ref: *const u8 = null
   pub var set_pipeline_state: extern fn(*var ID3D12GraphicsCommandList, *var ID3D12PipelineState): ()
@@ -746,7 +746,7 @@ pub extern struct ID3D12GraphicsCommandListVtbl {
   pub var so_set_targets: *const u8 = null
   pub var om_set_render_targets: extern fn(*var ID3D12GraphicsCommandList, u32, *const CpuDescriptorHandle, i32, *const CpuDescriptorHandle): ()
   pub var clear_depth_stencil_view: *const u8 = null
-  pub var clear_render_target_view: extern fn(*var ID3D12GraphicsCommandList, CpuDescriptorHandle, *const f32, u32, *const Rect): ()
+  pub var clear_render_target_view: extern fn(*var ID3D12GraphicsCommandList, CpuDescriptorHandle, *const f32, u32, *const D3dRect): ()
   pub var clear_unordered_access_view_uint: *const u8 = null
   pub var clear_unordered_access_view_float: *const u8 = null
   pub var discard_resource: *const u8 = null
@@ -900,7 +900,7 @@ pub unsafe fn cl_draw_indexed_instanced(this: *var ID3D12GraphicsCommandList, in
   unsafe { (*(*this).vtbl).draw_indexed_instanced(this, index_count_per_instance, instance_count, start_vertex_location, base_vertex_location, start_instance_location); }
 }
 
-pub unsafe fn cl_copy_texture_region(this: *var ID3D12GraphicsCommandList, dst: *const TextureCopyLocation, dst_x: u32, dst_y: u32, dst_z: u32, src: *const TextureCopyLocation, src_box: *const Box) {
+pub unsafe fn cl_copy_texture_region(this: *var ID3D12GraphicsCommandList, dst: *const TextureCopyLocation, dst_x: u32, dst_y: u32, dst_z: u32, src: *const TextureCopyLocation, src_box: *const D3dBox) {
   unsafe { (*(*this).vtbl).copy_texture_region(this, dst, dst_x, dst_y, dst_z, src, src_box); }
 }
 
@@ -912,7 +912,7 @@ pub unsafe fn cl_rs_set_viewports(this: *var ID3D12GraphicsCommandList, viewport
   unsafe { (*(*this).vtbl).rs_set_viewports(this, viewport_count, viewports); }
 }
 
-pub unsafe fn cl_rs_set_scissor_rects(this: *var ID3D12GraphicsCommandList, rect_count: u32, rects: *const Rect) {
+pub unsafe fn cl_rs_set_scissor_rects(this: *var ID3D12GraphicsCommandList, rect_count: u32, rects: *const D3dRect) {
   unsafe { (*(*this).vtbl).rs_set_scissor_rects(this, rect_count, rects); }
 }
 
@@ -952,7 +952,7 @@ pub unsafe fn cl_om_set_render_targets(this: *var ID3D12GraphicsCommandList, ren
   unsafe { (*(*this).vtbl).om_set_render_targets(this, render_target_descriptor_count, render_target_descriptors, single_descriptor_handle, depth_stencil_descriptor); }
 }
 
-pub unsafe fn cl_clear_render_target_view(this: *var ID3D12GraphicsCommandList, rtv: CpuDescriptorHandle, color: *const f32, rect_count: u32, rects: *const Rect) {
+pub unsafe fn cl_clear_render_target_view(this: *var ID3D12GraphicsCommandList, rtv: CpuDescriptorHandle, color: *const f32, rect_count: u32, rects: *const D3dRect) {
   unsafe { (*(*this).vtbl).clear_render_target_view(this, rtv, color, rect_count, rects); }
 }
 

@@ -1,0 +1,2197 @@
+// ugui/rhi/d3d12/d3d12_rhi.cc: the D3D12 RHI.
+//
+// Linux has no DXGI, so the C++ backend runs D3D12 on vkd3d (a D3D12 device
+// over Vulkan) and presents through a Vulkan swapchain whose images it wraps
+// as D3D12 resources (vkd3d_create_image_resource). This port keeps exactly
+// that, call for call: the D3D12 and vkd3d calls are in sys::d3d12 (COM
+// vtables generated from vkd3d's headers), the Vulkan and GLFW calls in
+// sys::vulkan and sys::glfw.
+//
+// Shape differences from the C++:
+// * The C++ RHI is one concrete class whose .cc is swapped at link time; here
+//   D3d12Rhi is a type implementing the Rhi capability, which UIContext takes
+//   as a type parameter. RHI::Impl stays a separate heap object (Impl in a
+//   Box) because GLFW's framebuffer-size callback keeps its address in a
+//   static (s_rhi_instance), so the D3d12Rhi value itself may move.
+// * Pointer + count arguments are slices, `const void* pixels` is `bytes`.
+//   The vertex dedup (last_quad_verts_) still compares the slice's data
+//   pointer and length, as the C++ compares pointer and count.
+// * RHIConfig::platform->native_handle() arrives as RhiConfig::native_window.
+// * Shaders: the C++ compiles shaders/hlsl to DXIL (.cso) at build time and
+//   loads them from the directory ULTRAGUI_HLSL_SHADER_DIR names. The package
+//   embeds the same blobs (src/shaders.aki); `config.shader_dir` empty (the C++
+//   default nullptr) uses them, a directory loads <dir>/{quad,text,video}_{vs,ps}.cso
+//   as the C++ does and fails with its message when a file is missing.
+// * CreateTexture/UpdateTexture with fewer pixel bytes than the texture needs
+//   (the C++ reads out of bounds, or crashes for nullptr): the missing rows
+//   are zero-filled.
+// * `static_cast<LONG>(float)` is @saturating_cast (what aarch64 does; UB in
+//   C++ when out of range).
+// * HRESULTs print as 0x%08lx of the int in the C++ (the high bits of the
+//   long are unspecified there); here as the 32-bit value.
+// * Shutdown follows the C++ order exactly, including that it never releases
+//   the vertex/index upload buffers' ... (it does: see shutdown below) and
+//   that the destructor of RHI does not call Shutdown.
+
+module ultragui_d3d12::d3d12_rhi;
+
+import {List, filled, to_list} from akikit::containers::list;
+import {read_bytes} from akikit::filesystem::file_util;
+import {eprintln, println} from akikit::logging;
+import {Box} from akikit::memory::box;
+import {utf8_view} from akikit::text::code_point_validation;
+import {String, from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {clamp_min_max, max, min} from ultragui::core::algorithm;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D} from ultragui::render::vertex;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import * from ultragui_d3d12::sys::d3d12;
+import {GlfwWindow, glfw_get_framebuffer_size, glfw_get_window_size, glfw_set_framebuffer_size_callback, glfw_wait_events}
+  from ultragui_d3d12::sys::glfw;
+import {VkDevice, VkExtent2D, VkFence, VkImage, VkInstance, VkPhysicalDevice, VkPhysicalDeviceProperties, VkPresentInfoKHR,
+  VkQueue, VkQueueFamilyProperties, VkSurfaceCapabilitiesKHR, VkSurfaceFormatKHR, VkSurfaceKHR, VkSwapchainCreateInfoKHR,
+  VkSwapchainKHR, VkFenceCreateInfo, glfw_create_window_surface, glfw_get_required_instance_extensions, kVkColorSpaceSrgbNonlinearKhr,
+  kVkCompositeAlphaOpaqueBitKhr, kVkErrorOutOfDateKhr, kVkFormatB8G8R8A8Srgb, kVkFormatB8G8R8A8Unorm, kVkFormatR8G8B8A8Srgb,
+  kVkFormatR8G8B8A8Unorm, kVkFormatUndefined, kVkImageUsageColorAttachmentBit, kVkPresentModeFifoKhr, kVkPresentModeMailboxKhr,
+  kVkQueueGraphicsBit, kVkSharingModeConcurrent, kVkSharingModeExclusive, kVkSuboptimalKhr, kVkSuccess,
+  vk_acquire_next_image_khr, vk_create_fence, vk_create_swapchain_khr, vk_destroy_fence, vk_destroy_surface_khr,
+  vk_destroy_swapchain_khr, vk_enumerate_physical_devices, vk_get_device_queue, vk_get_physical_device_properties,
+  vk_get_physical_device_queue_family_properties, vk_get_physical_device_surface_capabilities_khr,
+  vk_get_physical_device_surface_formats_khr, vk_get_physical_device_surface_present_modes_khr,
+  vk_get_physical_device_surface_support_khr, vk_get_swapchain_images_khr, vk_queue_present_khr, vk_reset_fences,
+  vk_wait_for_fences} from ultragui_d3d12::sys::vulkan;
+import {kQuadPs, kQuadVs, kTextPs, kTextVs, kVideoPs, kVideoVs} from ultragui_d3d12::shaders;
+
+extern("memcpy") fn memcpy(dst: *var u8, src: *const u8, n: usize): *var u8;
+extern("memset") fn memset(dst: *var u8, value: i32, n: usize): *var u8;
+
+comptime let kMaxSwapchain: u32 = 8;
+comptime let kMaxFrames: u32 = 2;
+comptime let kMaxTextures: u32 = 256;
+
+// --- Helpers -----------------------------------------------------------------
+
+// choose_surface_format: sRGB B8G8R8A8 first, then UNORM, else the first.
+fn choose_surface_format(formats&: [VkSurfaceFormatKHR]): VkSurfaceFormatKHR {
+  for (let f in formats) {
+    if (f.format == kVkFormatB8G8R8A8Srgb && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
+      return f;
+    }
+  }
+  for (let f in formats) {
+    if (f.format == kVkFormatB8G8R8A8Unorm && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
+      return f;
+    }
+  }
+  return formats[0];
+}
+
+fn choose_present_mode(modes&: [u32], vsync: bool): u32 {
+  if (vsync) {
+    return kVkPresentModeFifoKhr;
+  }
+  for (let m in modes) {
+    if (m == kVkPresentModeMailboxKhr) {
+      return m;
+    }
+  }
+  return kVkPresentModeFifoKhr;
+}
+
+fn choose_extent(caps&: VkSurfaceCapabilitiesKHR, window: *var GlfwWindow): VkExtent2D {
+  if (caps.current_extent.width != 0xFFFF_FFFF) {
+    return caps.current_extent;
+  }
+  var w: i32 = 0;
+  var h: i32 = 0;
+  unsafe { glfw_get_framebuffer_size(window, &raw var w, &raw var h); }
+  var ext = VkExtent2D { width: w as u32, height: h as u32 };
+  ext.width = clamp_min_max(ext.width, caps.min_image_extent.width, caps.max_image_extent.width);
+  ext.height = clamp_min_max(ext.height, caps.min_image_extent.height, caps.max_image_extent.height);
+  return ext;
+}
+
+// Map VkFormat (sRGB swapchain) to the matching DXGI format.
+fn vk_format_to_dxgi(vk_fmt: u32): u32 => match (vk_fmt) {
+  kVkFormatB8G8R8A8Srgb => kDxgiFormatB8G8R8A8UnormSrgb,
+  kVkFormatB8G8R8A8Unorm => kDxgiFormatB8G8R8A8Unorm,
+  kVkFormatR8G8B8A8Srgb => kDxgiFormatR8G8B8A8UnormSrgb,
+  kVkFormatR8G8B8A8Unorm => kDxgiFormatR8G8B8A8Unorm,
+  _ => kDxgiFormatB8G8R8A8UnormSrgb,
+};
+
+// The DPI scale: framebuffer pixels per window coordinate.
+fn window_dpi_scale(window: *var GlfwWindow): f32 {
+  var fw: i32 = 0;
+  var fh: i32 = 0;
+  var ww: i32 = 0;
+  var wh: i32 = 0;
+  unsafe {
+    glfw_get_framebuffer_size(window, &raw var fw, &raw var fh);
+    glfw_get_window_size(window, &raw var ww, &raw var wh);
+  }
+  return ww > 0 ? fw as f32 / ww as f32 : 1.0;
+}
+
+fn transition_barrier(resource: *var ID3D12Resource, before: u32, after: u32): ResourceBarrier {
+  var barrier = ResourceBarrier {};
+  barrier.barrier_type = kResourceBarrierTypeTransition;
+  barrier.data = ResourceBarrierData { transition: ResourceTransitionBarrier {
+    resource: resource,
+    subresource: kResourceBarrierAllSubresources,
+    state_before: before,
+    state_after: after,
+  } };
+  return barrier;
+}
+
+// A D3D12_RECT from float window coordinates (static_cast<LONG>).
+fn to_long(v: f32): i32 => @saturating_cast(i32, v);
+
+// One persistently mapped upload buffer of the per-frame ring: the
+// vertex/index buffer, its mapping, capacity and write position
+// (FrameBuffers' fields in sets of four).
+struct UploadBuf : Copy {
+  pub unowned var buf: *var ID3D12Resource = null
+  pub unowned var mapped: *var u8 = null
+  pub var capacity: u32 = 0
+  pub var write_pos: u32 = 0
+}
+
+// Per-frame upload buffers (ring buffer pattern)
+struct FrameBuffers : Copy {
+  pub var vertex: UploadBuf = UploadBuf {}
+  pub var index: UploadBuf = UploadBuf {}
+  // Separate text buffers (same pattern as Vulkan backend)
+  pub var text_vertex: UploadBuf = UploadBuf {}
+  pub var text_index: UploadBuf = UploadBuf {}
+}
+
+struct TextureSlot : Copy {
+  pub unowned var resource: *var ID3D12Resource = null
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var pixel_size: u32 = 0
+  pub var in_use: bool = false
+  pub var is_render_target: bool = false
+  pub var srv_index: u32 = 0
+  pub var rtv_index: u32 = 0  // only for render targets
+  pub var format: u32 = kDxgiFormatUnknown
+}
+
+// Use a static to avoid glfwSetWindowUserPointer conflict with InputRouter
+static var s_rhi_instance: *var Impl = null;
+
+// RHI::Impl
+struct Impl {
+  pub unowned var window: *var GlfwWindow = null
+  pub var shader_dir: String = String()
+  pub var dpi_scale: f32 = 1.0
+
+  // vkd3d
+  pub unowned var vkd3d_inst: *var Vkd3dInstance = null
+  pub unowned var device: *var ID3D12Device = null
+
+  // Vulkan presentation (no DXGI on Linux)
+  pub unowned var vk_instance: VkInstance = null
+  pub var vk_surface: VkSurfaceKHR = 0
+  pub var vk_swapchain: VkSwapchainKHR = 0
+  pub unowned var vk_device: VkDevice = null
+  pub unowned var vk_physical: VkPhysicalDevice = null
+  pub unowned var vk_present_queue: VkQueue = null
+  pub var vk_graphics_family: u32 = 0
+  pub var vk_present_family: u32 = 0
+  pub var vk_acquire_fence: VkFence = 0
+  pub var vk_swapchain_images: [VkImage; 8] = [0; 8]
+  pub unowned var swapchain_resources: [*var ID3D12Resource; 8] = [null; 8]
+  pub var swapchain_count: u32 = 0
+  pub var image_index: u32 = 0
+  pub var swapchain_vk_format: u32 = kVkFormatUndefined
+  pub var swapchain_dxgi_format: u32 = kDxgiFormatB8G8R8A8UnormSrgb
+  pub var swapchain_extent: VkExtent2D = VkExtent2D {}
+
+  // D3D12 core
+  pub unowned var cmd_queue: *var ID3D12CommandQueue = null
+  pub unowned var cmd_allocs: [*var ID3D12CommandAllocator; 2] = [null; 2]
+  pub unowned var cmd_lists: [*var ID3D12GraphicsCommandList; 2] = [null; 2]
+  pub unowned var fence: *var ID3D12Fence = null
+  pub var fence_values: [u64; 2] = [0; 2]
+  pub var fence_next_value: u64 = 1
+  pub var current_frame: u32 = 0
+
+  // Descriptor heaps
+  pub unowned var rtv_heap: *var ID3D12DescriptorHeap = null
+  pub var rtv_descriptor_size: u32 = 0
+  pub var rtv_next_index: u32 = 0  // next free RTV slot after swapchain RTVs
+  pub unowned var srv_heap: *var ID3D12DescriptorHeap = null
+  pub var srv_descriptor_size: u32 = 0
+
+  // Pipelines
+  pub unowned var root_sig: *var ID3D12RootSignature = null
+  pub unowned var quad_pso: *var ID3D12PipelineState = null
+  pub unowned var text_pso: *var ID3D12PipelineState = null
+  pub unowned var video_pso: *var ID3D12PipelineState = null
+  pub unowned var video_root_sig: *var ID3D12RootSignature = null
+
+  pub var frame_bufs: [FrameBuffers; 2] = [FrameBuffers {}; 2]
+
+  // Vertex dedup (same pattern as Vulkan)
+  pub unowned var last_quad_verts: *const Vertex2D = null
+  pub var last_quad_vert_count: u32 = 0
+  pub var last_quad_vb_offset: u32 = 0
+  pub unowned var last_text_verts: *const Vertex2D = null
+  pub var last_text_vert_count: u32 = 0
+  pub var last_text_vb_offset: u32 = 0
+
+  // Textures
+  pub var textures: [TextureSlot; 256] = [TextureSlot {}; 256]
+  pub var white_texture: RhiTextureHandle = kInvalidTexture
+
+  // Offscreen state
+  pub var frame_acquired: bool = false
+  pub var active_offscreen_target: RhiTextureHandle = kInvalidTexture
+  pub var offscreen_display_size: Vec2 = Vec2 {}
+
+  pub var framebuffer_resized: bool = false
+  pub var vsync: bool = true
+
+  // One-shot command resources for texture uploads
+  pub unowned var upload_cmd_alloc: *var ID3D12CommandAllocator = null
+  pub unowned var upload_cmd_list: *var ID3D12GraphicsCommandList = null
+}
+
+// PFN_vkd3d_signal_event: vkd3d_utils' own implementation, passed as the C++
+// passes `vkd3d_signal_event` (an extern symbol is not a function value here).
+extern fn signal_event_callback(event: Handle): Hresult => unsafe vkd3d_signal_event(event);
+
+// The framebuffer-size callback Init registers.
+extern fn framebuffer_size_callback(window: *var GlfwWindow, w: i32, h: i32) {
+  unsafe {
+    if (s_rhi_instance == null) {
+      return;
+    }
+    (*s_rhi_instance).framebuffer_resized = true;
+    (*s_rhi_instance).dpi_scale = window_dpi_scale((*s_rhi_instance).window);
+  }
+}
+
+// --- Descriptor handle helpers -----------------------------------------------
+
+fn Impl::rtv_cpu_handle(self&, index: u32): CpuDescriptorHandle {
+  var handle = unsafe heap_get_cpu_descriptor_handle_for_heap_start(self.rtv_heap);
+  handle.ptr += index as usize * self.rtv_descriptor_size as usize;
+  return handle;
+}
+
+fn Impl::srv_cpu_handle(self&, index: u32): CpuDescriptorHandle {
+  var handle = unsafe heap_get_cpu_descriptor_handle_for_heap_start(self.srv_heap);
+  handle.ptr += index as usize * self.srv_descriptor_size as usize;
+  return handle;
+}
+
+fn Impl::srv_gpu_handle(self&, index: u32): GpuDescriptorHandle {
+  var handle = unsafe heap_get_gpu_descriptor_handle_for_heap_start(self.srv_heap);
+  handle.ptr += index as u64 * self.srv_descriptor_size as u64;
+  return handle;
+}
+
+// --- Shader loading ----------------------------------------------------------
+
+// load_shader_cso: <shader_dir>/<filename> as the C++ does; with no shader
+// directory the package's embedded blob of the same name.
+fn Impl::load_shader_cso(self&, filename: str, embedded: bytes): List<byte> {
+  if (#self.shader_dir == 0) {
+    return to_list(embedded);
+  }
+  let path = f"{self.shader_dir}/{filename}";
+  var data: List<byte> = List();
+  if (let bytes_ = read_bytes(path)) {
+    data = bytes_;
+  }
+  if (#data == 0) {
+    eprintln(f"ultragui-d3d12: failed to load shader '{path}'");
+  }
+  return data;
+}
+
+// --- Upload buffer helpers ---------------------------------------------------
+
+// create_upload_buffer: (buffer, persistent mapping), (null, null) on failure.
+fn Impl::create_upload_buffer(self&, size: u32): (*var ID3D12Resource, *var u8) {
+  var heap_props = HeapProperties {};
+  heap_props.heap_type = kHeapTypeUpload;
+
+  var desc = ResourceDesc {};
+  desc.dimension = kResourceDimensionBuffer;
+  desc.width = size as u64;
+  desc.height = 1;
+  desc.depth_or_array_size = 1;
+  desc.mip_levels = 1;
+  desc.sample_desc.count = 1;
+  desc.layout = kTextureLayoutRowMajor;
+
+  var raw: *var u8 = null;
+  var mapped: *var u8 = null;
+  unsafe {
+    var hr = dev_create_committed_resource(self.device, &raw heap_props, kHeapFlagNone, &raw desc,
+      kResourceStateGenericRead, null, &raw kIidResource, &raw var raw);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d12: CreateCommittedResource (upload) failed: 0x{hr as u32:08x}");
+      return (null, null);
+    }
+    let buf = unsafe (raw as *var ID3D12Resource);
+
+    // Persistently map
+    var read_range = Range { begin: 0, end: 0 };
+    hr = res_map(buf, 0, &raw read_range, &raw var mapped);
+    if (failed(hr)) {
+      com_release(buf);
+      return (null, null);
+    }
+    return (buf, mapped);
+  }
+}
+
+fn Impl::ensure_buffer_capacity(self&, var b&: UploadBuf, required: u32, stride: u32) {
+  if (b.capacity >= required) {
+    return;
+  }
+
+  if (b.buf != null) {
+    unsafe {
+      res_unmap(b.buf, 0, null);
+      com_release(b.buf);
+    }
+    b.buf = null;
+    b.mapped = null;
+  }
+
+  var new_cap = max(required, b.capacity * 2);
+  new_cap = max(new_cap, 16384u32);
+  let (buf, mapped) = self.create_upload_buffer(new_cap * stride);
+  b.buf = buf;
+  b.mapped = mapped;
+  b.capacity = new_cap;
+}
+
+fn Impl::wait_for_gpu(var self&) {
+  if (self.cmd_queue == null || self.fence == null) {
+    return;
+  }
+
+  let val = self.fence_next_value;
+  self.fence_next_value += 1;
+  unsafe {
+    queue_signal(self.cmd_queue, self.fence, val);
+
+    if (fence_get_completed_value(self.fence) < val) {
+      // Spin-wait (no Win32 events on Linux)
+      while (fence_get_completed_value(self.fence) < val) {
+        // yield
+      }
+    }
+  }
+}
+
+fn Impl::set_projection_constants(self&, width: f32, height: f32) {
+  let cmd = self.cmd_lists[self.current_frame as usize];
+  // D3D12 NDC: Y-up (bottom=-1, top=+1). Negate Y to flip to screen coords
+  // (Y-down).
+  let push: [f32; 4] = [
+    2.0 / width,
+    -2.0 / height,
+    -1.0,
+    1.0,
+  ];
+  unsafe { cl_set_graphics_root32_bit_constants(cmd, 0, 4, @ptr(push[..]) as *const u8, 0); }
+}
+
+// --- Texture upload helper ---------------------------------------------------
+
+fn Impl::upload_texture_data(var self&, dest: *var ID3D12Resource, width: u32, height: u32, pixel_size: u32, pixels: bytes,
+  before_state: u32) {
+  unsafe {
+    // Get the required layout for the copy
+    let tex_desc = res_get_desc(dest);
+    var footprint = PlacedSubresourceFootprint {};
+    var total_bytes: u64 = 0;
+    dev_get_copyable_footprints(self.device, &raw tex_desc, 0, 1, 0, &raw var footprint, null, null, &raw var total_bytes);
+
+    // Create staging buffer
+    let (staging, staging_mapped) = self.create_upload_buffer(total_bytes as u32);
+    if (staging == null) {
+      return;
+    }
+
+    // Copy pixel data row by row (row pitch may differ from width * pixel_size)
+    let src_row_pitch = width * pixel_size;
+    let dst_row_pitch = footprint.footprint.row_pitch;
+    let src = @ptr(pixels) as *const u8;
+    let dst = staging_mapped + footprint.offset as usize;
+    for (let row in 0..height) {
+      let from = row as usize * src_row_pitch as usize;
+      let to = row as usize * dst_row_pitch as usize;
+      if (from + src_row_pitch as usize <= #pixels) {
+        memcpy(dst + to, src + from, src_row_pitch as usize);
+      } else {
+        memset(dst + to, 0, src_row_pitch as usize);
+      }
+    }
+
+    // Record copy commands
+    alloc_reset(self.upload_cmd_alloc);
+    cl_reset(self.upload_cmd_list, self.upload_cmd_alloc, null);
+
+    // Transition to COPY_DEST if needed
+    if (before_state != kResourceStateCopyDest) {
+      let barrier = transition_barrier(dest, before_state, kResourceStateCopyDest);
+      cl_resource_barrier(self.upload_cmd_list, 1, &raw barrier);
+    }
+
+    var src_loc = TextureCopyLocation {};
+    src_loc.resource = staging;
+    src_loc.copy_type = kTextureCopyTypePlacedFootprint;
+    src_loc.data = TextureCopyData { placed_footprint: footprint };
+
+    var dst_loc = TextureCopyLocation {};
+    dst_loc.resource = dest;
+    dst_loc.copy_type = kTextureCopyTypeSubresourceIndex;
+    dst_loc.data = TextureCopyData { subresource_index: 0 };
+
+    cl_copy_texture_region(self.upload_cmd_list, &raw dst_loc, 0, 0, 0, &raw src_loc, null);
+
+    // Transition to PIXEL_SHADER_RESOURCE
+    {
+      let barrier = transition_barrier(dest, kResourceStateCopyDest, kResourceStatePixelShaderResource);
+      cl_resource_barrier(self.upload_cmd_list, 1, &raw barrier);
+    }
+
+    cl_close(self.upload_cmd_list);
+    let lists: [*var ID3D12CommandList; 1] = [self.upload_cmd_list as *var ID3D12CommandList];
+    queue_execute_command_lists(self.cmd_queue, 1, @ptr(lists[..]));
+    self.wait_for_gpu();
+
+    res_unmap(staging, 0, null);
+    com_release(staging);
+  }
+}
+
+// --- Initialization ----------------------------------------------------------
+
+fn Impl::init(var self&, config&: RhiConfig): bool {
+  self.window = unsafe (config.native_window as *var GlfwWindow);
+  self.vsync = config.vsync;
+  self.shader_dir = config.shader_dir.clone();
+
+  // Compute DPI scale
+  self.dpi_scale = window_dpi_scale(self.window);
+
+  // s_rhi_instance = this (set by D3d12Rhi::init, which holds the Box)
+  unsafe { let _ = glfw_set_framebuffer_size_callback(self.window, @c_fn(framebuffer_size_callback)); }
+
+  if (!self.create_vkd3d_instance()) {
+    return false;
+  }
+  if (!self.create_vk_surface()) {
+    return false;
+  }
+  if (!self.pick_physical_device()) {
+    return false;
+  }
+  if (!self.create_d3d12_device()) {
+    return false;
+  }
+  if (!self.create_descriptor_heaps()) {
+    return false;
+  }
+  if (!self.create_vk_swapchain()) {
+    return false;
+  }
+  if (!self.create_command_resources()) {
+    return false;
+  }
+  if (!self.create_root_signature()) {
+    return false;
+  }
+  if (!self.create_pipelines()) {
+    return false;
+  }
+  if (!self.create_default_resources()) {
+    return false;
+  }
+  if (!self.create_upload_buffers()) {
+    return false;
+  }
+
+  // Create VkFence for swapchain image acquisition
+  {
+    let fci = VkFenceCreateInfo {};
+    if (unsafe vk_create_fence(self.vk_device, &raw fci, null, &raw var self.vk_acquire_fence) != kVkSuccess) {
+      eprintln("ultragui-d3d12: vkCreateFence (acquire) failed");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// --- vkd3d instance + Vulkan surface -----------------------------------------
+
+fn Impl::create_vkd3d_instance(var self&): bool {
+  var glfw_ext_count: u32 = 0;
+  let glfw_exts = unsafe glfw_get_required_instance_extensions(&raw var glfw_ext_count);
+  if (glfw_exts == null) {
+    eprintln("ultragui-d3d12: glfwGetRequiredInstanceExtensions failed");
+    return false;
+  }
+
+  // Collect Vulkan instance extensions needed by GLFW + swapchain (the C++
+  // copies GLFW's list into a vector; GLFW's own array is passed on here).
+  var inst_ci = Vkd3dInstanceCreateInfo {};
+  inst_ci.struct_type = kVkd3dStructureTypeInstanceCreateInfo;
+  inst_ci.pfn_signal_event = @c_fn(signal_event_callback);
+  inst_ci.wchar_size = 4;  // sizeof(WCHAR) in vkd3d's windows types: unsigned int
+  inst_ci.instance_extensions = unsafe (glfw_exts as *const *const c_char);
+  inst_ci.instance_extension_count = glfw_ext_count;
+
+  let hr = unsafe vkd3d_create_instance(&raw inst_ci, &raw var self.vkd3d_inst);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d12: vkd3d_create_instance failed: 0x{hr as u32:08x}");
+    return false;
+  }
+
+  self.vk_instance = unsafe vkd3d_instance_get_vk_instance(self.vkd3d_inst);
+  if (self.vk_instance == null) {
+    eprintln("ultragui-d3d12: vkd3d_instance_get_vk_instance returned null");
+    return false;
+  }
+
+  println("ultragui-d3d12: vkd3d instance created");
+  return true;
+}
+
+fn Impl::create_vk_surface(var self&): bool {
+  if (unsafe glfw_create_window_surface(self.vk_instance, self.window, null, &raw var self.vk_surface) != kVkSuccess) {
+    eprintln("ultragui-d3d12: glfwCreateWindowSurface failed");
+    return false;
+  }
+  return true;
+}
+
+// --- Physical device selection -----------------------------------------------
+
+fn Impl::pick_physical_device(var self&): bool {
+  var count: u32 = 0;
+  unsafe { vk_enumerate_physical_devices(self.vk_instance, &raw var count, null); }
+  if (count == 0) {
+    eprintln("ultragui-d3d12: no Vulkan physical devices found");
+    return false;
+  }
+
+  let no_device: VkPhysicalDevice = null;
+  var devices = filled(count as usize, no_device);
+  unsafe { vk_enumerate_physical_devices(self.vk_instance, &raw var count, @ptr(devices.as_slice_var())); }
+
+  for (let dev in devices) {
+    var qcount: u32 = 0;
+    unsafe { vk_get_physical_device_queue_family_properties(dev, &raw var qcount, null); }
+    var qfamilies = filled(qcount as usize, VkQueueFamilyProperties {});
+    unsafe { vk_get_physical_device_queue_family_properties(dev, &raw var qcount, @ptr(qfamilies.as_slice_var())); }
+
+    var found_graphics = false;
+    var found_present = false;
+    for (let i in 0..qcount) {
+      if ((qfamilies[i as usize].queue_flags & kVkQueueGraphicsBit) != 0 && !found_graphics) {
+        self.vk_graphics_family = i;
+        found_graphics = true;
+      }
+      var present_support: u32 = 0;
+      unsafe { vk_get_physical_device_surface_support_khr(dev, i, self.vk_surface, &raw var present_support); }
+      if (present_support != 0 && !found_present) {
+        self.vk_present_family = i;
+        found_present = true;
+      }
+      if (found_graphics && found_present) {
+        break;
+      }
+    }
+
+    if (found_graphics && found_present) {
+      self.vk_physical = dev;
+      var props = VkPhysicalDeviceProperties {};
+      unsafe { vk_get_physical_device_properties(dev, &raw var props); }
+      var name_len = 0usize;
+      while (name_len < 256 && props.device_name[name_len] != 0) {
+        name_len += 1;
+      }
+      let name = unsafe @slice(@ptr(props.device_name[..]), name_len);
+      println(f"ultragui-d3d12: using GPU '{utf8_view(name as bytes) ?? ""}'");
+      return true;
+    }
+  }
+
+  eprintln("ultragui-d3d12: no suitable physical device found");
+  return false;
+}
+
+// --- D3D12 device via vkd3d --------------------------------------------------
+
+fn Impl::create_d3d12_device(var self&): bool {
+  var dev_ci = Vkd3dDeviceCreateInfo {};
+  dev_ci.struct_type = kVkd3dStructureTypeDeviceCreateInfo;
+  dev_ci.minimum_feature_level = kFeatureLevel11_0;
+  dev_ci.instance = self.vkd3d_inst;
+  dev_ci.instance_create_info = null;
+  dev_ci.vk_physical_device = self.vk_physical;
+
+  // Device extensions required for swapchain presentation
+  let device_exts: [*const c_char; 1] = [c"VK_KHR_swapchain"];
+  dev_ci.device_extensions = @ptr(device_exts[..]);
+  dev_ci.device_extension_count = 1;
+
+  var raw: *var u8 = null;
+  let hr = unsafe vkd3d_create_device(&raw dev_ci, &raw kIidDevice, &raw var raw);
+  self.device = unsafe (raw as *var ID3D12Device);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d12: vkd3d_create_device failed: 0x{hr as u32:08x}");
+    return false;
+  }
+
+  // Get the Vulkan device that vkd3d created internally
+  self.vk_device = unsafe vkd3d_get_vk_device(self.device);
+  if (self.vk_device == null) {
+    eprintln("ultragui-d3d12: vkd3d_get_vk_device returned null");
+    return false;
+  }
+
+  // Get the present queue from the vkd3d-created VkDevice
+  unsafe { vk_get_device_queue(self.vk_device, self.vk_present_family, 0, &raw var self.vk_present_queue); }
+
+  println("ultragui-d3d12: D3D12 device created via vkd3d");
+  return true;
+}
+
+// --- Vulkan swapchain (presentation layer) -----------------------------------
+
+fn Impl::create_vk_swapchain(var self&): bool {
+  var caps = VkSurfaceCapabilitiesKHR {};
+  unsafe { vk_get_physical_device_surface_capabilities_khr(self.vk_physical, self.vk_surface, &raw var caps); }
+
+  var fmt_count: u32 = 0;
+  unsafe { vk_get_physical_device_surface_formats_khr(self.vk_physical, self.vk_surface, &raw var fmt_count, null); }
+  var formats = filled(fmt_count as usize, VkSurfaceFormatKHR {});
+  unsafe {
+    vk_get_physical_device_surface_formats_khr(self.vk_physical, self.vk_surface, &raw var fmt_count,
+      @ptr(formats.as_slice_var()));
+  }
+
+  var pm_count: u32 = 0;
+  unsafe { vk_get_physical_device_surface_present_modes_khr(self.vk_physical, self.vk_surface, &raw var pm_count, null); }
+  var modes = filled(pm_count as usize, 0u32);
+  unsafe {
+    vk_get_physical_device_surface_present_modes_khr(self.vk_physical, self.vk_surface, &raw var pm_count,
+      @ptr(modes.as_slice_var()));
+  }
+
+  let surface_format = choose_surface_format(formats.as_slice());
+  let present_mode = choose_present_mode(modes.as_slice(), self.vsync);
+  let extent = choose_extent(caps, self.window);
+
+  var image_count = caps.min_image_count + 1;
+  if (caps.max_image_count > 0 && image_count > caps.max_image_count) {
+    image_count = caps.max_image_count;
+  }
+
+  var ci = VkSwapchainCreateInfoKHR {};
+  ci.surface = self.vk_surface;
+  ci.min_image_count = image_count;
+  ci.image_format = surface_format.format;
+  ci.image_color_space = surface_format.color_space;
+  ci.image_extent = extent;
+  ci.image_array_layers = 1;
+  ci.image_usage = kVkImageUsageColorAttachmentBit;
+
+  let queue_indices: [u32; 2] = [self.vk_graphics_family, self.vk_present_family];
+  if (self.vk_graphics_family != self.vk_present_family) {
+    ci.image_sharing_mode = kVkSharingModeConcurrent;
+    ci.queue_family_index_count = 2;
+    ci.queue_family_indices = @ptr(queue_indices[..]);
+  } else {
+    ci.image_sharing_mode = kVkSharingModeExclusive;
+  }
+
+  ci.pre_transform = caps.current_transform;
+  ci.composite_alpha = kVkCompositeAlphaOpaqueBitKhr;
+  ci.present_mode = present_mode;
+  ci.clipped = 1;
+  ci.old_swapchain = 0;
+
+  if (unsafe vk_create_swapchain_khr(self.vk_device, &raw ci, null, &raw var self.vk_swapchain) != kVkSuccess) {
+    eprintln("ultragui-d3d12: vkCreateSwapchainKHR failed");
+    return false;
+  }
+
+  self.swapchain_vk_format = surface_format.format;
+  self.swapchain_dxgi_format = vk_format_to_dxgi(self.swapchain_vk_format);
+  self.swapchain_extent = extent;
+
+  unsafe { vk_get_swapchain_images_khr(self.vk_device, self.vk_swapchain, &raw var image_count, null); }
+  self.swapchain_count = min(image_count, kMaxSwapchain);
+  unsafe {
+    vk_get_swapchain_images_khr(self.vk_device, self.vk_swapchain, &raw var self.swapchain_count,
+      @ptr(self.vk_swapchain_images[..]));
+  }
+
+  // Wrap each VkImage as an ID3D12Resource via vkd3d
+  for (let i in 0..self.swapchain_count) {
+    var res_desc = ResourceDesc {};
+    res_desc.dimension = kResourceDimensionTexture2d;
+    res_desc.width = self.swapchain_extent.width as u64;
+    res_desc.height = self.swapchain_extent.height;
+    res_desc.depth_or_array_size = 1;
+    res_desc.mip_levels = 1;
+    res_desc.format = self.swapchain_dxgi_format;
+    res_desc.sample_desc.count = 1;
+    res_desc.sample_desc.quality = 0;
+    res_desc.layout = kTextureLayoutUnknown;
+    res_desc.flags = kResourceFlagAllowRenderTarget;
+
+    var img_ci = Vkd3dImageResourceCreateInfo {};
+    img_ci.struct_type = kVkd3dStructureTypeImageResourceCreateInfo;
+    img_ci.vk_image = self.vk_swapchain_images[i as usize];
+    img_ci.desc = res_desc;
+    img_ci.flags = kVkd3dResourceInitialStateTransition | kVkd3dResourcePresentStateTransition;
+    img_ci.present_state = kResourceStatePresent;
+
+    let hr = unsafe vkd3d_create_image_resource(self.device, &raw img_ci, &raw var self.swapchain_resources[i as usize]);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d12: vkd3d_create_image_resource[{i}] failed: 0x{hr as u32:08x}");
+      return false;
+    }
+  }
+
+  // Create RTVs for swapchain images
+  self.rtv_next_index = 0;
+  for (let i in 0..self.swapchain_count) {
+    unsafe { dev_create_render_target_view(self.device, self.swapchain_resources[i as usize], null, self.rtv_cpu_handle(i)); }
+  }
+  self.rtv_next_index = self.swapchain_count;
+
+  // Update DPI scale
+  self.dpi_scale = window_dpi_scale(self.window);
+
+  return true;
+}
+
+fn Impl::cleanup_swapchain(var self&) {
+  for (let i in 0..self.swapchain_count) {
+    if (self.swapchain_resources[i as usize] != null) {
+      unsafe { vkd3d_resource_decref(self.swapchain_resources[i as usize]); }
+      self.swapchain_resources[i as usize] = null;
+    }
+    self.vk_swapchain_images[i as usize] = 0;
+  }
+  self.swapchain_count = 0;
+
+  if (self.vk_swapchain != 0) {
+    unsafe { vk_destroy_swapchain_khr(self.vk_device, self.vk_swapchain, null); }
+    self.vk_swapchain = 0;
+  }
+}
+
+fn Impl::recreate_swapchain(var self&): bool {
+  var w: i32 = 0;
+  var h: i32 = 0;
+  unsafe { glfw_get_framebuffer_size(self.window, &raw var w, &raw var h); }
+  while (w == 0 || h == 0) {
+    unsafe {
+      glfw_get_framebuffer_size(self.window, &raw var w, &raw var h);
+      glfw_wait_events();
+    }
+  }
+
+  // Wait for all GPU work to complete
+  self.wait_for_gpu();
+
+  self.cleanup_swapchain();
+  if (!self.create_vk_swapchain()) {
+    return false;
+  }
+  return true;
+}
+
+// --- Command resources -------------------------------------------------------
+
+fn Impl::create_command_resources(var self&): bool {
+  // Create D3D12 command queue
+  var queue_desc = CommandQueueDesc {};
+  queue_desc.queue_type = kCommandListTypeDirect;
+  queue_desc.priority = kCommandQueuePriorityNormal;
+  queue_desc.flags = kCommandQueueFlagNone;
+
+  unsafe {
+    var raw: *var u8 = null;
+    var hr = dev_create_command_queue(self.device, &raw queue_desc, &raw kIidCommandQueue, &raw var raw);
+    self.cmd_queue = unsafe (raw as *var ID3D12CommandQueue);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d12: CreateCommandQueue failed: 0x{hr as u32:08x}");
+      return false;
+    }
+
+    // Create per-frame command allocators and command lists
+    for (let i in 0..kMaxFrames) {
+      hr = dev_create_command_allocator(self.device, kCommandListTypeDirect, &raw kIidCommandAllocator, &raw var raw);
+      self.cmd_allocs[i as usize] = unsafe (raw as *var ID3D12CommandAllocator);
+      if (failed(hr)) {
+        eprintln(f"ultragui-d3d12: CreateCommandAllocator[{i}] failed");
+        return false;
+      }
+
+      hr = dev_create_command_list(self.device, 0, kCommandListTypeDirect, self.cmd_allocs[i as usize], null,
+        &raw kIidGraphicsCommandList, &raw var raw);
+      self.cmd_lists[i as usize] = unsafe (raw as *var ID3D12GraphicsCommandList);
+      if (failed(hr)) {
+        eprintln(f"ultragui-d3d12: CreateCommandList[{i}] failed");
+        return false;
+      }
+      // Command lists are created in the recording state; close them
+      cl_close(self.cmd_lists[i as usize]);
+    }
+
+    // Create fence
+    hr = dev_create_fence(self.device, 0, kFenceFlagNone, &raw kIidFence, &raw var raw);
+    self.fence = unsafe (raw as *var ID3D12Fence);
+    if (failed(hr)) {
+      eprintln("ultragui-d3d12: CreateFence failed");
+      return false;
+    }
+
+    // Upload command resources (for texture uploads outside frame)
+    hr = dev_create_command_allocator(self.device, kCommandListTypeDirect, &raw kIidCommandAllocator, &raw var raw);
+    self.upload_cmd_alloc = unsafe (raw as *var ID3D12CommandAllocator);
+    if (failed(hr)) {
+      return false;
+    }
+
+    hr = dev_create_command_list(self.device, 0, kCommandListTypeDirect, self.upload_cmd_alloc, null,
+      &raw kIidGraphicsCommandList, &raw var raw);
+    self.upload_cmd_list = unsafe (raw as *var ID3D12GraphicsCommandList);
+    if (failed(hr)) {
+      return false;
+    }
+    cl_close(self.upload_cmd_list);
+  }
+
+  return true;
+}
+
+// --- Descriptor heaps --------------------------------------------------------
+
+fn Impl::create_descriptor_heaps(var self&): bool {
+  unsafe {
+    // RTV heap: swapchain images + render target textures
+    {
+      var desc = DescriptorHeapDesc {};
+      desc.heap_type = kDescriptorHeapTypeRtv;
+      desc.num_descriptors = kMaxSwapchain + kMaxTextures;
+      desc.flags = kDescriptorHeapFlagNone;
+
+      var raw: *var u8 = null;
+      let hr = dev_create_descriptor_heap(self.device, &raw desc, &raw kIidDescriptorHeap, &raw var raw);
+      self.rtv_heap = unsafe (raw as *var ID3D12DescriptorHeap);
+      if (failed(hr)) {
+        eprintln("ultragui-d3d12: CreateDescriptorHeap (RTV) failed");
+        return false;
+      }
+      self.rtv_descriptor_size = dev_get_descriptor_handle_increment_size(self.device, kDescriptorHeapTypeRtv);
+    }
+
+    // SRV heap (shader-visible) for texture descriptors
+    {
+      var desc = DescriptorHeapDesc {};
+      desc.heap_type = kDescriptorHeapTypeCbvSrvUav;
+      desc.num_descriptors = kMaxTextures;
+      desc.flags = kDescriptorHeapFlagShaderVisible;
+
+      var raw: *var u8 = null;
+      let hr = dev_create_descriptor_heap(self.device, &raw desc, &raw kIidDescriptorHeap, &raw var raw);
+      self.srv_heap = unsafe (raw as *var ID3D12DescriptorHeap);
+      if (failed(hr)) {
+        eprintln("ultragui-d3d12: CreateDescriptorHeap (SRV) failed");
+        return false;
+      }
+      self.srv_descriptor_size = dev_get_descriptor_handle_increment_size(self.device, kDescriptorHeapTypeCbvSrvUav);
+    }
+  }
+
+  return true;
+}
+
+// --- Root signature ----------------------------------------------------------
+
+// The text of a serialization error blob, as the C++ prints it ("%s").
+unsafe fn blob_text(blob: *var ID3D10Blob): String {
+  unsafe {
+    let data = blob_get_buffer_pointer(blob);
+    var n = 0usize;
+    let size = blob_get_buffer_size(blob);
+    while (n < size && *(data + n) != 0) {
+      n += 1;
+    }
+    return from_str(utf8_view(@slice(data as *const u8, n) as bytes) ?? "");
+  }
+}
+
+fn Impl::create_root_signature(var self&): bool {
+  unsafe {
+    // param[0]: 4 root constants (b0): VS visibility
+    var params: [RootParameter; 2] = [RootParameter {}; 2];
+    params[0].parameter_type = kRootParameterType32BitConstants;
+    params[0].data = RootParameterData { constants: RootConstants {
+      shader_register: 0,
+      register_space: 0,
+      num32_bit_values: 4,
+    } };
+    params[0].shader_visibility = kShaderVisibilityVertex;
+
+    // param[1]: descriptor table with 1 SRV (t0): PS visibility
+    var srv_range = DescriptorRange {};
+    srv_range.range_type = kDescriptorRangeTypeSrv;
+    srv_range.num_descriptors = 1;
+    srv_range.base_shader_register = 0;
+    srv_range.register_space = 0;
+    srv_range.offset_in_descriptors_from_table_start = kDescriptorRangeOffsetAppend;
+
+    params[1].parameter_type = kRootParameterTypeDescriptorTable;
+    params[1].data = RootParameterData { descriptor_table: RootDescriptorTable {
+      num_descriptor_ranges: 1,
+      descriptor_ranges: &raw srv_range,
+    } };
+    params[1].shader_visibility = kShaderVisibilityPixel;
+
+    // 2 static samplers: s0 = linear clamp, s1 = nearest clamp
+    var samplers: [StaticSamplerDesc; 2] = [StaticSamplerDesc {}; 2];
+
+    samplers[0].filter = kFilterMinMagMipLinear;
+    samplers[0].address_u = kTextureAddressModeClamp;
+    samplers[0].address_v = kTextureAddressModeClamp;
+    samplers[0].address_w = kTextureAddressModeClamp;
+    samplers[0].shader_register = 0;
+    samplers[0].register_space = 0;
+    samplers[0].shader_visibility = kShaderVisibilityPixel;
+    samplers[0].max_lod = kFloat32Max;
+
+    samplers[1].filter = kFilterMinMagMipPoint;
+    samplers[1].address_u = kTextureAddressModeClamp;
+    samplers[1].address_v = kTextureAddressModeClamp;
+    samplers[1].address_w = kTextureAddressModeClamp;
+    samplers[1].shader_register = 1;
+    samplers[1].register_space = 0;
+    samplers[1].shader_visibility = kShaderVisibilityPixel;
+    samplers[1].max_lod = kFloat32Max;
+
+    var root_desc = RootSignatureDesc {};
+    root_desc.num_parameters = 2;
+    root_desc.parameters = @ptr(params[..]);
+    root_desc.num_static_samplers = 2;
+    root_desc.static_samplers = @ptr(samplers[..]);
+    root_desc.flags = kRootSignatureFlagAllowInputAssemblerInputLayout;
+
+    var sig_blob: *var ID3D10Blob = null;
+    var error_blob: *var ID3D10Blob = null;
+    var hr = d3d12_serialize_root_signature(&raw root_desc, kRootSignatureVersion1, &raw var sig_blob, &raw var error_blob);
+    if (failed(hr)) {
+      if (error_blob != null) {
+        eprintln(f"ultragui-d3d12: root signature error: {blob_text(error_blob)}");
+        com_release(error_blob);
+      }
+      if (sig_blob != null) {
+        com_release(sig_blob);
+      }
+      return false;
+    }
+
+    var raw: *var u8 = null;
+    hr = dev_create_root_signature(self.device, 0, blob_get_buffer_pointer(sig_blob) as *const u8,
+      blob_get_buffer_size(sig_blob), &raw kIidRootSignature, &raw var raw);
+    self.root_sig = unsafe (raw as *var ID3D12RootSignature);
+    com_release(sig_blob);
+    if (error_blob != null) {
+      com_release(error_blob);
+    }
+
+    if (failed(hr)) {
+      eprintln("ultragui-d3d12: CreateRootSignature failed");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// --- Pipeline state objects --------------------------------------------------
+
+// Vertex input layout (matches Vertex2D: 48 bytes)
+fn input_layout(): [InputElementDesc; 9] => [
+  InputElementDesc { semantic_name: c"POSITION", semantic_index: 0, format: kDxgiFormatR32G32Float, input_slot: 0,
+    aligned_byte_offset: 0, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+  InputElementDesc { semantic_name: c"TEXCOORD", semantic_index: 0, format: kDxgiFormatR32G32Float, input_slot: 0,
+    aligned_byte_offset: 8, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+  InputElementDesc { semantic_name: c"COLOR", semantic_index: 0, format: kDxgiFormatR32Uint, input_slot: 0,
+    aligned_byte_offset: 16, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+  InputElementDesc { semantic_name: c"COLOR", semantic_index: 1, format: kDxgiFormatR32Uint, input_slot: 0,
+    aligned_byte_offset: 20, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+  InputElementDesc { semantic_name: c"BLENDINDICES", semantic_index: 0, format: kDxgiFormatR32Uint, input_slot: 0,
+    aligned_byte_offset: 24, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+  InputElementDesc { semantic_name: c"BLENDWEIGHT", semantic_index: 0, format: kDxgiFormatR32Float, input_slot: 0,
+    aligned_byte_offset: 28, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+  InputElementDesc { semantic_name: c"TEXCOORD", semantic_index: 1, format: kDxgiFormatR32G32Float, input_slot: 0,
+    aligned_byte_offset: 32, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+  InputElementDesc { semantic_name: c"BLENDWEIGHT", semantic_index: 1, format: kDxgiFormatR32Float, input_slot: 0,
+    aligned_byte_offset: 40, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+  InputElementDesc { semantic_name: c"COLOR", semantic_index: 2, format: kDxgiFormatR32Uint, input_slot: 0,
+    aligned_byte_offset: 44, input_slot_class: kInputClassificationPerVertexData, instance_data_step_rate: 0 },
+];
+
+// The pipeline state both the quad and the text pipeline are built from:
+// alpha blending, no culling, one render target of the swapchain's format.
+fn Impl::graphics_pso_desc(self&, root_signature: *var ID3D12RootSignature, vs_code&: List<byte>, ps_code&: List<byte>,
+  rt_blend: RenderTargetBlendDesc, layout: *const InputElementDesc, layout_count: u32): GraphicsPipelineStateDesc {
+  var pso_desc = GraphicsPipelineStateDesc {};
+  pso_desc.root_signature = root_signature;
+  pso_desc.vs.shader_bytecode = unsafe (@ptr(vs_code.as_slice()) as *const u8);
+  pso_desc.vs.bytecode_length = #vs_code;
+  pso_desc.ps.shader_bytecode = unsafe (@ptr(ps_code.as_slice()) as *const u8);
+  pso_desc.ps.bytecode_length = #ps_code;
+
+  pso_desc.blend_state.render_target[0] = rt_blend;
+  pso_desc.sample_mask = 0xFFFF_FFFF;
+
+  pso_desc.rasterizer_state.fill_mode = kFillModeSolid;
+  pso_desc.rasterizer_state.cull_mode = kCullModeNone;
+  pso_desc.rasterizer_state.depth_clip_enable = 1;
+
+  pso_desc.input_layout.input_element_descs = layout;
+  pso_desc.input_layout.num_elements = layout_count;
+  pso_desc.primitive_topology_type = kPrimitiveTopologyTypeTriangle;
+  pso_desc.num_render_targets = 1;
+  pso_desc.rtv_formats[0] = self.swapchain_dxgi_format;
+  pso_desc.sample_desc.count = 1;
+  return pso_desc;
+}
+
+fn Impl::create_pipelines(var self&): bool {
+  let layout = input_layout();
+
+  // Blend state (alpha blending)
+  var rt_blend = RenderTargetBlendDesc {};
+  rt_blend.blend_enable = 1;
+  rt_blend.src_blend = kBlendSrcAlpha;
+  rt_blend.dest_blend = kBlendInvSrcAlpha;
+  rt_blend.blend_op = kBlendOpAdd;
+  rt_blend.src_blend_alpha = kBlendSrcAlpha;
+  rt_blend.dest_blend_alpha = kBlendInvSrcAlpha;
+  rt_blend.blend_op_alpha = kBlendOpAdd;
+  rt_blend.render_target_write_mask = kColorWriteEnableAll;
+
+  // --- Quad PSO ---
+  {
+    let vs_code = self.load_shader_cso("quad_vs.cso", kQuadVs);
+    let ps_code = self.load_shader_cso("quad_ps.cso", kQuadPs);
+    if (#vs_code == 0 || #ps_code == 0) {
+      eprintln("ultragui-d3d12: failed to load quad shaders");
+      return false;
+    }
+
+    let pso_desc = self.graphics_pso_desc(self.root_sig, vs_code, ps_code, rt_blend, @ptr(layout[..]), 9);
+
+    var raw: *var u8 = null;
+    let hr = unsafe dev_create_graphics_pipeline_state(self.device, &raw pso_desc, &raw kIidPipelineState, &raw var raw);
+    self.quad_pso = unsafe (raw as *var ID3D12PipelineState);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d12: CreateGraphicsPipelineState (quad) failed: 0x{hr as u32:08x}");
+      return false;
+    }
+  }
+
+  // --- Text PSO ---
+  {
+    let vs_code = self.load_shader_cso("text_vs.cso", kTextVs);
+    let ps_code = self.load_shader_cso("text_ps.cso", kTextPs);
+    if (#vs_code == 0 || #ps_code == 0) {
+      eprintln("ultragui-d3d12: failed to load text shaders");
+      return false;
+    }
+
+    let pso_desc = self.graphics_pso_desc(self.root_sig, vs_code, ps_code, rt_blend, @ptr(layout[..]), 9);
+
+    var raw: *var u8 = null;
+    let hr = unsafe dev_create_graphics_pipeline_state(self.device, &raw pso_desc, &raw kIidPipelineState, &raw var raw);
+    self.text_pso = unsafe (raw as *var ID3D12PipelineState);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d12: CreateGraphicsPipelineState (text) failed: 0x{hr as u32:08x}");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// --- Default resources -------------------------------------------------------
+
+fn Impl::create_default_resources(var self&): bool {
+  let white_pixel: [u8; 4] = [255, 255, 255, 255];  // u32 white_pixel = 0xFFFFFFFF
+  self.white_texture = self.create_texture(1, 1, RhiFormat::Rgba8Unorm, white_pixel[..] as bytes);
+  return self.white_texture != kInvalidTexture;
+}
+
+// --- Upload buffers ----------------------------------------------------------
+
+fn Impl::create_upload_buffers(var self&): bool {
+  let vertex_size = @size_of(Vertex2D) as u32;
+  for (let i in 0..kMaxFrames) {
+    // Quad vertex buffer
+    var vertex = UploadBuf {};
+    vertex.capacity = 16384;
+    let (vertex_buf, vertex_mapped) = self.create_upload_buffer(vertex.capacity * vertex_size);
+    vertex.buf = vertex_buf;
+    vertex.mapped = vertex_mapped;
+    self.frame_bufs[i as usize].vertex = vertex;
+    if (vertex.buf == null) {
+      return false;
+    }
+
+    // Quad index buffer
+    var index = UploadBuf {};
+    index.capacity = 32768;
+    let (index_buf, index_mapped) = self.create_upload_buffer(index.capacity * 4);
+    index.buf = index_buf;
+    index.mapped = index_mapped;
+    self.frame_bufs[i as usize].index = index;
+    if (index.buf == null) {
+      return false;
+    }
+
+    // Text vertex buffer
+    var text_vertex = UploadBuf {};
+    text_vertex.capacity = 16384;
+    let (text_vertex_buf, text_vertex_mapped) = self.create_upload_buffer(text_vertex.capacity * vertex_size);
+    text_vertex.buf = text_vertex_buf;
+    text_vertex.mapped = text_vertex_mapped;
+    self.frame_bufs[i as usize].text_vertex = text_vertex;
+    if (text_vertex.buf == null) {
+      return false;
+    }
+
+    // Text index buffer
+    var text_index = UploadBuf {};
+    text_index.capacity = 32768;
+    let (text_index_buf, text_index_mapped) = self.create_upload_buffer(text_index.capacity * 4);
+    text_index.buf = text_index_buf;
+    text_index.mapped = text_index_mapped;
+    self.frame_bufs[i as usize].text_index = text_index;
+    if (text_index.buf == null) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// --- Video pipeline (lazy init) ----------------------------------------------
+
+fn Impl::ensure_video_pipeline(var self&): bool {
+  if (self.video_pso != null) {
+    return true;
+  }
+
+  unsafe {
+    // Video root signature: 3 descriptor tables (t0, t1, t2), 1 sampler
+    var ranges: [DescriptorRange; 3] = [DescriptorRange {}; 3];
+    var params: [RootParameter; 3] = [RootParameter {}; 3];
+    for (let i in 0..3u32) {
+      ranges[i as usize].range_type = kDescriptorRangeTypeSrv;
+      ranges[i as usize].num_descriptors = 1;
+      ranges[i as usize].base_shader_register = i;
+      ranges[i as usize].register_space = 0;
+      ranges[i as usize].offset_in_descriptors_from_table_start = kDescriptorRangeOffsetAppend;
+
+      params[i as usize].parameter_type = kRootParameterTypeDescriptorTable;
+      params[i as usize].data = RootParameterData { descriptor_table: RootDescriptorTable {
+        num_descriptor_ranges: 1,
+        descriptor_ranges: @ptr(ranges[..]) + i as usize,
+      } };
+      params[i as usize].shader_visibility = kShaderVisibilityPixel;
+    }
+
+    var sampler = StaticSamplerDesc {};
+    sampler.filter = kFilterMinMagMipLinear;
+    sampler.address_u = kTextureAddressModeClamp;
+    sampler.address_v = kTextureAddressModeClamp;
+    sampler.address_w = kTextureAddressModeClamp;
+    sampler.shader_register = 0;
+    sampler.register_space = 0;
+    sampler.shader_visibility = kShaderVisibilityPixel;
+    sampler.max_lod = kFloat32Max;
+
+    var root_desc = RootSignatureDesc {};
+    root_desc.num_parameters = 3;
+    root_desc.parameters = @ptr(params[..]);
+    root_desc.num_static_samplers = 1;
+    root_desc.static_samplers = &raw sampler;
+    root_desc.flags = kRootSignatureFlagNone;
+
+    var sig_blob: *var ID3D10Blob = null;
+    var error_blob: *var ID3D10Blob = null;
+    var hr = d3d12_serialize_root_signature(&raw root_desc, kRootSignatureVersion1, &raw var sig_blob, &raw var error_blob);
+    if (failed(hr)) {
+      if (error_blob != null) {
+        eprintln(f"ultragui-d3d12: video root sig error: {blob_text(error_blob)}");
+        com_release(error_blob);
+      }
+      if (sig_blob != null) {
+        com_release(sig_blob);
+      }
+      return false;
+    }
+
+    var raw: *var u8 = null;
+    hr = dev_create_root_signature(self.device, 0, blob_get_buffer_pointer(sig_blob) as *const u8,
+      blob_get_buffer_size(sig_blob), &raw kIidRootSignature, &raw var raw);
+    self.video_root_sig = unsafe (raw as *var ID3D12RootSignature);
+    com_release(sig_blob);
+    if (error_blob != null) {
+      com_release(error_blob);
+    }
+    if (failed(hr)) {
+      return false;
+    }
+
+    // Load video shaders
+    let vs_code = self.load_shader_cso("video_vs.cso", kVideoVs);
+    let ps_code = self.load_shader_cso("video_ps.cso", kVideoPs);
+    if (#vs_code == 0 || #ps_code == 0) {
+      return false;
+    }
+
+    var pso_desc = GraphicsPipelineStateDesc {};
+    pso_desc.root_signature = self.video_root_sig;
+    pso_desc.vs.shader_bytecode = unsafe (@ptr(vs_code.as_slice()) as *const u8);
+    pso_desc.vs.bytecode_length = #vs_code;
+    pso_desc.ps.shader_bytecode = unsafe (@ptr(ps_code.as_slice()) as *const u8);
+    pso_desc.ps.bytecode_length = #ps_code;
+
+    // No blending (opaque video frame)
+    pso_desc.blend_state.render_target[0].render_target_write_mask = kColorWriteEnableAll;
+    pso_desc.sample_mask = 0xFFFF_FFFF;
+
+    pso_desc.rasterizer_state.fill_mode = kFillModeSolid;
+    pso_desc.rasterizer_state.cull_mode = kCullModeNone;
+    pso_desc.rasterizer_state.depth_clip_enable = 1;
+
+    // No vertex input (fullscreen triangle from SV_VertexID)
+    pso_desc.primitive_topology_type = kPrimitiveTopologyTypeTriangle;
+    pso_desc.num_render_targets = 1;
+    pso_desc.rtv_formats[0] = self.swapchain_dxgi_format;
+    pso_desc.sample_desc.count = 1;
+
+    hr = dev_create_graphics_pipeline_state(self.device, &raw pso_desc, &raw kIidPipelineState, &raw var raw);
+    self.video_pso = unsafe (raw as *var ID3D12PipelineState);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d12: CreateGraphicsPipelineState (video) failed: 0x{hr as u32:08x}");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// --- AcquireFrame ------------------------------------------------------------
+
+fn Impl::acquire_frame(var self&): bool {
+  if (self.frame_acquired) {
+    return true;
+  }
+
+  unsafe {
+    // Wait for previous frame's fence value
+    let frame = self.current_frame as usize;
+    if (fence_get_completed_value(self.fence) < self.fence_values[frame]) {
+      while (fence_get_completed_value(self.fence) < self.fence_values[frame]) {
+        // spin-wait
+      }
+    }
+
+    // Acquire next swapchain image via Vulkan
+    let result = vk_acquire_next_image_khr(self.vk_device, self.vk_swapchain, 0xFFFF_FFFF_FFFF_FFFF, 0, self.vk_acquire_fence,
+      &raw var self.image_index);
+
+    if (result == kVkErrorOutOfDateKhr) {
+      self.recreate_swapchain();
+      return false;
+    }
+
+    // Wait for the acquire fence
+    vk_wait_for_fences(self.vk_device, 1, &raw self.vk_acquire_fence, 1, 0xFFFF_FFFF_FFFF_FFFF);
+    vk_reset_fences(self.vk_device, 1, &raw self.vk_acquire_fence);
+
+    // Reset command allocator and command list
+    alloc_reset(self.cmd_allocs[frame]);
+    cl_reset(self.cmd_lists[frame], self.cmd_allocs[frame], null);
+  }
+
+  // Reset write positions for the ring-buffer
+  let frame = self.current_frame as usize;
+  self.frame_bufs[frame].vertex.write_pos = 0;
+  self.frame_bufs[frame].index.write_pos = 0;
+  self.frame_bufs[frame].text_vertex.write_pos = 0;
+  self.frame_bufs[frame].text_index.write_pos = 0;
+
+  // Reset vertex dedup tracking
+  self.last_quad_verts = null;
+  self.last_quad_vert_count = 0;
+  self.last_text_verts = null;
+  self.last_text_vert_count = 0;
+
+  self.frame_acquired = true;
+  return true;
+}
+
+// --- BeginFrame --------------------------------------------------------------
+
+// Pipeline state and root signature, the SRV heap, and the projection of the
+// window's size (BeginFrame and EndOffscreen end with the same sequence).
+fn Impl::bind_quad_state(self&) {
+  let cmd = self.cmd_lists[self.current_frame as usize];
+  unsafe {
+    // Set pipeline state and root signature
+    cl_set_pipeline_state(cmd, self.quad_pso);
+    cl_set_graphics_root_signature(cmd, self.root_sig);
+
+    // Set descriptor heap
+    let heaps: [*var ID3D12DescriptorHeap; 1] = [self.srv_heap];
+    cl_set_descriptor_heaps(cmd, 1, @ptr(heaps[..]));
+  }
+}
+
+fn Impl::begin_frame(var self&, clear_color: Color): bool {
+  if (!self.acquire_frame()) {
+    return false;
+  }
+
+  let cmd = self.cmd_lists[self.current_frame as usize];
+
+  unsafe {
+    // Transition swapchain: PRESENT -> RENDER_TARGET
+    {
+      let barrier = transition_barrier(self.swapchain_resources[self.image_index as usize], kResourceStatePresent,
+        kResourceStateRenderTarget);
+      cl_resource_barrier(cmd, 1, &raw barrier);
+    }
+
+    // Set render target
+    let rtv = self.rtv_cpu_handle(self.image_index);
+    cl_om_set_render_targets(cmd, 1, &raw rtv, 0, null);
+
+    // Clear
+    let clear: [f32; 4] = [clear_color.r, clear_color.g, clear_color.b, clear_color.a];
+    cl_clear_render_target_view(cmd, rtv, @ptr(clear[..]), 0, null);
+
+    // Set viewport (framebuffer pixels)
+    var viewport = Viewport {};
+    viewport.width = self.swapchain_extent.width as f32;
+    viewport.height = self.swapchain_extent.height as f32;
+    viewport.min_depth = 0.0;
+    viewport.max_depth = 1.0;
+    cl_rs_set_viewports(cmd, 1, &raw viewport);
+
+    // Set scissor (full framebuffer)
+    var scissor = D3dRect {};
+    scissor.right = self.swapchain_extent.width as i32;
+    scissor.bottom = self.swapchain_extent.height as i32;
+    cl_rs_set_scissor_rects(cmd, 1, &raw scissor);
+  }
+
+  self.bind_quad_state();
+
+  // Set projection constants using WINDOW coordinates (not framebuffer)
+  let win_w = self.swapchain_extent.width as f32 / self.dpi_scale;
+  let win_h = self.swapchain_extent.height as f32 / self.dpi_scale;
+  self.set_projection_constants(win_w, win_h);
+
+  // Set topology
+  unsafe { cl_ia_set_primitive_topology(cmd, kPrimitiveTopologyTriangleList); }
+
+  return true;
+}
+
+// --- EndFrame ----------------------------------------------------------------
+
+fn Impl::end_frame(var self&) {
+  let cmd = self.cmd_lists[self.current_frame as usize];
+
+  unsafe {
+    // Transition swapchain: RENDER_TARGET -> PRESENT
+    {
+      let barrier = transition_barrier(self.swapchain_resources[self.image_index as usize], kResourceStateRenderTarget,
+        kResourceStatePresent);
+      cl_resource_barrier(cmd, 1, &raw barrier);
+    }
+
+    // Close command list
+    cl_close(cmd);
+
+    // Execute
+    let lists: [*var ID3D12CommandList; 1] = [cmd as *var ID3D12CommandList];
+    queue_execute_command_lists(self.cmd_queue, 1, @ptr(lists[..]));
+
+    // Signal fence
+    let val = self.fence_next_value;
+    self.fence_next_value += 1;
+    self.fence_values[self.current_frame as usize] = val;
+    queue_signal(self.cmd_queue, self.fence, val);
+
+    // Present via Vulkan
+    // Acquire the VkQueue from the D3D12 command queue for presentation
+    let present_queue = vkd3d_acquire_vk_queue(self.cmd_queue);
+
+    var pi = VkPresentInfoKHR {};
+    pi.swapchain_count = 1;
+    pi.swapchains = &raw self.vk_swapchain;
+    pi.image_indices = &raw self.image_index;
+
+    let result = vk_queue_present_khr(present_queue, &raw pi);
+
+    vkd3d_release_vk_queue(self.cmd_queue);
+
+    if (result == kVkErrorOutOfDateKhr || result == kVkSuboptimalKhr || self.framebuffer_resized) {
+      self.framebuffer_resized = false;
+      self.recreate_swapchain();
+    }
+  }
+
+  self.frame_acquired = false;
+  self.current_frame = (self.current_frame + 1) % kMaxFrames;
+}
+
+// --- Scissor -----------------------------------------------------------------
+
+fn Impl::set_scissor(self&, rect: Rect) {
+  let cmd = self.cmd_lists[self.current_frame as usize];
+  let scale = self.active_offscreen_target != kInvalidTexture ? 1.0 : self.dpi_scale;
+
+  var scissor = D3dRect {};
+  scissor.left = to_long(rect.x * scale);
+  scissor.top = to_long(rect.y * scale);
+  scissor.right = to_long((rect.x + rect.w) * scale);
+  scissor.bottom = to_long((rect.y + rect.h) * scale);
+  unsafe { cl_rs_set_scissor_rects(cmd, 1, &raw scissor); }
+}
+
+fn Impl::reset_scissor(self&) {
+  let cmd = self.cmd_lists[self.current_frame as usize];
+  var scissor = D3dRect {};
+
+  if (self.active_offscreen_target != kInvalidTexture) {
+    let slot& = self.textures[self.active_offscreen_target as usize];
+    scissor.right = slot.width as i32;
+    scissor.bottom = slot.height as i32;
+  } else {
+    scissor.right = self.swapchain_extent.width as i32;
+    scissor.bottom = self.swapchain_extent.height as i32;
+  }
+  unsafe { cl_rs_set_scissor_rects(cmd, 1, &raw scissor); }
+}
+
+// --- DrawTriangles -----------------------------------------------------------
+
+fn Impl::draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return;
+  }
+
+  let cmd = self.cmd_lists[self.current_frame as usize];
+  let frame = self.current_frame as usize;
+  let vertex_size = @size_of(Vertex2D) as u32;
+
+  // Vertex dedup check
+  var vb_byte_offset: u32 = 0;
+  if (@ptr(vertices) == self.last_quad_verts && vertex_count == self.last_quad_vert_count) {
+    vb_byte_offset = self.last_quad_vb_offset;
+  } else {
+    var vb = self.frame_bufs[frame].vertex;
+    self.ensure_buffer_capacity(vb, vb.write_pos + vertex_count, vertex_size);
+    vb_byte_offset = vb.write_pos * vertex_size;
+    unsafe { memcpy(vb.mapped + vb_byte_offset as usize, @ptr(vertices) as *const u8, vertex_count as usize * vertex_size as usize); }
+    self.last_quad_verts = @ptr(vertices);
+    self.last_quad_vert_count = vertex_count;
+    self.last_quad_vb_offset = vb_byte_offset;
+    vb.write_pos += vertex_count;
+    self.frame_bufs[frame].vertex = vb;
+  }
+
+  // Always append indices
+  var ib = self.frame_bufs[frame].index;
+  self.ensure_buffer_capacity(ib, ib.write_pos + index_count, 4);
+  let ib_byte_offset = ib.write_pos * 4;
+  unsafe { memcpy(ib.mapped + ib_byte_offset as usize, @ptr(indices) as *const u8, index_count as usize * 4); }
+  ib.write_pos += index_count;
+  self.frame_bufs[frame].index = ib;
+
+  unsafe {
+    // Bind texture
+    let tex = texture != kInvalidTexture ? texture : self.white_texture;
+    if (tex < kMaxTextures && self.textures[tex as usize].in_use) {
+      cl_set_graphics_root_descriptor_table(cmd, 1, self.srv_gpu_handle(self.textures[tex as usize].srv_index));
+    }
+
+    // Set vertex buffer view
+    var vbv = VertexBufferView {};
+    vbv.buffer_location = res_get_gpu_virtual_address(self.frame_bufs[frame].vertex.buf) + vb_byte_offset as u64;
+    vbv.size_in_bytes = vertex_count * vertex_size;
+    vbv.stride_in_bytes = vertex_size;
+    cl_ia_set_vertex_buffers(cmd, 0, 1, &raw vbv);
+
+    // Set index buffer view
+    var ibv = IndexBufferView {};
+    ibv.buffer_location = res_get_gpu_virtual_address(self.frame_bufs[frame].index.buf) + ib_byte_offset as u64;
+    ibv.size_in_bytes = index_count * 4;
+    ibv.format = kDxgiFormatR32Uint;
+    cl_ia_set_index_buffer(cmd, &raw ibv);
+
+    cl_draw_indexed_instanced(cmd, index_count, 1, 0, 0, 0);
+  }
+}
+
+// --- DrawTextTriangles -------------------------------------------------------
+
+fn Impl::draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return;
+  }
+
+  let cmd = self.cmd_lists[self.current_frame as usize];
+  let frame = self.current_frame as usize;
+  let vertex_size = @size_of(Vertex2D) as u32;
+
+  // Use SEPARATE buffers for text to avoid overwriting quad data
+  var vb_byte_offset: u32 = 0;
+  if (@ptr(vertices) == self.last_text_verts && vertex_count == self.last_text_vert_count) {
+    vb_byte_offset = self.last_text_vb_offset;
+  } else {
+    var vb = self.frame_bufs[frame].text_vertex;
+    self.ensure_buffer_capacity(vb, vb.write_pos + vertex_count, vertex_size);
+    vb_byte_offset = vb.write_pos * vertex_size;
+    unsafe { memcpy(vb.mapped + vb_byte_offset as usize, @ptr(vertices) as *const u8, vertex_count as usize * vertex_size as usize); }
+    self.last_text_verts = @ptr(vertices);
+    self.last_text_vert_count = vertex_count;
+    self.last_text_vb_offset = vb_byte_offset;
+    vb.write_pos += vertex_count;
+    self.frame_bufs[frame].text_vertex = vb;
+  }
+
+  var ib = self.frame_bufs[frame].text_index;
+  self.ensure_buffer_capacity(ib, ib.write_pos + index_count, 4);
+  let ib_byte_offset = ib.write_pos * 4;
+  unsafe { memcpy(ib.mapped + ib_byte_offset as usize, @ptr(indices) as *const u8, index_count as usize * 4); }
+  ib.write_pos += index_count;
+  self.frame_bufs[frame].text_index = ib;
+
+  unsafe {
+    // Switch to text pipeline
+    cl_set_pipeline_state(cmd, self.text_pso);
+
+    // Re-set root signature and descriptor heaps (pipeline change)
+    cl_set_graphics_root_signature(cmd, self.root_sig);
+    let heaps: [*var ID3D12DescriptorHeap; 1] = [self.srv_heap];
+    cl_set_descriptor_heaps(cmd, 1, @ptr(heaps[..]));
+
+    // Re-set projection constants (display_size may differ for offscreen)
+    let ds = self.display_size();
+    self.set_projection_constants(ds.x, ds.y);
+
+    // Bind atlas texture
+    let tex = atlas_texture;
+    if (tex < kMaxTextures && self.textures[tex as usize].in_use) {
+      cl_set_graphics_root_descriptor_table(cmd, 1, self.srv_gpu_handle(self.textures[tex as usize].srv_index));
+    }
+
+    // Set vertex and index buffer views
+    var vbv = VertexBufferView {};
+    vbv.buffer_location = res_get_gpu_virtual_address(self.frame_bufs[frame].text_vertex.buf) + vb_byte_offset as u64;
+    vbv.size_in_bytes = vertex_count * vertex_size;
+    vbv.stride_in_bytes = vertex_size;
+    cl_ia_set_vertex_buffers(cmd, 0, 1, &raw vbv);
+
+    var ibv = IndexBufferView {};
+    ibv.buffer_location = res_get_gpu_virtual_address(self.frame_bufs[frame].text_index.buf) + ib_byte_offset as u64;
+    ibv.size_in_bytes = index_count * 4;
+    ibv.format = kDxgiFormatR32Uint;
+    cl_ia_set_index_buffer(cmd, &raw ibv);
+
+    cl_ia_set_primitive_topology(cmd, kPrimitiveTopologyTriangleList);
+    cl_draw_indexed_instanced(cmd, index_count, 1, 0, 0, 0);
+
+    // Switch back to quad pipeline
+    cl_set_pipeline_state(cmd, self.quad_pso);
+    cl_set_graphics_root_signature(cmd, self.root_sig);
+    cl_set_descriptor_heaps(cmd, 1, @ptr(heaps[..]));
+    self.set_projection_constants(ds.x, ds.y);
+  }
+}
+
+// --- display_size / dpi_scale ------------------------------------------------
+
+fn Impl::display_size(self&): Vec2 {
+  if (self.active_offscreen_target != kInvalidTexture) {
+    return self.offscreen_display_size;
+  }
+  return Vec2 { x: self.swapchain_extent.width as f32 / self.dpi_scale, y: self.swapchain_extent.height as f32 / self.dpi_scale };
+}
+
+// --- Texture management ------------------------------------------------------
+
+fn Impl::find_free_slot(self&): RhiTextureHandle {
+  for (let i in 0..kMaxTextures) {
+    if (!self.textures[i as usize].in_use) {
+      return i;
+    }
+  }
+  return kInvalidTexture;
+}
+
+fn Impl::create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes): RhiTextureHandle {
+  // Find free slot
+  let handle = self.find_free_slot();
+  if (handle == kInvalidTexture) {
+    return kInvalidTexture;
+  }
+
+  var dxgi_format = kDxgiFormatR8G8B8A8Unorm;
+  var pixel_size: u32 = 4;
+  match (format) {
+    RhiFormat::Rgba8Unorm => {
+      dxgi_format = kDxgiFormatR8G8B8A8Unorm;
+      pixel_size = 4;
+    },
+    RhiFormat::Bgra8Unorm => {
+      dxgi_format = kDxgiFormatB8G8R8A8Unorm;
+      pixel_size = 4;
+    },
+    RhiFormat::R8Unorm => {
+      dxgi_format = kDxgiFormatR8Unorm;
+      pixel_size = 1;
+    },
+    _ => {
+      return kInvalidTexture;
+    },
+  }
+
+  // Create texture resource on DEFAULT heap
+  var heap_props = HeapProperties {};
+  heap_props.heap_type = kHeapTypeDefault;
+
+  var desc = ResourceDesc {};
+  desc.dimension = kResourceDimensionTexture2d;
+  desc.width = width as u64;
+  desc.height = height;
+  desc.depth_or_array_size = 1;
+  desc.mip_levels = 1;
+  desc.format = dxgi_format;
+  desc.sample_desc.count = 1;
+  desc.layout = kTextureLayoutUnknown;
+  desc.flags = kResourceFlagNone;
+
+  var raw: *var u8 = null;
+  let hr = unsafe dev_create_committed_resource(self.device, &raw heap_props, kHeapFlagNone, &raw desc, kResourceStateCopyDest,
+    null, &raw kIidResource, &raw var raw);
+  self.textures[handle as usize].resource = unsafe (raw as *var ID3D12Resource);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d12: CreateTexture resource failed: 0x{hr as u32:08x}");
+    return kInvalidTexture;
+  }
+
+  // Upload pixel data
+  self.upload_texture_data(self.textures[handle as usize].resource, width, height, pixel_size, pixels, kResourceStateCopyDest);
+
+  // Create SRV
+  self.textures[handle as usize].srv_index = handle;  // 1:1 mapping for simplicity
+  var srv_desc = ShaderResourceViewDesc {};
+  srv_desc.format = dxgi_format;
+  srv_desc.view_dimension = kSrvDimensionTexture2d;
+  srv_desc.shader4_component_mapping = kDefaultShader4ComponentMapping;
+  srv_desc.data = SrvData { texture2d: Tex2dSrv { most_detailed_mip: 0, mip_levels: 1, plane_slice: 0, resource_min_lod_clamp: 0.0 } };
+  unsafe {
+    dev_create_shader_resource_view(self.device, self.textures[handle as usize].resource, &raw srv_desc,
+      self.srv_cpu_handle(handle));
+  }
+
+  var slot = self.textures[handle as usize];
+  slot.width = width;
+  slot.height = height;
+  slot.pixel_size = pixel_size;
+  slot.format = dxgi_format;
+  slot.in_use = true;
+  self.textures[handle as usize] = slot;
+  return handle;
+}
+
+fn Impl::update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+  if (handle >= kMaxTextures || !self.textures[handle as usize].in_use) {
+    return;
+  }
+
+  let slot = self.textures[handle as usize];
+  self.upload_texture_data(slot.resource, slot.width, slot.height, slot.pixel_size, pixels, kResourceStatePixelShaderResource);
+}
+
+fn Impl::destroy_texture(var self&, handle: RhiTextureHandle) {
+  if (handle >= kMaxTextures || !self.textures[handle as usize].in_use) {
+    return;
+  }
+  if (self.textures[handle as usize].is_render_target) {
+    self.destroy_render_target(handle);
+    return;
+  }
+  self.wait_for_gpu();
+  let slot = self.textures[handle as usize];
+  if (slot.resource != null) {
+    unsafe { com_release(slot.resource); }
+  }
+  self.textures[handle as usize] = TextureSlot {};
+}
+
+// --- Render targets ----------------------------------------------------------
+
+fn Impl::create_render_target(var self&, width: u32, height: u32): RhiTextureHandle {
+  // Find free slot
+  let handle = self.find_free_slot();
+  if (handle == kInvalidTexture) {
+    return kInvalidTexture;
+  }
+
+  // Create texture with ALLOW_RENDER_TARGET flag
+  var heap_props = HeapProperties {};
+  heap_props.heap_type = kHeapTypeDefault;
+
+  var desc = ResourceDesc {};
+  desc.dimension = kResourceDimensionTexture2d;
+  desc.width = width as u64;
+  desc.height = height;
+  desc.depth_or_array_size = 1;
+  desc.mip_levels = 1;
+  desc.format = self.swapchain_dxgi_format;
+  desc.sample_desc.count = 1;
+  desc.layout = kTextureLayoutUnknown;
+  desc.flags = kResourceFlagAllowRenderTarget;
+
+  var clear_val = ClearValue {};
+  clear_val.format = self.swapchain_dxgi_format;
+
+  var raw: *var u8 = null;
+  let hr = unsafe dev_create_committed_resource(self.device, &raw heap_props, kHeapFlagNone, &raw desc,
+    kResourceStatePixelShaderResource, &raw clear_val, &raw kIidResource, &raw var raw);
+  self.textures[handle as usize].resource = unsafe (raw as *var ID3D12Resource);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d12: CreateRenderTarget resource failed: 0x{hr as u32:08x}");
+    return kInvalidTexture;
+  }
+
+  // Create RTV
+  let rtv_index = self.rtv_next_index;
+  self.rtv_next_index += 1;
+  self.textures[handle as usize].rtv_index = rtv_index;
+  var rtv_desc = RenderTargetViewDesc {};
+  rtv_desc.format = self.swapchain_dxgi_format;
+  rtv_desc.view_dimension = kRtvDimensionTexture2d;
+  unsafe {
+    dev_create_render_target_view(self.device, self.textures[handle as usize].resource, &raw rtv_desc,
+      self.rtv_cpu_handle(rtv_index));
+  }
+
+  // Create SRV
+  self.textures[handle as usize].srv_index = handle;
+  var srv_desc = ShaderResourceViewDesc {};
+  srv_desc.format = self.swapchain_dxgi_format;
+  srv_desc.view_dimension = kSrvDimensionTexture2d;
+  srv_desc.shader4_component_mapping = kDefaultShader4ComponentMapping;
+  srv_desc.data = SrvData { texture2d: Tex2dSrv { most_detailed_mip: 0, mip_levels: 1, plane_slice: 0, resource_min_lod_clamp: 0.0 } };
+  unsafe {
+    dev_create_shader_resource_view(self.device, self.textures[handle as usize].resource, &raw srv_desc,
+      self.srv_cpu_handle(handle));
+  }
+
+  var slot = self.textures[handle as usize];
+  slot.width = width;
+  slot.height = height;
+  slot.pixel_size = 4;
+  slot.format = self.swapchain_dxgi_format;
+  slot.in_use = true;
+  slot.is_render_target = true;
+  self.textures[handle as usize] = slot;
+  return handle;
+}
+
+fn Impl::destroy_render_target(var self&, handle: RhiTextureHandle) {
+  if (handle >= kMaxTextures || !self.textures[handle as usize].in_use || !self.textures[handle as usize].is_render_target) {
+    return;
+  }
+  self.wait_for_gpu();
+  let slot = self.textures[handle as usize];
+  if (slot.resource != null) {
+    unsafe { com_release(slot.resource); }
+  }
+  self.textures[handle as usize] = TextureSlot {};
+}
+
+// --- Offscreen rendering -----------------------------------------------------
+
+fn Impl::begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool {
+  if (target >= kMaxTextures || !self.textures[target as usize].in_use || !self.textures[target as usize].is_render_target) {
+    return false;
+  }
+
+  let slot = self.textures[target as usize];
+  let cmd = self.cmd_lists[self.current_frame as usize];
+
+  self.active_offscreen_target = target;
+  self.offscreen_display_size = Vec2 { x: slot.width as f32, y: slot.height as f32 };
+
+  unsafe {
+    // Transition: PIXEL_SHADER_RESOURCE -> RENDER_TARGET
+    {
+      let barrier = transition_barrier(slot.resource, kResourceStatePixelShaderResource, kResourceStateRenderTarget);
+      cl_resource_barrier(cmd, 1, &raw barrier);
+    }
+
+    // Set render target
+    let rtv = self.rtv_cpu_handle(slot.rtv_index);
+    cl_om_set_render_targets(cmd, 1, &raw rtv, 0, null);
+
+    // Clear
+    let clear: [f32; 4] = [clear_color.r, clear_color.g, clear_color.b, clear_color.a];
+    cl_clear_render_target_view(cmd, rtv, @ptr(clear[..]), 0, null);
+
+    // Set viewport
+    var viewport = Viewport {};
+    viewport.width = slot.width as f32;
+    viewport.height = slot.height as f32;
+    viewport.min_depth = 0.0;
+    viewport.max_depth = 1.0;
+    cl_rs_set_viewports(cmd, 1, &raw viewport);
+
+    // Set scissor
+    var scissor = D3dRect {};
+    scissor.right = slot.width as i32;
+    scissor.bottom = slot.height as i32;
+    cl_rs_set_scissor_rects(cmd, 1, &raw scissor);
+  }
+
+  // Set pipeline and root sig, and the descriptor heap
+  self.bind_quad_state();
+
+  // Projection for pixel-exact offscreen coordinates
+  self.set_projection_constants(slot.width as f32, slot.height as f32);
+
+  unsafe { cl_ia_set_primitive_topology(cmd, kPrimitiveTopologyTriangleList); }
+
+  return true;
+}
+
+fn Impl::end_offscreen(var self&, target: RhiTextureHandle) {
+  if (self.active_offscreen_target == kInvalidTexture) {
+    return;
+  }
+
+  let slot = self.textures[target as usize];
+  let cmd = self.cmd_lists[self.current_frame as usize];
+
+  unsafe {
+    // Transition: RENDER_TARGET -> PIXEL_SHADER_RESOURCE
+    {
+      let barrier = transition_barrier(slot.resource, kResourceStateRenderTarget, kResourceStatePixelShaderResource);
+      cl_resource_barrier(cmd, 1, &raw barrier);
+    }
+  }
+
+  self.active_offscreen_target = kInvalidTexture;
+
+  unsafe {
+    // Restore swapchain render target and state
+    let rtv = self.rtv_cpu_handle(self.image_index);
+    cl_om_set_render_targets(cmd, 1, &raw rtv, 0, null);
+
+    // Restore viewport/scissor
+    var viewport = Viewport {};
+    viewport.width = self.swapchain_extent.width as f32;
+    viewport.height = self.swapchain_extent.height as f32;
+    viewport.min_depth = 0.0;
+    viewport.max_depth = 1.0;
+    cl_rs_set_viewports(cmd, 1, &raw viewport);
+
+    var scissor = D3dRect {};
+    scissor.right = self.swapchain_extent.width as i32;
+    scissor.bottom = self.swapchain_extent.height as i32;
+    cl_rs_set_scissor_rects(cmd, 1, &raw scissor);
+  }
+
+  // Restore pipeline state
+  self.bind_quad_state();
+
+  let win_w = self.swapchain_extent.width as f32 / self.dpi_scale;
+  let win_h = self.swapchain_extent.height as f32 / self.dpi_scale;
+  self.set_projection_constants(win_w, win_h);
+
+  unsafe { cl_ia_set_primitive_topology(cmd, kPrimitiveTopologyTriangleList); }
+}
+
+// --- Video frame conversion (YCbCr -> RGBA) ----------------------------------
+
+fn Impl::convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {
+  if (!self.ensure_video_pipeline()) {
+    return;
+  }
+  if (target >= kMaxTextures || !self.textures[target as usize].in_use || !self.textures[target as usize].is_render_target) {
+    return;
+  }
+  if (y >= kMaxTextures || !self.textures[y as usize].in_use) {
+    return;
+  }
+  if (cb >= kMaxTextures || !self.textures[cb as usize].in_use) {
+    return;
+  }
+  if (cr >= kMaxTextures || !self.textures[cr as usize].in_use) {
+    return;
+  }
+
+  let slot = self.textures[target as usize];
+  let cmd = self.cmd_lists[self.current_frame as usize];
+
+  unsafe {
+    // Transition target: PIXEL_SHADER_RESOURCE -> RENDER_TARGET
+    {
+      let barrier = transition_barrier(slot.resource, kResourceStatePixelShaderResource, kResourceStateRenderTarget);
+      cl_resource_barrier(cmd, 1, &raw barrier);
+    }
+
+    // Set render target
+    let rtv = self.rtv_cpu_handle(slot.rtv_index);
+    cl_om_set_render_targets(cmd, 1, &raw rtv, 0, null);
+
+    let clear: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+    cl_clear_render_target_view(cmd, rtv, @ptr(clear[..]), 0, null);
+
+    // Set video pipeline
+    cl_set_pipeline_state(cmd, self.video_pso);
+    cl_set_graphics_root_signature(cmd, self.video_root_sig);
+
+    let heaps: [*var ID3D12DescriptorHeap; 1] = [self.srv_heap];
+    cl_set_descriptor_heaps(cmd, 1, @ptr(heaps[..]));
+
+    // Set 3 SRV descriptor tables for Y, Cb, Cr
+    cl_set_graphics_root_descriptor_table(cmd, 0, self.srv_gpu_handle(self.textures[y as usize].srv_index));
+    cl_set_graphics_root_descriptor_table(cmd, 1, self.srv_gpu_handle(self.textures[cb as usize].srv_index));
+    cl_set_graphics_root_descriptor_table(cmd, 2, self.srv_gpu_handle(self.textures[cr as usize].srv_index));
+
+    // Viewport and scissor
+    var viewport = Viewport {};
+    viewport.width = slot.width as f32;
+    viewport.height = slot.height as f32;
+    viewport.min_depth = 0.0;
+    viewport.max_depth = 1.0;
+    cl_rs_set_viewports(cmd, 1, &raw viewport);
+
+    var scissor = D3dRect {};
+    scissor.right = slot.width as i32;
+    scissor.bottom = slot.height as i32;
+    cl_rs_set_scissor_rects(cmd, 1, &raw scissor);
+
+    cl_ia_set_primitive_topology(cmd, kPrimitiveTopologyTriangleList);
+
+    // Draw fullscreen triangle (3 vertices, no vertex buffer)
+    cl_draw_instanced(cmd, 3, 1, 0, 0);
+
+    // Transition target: RENDER_TARGET -> PIXEL_SHADER_RESOURCE
+    {
+      let barrier = transition_barrier(slot.resource, kResourceStateRenderTarget, kResourceStatePixelShaderResource);
+      cl_resource_barrier(cmd, 1, &raw barrier);
+    }
+
+    // Restore quad pipeline state (caller expects it active)
+    cl_set_pipeline_state(cmd, self.quad_pso);
+    cl_set_graphics_root_signature(cmd, self.root_sig);
+    cl_set_descriptor_heaps(cmd, 1, @ptr(heaps[..]));
+  }
+}
+
+// --- Shutdown ----------------------------------------------------------------
+
+fn Impl::shutdown(var self&) {
+  unsafe { s_rhi_instance = null; }
+
+  if (self.device != null && self.fence != null) {
+    self.wait_for_gpu();
+  }
+
+  // Textures
+  for (let i in 0..kMaxTextures) {
+    if (self.textures[i as usize].in_use) {
+      if (self.textures[i as usize].is_render_target) {
+        self.destroy_render_target(i);
+      } else {
+        self.destroy_texture(i);
+      }
+    }
+  }
+
+  unsafe {
+    // Per-frame upload buffers
+    for (let i in 0..kMaxFrames) {
+      let fb = self.frame_bufs[i as usize];
+      for (let b in [fb.vertex, fb.index, fb.text_vertex, fb.text_index]) {
+        if (b.buf != null) {
+          res_unmap(b.buf, 0, null);
+          com_release(b.buf);
+        }
+      }
+    }
+
+    // Command resources
+    for (let i in 0..kMaxFrames) {
+      if (self.cmd_lists[i as usize] != null) {
+        com_release(self.cmd_lists[i as usize]);
+      }
+      if (self.cmd_allocs[i as usize] != null) {
+        com_release(self.cmd_allocs[i as usize]);
+      }
+    }
+    if (self.upload_cmd_list != null) {
+      com_release(self.upload_cmd_list);
+    }
+    if (self.upload_cmd_alloc != null) {
+      com_release(self.upload_cmd_alloc);
+    }
+    if (self.fence != null) {
+      com_release(self.fence);
+    }
+    if (self.cmd_queue != null) {
+      com_release(self.cmd_queue);
+    }
+
+    // Pipelines
+    if (self.video_pso != null) {
+      com_release(self.video_pso);
+    }
+    if (self.video_root_sig != null) {
+      com_release(self.video_root_sig);
+    }
+    if (self.text_pso != null) {
+      com_release(self.text_pso);
+    }
+    if (self.quad_pso != null) {
+      com_release(self.quad_pso);
+    }
+    if (self.root_sig != null) {
+      com_release(self.root_sig);
+    }
+
+    // Descriptor heaps
+    if (self.srv_heap != null) {
+      com_release(self.srv_heap);
+    }
+    if (self.rtv_heap != null) {
+      com_release(self.rtv_heap);
+    }
+  }
+
+  // Swapchain resources
+  self.cleanup_swapchain();
+
+  unsafe {
+    // Vulkan acquire fence
+    if (self.vk_acquire_fence != 0 && self.vk_device != null) {
+      vk_destroy_fence(self.vk_device, self.vk_acquire_fence, null);
+    }
+
+    // Vulkan surface
+    if (self.vk_surface != 0 && self.vk_instance != null) {
+      vk_destroy_surface_khr(self.vk_instance, self.vk_surface, null);
+    }
+
+    // D3D12 device (releases the underlying VkDevice)
+    if (self.device != null) {
+      com_release(self.device);
+    }
+
+    // vkd3d instance (releases VkInstance)
+    if (self.vkd3d_inst != null) {
+      vkd3d_instance_decref(self.vkd3d_inst);
+    }
+  }
+}
+
+// --- The RHI -----------------------------------------------------------------
+
+// The D3D12 backend: UIContext<..., D3d12Rhi, ...> where the C++ build links
+// d3d12_rhi.cc.
+pub struct D3d12Rhi : Rhi {
+  var impl_: Box<Impl>
+
+  pub fn D3d12Rhi(): D3d12Rhi => D3d12Rhi { impl_: Box(Impl {}) };
+
+  pub fn init(var self&, config&: RhiConfig): bool {
+    unsafe { s_rhi_instance = self.impl_.as_ptr() as *var Impl; }
+    return self.impl_.get_var().init(config);
+  }
+  pub fn shutdown(var self&) {
+    self.impl_.get_var().shutdown();
+  }
+  pub fn begin_frame(var self&, clear_color: Color): bool => self.impl_.get_var().begin_frame(clear_color);
+  pub fn end_frame(var self&) {
+    self.impl_.get_var().end_frame();
+  }
+  pub fn set_scissor(var self&, rect: Rect) {
+    self.impl_.get().set_scissor(rect);
+  }
+  pub fn reset_scissor(var self&) {
+    self.impl_.get().reset_scissor();
+  }
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+    self.impl_.get_var().draw_triangles(vertices, indices, texture);
+  }
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+    self.impl_.get_var().draw_text_triangles(vertices, indices, atlas_texture);
+  }
+  // `filter` is not used by the D3D12 backend: the samplers are static
+  // (s0 linear clamp, s1 nearest clamp).
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle =>
+    self.impl_.get_var().create_texture(width, height, format, pixels);
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+    self.impl_.get_var().update_texture(handle, pixels);
+  }
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {
+    self.impl_.get_var().destroy_texture(handle);
+  }
+  pub fn acquire_frame(var self&): bool => self.impl_.get_var().acquire_frame();
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle =>
+    self.impl_.get_var().create_render_target(width, height);
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {
+    self.impl_.get_var().destroy_render_target(handle);
+  }
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool =>
+    self.impl_.get_var().begin_offscreen(target, clear_color);
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {
+    self.impl_.get_var().end_offscreen(target);
+  }
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {
+    self.impl_.get_var().convert_video_frame(target, y, cb, cr);
+  }
+  pub fn display_size(self&): Vec2 => self.impl_.get().display_size();
+  pub fn dpi_scale(self&): f32 => self.impl_.get().dpi_scale;
+}

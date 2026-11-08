@@ -63,10 +63,10 @@ STRUCTS = {
     "D3D12_RENDER_TARGET_VIEW_DESC": "RenderTargetViewDesc", "D3D12_HEAP_PROPERTIES": "HeapProperties",
     "D3D12_RESOURCE_DESC": "ResourceDesc", "D3D12_CLEAR_VALUE": "ClearValue",
     "D3D12_PLACED_SUBRESOURCE_FOOTPRINT": "PlacedSubresourceFootprint", "D3D12_RESOURCE_BARRIER": "ResourceBarrier",
-    "D3D12_TEXTURE_COPY_LOCATION": "TextureCopyLocation", "D3D12_VIEWPORT": "Viewport", "D3D12_RECT": "Rect",
+    "D3D12_TEXTURE_COPY_LOCATION": "TextureCopyLocation", "D3D12_VIEWPORT": "Viewport", "D3D12_RECT": "D3dRect",
     "D3D12_VERTEX_BUFFER_VIEW": "VertexBufferView", "D3D12_INDEX_BUFFER_VIEW": "IndexBufferView",
     "D3D12_CPU_DESCRIPTOR_HANDLE": "CpuDescriptorHandle", "D3D12_GPU_DESCRIPTOR_HANDLE": "GpuDescriptorHandle",
-    "D3D12_RANGE": "Range", "D3D12_BOX": "Box",
+    "D3D12_RANGE": "Range", "D3D12_BOX": "D3dBox",
 }
 SCALARS = {
     "HRESULT": "i32", "ULONG": "u32", "UINT": "u32", "UINT64": "u64", "UINT8": "u8", "UINT16": "u16", "SIZE_T": "usize",
@@ -149,7 +149,7 @@ def gen_com():
     for iid in IIDS + ["ID3D10Blob"]:
         mm = re.search(r"DEFINE_GUID\(IID_%s,\s*(0x\w+),\s*(0x\w+),\s*(0x\w+),((?:\s*0x\w+,?){8})\);" % iid, hdrs)
         d4 = [x for x in re.findall(r"0x\w+", mm.group(4))]
-        w("pub comptime let kIid%s: Guid = Guid { data1: %s, data2: %s, data3: %s, data4: [%s] };" % (
+        w("pub static let kIid%s: Guid = Guid { data1: %s, data2: %s, data3: %s, data4: [%s] };" % (
             iid[1:] if iid.startswith("ID3D12") is False else iid[6:], mm.group(1), mm.group(2), mm.group(3), ", ".join(d4)))
     w("")
     # IUnknown
@@ -236,8 +236,8 @@ def gen_com():
 LAYOUT = [
     ("Guid", "GUID", ["Data1", "Data2", "Data3", "Data4"]),
     ("Luid", "LUID", ["LowPart", "HighPart"]),
-    ("Rect", "D3D12_RECT", ["left", "top", "right", "bottom"]),
-    ("Box", "D3D12_BOX", ["left", "top", "front", "right", "bottom", "back"]),
+    ("D3dRect", "D3D12_RECT", ["left", "top", "right", "bottom"]),
+    ("D3dBox", "D3D12_BOX", ["left", "top", "front", "right", "bottom", "back"]),
     ("Range", "D3D12_RANGE", ["Begin", "End"]),
     ("HeapProperties", "D3D12_HEAP_PROPERTIES",
      ["Type", "CPUPageProperty", "MemoryPoolPreference", "CreationNodeMask", "VisibleNodeMask"]),
