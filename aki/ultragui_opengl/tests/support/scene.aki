@@ -174,6 +174,51 @@ pub fn destroy_textures<R: Rhi>(var rhi&: R, t&: Textures) {
   rhi.destroy_render_target(t.target);
 }
 
+// The main pass: panel, gradient, shadow, textures, clipped and translucent
+// panels, and the text over them. `big` is the texture of the 128x96 quad.
+pub fn build_main(var quads&: Geometry, var text&: Geometry, var te&: TextEngine, font: FontHandle, checker: RhiTextureHandle,
+  smooth: RhiTextureHandle, big: RhiTextureHandle, full: Rect) {
+  // Batch 1 (white): panel, gradient, shadow + button.
+  quads.quad(Rect { x: 20.0, y: 20.0, w: 300.0, h: 170.0 }, rgba(0x2a3a5a, 1.0), rgba(0x2a3a5a, 1.0),
+    pack_radii(16.0, 16.0, 16.0, 16.0), 0.0, 2.0, rgba(0x8fb0ff, 1.0));
+  quads.quad(Rect { x: 340.0, y: 20.0, w: 280.0, h: 60.0 }, rgba(0xff5050, 1.0), rgba(0x5050ff, 1.0),
+    pack_radii(30.0, 4.0, 30.0, 4.0), 0.0, 0.0, 0);
+  quads.shadow(Rect { x: 40.0, y: 130.0, w: 140.0, h: 40.0 }, rgba(0x000000, 0.6), 12.0, 0.0, 0.0, 4.0, 10.0, 10.0, 10.0, 10.0);
+  quads.quad(Rect { x: 40.0, y: 130.0, w: 140.0, h: 40.0 }, rgba(0x4a4aff, 1.0), rgba(0x4a4aff, 1.0), pack_radii_uniform(10.0),
+    0.0, 0.0, 0);
+  quads.close(full, kInvalidTexture);
+  // Batch 2: the checker (nearest), tinted white.
+  quads.quad(Rect { x: 340.0, y: 100.0, w: 64.0, h: 64.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), pack_radii_uniform(8.0),
+    0.0, 0.0, 0);
+  quads.close(full, checker);
+  // Batch 3: the BGRA ramp (linear).
+  quads.quad(Rect { x: 416.0, y: 100.0, w: 64.0, h: 64.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), 0, 0.0, 0.0, 0);
+  quads.close(full, smooth);
+  // Batch 4: the offscreen target.
+  quads.quad(Rect { x: 492.0, y: 100.0, w: 128.0, h: 96.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), pack_radii_uniform(6.0),
+    0.0, 0.0, 0);
+  quads.close(full, big);
+  // Clipped batch: a big rect clipped to a smaller scissor.
+  let clip = Rect { x: 40.0, y: 230.0, w: 150.0, h: 60.0 };
+  quads.quad(Rect { x: 20.0, y: 210.0, w: 300.0, h: 120.0 }, rgba(0x30c070, 1.0), rgba(0x108040, 1.0), pack_radii_uniform(20.0),
+    0.0, 4.0, rgba(0xffffff, 1.0));
+  quads.close(clip, kInvalidTexture);
+  // A translucent panel over the clear colour.
+  quads.quad(Rect { x: 340.0, y: 220.0, w: 280.0, h: 150.0 }, rgba(0xffffff, 0.15), rgba(0xffffff, 0.45),
+    pack_radii(24.0, 24.0, 4.0, 4.0), 0.0, 1.0, rgba(0xffffff, 0.8));
+  quads.close(full, kInvalidTexture);
+
+  // Text, over the quads.
+  text.text(te, font, 36.0, 32.0, "Hello, ultragui", 24.0, rgba(0xffffff, 1.0));
+  text.text(te, font, 36.0, 66.0, "Rounded rects, SDF borders", 14.0, rgba(0xa8c0ff, 1.0));
+  text.text(te, font, 36.0, 90.0, "gradient / shadow / texture / text", 12.0, rgba(0xffd070, 1.0));
+  text.close(full, kInvalidTexture);
+  text.text(te, font, 28.0, 250.0, "clipped text overflows the scissor rectangle", 16.0, rgba(0x000000, 1.0));
+  text.close(clip, kInvalidTexture);
+  text.text(te, font, 356.0, 236.0, "alpha blended panel", 18.0, rgba(0xffffff, 1.0));
+  text.close(full, kInvalidTexture);
+}
+
 // One frame: geometry first, then the atlas upload, the offscreen pass and the
 // main pass, as UIContext orders them.
 pub fn draw_scene<R: Rhi>(var rhi&: R, var te&: TextEngine, font: FontHandle, tex&: Textures): bool {
@@ -194,45 +239,7 @@ pub fn draw_scene<R: Rhi>(var rhi&: R, var te&: TextEngine, font: FontHandle, te
   var quads = Geometry {};
   var text = Geometry {};
 
-  // Batch 1 (white): panel, gradient, shadow + button.
-  quads.quad(Rect { x: 20.0, y: 20.0, w: 300.0, h: 170.0 }, rgba(0x2a3a5a, 1.0), rgba(0x2a3a5a, 1.0),
-    pack_radii(16.0, 16.0, 16.0, 16.0), 0.0, 2.0, rgba(0x8fb0ff, 1.0));
-  quads.quad(Rect { x: 340.0, y: 20.0, w: 280.0, h: 60.0 }, rgba(0xff5050, 1.0), rgba(0x5050ff, 1.0),
-    pack_radii(30.0, 4.0, 30.0, 4.0), 0.0, 0.0, 0);
-  quads.shadow(Rect { x: 40.0, y: 130.0, w: 140.0, h: 40.0 }, rgba(0x000000, 0.6), 12.0, 0.0, 0.0, 4.0, 10.0, 10.0, 10.0, 10.0);
-  quads.quad(Rect { x: 40.0, y: 130.0, w: 140.0, h: 40.0 }, rgba(0x4a4aff, 1.0), rgba(0x4a4aff, 1.0), pack_radii_uniform(10.0),
-    0.0, 0.0, 0);
-  quads.close(full, kInvalidTexture);
-  // Batch 2: the checker (nearest), tinted white.
-  quads.quad(Rect { x: 340.0, y: 100.0, w: 64.0, h: 64.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), pack_radii_uniform(8.0),
-    0.0, 0.0, 0);
-  quads.close(full, tex.checker);
-  // Batch 3: the BGRA ramp (linear).
-  quads.quad(Rect { x: 416.0, y: 100.0, w: 64.0, h: 64.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), 0, 0.0, 0.0, 0);
-  quads.close(full, tex.smooth);
-  // Batch 4: the offscreen target.
-  quads.quad(Rect { x: 492.0, y: 100.0, w: 128.0, h: 96.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), pack_radii_uniform(6.0),
-    0.0, 0.0, 0);
-  quads.close(full, tex.target);
-  // Clipped batch: a big rect clipped to a smaller scissor.
-  let clip = Rect { x: 40.0, y: 230.0, w: 150.0, h: 60.0 };
-  quads.quad(Rect { x: 20.0, y: 210.0, w: 300.0, h: 120.0 }, rgba(0x30c070, 1.0), rgba(0x108040, 1.0), pack_radii_uniform(20.0),
-    0.0, 4.0, rgba(0xffffff, 1.0));
-  quads.close(clip, kInvalidTexture);
-  // A translucent panel over the clear colour.
-  quads.quad(Rect { x: 340.0, y: 220.0, w: 280.0, h: 150.0 }, rgba(0xffffff, 0.15), rgba(0xffffff, 0.45),
-    pack_radii(24.0, 24.0, 4.0, 4.0), 0.0, 1.0, rgba(0xffffff, 0.8));
-  quads.close(full, kInvalidTexture);
-
-  // Text, over the quads.
-  text.text(te, font, 36.0, 32.0, "Hello, ultragui", 24.0, rgba(0xffffff, 1.0));
-  text.text(te, font, 36.0, 66.0, "Rounded rects, SDF borders", 14.0, rgba(0xa8c0ff, 1.0));
-  text.text(te, font, 36.0, 90.0, "gradient / shadow / texture / text", 12.0, rgba(0xffd070, 1.0));
-  text.close(full, kInvalidTexture);
-  text.text(te, font, 28.0, 250.0, "clipped text overflows the scissor rectangle", 16.0, rgba(0x000000, 1.0));
-  text.close(clip, kInvalidTexture);
-  text.text(te, font, 356.0, 236.0, "alpha blended panel", 18.0, rgba(0xffffff, 1.0));
-  text.close(full, kInvalidTexture);
+  build_main(quads, text, te, font, tex.checker, tex.smooth, tex.target, full);
 
   te.flush_atlas(rhi);
   let atlas = rhi_handle_from_texture_id(te.atlas_texture());
