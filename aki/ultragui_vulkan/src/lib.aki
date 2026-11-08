@@ -1,0 +1,9 @@
+// libultragui's Vulkan backends. Import from the modules directly:
+//   ultragui_vulkan::vulkan_rhi         VulkanRhi, the windowed Rhi
+//   ultragui_vulkan::ugui_impl_vulkan   the draw-data renderer (host owns Vulkan)
+//   ultragui_vulkan::sys::vulkan        the Vulkan binding
+// ../PORTING.md is the map and the contract.
+
+module ultragui_vulkan;
+
+pub fn version(): str => @package_version();
