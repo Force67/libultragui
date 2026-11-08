@@ -18,9 +18,9 @@
 //
 //   WidgetKind::Button => button_measure(world, ctx, e),
 //
-// Kinds with entries in the C++: Image, Text, Button, Checkbox, Radio,
-// Toggle, Slider, Dropdown, RichText, TextInput, ScrollView, ContextMenu,
-// MessageBox. Widget, Panel and Modal have none.
+// Kinds with entries in the C++, all ported with their arms: Image, Text,
+// Button, Checkbox, Radio, Toggle, Slider, Dropdown, RichText, TextInput,
+// ScrollView, ContextMenu, MessageBox. Widget, Panel and Modal have none.
 
 module ultragui::widgets::widget_vtable;
 
@@ -28,9 +28,6 @@ import {WidgetId} from ultragui::core::handle;
 import {Vec2} from ultragui::core::math;
 import {Rect} from ultragui::core::rect;
 import {Renderer2D} from ultragui::render::renderer2d;
-import {WidgetKind} from ultragui::widgets::widget;
-import {WidgetContext} from ultragui::widgets::widget_context;
-import {World} from ultragui::widgets::widget_registry;
 import {button_click, button_draw, button_measure} from ultragui::widgets::button;
 import {checkbox_click, checkbox_draw, checkbox_measure} from ultragui::widgets::checkbox;
 import {context_menu_click, context_menu_dismiss, context_menu_draw, context_menu_measure} from ultragui::widgets::context_menu;
@@ -51,6 +48,9 @@ import {
   text_input_measure, text_input_update,
 } from ultragui::widgets::text_input;
 import {toggle_click, toggle_draw, toggle_measure, toggle_update} from ultragui::widgets::toggle;
+import {WidgetKind} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
 
 // WidgetVTable::custom_paint: paint_widget draws nothing itself and `draw`
 // paints the whole widget (kinds that fully own their visuals: slider,
