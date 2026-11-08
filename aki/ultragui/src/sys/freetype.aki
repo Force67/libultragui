@@ -1,0 +1,155 @@
+// No C++ counterpart: the FreeType 2 API text/text_engine uses, declared by
+// hand (ft2build.h, freetype/freetype.h, freetype/ftimage.h). Only what the
+// text engine calls or reads is here.
+//
+// Layouts are C's, as `extern struct`s, and portable: FT_Long, FT_Pos and
+// FT_Fixed are C `long`, which is 64 bits on LP64 (Linux, macOS, FreeBSD,
+// Android) and 32 bits on Windows; CLong (ultragui::sys::c_long, one module
+// per OS under os/) follows the target. Records FreeType allocates and the
+// engine only reads through a pointer (FT_FaceRec, FT_GlyphSlotRec,
+// FT_SizeRec) are declared up to the last field read: a prefix of the C
+// struct has the same offsets. FT_Open_Args, which the engine fills in and
+// passes, is declared whole.
+
+module ultragui::sys::freetype;
+
+import {CLong} from ultragui::sys::c_long;
+
+pub type FtError = i32;
+
+pub extern type FtLibraryRec;
+pub type FtLibrary = *var FtLibraryRec;
+
+// FT_Generic
+pub extern struct FtGeneric {
+  pub var data: *var u8
+  pub var finalizer: *var u8
+}
+
+// FT_Vector
+pub extern struct FtVector {
+  pub var x: CLong
+  pub var y: CLong
+}
+
+// FT_BBox
+pub extern struct FtBBox {
+  pub var x_min: CLong
+  pub var y_min: CLong
+  pub var x_max: CLong
+  pub var y_max: CLong
+}
+
+// FT_Bitmap
+pub extern struct FtBitmap {
+  pub var rows: u32
+  pub var width: u32
+  pub var pitch: i32
+  pub var buffer: *var u8
+  pub var num_grays: u16
+  pub var pixel_mode: u8
+  pub var palette_mode: u8
+  pub var palette: *var u8
+}
+
+// FT_Glyph_Metrics
+pub extern struct FtGlyphMetrics {
+  pub var width: CLong
+  pub var height: CLong
+  pub var hori_bearing_x: CLong
+  pub var hori_bearing_y: CLong
+  pub var hori_advance: CLong
+  pub var vert_bearing_x: CLong
+  pub var vert_bearing_y: CLong
+  pub var vert_advance: CLong
+}
+
+// FT_GlyphSlotRec, through bitmap_top.
+pub extern struct FtGlyphSlotRec {
+  pub var library: FtLibrary
+  pub var face: *var FtFaceRec
+  pub var next: *var FtGlyphSlotRec
+  pub var glyph_index: u32
+  pub var generic: FtGeneric
+  pub var metrics: FtGlyphMetrics
+  pub var linear_hori_advance: CLong
+  pub var linear_vert_advance: CLong
+  pub var advance: FtVector
+  pub var format: u32  // FT_Glyph_Format, a C enum
+  pub var bitmap: FtBitmap
+  pub var bitmap_left: i32
+  pub var bitmap_top: i32
+}
+
+// FT_Size_Metrics
+pub extern struct FtSizeMetrics {
+  pub var x_ppem: u16
+  pub var y_ppem: u16
+  pub var x_scale: CLong
+  pub var y_scale: CLong
+  pub var ascender: CLong
+  pub var descender: CLong
+  pub var height: CLong
+  pub var max_advance: CLong
+}
+
+// FT_SizeRec, through metrics.
+pub extern struct FtSizeRec {
+  pub var face: *var FtFaceRec
+  pub var generic: FtGeneric
+  pub var metrics: FtSizeMetrics
+}
+
+// FT_FaceRec, through charmap.
+pub extern struct FtFaceRec {
+  pub var num_faces: CLong
+  pub var face_index: CLong
+  pub var face_flags: CLong
+  pub var style_flags: CLong
+  pub var num_glyphs: CLong
+  pub var family_name: *const c_char
+  pub var style_name: *const c_char
+  pub var num_fixed_sizes: i32
+  pub var available_sizes: *var u8
+  pub var num_charmaps: i32
+  pub var charmaps: *var u8
+  pub var generic: FtGeneric
+  pub var bbox: FtBBox
+  pub var units_per_em: u16
+  pub var ascender: i16
+  pub var descender: i16
+  pub var height: i16
+  pub var max_advance_width: i16
+  pub var max_advance_height: i16
+  pub var underline_position: i16
+  pub var underline_thickness: i16
+  pub var glyph: *var FtGlyphSlotRec
+  pub var size: *var FtSizeRec
+  pub var charmap: *var u8
+}
+
+pub type FtFace = *var FtFaceRec;
+
+// FT_Open_Args, whole.
+pub extern struct FtOpenArgs {
+  pub var flags: u32
+  pub var memory_base: *const u8
+  pub var memory_size: CLong
+  pub var pathname: *const c_char
+  pub var stream: *var u8
+  pub var driver: *var u8
+  pub var num_params: i32
+  pub var params: *var u8
+}
+
+pub comptime let kFtOpenMemory: u32 = 0x1;
+pub comptime let kFtOpenPathname: u32 = 0x4;
+// FT_LOAD_RENDER: (1L << 2), an FT_Int32 argument.
+pub comptime let kFtLoadRender: i32 = 4;
+
+pub extern("FT_Init_FreeType") fn ft_init_freetype(library: *var FtLibrary): FtError;
+pub extern("FT_Done_FreeType") fn ft_done_freetype(library: FtLibrary): FtError;
+pub extern("FT_Open_Face") fn ft_open_face(library: FtLibrary, args: *const FtOpenArgs, face_index: CLong, face: *var FtFace): FtError;
+pub extern("FT_Done_Face") fn ft_done_face(face: FtFace): FtError;
+pub extern("FT_Set_Pixel_Sizes") fn ft_set_pixel_sizes(face: FtFace, pixel_width: u32, pixel_height: u32): FtError;
+pub extern("FT_Load_Glyph") fn ft_load_glyph(face: FtFace, glyph_index: u32, load_flags: i32): FtError;

@@ -1,0 +1,42 @@
+// No C++ counterpart: the HarfBuzz API text/text_engine uses, declared by
+// hand (hb.h, hb-ft.h). Only what the text engine calls or reads is here.
+// Every field is 32 bits wide on every target, so one layout serves all.
+
+module ultragui::sys::harfbuzz;
+
+import {FtFace} from ultragui::sys::freetype;
+
+pub extern type HbFont;
+pub extern type HbBuffer;
+
+// hb_glyph_info_t. var1/var2 are unions of 32 bits HarfBuzz keeps private.
+pub extern struct HbGlyphInfo {
+  pub var codepoint: u32
+  pub var mask: u32
+  pub var cluster: u32
+  pub var var1: u32
+  pub var var2: u32
+}
+
+// hb_glyph_position_t, positions in the font's scale (26.6 pixels for a font
+// made by hb_ft_font_create_referenced).
+pub extern struct HbGlyphPosition {
+  pub var x_advance: i32
+  pub var y_advance: i32
+  pub var x_offset: i32
+  pub var y_offset: i32
+  pub var var_: u32
+}
+
+pub extern("hb_ft_font_create_referenced") fn hb_ft_font_create_referenced(face: FtFace): *var HbFont;
+pub extern("hb_ft_font_changed") fn hb_ft_font_changed(font: *var HbFont);
+pub extern("hb_font_destroy") fn hb_font_destroy(font: *var HbFont);
+
+pub extern("hb_buffer_create") fn hb_buffer_create(): *var HbBuffer;
+pub extern("hb_buffer_destroy") fn hb_buffer_destroy(buffer: *var HbBuffer);
+pub extern("hb_buffer_add_utf8") fn hb_buffer_add_utf8(buffer: *var HbBuffer, text: *const c_char, text_length: i32, item_offset: u32,
+                                                     item_length: i32);
+pub extern("hb_buffer_guess_segment_properties") fn hb_buffer_guess_segment_properties(buffer: *var HbBuffer);
+pub extern("hb_shape") fn hb_shape(font: *var HbFont, buffer: *var HbBuffer, features: *const u8, num_features: u32);
+pub extern("hb_buffer_get_glyph_infos") fn hb_buffer_get_glyph_infos(buffer: *var HbBuffer, length: *var u32): *var HbGlyphInfo;
+pub extern("hb_buffer_get_glyph_positions") fn hb_buffer_get_glyph_positions(buffer: *var HbBuffer, length: *var u32): *var HbGlyphPosition;

@@ -1,9 +1,11 @@
 // Prints the values the aki tests compare against, computed by the C++
 // library itself. Build and run inside the repo's dev shell:
 //
-//   clang++ -std=c++20 -O2 -I. aki/ultragui/tools/gen_reference.cc \
-//     ugui/core/from_chars.cc ugui/style/style.cc ugui/style/transition.cc \
-//     ugui/animation/animator.cc -o /tmp/gen_reference && /tmp/gen_reference
+//   clang++ -std=c++20 -O2 -I. $(pkg-config --cflags freetype2 harfbuzz) \
+//     aki/ultragui/tools/gen_reference.cc ugui/core/from_chars.cc \
+//     ugui/style/style.cc ugui/style/transition.cc ugui/animation/animator.cc \
+//     ugui/text/text_engine.cc ugui/rhi/null/null_rhi.cc $(pkg-config --libs freetype2 harfbuzz) \
+//     -o /tmp/gen_reference && /tmp/gen_reference
 //
 // The output is pasted into tests/*_test.aki as tables; re-run it whenever
 // the C++ changes.
@@ -14,6 +16,12 @@
 #include <ugui/render/vertex.h>
 #include <ugui/style/style.h>
 #include <ugui/style/transition.h>
+#include <ugui/text/text_engine.h>
+
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include <hb.h>
+#include <stddef.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -180,7 +188,77 @@ static void Pack() {
          Vertex2D::PackRadii(7.5f));
 }
 
+// The FreeType/HarfBuzz layouts ultragui::sys declares, for the target this
+// runs on (LP64 Linux: x86-64 and aarch64 agree).
+static void Layouts() {
+  printf("OFFS face %zu %zu %zu %zu sizeof_open_args %zu\n",
+         offsetof(FT_FaceRec, family_name), offsetof(FT_FaceRec, glyph),
+         offsetof(FT_FaceRec, size), offsetof(FT_FaceRec, charmap),
+         sizeof(FT_Open_Args));
+  printf("OFFS slot %zu %zu %zu %zu %zu\n", offsetof(FT_GlyphSlotRec, advance),
+         offsetof(FT_GlyphSlotRec, format), offsetof(FT_GlyphSlotRec, bitmap),
+         offsetof(FT_GlyphSlotRec, bitmap_left),
+         offsetof(FT_GlyphSlotRec, bitmap_top));
+  printf("OFFS bitmap %zu %zu %zu sizeof %zu\n", offsetof(FT_Bitmap, pitch),
+         offsetof(FT_Bitmap, buffer), offsetof(FT_Bitmap, palette),
+         sizeof(FT_Bitmap));
+  printf("OFFS size %zu metrics_asc %zu metrics_height %zu\n",
+         offsetof(FT_SizeRec, metrics), offsetof(FT_Size_Metrics, ascender),
+         offsetof(FT_Size_Metrics, height));
+  printf("OFFS hb %zu %zu\n", sizeof(hb_glyph_info_t),
+         sizeof(hb_glyph_position_t));
+}
+
+// Shaping with DejaVu Sans, no RHI (dpi 1). Prints the run metrics, each
+// glyph, and the layout of a wrapped run.
+static void Text() {
+  TextEngine te;
+  if (!te.Init(nullptr)) return;
+  FontHandle f =
+      te.LoadFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+  const char* texts[] = {"Hello, World!", "fi ffl AVATAR", "x"};
+  const f32 sizes[] = {16.0f, 23.5f, 9.0f};
+  for (int k = 0; k < 3; ++k) {
+    const char* t = texts[k];
+    TextRun run = te.Shape(f, t, (u32)strlen(t), sizes[k], k == 1 ? 0.5f : 0.0f,
+                           k == 2 ? 1.25f : 1.0f);
+    printf("RUN %u 0x%08x 0x%08x 0x%08x 0x%08x\n", run.glyph_count,
+           Bits(run.total_advance), Bits(run.ascent), Bits(run.descent),
+           Bits(run.line_height));
+    for (u32 i = 0; i < run.glyph_count; ++i) {
+      const auto& g = run.glyphs[i];
+      printf("G %u 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x "
+             "0x%08x 0x%08x 0x%08x\n",
+             g.glyph_id, Bits(g.x_offset), Bits(g.y_offset), Bits(g.x_advance),
+             Bits(g.u0), Bits(g.v0), Bits(g.u1), Bits(g.v1), Bits(g.bmp_w),
+             Bits(g.bmp_h), Bits(g.bearing_x), Bits(g.bearing_y));
+    }
+  }
+  const char* para = "The quick brown fox jumps over the lazy dog again";
+  TextRun run = te.Shape(f, para, (u32)strlen(para), 14.0f);
+  TextLayoutConfig cfg;
+  cfg.max_width = 120.0f;
+  TextLayout lay = te.Layout(run, cfg);
+  printf("LAYOUT %u 0x%08x 0x%08x\n", lay.line_count, Bits(lay.total_width),
+         Bits(lay.total_height));
+  for (u32 i = 0; i < lay.line_count; ++i)
+    printf("LINE %u %u 0x%08x 0x%08x\n", lay.lines[i].glyph_start,
+           lay.lines[i].glyph_count, Bits(lay.lines[i].width),
+           Bits(lay.lines[i].y_offset));
+  // Atlas checksum: FNV-1a over all pixels.
+  u64 h = 1469598103934665603ull;
+  const u8* px = te.atlas_pixels();
+  for (u32 i = 0; i < 2048u * 2048u; ++i) {
+    h ^= px[i];
+    h *= 1099511628211ull;
+  }
+  printf("ATLAS %u 0x%016llx\n", te.atlas_revision(), (unsigned long long)h);
+  te.Shutdown();
+}
+
 int main() {
+  Layouts();
+  Text();
   FromChars();
   Sort();
   Easing();

@@ -1,0 +1,274 @@
+// text/text_engine: shaping, the glyph atlas and line layout with DejaVu
+// Sans, compared bit for bit with what the C++ engine computes for the same
+// calls (tools/gen_reference.cc, the RUN/G/LAYOUT/LINE/ATLAS/OFFS lines), and
+// the FreeType/HarfBuzz layouts ultragui::sys declares against offsetof.
+// LP64 only: the offsets are those of Linux on x86-64 and aarch64.
+
+module text_engine_test;
+
+import {List} from akikit::containers::list;
+import {read_bytes} from akikit::filesystem::file_util;
+import {Vec2} from ultragui::core::math;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D} from ultragui::render::vertex;
+import {kNullTextureId} from ultragui::render::draw_data;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle} from ultragui::rhi::rhi_types;
+import {FontStyle, FontWeight} from ultragui::style::enums;
+import {FtBitmap, FtFaceRec, FtGlyphSlotRec, FtOpenArgs, FtSizeMetrics, FtSizeRec} from ultragui::sys::freetype;
+import {HbGlyphInfo, HbGlyphPosition} from ultragui::sys::harfbuzz;
+import {Glyph, TextEngine, TextLayoutConfig, TextRun, kInvalidFont} from ultragui::text::text_engine;
+import {Expect} from support::expect;
+
+comptime let kFont: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+struct RunRef {
+  pub let text: str
+  pub let size: f32
+  pub let letter_spacing: f32
+  pub let line_height_mult: f32
+  pub let glyph_count: u32
+  pub let metrics: [u32; 4]  // total_advance, ascent, descent, line_height
+}
+
+// glyph_id, then x_offset, y_offset, x_advance, u0, v0, u1, v1, bmp_w, bmp_h,
+// bearing_x, bearing_y as f32 bits.
+struct GlyphRef {
+  pub let id: u32
+  pub let f: [u32; 11]
+}
+
+static let kRuns: [RunRef; 3] = [
+  RunRef { text: "Hello, World!", size: 16.0, letter_spacing: 0.0, line_height_mult: 1.0, glyph_count: 13, metrics: [0x42ce2000, 0x41700000, 0xc0800000, 0x41980000] },
+  RunRef { text: "fi ffl AVATAR", size: 23.5, letter_spacing: 0.5, line_height_mult: 1.0, glyph_count: 10, metrics: [0x4314d000, 0x41b80000, 0xc0c00000, 0x41e00000] },
+  RunRef { text: "x", size: 9.0, letter_spacing: 0.0, line_height_mult: 1.25, glyph_count: 1, metrics: [0x40aa8000, 0x41100000, 0xc0400000, 0x41480000] },
+];
+
+static let kGlyphs: [GlyphRef; 24] = [
+  GlyphRef { id: 43, f: [0x00000000, 0x00000000, 0x41408000, 0x3a000000, 0x3a000000, 0x3bb00000, 0x3bd00000, 0x41200000, 0x41400000, 0x3f800000, 0x41400000] },
+  GlyphRef { id: 72, f: [0x00000000, 0x00000000, 0x411d8000, 0x3bc00000, 0x3a000000, 0x3c280000, 0x3ba00000, 0x41100000, 0x41100000, 0x00000000, 0x41100000] },
+  GlyphRef { id: 79, f: [0x00000000, 0x00000000, 0x408e8000, 0x3c300000, 0x3a000000, 0x3c400000, 0x3bd00000, 0x40000000, 0x41400000, 0x3f800000, 0x41400000] },
+  GlyphRef { id: 79, f: [0x00000000, 0x00000000, 0x408e8000, 0x3c300000, 0x3a000000, 0x3c400000, 0x3bd00000, 0x40000000, 0x41400000, 0x3f800000, 0x41400000] },
+  GlyphRef { id: 82, f: [0x00000000, 0x00000000, 0x411cc000, 0x3c480000, 0x3a000000, 0x3c880000, 0x3ba00000, 0x41100000, 0x41100000, 0x00000000, 0x41100000] },
+  GlyphRef { id: 15, f: [0x00000000, 0x00000000, 0x40a30000, 0x3c8c0000, 0x3a000000, 0x3c980000, 0x3b200000, 0x40400000, 0x40800000, 0x3f800000, 0x40000000] },
+  GlyphRef { id: 3, f: [0x00000000, 0x00000000, 0x40a30000, 0x3c9c0000, 0x3a000000, 0x3c9c0000, 0x3a000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000] },
+  GlyphRef { id: 58, f: [0x00000000, 0x00000000, 0x416e4000, 0x3ca00000, 0x3a000000, 0x3ce00000, 0x3bd00000, 0x41800000, 0x41400000, 0x00000000, 0x41400000] },
+  GlyphRef { id: 82, f: [0x00000000, 0x00000000, 0x411cc000, 0x3c480000, 0x3a000000, 0x3c880000, 0x3ba00000, 0x41100000, 0x41100000, 0x00000000, 0x41100000] },
+  GlyphRef { id: 85, f: [0x00000000, 0x00000000, 0x40d28000, 0x3ce40000, 0x3a000000, 0x3cfc0000, 0x3ba00000, 0x40c00000, 0x41100000, 0x3f800000, 0x41100000] },
+  GlyphRef { id: 79, f: [0x00000000, 0x00000000, 0x408e8000, 0x3c300000, 0x3a000000, 0x3c400000, 0x3bd00000, 0x40000000, 0x41400000, 0x3f800000, 0x41400000] },
+  GlyphRef { id: 71, f: [0x00000000, 0x00000000, 0x41228000, 0x3d000000, 0x3a000000, 0x3d120000, 0x3bd00000, 0x41100000, 0x41400000, 0x00000000, 0x41400000] },
+  GlyphRef { id: 4, f: [0x00000000, 0x00000000, 0x40cd8000, 0x3d140000, 0x3a000000, 0x3d180000, 0x3bd00000, 0x40000000, 0x41400000, 0x40000000, 0x41400000] },
+  GlyphRef { id: 5042, f: [0x00000000, 0x00000000, 0x417a0000, 0x3d1a0000, 0x3a000000, 0x3d340000, 0x3c180000, 0x41500000, 0x41900000, 0x00000000, 0x41900000] },
+  GlyphRef { id: 3, f: [0x00000000, 0x00000000, 0x41020000, 0x3d360000, 0x3a000000, 0x3d360000, 0x3a000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000] },
+  GlyphRef { id: 5045, f: [0x00000000, 0x00000000, 0x41bda000, 0x3d380000, 0x3a000000, 0x3d620000, 0x3c180000, 0x41a80000, 0x41900000, 0x00000000, 0x41900000] },
+  GlyphRef { id: 3, f: [0x00000000, 0x00000000, 0x41020000, 0x3d360000, 0x3a000000, 0x3d360000, 0x3a000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000] },
+  GlyphRef { id: 36, f: [0x00000000, 0x00000000, 0x41764000, 0x3d640000, 0x3a000000, 0x3d830000, 0x3c180000, 0x41880000, 0x41900000, 0x00000000, 0x41900000] },
+  GlyphRef { id: 57, f: [0x00000000, 0x00000000, 0x41764000, 0x3d840000, 0x3a000000, 0x3d950000, 0x3c180000, 0x41880000, 0x41900000, 0x00000000, 0x41900000] },
+  GlyphRef { id: 36, f: [0x00000000, 0x00000000, 0x41710000, 0x3d640000, 0x3a000000, 0x3d830000, 0x3c180000, 0x41880000, 0x41900000, 0x00000000, 0x41900000] },
+  GlyphRef { id: 55, f: [0x00000000, 0x00000000, 0x4154c000, 0x3d960000, 0x3a000000, 0x3da60000, 0x3c180000, 0x41800000, 0x41900000, 0xbf800000, 0x41900000] },
+  GlyphRef { id: 36, f: [0x00000000, 0x00000000, 0x41876000, 0x3d640000, 0x3a000000, 0x3d830000, 0x3c180000, 0x41880000, 0x41900000, 0x00000000, 0x41900000] },
+  GlyphRef { id: 53, f: [0x00000000, 0x00000000, 0x41896000, 0x3da70000, 0x3a000000, 0x3db50000, 0x3c180000, 0x41600000, 0x41900000, 0x40000000, 0x41900000] },
+  GlyphRef { id: 91, f: [0x00000000, 0x00000000, 0x40aa8000, 0x3db60000, 0x3a000000, 0x3dbc0000, 0x3b400000, 0x40c00000, 0x40a00000, 0x00000000, 0x40a00000] },
+];
+
+// The layout of the 14 px paragraph at max_width 120: lines, total_width,
+// total_height, then glyph_start, glyph_count, width, y_offset per line.
+comptime let kLayoutLines: u32 = 4;
+comptime let kLayoutWidth: u32 = 0x42f02800;
+comptime let kLayoutHeight: u32 = 0x42800000;
+static let kLines: [[u32; 4]; 4] = [
+  [0, 16, 0x42f02800, 0x00000000],
+  [16, 15, 0x42d8f800, 0x41800000],
+  [31, 13, 0x42b58800, 0x42000000],
+  [44, 5, 0x421b4000, 0x42400000],
+];
+
+comptime let kAtlasRevision: u32 = 46;
+comptime let kAtlasHash: u64 = 0xd431434162250329;
+
+// An RHI that records the texture calls flush_atlas makes.
+struct RecordingRhi : Rhi {
+  pub var created: u32 = 0
+  pub var updated: u32 = 0
+  pub var destroyed: u32 = 0
+  pub var last_size: usize = 0
+  pub var last_format: RhiFormat = RhiFormat::Rgba8Unorm
+  pub var last_filter: RhiFilter = RhiFilter::Linear
+
+  pub fn init(var self&, config&: RhiConfig): bool => true;
+  pub fn shutdown(var self&) {}
+  pub fn begin_frame(var self&, clear_color: Color): bool => true;
+  pub fn end_frame(var self&) {}
+  pub fn set_scissor(var self&, rect: Rect) {}
+  pub fn reset_scissor(var self&) {}
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {}
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {}
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle {
+    self.created += 1;
+    self.last_size = #pixels;
+    self.last_format = format;
+    self.last_filter = filter;
+    return 6;
+  }
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+    self.updated += 1;
+    self.last_size = #pixels;
+  }
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {
+    self.destroyed += 1;
+  }
+  pub fn acquire_frame(var self&): bool => true;
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle => 0;
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {}
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool => true;
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {}
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {}
+  pub fn display_size(self&): Vec2 => Vec2 {};
+  pub fn dpi_scale(self&): f32 => 1.0;
+}
+
+fn check_layouts(var t&: Expect) {
+  t.that(@offset_of(FtFaceRec, family_name) == 40, "FT_FaceRec.family_name");
+  t.that(@offset_of(FtFaceRec, glyph) == 152, "FT_FaceRec.glyph");
+  t.that(@offset_of(FtFaceRec, size) == 160, "FT_FaceRec.size");
+  t.that(@offset_of(FtFaceRec, charmap) == 168, "FT_FaceRec.charmap");
+  t.that(@size_of(FtOpenArgs) == 64, "sizeof FT_Open_Args");
+  t.that(@offset_of(FtGlyphSlotRec, advance) == 128, "FT_GlyphSlotRec.advance");
+  t.that(@offset_of(FtGlyphSlotRec, format) == 144, "FT_GlyphSlotRec.format");
+  t.that(@offset_of(FtGlyphSlotRec, bitmap) == 152, "FT_GlyphSlotRec.bitmap");
+  t.that(@offset_of(FtGlyphSlotRec, bitmap_left) == 192, "FT_GlyphSlotRec.bitmap_left");
+  t.that(@offset_of(FtGlyphSlotRec, bitmap_top) == 196, "FT_GlyphSlotRec.bitmap_top");
+  t.that(@offset_of(FtBitmap, pitch) == 8, "FT_Bitmap.pitch");
+  t.that(@offset_of(FtBitmap, buffer) == 16, "FT_Bitmap.buffer");
+  t.that(@offset_of(FtBitmap, palette) == 32, "FT_Bitmap.palette");
+  t.that(@size_of(FtBitmap) == 40, "sizeof FT_Bitmap");
+  t.that(@offset_of(FtSizeRec, metrics) == 24, "FT_SizeRec.metrics");
+  t.that(@offset_of(FtSizeMetrics, ascender) == 24, "FT_Size_Metrics.ascender");
+  t.that(@offset_of(FtSizeMetrics, height) == 40, "FT_Size_Metrics.height");
+  t.that(@size_of(HbGlyphInfo) == 20, "sizeof hb_glyph_info_t");
+  t.that(@size_of(HbGlyphPosition) == 20, "sizeof hb_glyph_position_t");
+}
+
+fn check_glyph(var t&: Expect, g&: Glyph, r&: GlyphRef, where: str) {
+  t.eq_u32(g.glyph_id, r.id, f"{where} glyph_id");
+  let got = [g.x_offset, g.y_offset, g.x_advance, g.u0, g.v0, g.u1, g.v1, g.bmp_w, g.bmp_h, g.bearing_x, g.bearing_y];
+  let names = ["x_offset", "y_offset", "x_advance", "u0", "v0", "u1", "v1", "bmp_w", "bmp_h", "bearing_x", "bearing_y"];
+  for (let i in 0usize..11) {
+    t.bits(got[i], r.f[i], f"{where} {names[i]}");
+  }
+}
+
+fn atlas_hash(px&: [u8]): u64 {
+  var h: u64 = 1469598103934665603;
+  for (let b in px) {
+    h ^= b as u64;
+    h = h *% 1099511628211;
+  }
+  return h;
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  check_layouts(t);
+
+  var te = TextEngine();
+  t.that(te.atlas_texture() == kNullTextureId, "no atlas texture before init");
+  t.that(te.init(), "init");
+  t.that(te.load_font("") == kInvalidFont, "empty path");
+  t.that(te.load_font("/nonexistent/font.ttf") == kInvalidFont, "missing file");
+  let f = te.load_font(kFont);
+  t.eq_u32(f, 0, "first font handle");
+
+  // The C++ sequence: three runs, then the paragraph and its layout.
+  var g: usize = 0;
+  for (let i in 0usize..3) {
+    let r& = kRuns[i];
+    let run = te.shape(f, r.text, r.size, r.letter_spacing, r.line_height_mult);
+    t.eq_u32(run.glyph_count(), r.glyph_count, f"run {i} glyph_count");
+    t.bits(run.total_advance, r.metrics[0], f"run {i} total_advance");
+    t.bits(run.ascent, r.metrics[1], f"run {i} ascent");
+    t.bits(run.descent, r.metrics[2], f"run {i} descent");
+    t.bits(run.line_height, r.metrics[3], f"run {i} line_height");
+    for (let gl in run.glyphs()) {
+      check_glyph(t, gl, kGlyphs[g], f"run {i} glyph {g}");
+      g += 1;
+    }
+  }
+
+  let para = te.shape(f, "The quick brown fox jumps over the lazy dog again", 14.0);
+  let lay = te.layout(para, TextLayoutConfig { max_width: 120.0 });
+  t.eq_u32(lay.line_count(), kLayoutLines, "layout line_count");
+  t.bits(lay.total_width, kLayoutWidth, "layout total_width");
+  t.bits(lay.total_height, kLayoutHeight, "layout total_height");
+  for (let i in 0usize..#kLines) {
+    if (i >= lay.lines.len()) {
+      break;
+    }
+    let l& = lay.lines[i];
+    t.eq_u32(l.glyph_start, kLines[i][0], f"line {i} glyph_start");
+    t.eq_u32(l.glyph_count, kLines[i][1], f"line {i} glyph_count");
+    t.bits(l.width, kLines[i][2], f"line {i} width");
+    t.bits(l.y_offset, kLines[i][3], f"line {i} y_offset");
+  }
+
+  t.eq_u32(te.atlas_revision(), kAtlasRevision, "atlas revision");
+  t.that(atlas_hash(te.atlas_pixels()) == kAtlasHash, "atlas pixels match the C++ atlas");
+
+  // The shaping cache: the same text again is a hit, and its run shares the
+  // glyphs of the first.
+  te.begin_frame();
+  let a = te.shape(f, "Hello, World!", 16.0);
+  let b = te.shape(f, "Hello, World!", 16.0);
+  let c = te.shape(f, "Hello, World!", 16.5);
+  t.eq_u32(te.shape_calls(), 3, "shape_calls");
+  t.eq_u32(te.shape_hits(), 2, "shape_hits (one from before begin_frame)");
+  t.that(a.glyph_count() == b.glyph_count() && a.glyphs()[0] == b.glyphs()[0], "cached run equals");
+  t.that(c.total_advance != a.total_advance, "another size shapes anew");
+  let held = a.clone();
+  te.begin_frame();
+  t.eq_u32(te.shape_calls(), 0, "begin_frame resets calls");
+  t.that(held.glyph_count() == 13, "a held run outlives begin_frame");
+  t.that(TextRun().glyph_count() == 0, "empty run");
+
+  // Weight/style resolution within one family.
+  let bold = te.load_font_styled(kFont, FontWeight::Bold, FontStyle::Normal);
+  let light_it = te.load_font_styled(kFont, FontWeight::Light, FontStyle::Italic);
+  t.eq_u32(te.resolve_font(f, FontWeight::Bold, FontStyle::Normal), bold, "resolve bold");
+  t.eq_u32(te.resolve_font(f, FontWeight::SemiBold, FontStyle::Normal), bold, "resolve semibold -> bold");
+  t.eq_u32(te.resolve_font(f, FontWeight::Regular, FontStyle::Italic), light_it, "resolve italic");
+  t.eq_u32(te.resolve_font(f, FontWeight::Regular, FontStyle::Normal), f, "resolve regular");
+  t.eq_u32(te.resolve_font(99, FontWeight::Bold, FontStyle::Normal), 99, "resolve out of range");
+
+  // Memory fonts copy the bytes.
+  let mem_handle = load_from_memory(te);
+  t.that(mem_handle != kInvalidFont, "memory font");
+  t.that(te.load_font_memory([]) == kInvalidFont, "empty memory font");
+
+  // Atlas upload: create once (R8, nearest, the whole atlas), then update.
+  var rhi = RecordingRhi {};
+  te.flush_atlas(rhi);
+  t.eq_u32(rhi.created, 1, "flush creates");
+  t.that(rhi.last_size == 2048 * 2048 && rhi.last_format == RhiFormat::R8Unorm && rhi.last_filter == RhiFilter::Nearest,
+         "flush uploads the R8 atlas with nearest filtering");
+  t.that(te.atlas_texture() == 7, "atlas texture id is the RHI handle + 1");
+  te.flush_atlas(rhi);
+  t.eq_u32(rhi.updated, 0, "clean atlas: no upload");
+  let _ = te.shape(f, "new glyphs: Qz", 31.0);
+  te.flush_atlas(rhi);
+  t.eq_u32(rhi.updated, 1, "dirty atlas: update in place");
+  te.shutdown_with(rhi);
+  t.eq_u32(rhi.destroyed, 1, "shutdown destroys the atlas");
+  t.that(te.atlas_pixels().len() == 0, "no pixels after shutdown");
+  return t.finish();
+}
+
+fn load_from_memory(var te&: TextEngine): u32 {
+  var data: List<byte> = List();
+  if (let bytes_read = read_bytes(kFont)) {
+    data = bytes_read;
+  }
+  let h = te.load_font_memory(data.as_slice());
+  data.clear();
+  return h;
+}

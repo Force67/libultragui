@@ -10,5 +10,22 @@ description = "libultragui's core in aki: style, text, widgets ECS, seams for RH
 
 [build]
 c_sources = ["../../third_party/yoga/yoga/algorithm/AbsoluteLayout.cpp", "../../third_party/yoga/yoga/algorithm/Baseline.cpp", "../../third_party/yoga/yoga/algorithm/Cache.cpp", "../../third_party/yoga/yoga/algorithm/CalculateLayout.cpp", "../../third_party/yoga/yoga/algorithm/FlexLine.cpp", "../../third_party/yoga/yoga/algorithm/PixelGrid.cpp", "../../third_party/yoga/yoga/config/Config.cpp", "../../third_party/yoga/yoga/debug/AssertFatal.cpp", "../../third_party/yoga/yoga/debug/Log.cpp", "../../third_party/yoga/yoga/event/event.cpp", "../../third_party/yoga/yoga/node/LayoutResults.cpp", "../../third_party/yoga/yoga/node/Node.cpp", "../../third_party/yoga/yoga/YGConfig.cpp", "../../third_party/yoga/yoga/YGEnums.cpp", "../../third_party/yoga/yoga/YGNode.cpp", "../../third_party/yoga/yoga/YGNodeLayout.cpp", "../../third_party/yoga/yoga/YGNodeStyle.cpp", "../../third_party/yoga/yoga/YGPixelGrid.cpp", "../../third_party/yoga/yoga/YGValue.cpp"]
-c_flags = ["-std=c++20", "-I../../third_party/yoga"]
+c_flags = ["-std=c++20", "-I../../third_party/yoga", "-Wno-#warnings"]
 link = ["-lfreetype", "-lharfbuzz", "-lstdc++", "-lm"]
+
+# C `long` differs per OS (FreeType's FT_Long, FT_Pos, FT_Fixed): see
+# src/sys/freetype.aki.
+[build.os.linux]
+sources = ["os/linux"]
+
+[build.os.android]
+sources = ["os/android"]
+
+[build.os.macos]
+sources = ["os/macos"]
+
+[build.os.freebsd]
+sources = ["os/freebsd"]
+
+[build.os.windows]
+sources = ["os/windows"]
