@@ -1,0 +1,36 @@
+// No C++ counterpart: the SPIR-V of the bundled shaders, embedded at build
+// time, for the `embed_shaders` feature (see shaders/README.md). The C++
+// always reads them from its shader_dir.
+
+module ultragui_vulkan::shaders;
+
+static let kQuadVert: bytes = @embed("../shaders/quad.vert.spv");
+static let kQuadFrag: bytes = @embed("../shaders/quad.frag.spv");
+static let kTextVert: bytes = @embed("../shaders/text.vert.spv");
+static let kTextFrag: bytes = @embed("../shaders/text.frag.spv");
+static let kVideoVert: bytes = @embed("../shaders/video.vert.spv");
+static let kVideoFrag: bytes = @embed("../shaders/video.frag.spv");
+
+// The embedded SPIR-V for a shader file name ("quad.vert.spv", ...); empty
+// for a name that is not one of them.
+pub fn embedded_shader(filename: str): bytes {
+  if (filename == "quad.vert.spv") {
+    return kQuadVert;
+  }
+  if (filename == "quad.frag.spv") {
+    return kQuadFrag;
+  }
+  if (filename == "text.vert.spv") {
+    return kTextVert;
+  }
+  if (filename == "text.frag.spv") {
+    return kTextFrag;
+  }
+  if (filename == "video.vert.spv") {
+    return kVideoVert;
+  }
+  if (filename == "video.frag.spv") {
+    return kVideoFrag;
+  }
+  return [];
+}

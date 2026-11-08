@@ -14,3 +14,8 @@ ultragui_glfw = { path = "../ultragui_glfw" }
 
 [build]
 link = ["-lvulkan"]
+
+# Take the SPIR-V from the copies in shaders/ embedded at build time instead
+# of reading <shader_dir>/*.spv at run time (shaders/README.md).
+[features.embed_shaders]
+default = false
