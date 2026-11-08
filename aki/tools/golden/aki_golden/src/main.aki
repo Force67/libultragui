@@ -6,8 +6,9 @@
 //
 //   aki_golden <scenario.txt> <out.bin>
 //
-// The script runtime is the one alias below (`Runtime`); the Lua scenarios
-// need ultragui_lua's runtime there.
+// The script runtime is the one alias below (`Runtime`): ultragui_lua's, with
+// the bindings of the C++ runner's build (ULTRAGUI_LUA on, ULTRAGUI_AUDIO,
+// LOTTIE and VIDEO off: RegisterAnimLua only).
 
 module aki_golden;
 
@@ -28,16 +29,16 @@ import {TextureBackend, TextureBackendBox} from ultragui::render::texture_backen
 import {Vertex2D} from ultragui::render::vertex;
 import {NullRhi} from ultragui::rhi::null_rhi;
 import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
-import {NoScript} from ultragui::scripting::script_runtime;
 import {Cursor, ViewportScaleMode} from ultragui::style::enums;
 import {CText} from ultragui::sys::c_text;
 import {kInvalidFont} from ultragui::text::text_engine;
 import {UIConfig, UIContext} from ultragui::ui_context;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {LuaBindings, add_core_lua} from ultragui_lua::lua_ui_context;
 
-// The scenario's script runtime: NoScript until ultragui_lua's runtime can be
-// named here.
-type Runtime = NoScript;
-fn make_runtime(): Runtime => NoScript();
+// The scenario's script runtime.
+type Runtime = LuaRuntime;
+fn make_runtime(): Runtime => LuaRuntime();
 
 // golden_platform.cc: the host platform with time() reading the scenario's
 // clock.
@@ -277,6 +278,8 @@ fn Runner::ensure_init(var self&): bool {
     eprintln("ugui_golden: Init failed");
     return false;
   }
+  // Lua 5.4 seeds math.random per state from the clock: both runners seed it.
+  let _ = self.ui.exec_script("math.randomseed(42)", "chunk");
   let p = unsafe (self.out.as_ptr() as *var Writer);
   self.ui.set_texture_backend(TextureBackendBox::of(RecordingTextures { out: p }));
   self.ui.platform.host.set_viewport(self.window, self.framebuffer);
@@ -327,6 +330,7 @@ fn main(): i32 {
     ui: UIContext::<GoldenPlatform, NullRhi, Runtime>(GoldenPlatform { host: HostPlatform() }, NullRhi(), make_runtime()),
     out: Box::<Writer>(Writer {}),
   };
+  add_core_lua(r.ui, LuaBindings { audio: false });
   r.out.get_var().bytes("UGGD" as bytes);
   r.out.get_var().u32v(1);
 

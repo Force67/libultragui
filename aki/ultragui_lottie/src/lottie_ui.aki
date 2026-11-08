@@ -1,0 +1,173 @@
+// UIContext::LoadLottie and the C++ UIContext's lottie_anims_ (ugui/ui_context.cc
+// under ULTRAGUI_LOTTIE), as a frame extension of ultragui::ui_context.
+//
+// The core cannot name LottieAnimation, so the players UIContext owns are a
+// `LottiePlayers` extension (scripting::script_host::UiExtension): UIContext
+// updates it each legacy frame where the C++ updates lottie_anims_ (after the
+// vector animations, before the video players: add it before
+// ultragui_video's), and its shutdown unloads and drops every animation where
+// the C++ Shutdown deletes them. `load_lottie` adds the extension on first
+// use.
+//
+// Shape differences (not behavior):
+//
+// * LoadLottie returns a `LottieId` (an index; animations live until
+//   UIContext::shutdown, as in the C++) and `lottie_var(ui, id)` lends the
+//   animation; the C++ hands out the LottieAnimation*. The animation is boxed,
+//   so `lottie_ptr` (the address a script holds) stays valid until shutdown.
+// * The aki LottieAnimation takes its texture backend per call (PORTING.md):
+//   `lottie_stop`/`lottie_seek` run Stop()/Seek() through UIContext's texture
+//   sink, the backend the C++ animation was loaded with.
+
+module ultragui_lottie::lottie_ui;
+
+import {List} from akikit::containers::list;
+import {Box} from akikit::memory::box;
+import {ComponentKey} from ultragui::core::component_store;
+import {Platform} from ultragui::platform::platform;
+import {DynTextureBackend} from ultragui::render::texture_backend;
+import {Rhi} from ultragui::rhi::rhi;
+import {FrameEnv, ScriptHost, UiExtension, UiExtensionBox} from ultragui::scripting::script_host;
+import {ScriptRuntime} from ultragui::scripting::script_runtime;
+import {UIContext} from ultragui::ui_context;
+import {LottieAnimation} from ultragui_lottie::lottie;
+
+// LoadLottie's result: the index of an animation the LottiePlayers own.
+pub type LottieId = u32;
+
+// The C++ UIContext's lottie_anims_.
+pub struct LottiePlayers : UiExtension {
+  pub var anims: List<Box<LottieAnimation>> = List()
+
+  pub fn LottiePlayers(): LottiePlayers => LottiePlayers {};
+
+  // Update all animations: anim->Update(dt) for each, in load order.
+  pub fn update(var self&, var env&: FrameEnv);
+  // delete anim: the destructor unloads through the animation's backend.
+  pub fn shutdown(var self&, var env&: FrameEnv);
+}
+
+// The extension's identity (UIContext::add_extension / find_extension).
+pub static let kLottiePlayers: ComponentKey<LottiePlayers> = ComponentKey();
+
+fn LottiePlayers::update(var self&, var env&: FrameEnv) {
+  let dt = env.dt;
+  for (var b& in self.anims) {
+    var a& = b.get_var();
+    env.with_textures(fn(t: (&var DynTextureBackend)?) {
+      a.update(dt, t);
+    });
+  }
+}
+
+fn LottiePlayers::shutdown(var self&, var env&: FrameEnv) {
+  for (var b& in self.anims) {
+    var a& = b.get_var();
+    if (a.is_loaded()) {
+      env.with_textures(fn(t: (&var DynTextureBackend)?) {
+        a.unload(t);
+      });
+    }
+  }
+  self.anims.clear();
+}
+
+// The LottiePlayers among the host's extensions, added if absent.
+pub fn lottie_players(var host&: ScriptHost): &var LottiePlayers {
+  var index = host.find_extension(kLottiePlayers);
+  if (index == none) {
+    host.extensions.push(UiExtensionBox::of(kLottiePlayers, LottiePlayers()));
+    index = (host.extensions.len() - 1) as u32;
+  }
+  return host.extensions[index! as usize].downcast(kLottiePlayers)!;
+}
+
+// UIContext::LoadLottie through a script host: load a Lottie JSON file
+// rendered at width x height through the host's texture sink; none on
+// failure (the animation is dropped, as the C++ deletes it).
+pub fn load_lottie_in(var host&: ScriptHost, path: str, width: u32, height: u32): LottieId? {
+  var anim = LottieAnimation();
+  var ok = false;
+  {
+    var a& = anim;
+    var r& = ok;
+    host.env.with_textures(fn(t: (&var DynTextureBackend)?) {
+      r = a.load(t, path, width, height);
+    });
+  }
+  if (!ok) {
+    return none;
+  }
+  var players& = lottie_players(host);
+  players.anims.push(Box(anim));
+  return (players.anims.len() - 1) as u32;
+}
+
+// The animation's address (the C++ LottieAnimation*); null for an unknown id.
+pub fn lottie_ptr_in(var host&: ScriptHost, id: LottieId): *var LottieAnimation {
+  let index = host.find_extension(kLottiePlayers) else {
+    return null;
+  };
+  var players& = host.extension_var(kLottiePlayers, index)!;
+  if (id as usize >= players.anims.len()) {
+    return null;
+  }
+  return unsafe (players.anims[id as usize].as_ptr() as *var LottieAnimation);
+}
+
+// LottieAnimation::Stop() / Seek(progress) through the host's texture sink.
+pub fn lottie_stop_in(var host&: ScriptHost, anim: *var LottieAnimation) {
+  host.env.with_textures(fn(t: (&var DynTextureBackend)?) {
+    unsafe (*anim).stop(t);
+  });
+}
+
+pub fn lottie_seek_in(var host&: ScriptHost, anim: *var LottieAnimation, progress: f32) {
+  host.env.with_textures(fn(t: (&var DynTextureBackend)?) {
+    unsafe (*anim).seek(progress, t);
+  });
+}
+
+// UIContext::LoadLottie.
+pub fn load_lottie<P: Platform, R: Rhi, S: ScriptRuntime>(var ui&: UIContext<P, R, S>, path: str, width: u32, height: u32): LottieId? {
+  var out: LottieId? = none;
+  {
+    var o& = out;
+    ui.with_host(fn(h: &var ScriptHost) {
+      o = load_lottie_in(h, path, width, height);
+    });
+  }
+  return out;
+}
+
+// The animation `id` names, lent; none for an unknown id.
+pub fn lottie_var<P: Platform, R: Rhi, S: ScriptRuntime>(var ui&: UIContext<P, R, S>, id: LottieId): (&var LottieAnimation)? {
+  let index = ui.find_extension(kLottiePlayers) else {
+    return none;
+  };
+  var players& = ui.extension_var(kLottiePlayers, index)!;
+  if (id as usize >= players.anims.len()) {
+    return none;
+  }
+  return players.anims[id as usize].get_var();
+}
+
+// anim->Stop() for the animation `id` names (through UIContext's texture sink).
+pub fn lottie_stop<P: Platform, R: Rhi, S: ScriptRuntime>(var ui&: UIContext<P, R, S>, id: LottieId) {
+  ui.with_host(fn(h: &var ScriptHost) {
+    let p = lottie_ptr_in(h, id);
+    if (p != null) {
+      lottie_stop_in(h, p);
+    }
+  });
+}
+
+// anim->Seek(progress) for the animation `id` names.
+pub fn lottie_seek<P: Platform, R: Rhi, S: ScriptRuntime>(var ui&: UIContext<P, R, S>, id: LottieId, progress: f32) {
+  ui.with_host(fn(h: &var ScriptHost) {
+    let p = lottie_ptr_in(h, id);
+    if (p != null) {
+      lottie_seek_in(h, p, progress);
+    }
+  });
+}

@@ -1,0 +1,186 @@
+// UIContext::LoadVideo and the C++ UIContext's video_players_ (ugui/ui_context.cc
+// under ULTRAGUI_VIDEO), as a frame extension of ultragui::ui_context.
+//
+// The players UIContext owns are a `VideoPlayers` extension
+// (scripting::script_host::UiExtension): UIContext updates them each legacy
+// frame after the vector animations and the Lottie players (add
+// ultragui_lottie's extension first to keep the C++ order), then, if any has
+// a new frame and the Rhi acquires one, converts those frames
+// (NeedsConvert/ConvertFrame), and its shutdown unloads and drops every
+// player where the C++ Shutdown deletes them. `load_video` adds the
+// extension on first use.
+//
+// Shape differences (not behavior):
+//
+// * LoadVideo returns a `VideoId` (an index; players live until
+//   UIContext::shutdown) and `video_var(ui, id)` lends the player; the C++
+//   hands out the VideoPlayer*. The player is boxed, so `video_ptr_in` (the
+//   address a script holds) stays valid until shutdown.
+// * The aki VideoPlayer takes the Rhi per call: `video_stop`/`video_seek` run
+//   Stop()/Seek(seconds) through UIContext's Rhi, the one the C++ player was
+//   loaded with.
+// * LoadVideo passes UIContext's audio backend (`audio_`, the silent one by
+//   default), which the player only tests for presence, as the C++ build with
+//   ULTRAGUI_AUDIO does.
+
+module ultragui_video::video_ui;
+
+import {List} from akikit::containers::list;
+import {Box} from akikit::memory::box;
+import {ComponentKey} from ultragui::core::component_store;
+import {Platform} from ultragui::platform::platform;
+import {Rhi} from ultragui::rhi::rhi;
+import {FrameEnv, ScriptHost, UiExtension, UiExtensionBox} from ultragui::scripting::script_host;
+import {ScriptRuntime} from ultragui::scripting::script_runtime;
+import {UIContext} from ultragui::ui_context;
+import {VideoPlayer} from ultragui_video::video;
+
+// LoadVideo's result: the index of a player the VideoPlayers own.
+pub type VideoId = u32;
+
+// The C++ UIContext's video_players_.
+pub struct VideoPlayers : UiExtension {
+  pub var players: List<Box<VideoPlayer>> = List()
+
+  pub fn VideoPlayers(): VideoPlayers => VideoPlayers {};
+
+  // vid->Update(dt) for each, in load order.
+  pub fn update(var self&, var env&: FrameEnv);
+  // Any player with a decoded frame waiting for ConvertFrame.
+  pub fn needs_convert(self&): bool;
+  // ConvertFrame for each player that needs it.
+  pub fn convert(var self&, var env&: FrameEnv);
+  // delete vid: the destructor unloads through the player's Rhi.
+  pub fn shutdown(var self&, var env&: FrameEnv);
+}
+
+// The extension's identity (UIContext::add_extension / find_extension).
+pub static let kVideoPlayers: ComponentKey<VideoPlayers> = ComponentKey();
+
+fn VideoPlayers::update(var self&, var env&: FrameEnv) {
+  let dt = env.dt;
+  for (var b& in self.players) {
+    b.get_var().update(dt, env.rhi);
+  }
+}
+
+fn VideoPlayers::needs_convert(self&): bool {
+  for (let b& in self.players) {
+    if (b.get().needs_convert()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn VideoPlayers::convert(var self&, var env&: FrameEnv) {
+  for (var b& in self.players) {
+    var v& = b.get_var();
+    if (v.needs_convert()) {
+      v.convert_frame(env.rhi);
+    }
+  }
+}
+
+fn VideoPlayers::shutdown(var self&, var env&: FrameEnv) {
+  for (var b& in self.players) {
+    var v& = b.get_var();
+    if (v.is_loaded()) {
+      v.unload(env.rhi);
+    }
+  }
+  self.players.clear();
+}
+
+// The VideoPlayers among the host's extensions, added if absent.
+pub fn video_players(var host&: ScriptHost): &var VideoPlayers {
+  var index = host.find_extension(kVideoPlayers);
+  if (index == none) {
+    host.extensions.push(UiExtensionBox::of(kVideoPlayers, VideoPlayers()));
+    index = (host.extensions.len() - 1) as u32;
+  }
+  return host.extensions[index! as usize].downcast(kVideoPlayers)!;
+}
+
+// UIContext::LoadVideo through a script host: open an MPEG-1 file, decoding
+// through the host's Rhi, with the host's audio backend; none on failure
+// (the player is dropped, as the C++ deletes it).
+pub fn load_video_in(var host&: ScriptHost, path: str): VideoId? {
+  var vid = VideoPlayer();
+  var ok = false;
+  {
+    let audio = host.env.audio.as_dyn();
+    ok = vid.load(host.env.rhi, path, audio);
+  }
+  if (!ok) {
+    return none;
+  }
+  var players& = video_players(host);
+  players.players.push(Box(vid));
+  return (players.players.len() - 1) as u32;
+}
+
+// The player's address (the C++ VideoPlayer*); null for an unknown id.
+pub fn video_ptr_in(var host&: ScriptHost, id: VideoId): *var VideoPlayer {
+  let index = host.find_extension(kVideoPlayers) else {
+    return null;
+  };
+  var players& = host.extension_var(kVideoPlayers, index)!;
+  if (id as usize >= players.players.len()) {
+    return null;
+  }
+  return unsafe (players.players[id as usize].as_ptr() as *var VideoPlayer);
+}
+
+// VideoPlayer::Stop() / Seek(seconds) through the host's Rhi.
+pub fn video_stop_in(var host&: ScriptHost, vid: *var VideoPlayer) {
+  unsafe (*vid).stop(host.env.rhi);
+}
+
+pub fn video_seek_in(var host&: ScriptHost, vid: *var VideoPlayer, seconds: f64) {
+  unsafe (*vid).seek(seconds, host.env.rhi);
+}
+
+// UIContext::LoadVideo.
+pub fn load_video<P: Platform, R: Rhi, S: ScriptRuntime>(var ui&: UIContext<P, R, S>, path: str): VideoId? {
+  var out: VideoId? = none;
+  {
+    var o& = out;
+    ui.with_host(fn(h: &var ScriptHost) {
+      o = load_video_in(h, path);
+    });
+  }
+  return out;
+}
+
+// The player `id` names, lent; none for an unknown id.
+pub fn video_var<P: Platform, R: Rhi, S: ScriptRuntime>(var ui&: UIContext<P, R, S>, id: VideoId): (&var VideoPlayer)? {
+  let index = ui.find_extension(kVideoPlayers) else {
+    return none;
+  };
+  var players& = ui.extension_var(kVideoPlayers, index)!;
+  if (id as usize >= players.players.len()) {
+    return none;
+  }
+  return players.players[id as usize].get_var();
+}
+
+// vid->Stop() for the player `id` names (through UIContext's Rhi).
+pub fn video_stop<P: Platform, R: Rhi, S: ScriptRuntime>(var ui&: UIContext<P, R, S>, id: VideoId) {
+  ui.with_host(fn(h: &var ScriptHost) {
+    let p = video_ptr_in(h, id);
+    if (p != null) {
+      video_stop_in(h, p);
+    }
+  });
+}
+
+// vid->Seek(seconds) for the player `id` names.
+pub fn video_seek<P: Platform, R: Rhi, S: ScriptRuntime>(var ui&: UIContext<P, R, S>, id: VideoId, seconds: f64) {
+  ui.with_host(fn(h: &var ScriptHost) {
+    let p = video_ptr_in(h, id);
+    if (p != null) {
+      video_seek_in(h, p, seconds);
+    }
+  });
+}

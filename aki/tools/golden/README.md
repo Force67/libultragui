@@ -55,8 +55,19 @@ takes them as arguments: `run.sh <c++> <aki> aki/tools/golden/extra/*.txt`.
 
 `aki_golden/` is the aki runner (`cd aki/tools/golden/aki_golden && akiko
 build` -> `build/aki_golden`, built at -O2). Its script runtime is the one
-alias `Runtime` in `src/main.aki` (NoScript today), so the `_lua` scenarios
-need ultragui_lua's runtime named there.
+alias `Runtime` in `src/main.aki`: ultragui_lua's `LuaRuntime`, with the
+bindings of the C++ runner's build (`add_core_lua(ui, LuaBindings { audio:
+false })`: ULTRAGUI_LUA on, ULTRAGUI_AUDIO, LOTTIE and VIDEO off, so only
+RegisterAnimLua). All 20 scenarios and the extra ones compare `same`.
+
+## Random numbers
+
+Lua 5.4 seeds `math.random` per state from the clock and an address
+(`luai_makeseed`), so a script that draws random numbers (neon, glass,
+terminal) would not replay, not even against itself. Both runners run
+`math.randomseed(42)` right after Init (`ExecScript` / `exec_script`, before
+the texture backend and viewport are set); without ULTRAGUI_LUA it is a
+no-op.
 
 ## The C++ side
 

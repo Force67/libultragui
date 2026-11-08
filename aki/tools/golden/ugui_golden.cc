@@ -193,6 +193,10 @@ int main(int argc, char** argv) {
       fprintf(stderr, "ugui_golden: Init failed\n");
       return false;
     }
+    // Lua 5.4 seeds math.random per state from the clock (luai_makeseed):
+    // both runners seed it, so scripts that draw random numbers (neon,
+    // glass, terminal) replay. A no-op without ULTRAGUI_LUA.
+    ui.ExecScript("math.randomseed(42)");
     ui.set_texture_backend(&textures);
     host::SetViewport(*ui.platform(), window, framebuffer);
     initialized = true;

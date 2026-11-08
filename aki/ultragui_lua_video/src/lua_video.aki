@@ -24,6 +24,11 @@ import {VideoPlayer} from ultragui_video::video;
 import {LuaCall, LuaRaise} from ultragui_lua::lua_call;
 import {LuaRuntime} from ultragui_lua::lua_runtime;
 import {FindWidget} from ultragui_lua::lua_anim;
+import {host_find_widget} from ultragui_lua::lua_ui_context;
+import {Platform} from ultragui::platform::platform;
+import {Rhi} from ultragui::rhi::rhi;
+import {UIContext} from ultragui::ui_context;
+import {VideoPlayers, kVideoPlayers, load_video_in, video_ptr_in, video_seek_in, video_stop_in} from ultragui_video::video_ui;
 
 // Function<VideoPlayer*(const char*)>: a loaded player the host owns, or null.
 pub type VideoLoader = own fn(&var LuaCall, String): *var VideoPlayer;
@@ -163,5 +168,35 @@ pub fn register_video_lua(var rt&: LuaRuntime, loader: VideoLoader, find_widget:
       }
     }
     return 0;
+  });
+}
+
+// UIContext::Init's RegisterVideoLua for `ui` (registered for its init,
+// right after the runtime's), with the hooks going through the running
+// call's script host: LoadVideo, FindWidgetEntity, Stop/Seek through the Rhi.
+// Adds the video players extension now (after any Lottie players: add
+// add_lottie_lua first, as the C++ updates lottie_anims_ first).
+pub fn add_video_lua<P: Platform, R: Rhi>(var ui&: UIContext<P, R, LuaRuntime>) {
+  if (ui.find_extension(kVideoPlayers) == none) {
+    let _ = ui.add_extension(kVideoPlayers, VideoPlayers());
+  }
+  ui.add_script_init(own fn(rt: &var LuaRuntime) {
+    register_video_lua(rt, own fn(call: &var LuaCall, path: String): *var VideoPlayer {
+      var host& = call.ctx.host else {
+        return null;
+      };
+      let id = load_video_in(host, path.as_str()) else {
+        return null;
+      };
+      return video_ptr_in(host, id);
+    }, host_find_widget(), own fn(call: &var LuaCall, v: *var VideoPlayer) {
+      if (var host& = call.ctx.host) {
+        video_stop_in(host, v);
+      }
+    }, own fn(call: &var LuaCall, v: *var VideoPlayer, s: f64) {
+      if (var host& = call.ctx.host) {
+        video_seek_in(host, v, s);
+      }
+    });
   });
 }
