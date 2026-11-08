@@ -1,10 +1,10 @@
-// Shared by the Lua tests (a copy lives in ultragui_lua_lottie/tests/support):
+// No C++ counterpart; shared by the tests of ultragui_lua and ultragui_lua_lottie:
 // what tools/gen_lua_reference.cc prints about widgets, printed the same
 // way (C's unbuffered stdout, so Lua's print, the runtime's stderr lines and
 // these interleave in program order), and the capture of one scenario's
 // output into a file compared byte for byte with the C++'s.
 
-module support::harness;
+module ultragui_lua::test_harness;
 
 import {List} from akikit::containers::list;
 import {String, from_str} from akikit::strings::string;

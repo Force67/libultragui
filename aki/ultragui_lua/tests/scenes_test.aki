@@ -33,7 +33,7 @@ import {LuaRuntime} from ultragui_lua::lua_runtime;
 import {register_audio_lua} from ultragui_lua::lua_audio;
 import {register_anim_lua} from ultragui_lua::lua_anim;
 import {kLuaRegistryIndex, luaL_loadbuffer, luaL_ref} from ultragui_lua::sys::lua;
-import {Tracker, b01, bits, collect_named, outln, run_captured, setup} from support::harness;
+import {Tracker, b01, bits, collect_named, outln, run_captured, setup} from ultragui_lua::test_harness;
 
 // RecordingAudio of the driver.
 struct RecordingAudio : AudioBackend {

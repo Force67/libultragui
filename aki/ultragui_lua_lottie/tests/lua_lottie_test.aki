@@ -20,7 +20,7 @@ import {LottieAnimation} from ultragui_lottie::lottie;
 import {LuaCall} from ultragui_lua::lua_call;
 import {LuaRuntime} from ultragui_lua::lua_runtime;
 import {register_lottie_lua} from ultragui_lua_lottie::lua_lottie;
-import {b01, collect_named, dump_line, outln, run_captured, setup} from support::harness;
+import {b01, collect_named, dump_line, outln, run_captured, setup} from ultragui_lua::test_harness;
 
 fn run_lottie() {
   var world = World();
