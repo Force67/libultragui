@@ -116,9 +116,12 @@ package), **gone** (no counterpart, reason given).
 | widgets/widget_tree.{h,cc} | ultragui::widgets::widget_tree | next |
 | widgets/{panel,text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | next |
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} (+ sys::yoga) | next |
-| idl/parser.{h,cc}, builder.{h,cc} | ultragui::idl::{parser,builder} | next |
+| idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
+| idl/builder.{h,cc} | ultragui::idl::builder | next (consumes idl::parser's AST) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
-| anim/* | ultragui::anim::* | next (pure code, core) |
+| anim/json.{h,cc} | ultragui::anim::json | ported |
+| anim/anim_types.h, anim_parser.cc, anim_eval.cc, anim_render.cc | ultragui::anim::{anim_types,anim_parser,anim_eval,anim_render} | ported (rendered frames byte-identical to the C++: 330 frame hashes) |
+| anim/vector_animation.{h,cc} | ultragui::anim::vector_animation | ported (backend passed per call, see below) |
 | ui_context.{h,cc} | ultragui::ui_context | next |
 | lottie/* | | pkg:ultragui_lottie |
 | video/* | | pkg:ultragui_video |
@@ -491,6 +494,19 @@ so bit-exact tables are aarch64's.
   (`-0.0` and `0.0` may cache twice), as the C++.
 - TextEngine's bitmap copy assumes FreeType's positive pitch (the C++ computes
   `row * pitch` unsigned).
+- `.ugui` lexer: a byte that starts no token is a one-byte error token in the
+  C++; a multi-byte UTF-8 character here is one error token holding the whole
+  character (a String cannot hold half of one). A file that is not UTF-8 is
+  the error "file is not valid UTF-8" (the C++ parses any bytes); a .uganim
+  that is not UTF-8 is a JSON parse error.
+- `.ugui` import resolution keeps the C++'s `std::filesystem` imitations
+  (ParentPath, JoinPath, LexicallyNormal, WeaklyCanonical) with akikit's
+  `real_path`/`path_exists`; Windows uses the same prefix algorithm (the C++
+  calls `_fullpath` there).
+- VectorAnimation of a looping document with duration 0 spins forever in
+  `update` (`while (t >= dur) t -= dur`), as the C++.
+- JSON numbers go through C `strtod`, so "-inf", "-nan(12)" and hex floats
+  parse as numbers, and `\u0041` reads as "u0041" (no `\u` decoding).
 - KeyframeAnimation with a zero duration: the C++ casts inf to int (UB); the
   port saturates.
 - SVG: a gradient `<stop>` without `offset` has an uninitialized offset in the
@@ -506,6 +522,27 @@ so bit-exact tables are aarch64's.
   `sys::c_text` calls libc for both so the values cannot differ.
 
 ### Shape differences (not behavior)
+
+- **VectorAnimation does not store its TextureBackend.** `load(backend, path,
+  w, h)`, `load_data(backend, json, w, h)`, `update(backend, dt)` and
+  `unload(backend)` take it as `(&var T)?` for any `T: TextureBackend` (a
+  `DynTextureBackend`, a `TextureBackendBox`, an `RhiTextureBackend`; `none`
+  is the C++ `nullptr`), because a stored borrow would pin UIContext, which
+  owns both. The destructor therefore cannot destroy the texture: call
+  `unload(backend)` first. Pass the same backend each time.
+- **idl::parser AST**: `UguiNode::type` is `type_`; the nested C++ types are
+  module-level: `UguiStateBlock`, `UguiKeyframeBlock` (+ `UguiKeyframeStop`),
+  `UguiMediaQuery`, `UguiStyleClass`, `UguiComponent`; `UguiDocument` and
+  `ParseError` as in the C++. Entry points: `parse_ugui(source: str,
+  filename: str, doc, errors): bool` and `parse_ugui_file(path, doc, errors)`;
+  every AST type is `Clone`. Property maps are `HashMap<String, String>`
+  (walk them with `sorted_entries`, as the C++ builder does).
+- **anim**: `AnimDocument::loop` is `looping`; `parse_anim_data(json: str,
+  doc)` and `parse_anim_file(path, doc)` take text (a non-UTF-8 file is a
+  parse error); `json::JsonValue::type` is `kind`; `evaluate_layer` returns
+  the `EvaluatedLayer`; `render_anim_frame(doc, time, pixels: &var [u8], w,
+  h)` builds its svg Document per call and parses path layers each frame
+  (the C++ caches by the address of `path_data`).
 
 - SVG: `LoadSvg*` return `SvgImage?`, `ParseSvg` returns `Document?`,
   `Rasterize` writes into a `&var [u8]`, `LoadSvgTexture` takes `(&var T)?`
@@ -534,6 +571,10 @@ so bit-exact tables are aarch64's.
 - **A closure cannot capture a field of `s` while another field of `s` is
   lent to the call**: bind views of both fields first
   (`var w& = ui.world; var a& = ui.animator; a.update(t, fn(...) { ... w ... });`).
+- **`push_c8` stops on a byte >= 0x80** (a String is UTF-8): to build text from
+  source bytes, copy runs between ASCII delimiters with `push_str(s[a..b])`.
+- **A ternary in an f-string hole needs parentheses and typed literals**:
+  `{(ok ? 1i32 : 0i32)}`.
 - **`if (var x& = list.at_var(i))` on a `List<T?>`** fails ("needs a place");
   use the index place `list[i]`.
 - **`&raw` takes a place, not a parameter's target**: bind the view first
