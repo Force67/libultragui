@@ -31,6 +31,9 @@ import {Renderer2D} from ultragui::render::renderer2d;
 import {WidgetKind} from ultragui::widgets::widget;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
+import {button_click, button_draw, button_measure} from ultragui::widgets::button;
+import {image_draw, image_measure} from ultragui::widgets::image;
+import {text_draw, text_measure} from ultragui::widgets::text;
 
 // WidgetVTable::custom_paint: paint_widget draws nothing itself and `draw`
 // paints the whole widget (kinds that fully own their visuals: slider,
@@ -42,11 +45,26 @@ pub fn custom_paint(kind: WidgetKind): bool => match (kind) {
 // WidgetVTable::draw. False when the kind has no draw entry.
 pub fn vt_draw(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D): bool =>
   match (kind) {
+    WidgetKind::Image => {
+      image_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Text => {
+      text_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Button => {
+      button_draw(world, ctx, e, renderer);
+      true
+    },
     _ => false,
   };
 
 // WidgetVTable::measure: (width, height), none without an entry.
 pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32)? => match (kind) {
+  WidgetKind::Image => image_measure(world, ctx, e),
+  WidgetKind::Text => text_measure(world, ctx, e),
+  WidgetKind::Button => button_measure(world, ctx, e),
   _ => none,
 };
 
@@ -59,6 +77,7 @@ pub fn vt_hit_test(kind: WidgetKind, var world&: World, var ctx&: WidgetContext,
 
 // WidgetVTable::on_click
 pub fn vt_on_click(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): bool? => match (kind) {
+  WidgetKind::Button => button_click(world, ctx, e),
   _ => none,
 };
 
