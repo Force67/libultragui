@@ -226,6 +226,15 @@ pkg-config. Offline, point `FETCHCONTENT_SOURCE_DIR_UGUI_FREETYPE` (and
 
 The showcase has 8 scenes (dashboard, RPG journal, terminal, etc.), all `.ugui` + `.lua`, no C++.
 
+## Aki port
+
+`aki/` is a complete port of the library to the Aki language: one package for
+the core and one per optional backend or subsystem (GLFW, Vulkan, OpenGL,
+D3D11, D3D12, Lua, Lottie, video, audio), checked against this C++ build with
+recorded values, a golden draw-data comparison and pixel-identical
+screenshots. See [aki/README.md](aki/README.md) for the packages, how to use
+and test them (`aki/tools/test_all.sh`), and how it differs from the C++.
+
 ## License
 
 MIT
