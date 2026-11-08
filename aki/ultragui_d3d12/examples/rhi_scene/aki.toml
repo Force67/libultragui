@@ -1,0 +1,11 @@
+# The aki side of tools/rhi_scene.cc: a window and one frame drawn straight
+# through D3d12Rhi's calls. Run it under ../../../tools/xshot.sh and compare
+# with the C++ program's screenshot (see ../../tools/rhi_scene.cc).
+[package]
+name = "rhi_scene"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../../ultragui" }
+ultragui_d3d12 = { path = "../.." }

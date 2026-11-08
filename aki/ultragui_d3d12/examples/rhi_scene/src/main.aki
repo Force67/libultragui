@@ -1,0 +1,225 @@
+// tools/rhi_scene.cc in aki: a window, D3d12Rhi (ugui/rhi/d3d12/d3d12_rhi.cc),
+// and one frame drawn straight through the RHI calls: SDF rounded rects with a
+// border, a gradient and a soft shadow, a textured quad, text from the
+// TextEngine atlas, a scissored rect, an offscreen render target drawn back as
+// a texture, and a YCbCr video frame converted into a render target. Both
+// programs make the same calls in the same order; compare their screenshots
+// under aki/tools/xshot.sh.
+
+module rhi_scene;
+
+import {List} from akikit::containers::list;
+import {eprintln, println} from akikit::logging;
+import {sleep, milliseconds} from akikit::time::time;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D, pack_color, pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {rhi_handle_from_texture_id} from ultragui::render::texture_backend;
+import {RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {TextEngine} from ultragui::text::text_engine;
+import {D3d12Rhi} from ultragui_d3d12::d3d12_rhi;
+import {glfw_create_window, glfw_init, glfw_poll_events, glfw_terminate, glfw_window_hint, glfw_window_should_close,
+  glfw_destroy_window, kGlfwClientApi, kGlfwFalse, kGlfwNoApi, kGlfwResizable} from ultragui_d3d12::sys::glfw;
+
+struct Batch {
+  pub var v: List<Vertex2D> = List()
+  pub var i: List<u32> = List()
+}
+
+// One quad: [x - e, x + w + e] x [y - e, y + h + e], uv over the quad. sdf
+// quads carry the half extents of the quad.
+fn quad(var b&: Batch, x: f32, y: f32, w: f32, h: f32, e: f32, c1: u32, c2: u32, radii: u32, softness: f32, border_w: f32,
+  border_c: u32, sdf: bool, u0: f32, v0: f32, u1: f32, v1: f32) {
+  let x0 = x - e;
+  let y0 = y - e;
+  let x1 = x + w + e;
+  let y1 = y + h + e;
+  let hx = sdf ? (x1 - x0) * 0.5 : 0.0;
+  let hy = sdf ? (y1 - y0) * 0.5 : 0.0;
+  let base = #b.v as u32;
+  let corners: [(f32, f32, f32, f32); 4] = [(x0, y0, u0, v0), (x1, y0, u1, v0), (x1, y1, u1, v1), (x0, y1, u0, v1)];
+  for (let (px, py, u, v) in corners) {
+    b.v.push(Vertex2D {
+      pos: [px, py],
+      uv: [u, v],
+      color: c1,
+      color2: c2,
+      corner_radii: radii,
+      softness: softness,
+      half_size: [hx, hy],
+      border_width: border_w,
+      border_color: border_c,
+    });
+  }
+  let idx: [u32; 6] = [0, 1, 2, 0, 2, 3];
+  for (let k in idx) {
+    b.i.push(base + k);
+  }
+}
+
+fn quad_full(var b&: Batch, x: f32, y: f32, w: f32, h: f32, e: f32, c1: u32, c2: u32, radii: u32, softness: f32, border_w: f32,
+  border_c: u32, sdf: bool) {
+  quad(b, x, y, w, h, e, c1, c2, radii, softness, border_w, border_c, sdf, 0.0, 0.0, 1.0, 1.0);
+}
+
+fn add_text(var te&: TextEngine, font: u32, var text&: Batch, s: str, size: f32, x: f32, baseline: f32, color: u32) {
+  let run = te.shape(font, s, size);
+  var pen = x;
+  for (let gl in run.glyphs()) {
+    if (gl.bmp_w > 0.0 && gl.bmp_h > 0.0) {
+      quad(text, pen + gl.x_offset + gl.bearing_x, baseline + gl.y_offset - gl.bearing_y, gl.bmp_w, gl.bmp_h, 0.0, color, color,
+        0, 0.0, 0.0, 0, false, gl.u0, gl.v0, gl.u1, gl.v1);
+    }
+    pen += gl.x_advance;
+  }
+}
+
+pub fn main(): i32 {
+  // Platform::Init: GLFW, no client API, a fixed-size window.
+  unsafe {
+    if (glfw_init() == 0) {
+      eprintln("platform init failed");
+      return 1;
+    }
+    glfw_window_hint(kGlfwClientApi, kGlfwNoApi);
+    glfw_window_hint(kGlfwResizable, kGlfwFalse);
+  }
+  let window = unsafe glfw_create_window(800, 600, c"d3d12 scene", null, null);
+  if (window == null) {
+    eprintln("platform init failed");
+    return 1;
+  }
+
+  var rhi = D3d12Rhi();
+  var rc = RhiConfig {};
+  rc.native_window = unsafe (window as *var u8);
+  if (!rhi.init(rc)) {
+    eprintln("rhi init failed");
+    return 2;
+  }
+
+  var te = TextEngine();
+  te.init();
+  te.set_dpi_scale(rhi.dpi_scale());
+  let font = te.load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+
+  // Textures: a checker (RGBA), the offscreen target, the video planes.
+  var checker_px = List::<u8>();
+  for (let y in 0..8u32) {
+    for (let x in 0..8u32) {
+      let on = ((x ^ y) & 1) != 0;
+      let px: u32 = on ? 0xFF3050F0 : 0xFFF0D030;
+      checker_px.push((px & 0xFF) as u8);
+      checker_px.push(((px >> 8) & 0xFF) as u8);
+      checker_px.push(((px >> 16) & 0xFF) as u8);
+      checker_px.push(((px >> 24) & 0xFF) as u8);
+    }
+  }
+  let checker = rhi.create_texture(8, 8, RhiFormat::Rgba8Unorm, checker_px.as_slice() as bytes, RhiFilter::Nearest);
+  let target = rhi.create_render_target(128, 128);
+
+  var yplane = List::<u8>();
+  for (let y in 0..48u32) {
+    for (let x in 0..64u32) {
+      yplane.push((16 + (x * 3 + y * 2) % 200) as u8);
+    }
+  }
+  var cbplane = List::<u8>();
+  var crplane = List::<u8>();
+  for (let y in 0..24u32) {
+    for (let x in 0..32u32) {
+      cbplane.push((64 + x * 4) as u8);
+      crplane.push((192 - y * 6) as u8);
+    }
+  }
+  let ytex = rhi.create_texture(64, 48, RhiFormat::R8Unorm, yplane.as_slice() as bytes, RhiFilter::Linear);
+  let cbtex = rhi.create_texture(32, 24, RhiFormat::R8Unorm, cbplane.as_slice() as bytes, RhiFilter::Linear);
+  let crtex = rhi.create_texture(32, 24, RhiFormat::R8Unorm, crplane.as_slice() as bytes, RhiFilter::Linear);
+  let video = rhi.create_render_target(64, 48);
+
+  // Text: shaped once, quads built per glyph from the atlas UVs.
+  var text = Batch {};
+  add_text(te, font, text, "Hello, D3D12 backend", 28.0, 40.0, 470.0, pack_color(1.0, 1.0, 1.0, 1.0));
+  add_text(te, font, text, "rounded rects, gradient, shadow, scissor, offscreen, video", 14.0, 40.0, 500.0,
+    pack_color(0.7, 0.85, 1.0, 1.0));
+  te.flush_atlas(rhi);
+
+  let white = pack_color(1.0, 1.0, 1.0, 1.0);
+
+  // Static batches.
+  var shapes = Batch {};  // 0: shadow, 1: panel, 2: pill
+  quad_full(shapes, 44.0, 48.0, 320.0, 200.0, 12.0, pack_color(0.0, 0.0, 0.0, 0.6), pack_color(0.0, 0.0, 0.0, 0.6),
+    pack_radii_uniform(12.0), 12.0, 0.0, 0, true);
+  quad_full(shapes, 40.0, 40.0, 320.0, 200.0, 0.0, pack_color(0.95, 0.45, 0.2, 1.0), pack_color(0.3, 0.1, 0.6, 1.0),
+    pack_radii(16.0, 4.0, 24.0, 0.0), 0.0, 3.0, pack_color(1.0, 1.0, 1.0, 1.0), true);
+  quad_full(shapes, 70.0, 190.0, 140.0, 36.0, 0.0, pack_color(0.1, 0.7, 0.4, 1.0), pack_color(0.1, 0.7, 0.4, 1.0),
+    pack_radii_uniform(18.0), 0.0, 0.0, 0, true);
+
+  var chk = Batch {};
+  quad_full(chk, 400.0, 40.0, 128.0, 128.0, 0.0, white, white, 0, 0.0, 0.0, 0, false);
+  var off = Batch {};
+  quad_full(off, 560.0, 40.0, 128.0, 128.0, 0.0, white, white, 0, 0.0, 0.0, 0, false);
+  var vid = Batch {};
+  quad_full(vid, 400.0, 200.0, 192.0, 144.0, 0.0, white, white, 0, 0.0, 0.0, 0, false);
+  var clip = Batch {};
+  quad_full(clip, 60.0, 280.0, 400.0, 120.0, 0.0, pack_color(0.9, 0.8, 0.1, 1.0), pack_color(0.9, 0.2, 0.1, 1.0),
+    pack_radii_uniform(30.0), 0.0, 0.0, 0, true);
+  var inner = Batch {};  // drawn into the offscreen target, 128x128 pixels
+  quad_full(inner, 0.0, 0.0, 128.0, 128.0, 0.0, pack_color(0.1, 0.2, 0.5, 1.0), pack_color(0.6, 0.8, 1.0, 1.0), 0, 0.0, 0.0, 0,
+    false);
+  quad_full(inner, 14.0, 14.0, 100.0, 100.0, 0.0, pack_color(1.0, 0.9, 0.2, 1.0), pack_color(1.0, 0.9, 0.2, 1.0),
+    pack_radii_uniform(50.0), 0.0, 4.0, pack_color(0.0, 0.0, 0.0, 1.0), true);
+
+  let atlas = rhi_handle_from_texture_id(te.atlas_texture());
+
+  var frame: u32 = 0;
+  while (true) {
+    unsafe { glfw_poll_events(); }
+    if (unsafe glfw_window_should_close(window) != 0) {
+      break;
+    }
+    if (!rhi.acquire_frame()) {
+      continue;
+    }
+
+    // Outside any pass: video conversion and the offscreen target.
+    rhi.convert_video_frame(video, ytex, cbtex, crtex);
+    if (rhi.begin_offscreen(target, Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })) {
+      rhi.draw_triangles(inner.v.as_slice(), inner.i.as_slice(), kInvalidTexture);
+      rhi.end_offscreen(target);
+    }
+
+    if (!rhi.begin_frame(Color { r: 0.10, g: 0.11, b: 0.14, a: 1.0 })) {
+      continue;
+    }
+
+    // The same vertex array twice: the second call takes the dedup path.
+    rhi.draw_triangles(shapes.v.as_slice(), shapes.i.as_slice()[0..12], kInvalidTexture);
+    rhi.draw_triangles(shapes.v.as_slice(), shapes.i.as_slice()[12..18], kInvalidTexture);
+
+    rhi.draw_triangles(chk.v.as_slice(), chk.i.as_slice(), checker);
+    rhi.draw_triangles(off.v.as_slice(), off.i.as_slice(), target);
+    rhi.draw_triangles(vid.v.as_slice(), vid.i.as_slice(), video);
+
+    rhi.set_scissor(Rect { x: 100.0, y: 300.0, w: 150.0, h: 60.0 });
+    rhi.draw_triangles(clip.v.as_slice(), clip.i.as_slice(), kInvalidTexture);
+    rhi.reset_scissor();
+
+    rhi.draw_text_triangles(text.v.as_slice(), text.i.as_slice(), atlas);
+    rhi.end_frame();
+    if (frame == 0) {
+      println("scene: first frame done");
+    }
+    frame += 1;
+    sleep(milliseconds(16));
+  }
+
+  te.shutdown_with(rhi);
+  rhi.shutdown();
+  unsafe {
+    glfw_destroy_window(window);
+    glfw_terminate();
+  }
+  return 0;
+}
