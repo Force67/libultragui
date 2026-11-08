@@ -1,0 +1,34 @@
+<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient id="g0" spreadMethod="repeat" x1="0.182" y1="0.0" x2="0.139" y2="0.0"><stop offset="0.74" stop-color="rgb(14,238,127)" stop-opacity="0.9"/><stop offset="0.8" stop-color="#be5bb2"/><stop offset="0.94" stop-color="#c2f"/></linearGradient>
+<linearGradient id="g1" gradientTransform="rotate(-172.235) scale(1.89) rotate(114.0)" spreadMethod="repeat" x1="0.36" y1="0.48" x2="0.185" y2="1.0"><stop offset="0.21" stop-color="#941"/><stop offset="0.22" stop-color="#68d"/></linearGradient>
+<radialGradient id="g2" gradientUnits="userSpaceOnUse" gradientTransform="skewY(-19.928) translate(3.59 14.0)" spreadMethod="reflect" cx="14.59" cy="61.55" r="73.86"><stop offset="0.02" stop-color="#d67086"/><stop offset="0.75" stop-color="rgb(4,231,23)" stop-opacity="0.62"/><stop offset="0.98" stop-color="#3cf" stop-opacity="0.93"/></radialGradient>
+<linearGradient id="g3" gradientTransform="matrix(0.28 -0.133 -1.0 0.9 13.5 19.3)" spreadMethod="reflect" x1="0.4" y1="0.059" x2="0.295" y2="0.9"><stop offset="0.31" stop-color="#280" stop-opacity="0.72"/><stop offset="0.55" stop-color="#ff297d0e"/><stop offset="0.92" stop-color="#29735b" stop-opacity="0.53"/></linearGradient>
+</defs>
+<circle cx="58.15" cy="100.23" r="31.02" fill="orchid" stroke="teal" stroke-width="1.0" fill-rule="evenodd" transform="skewY(22.56) translate(11.44 8.0)"/>
+<polyline points="116.754,12.743 42.11,92.0 21.555,77.9 26.1,79.0 173.4,11.9" fill="none" stroke="url(#g0)" stroke-width="3.43" fill-opacity="0.29" transform="rotate(-81.4) matrix(1.313 -0.4 1.11 1.43 0.7 -12.05)"/>
+<polygon points="75.6,127.0 51.0,42.99 92.6,34.863 66.4,59.051 170.711,43.3 98.4,94.71 79.291,-9.17" fill="url(#g1)" stroke="salmon" stroke-width="3.0" fill-opacity="0.9" stroke-opacity="0.41" fill-rule="evenodd" transform="rotate(-138.57 96.44 9.48) skewY(-16.54) rotate(-133.502 81.3 46.7)"/>
+<circle cx="46.91" cy="62.0" r="1.6" fill="#24aebf16" stroke="gold" stroke-width="2.2" fill-opacity="0.53" stroke-opacity="0.94" transform="skewX(-18.6)"/>
+<line x1="142.19" y1="64.553" x2="94.0" y2="8.2" fill="rgb(172,151,13)" stroke="rgba(67,18,1,0.25)" stroke-width="3.0" stroke-opacity="0.78" transform="rotate(148.218 47.6 89.89) rotate(92.95 83.628 58.211) rotate(-128.634)"/>
+<path d="M10.54,9.76 A11.3,10.91 3.1 0,1 71.041,14.0 h-25.0 V103.606 A16.204,19.74 -71.0 1,0 146.863,86.1 C0.085,106.2 118.686,39.0 39.64,102.63 S122.76,81.296 168.56,62.5" fill="url(#g0)" fill-opacity="0.72" transform="translate(-15.0 -11.0) matrix(1.18 0.617 -1.1 -0.3 -17.3 -18.0) matrix(-0.0 -1.0 0.7 -1.0 -7.417 -0.42)"/>
+<polygon points="13.21,3.9 128.1,-7.0 50.11,34.0 116.041,55.9 6.64,29.9 124.0,-7.0" fill="navy" stroke="url(#g1)" stroke-width="1.53" fill-rule="evenodd" transform="rotate(140.32) rotate(-12.0) scale(0.6)"/>
+<path d="M164.0,86.0 c17.0,-14.674 -3.0,22.5 -19.237,-18.7 V111.0 V65.0 V102.8 L68.71,58.062" fill="rgba(40,205,186,0.68)" stroke="#efa2ad" stroke-width="1.3" opacity="0.21" fill-opacity="0.61" fill-rule="evenodd" transform="translate(-1.879 -13.0) skewY(26.84) translate(8.7 15.952)"/>
+<path d="M44.0,100.31 h-22.0 t-15.0,17.9 Z M-4.2,-5.1 l23.0,-25.69 c15.0,23.8 4.484,-21.0 13.681,-13.938" fill="#065" fill-rule="evenodd"/>
+<rect x="20.1" y="40.0" width="13.9" height="44.0" fill="#10e0b715" stroke="rgba(165,146,17,0.06)" stroke-width="5.0" opacity="0.05" fill-opacity="0.36"/>
+<polygon points="-6.0,-7.3 76.54,44.6 22.7,31.66 130.8,40.8 140.0,77.014 51.0,107.762 57.0,12.0 128.69,117.6" fill="url(#g1)" opacity="0.76" fill-rule="evenodd" transform="scale(1.084) translate(10.7 1.304) skewY(-39.9)"/>
+<circle cx="82.175" cy="65.479" r="19.0" fill="#32f079c5" opacity="0.61" fill-rule="evenodd"/>
+<ellipse cx="110.0" cy="58.0" rx="44.9" ry="10.917" fill="orchid" opacity="0.77" fill-opacity="0.29" stroke-opacity="0.77" transform="rotate(169.0) rotate(154.5) translate(-18.0 6.8)"/>
+<line x1="116.486" y1="27.692" x2="84.6" y2="36.28" fill="#c7c3f5" stroke="rgb(106,164,197)" stroke-width="2.4" opacity="0.1" fill-opacity="0.8" fill-rule="evenodd" transform="translate(5.3 -11.0)"/>
+<path d="M166.8,108.0 T147.265,121.4 t20.0,-18.4 C1.8,41.0 94.395,94.0 121.0,41.0 T23.63,13.0" fill="url(#g2)" stroke="url(#g0)" stroke-width="2.2" stroke-opacity="0.79" fill-rule="evenodd"/>
+<polyline points="118.0,70.9 62.0,63.0 26.3,27.0 12.0,67.682 173.051,111.2 1.63,7.0 -15.0,40.0 -11.911,126.0" fill="url(#g3)" stroke="url(#g2)" stroke-width="1.0" fill-rule="evenodd" transform="translate(-15.326 20.0) rotate(-42.45)"/>
+<path d="M25.395,98.817 c-29.1,23.5 -11.8,-5.0 29.7,-6.4 Z M10.74,29.0 Q130.0,-1.357 -9.104,115.5 L127.492,126.352 S74.0,121.0 -13.24,0.3" fill="url(#g1)" stroke="#f19b74" stroke-width="3.73" fill-rule="evenodd" transform="skewX(21.67)"/>
+<line x1="2.021" y1="16.032" x2="106.0" y2="1.0" fill="#36f01cd1" stroke="rgba(46,145,56,0.11)" stroke-width="2.92" transform="skewY(-29.0)"/>
+<line x1="59.696" y1="16.56" x2="10.0" y2="67.9" fill="rgb(120,157,28)" opacity="0.69" transform="skewX(-32.0) rotate(24.74) matrix(0.249 1.46 1.0 0.0 9.448 -16.06)"/>
+<polyline points="117.198,85.0 -11.008,4.913 101.5,65.0" fill="#1ea160" opacity="0.89" transform="rotate(-128.0 26.0 62.572) scale(1.4 1.306) rotate(-116.3 56.56 56.0)"/>
+<path d="M106.861,77.513 T10.651,12.451 v24.7 s-13.93,0.2 3.3,-4.82" fill="rgba(47,21,34,0.72)" stroke="rgb(35,139,61)" stroke-width="2.95" opacity="0.3" fill-opacity="0.76" transform="skewX(-27.6) rotate(-66.7) skewX(-32.94)"/>
+<circle cx="15.98" cy="105.9" r="3.51" fill="#9df0c17f" stroke="rgb(135,249,44)" stroke-width="7.0" fill-opacity="0.1" fill-rule="evenodd" transform="translate(11.057 -13.11)"/>
+<line x1="51.73" y1="113.518" x2="60.8" y2="92.0" fill="navy" stroke="url(#g0)" stroke-width="6.615" opacity="0.42" fill-opacity="0.03" fill-rule="evenodd"/>
+<circle cx="26.56" cy="54.802" r="31.0" fill="#2adb40" stroke-opacity="0.31" transform="translate(-11.6 -4.7) scale(1.0) translate(14.24 -7.74)"/>
+<line x1="147.11" y1="73.0" x2="140.3" y2="62.87" fill="url(#g1)" stroke="#e3f2e0" stroke-width="7.0" opacity="0.64" stroke-opacity="0.46" transform="translate(-8.08 5.0) skewY(18.0) scale(1.6 1.118)"/>
+<rect x="93.03" y="52.18" width="19.0" height="22.995" fill="#946" stroke-opacity="0.94" fill-rule="evenodd" transform="matrix(-0.654 -0.48 1.0 -1.022 6.079 10.86) translate(-11.0 -1.0) matrix(-0.9 1.1 0.498 0.453 -3.3 6.0)"/>
+</svg>

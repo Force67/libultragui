@@ -1,0 +1,35 @@
+<svg width="128" height="128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="a" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff0000"/>
+      <stop offset="0.5" stop-color="#00ff00" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#0000ff"/>
+    </linearGradient>
+    <linearGradient id="b" x1="0%" y1="0%" x2="100%" y2="0%" spreadMethod="reflect">
+      <stop offset="0%" stop-color="white"/>
+      <stop offset="40%" stop-color="navy"/>
+      <stop offset="100%" stop-color="gold"/>
+    </linearGradient>
+    <linearGradient id="c" gradientUnits="userSpaceOnUse" x1="70" y1="70" x2="90" y2="70" spreadMethod="repeat">
+      <stop offset="0" stop-color="#e63946"/>
+      <stop offset="1" stop-color="#f1faee"/>
+    </linearGradient>
+    <linearGradient id="d" x1="0" y1="0" x2="1" y2="0" gradientTransform="rotate(30 0.5 0.5)">
+      <stop offset="0" stop-color="#06d6a0"/>
+      <stop offset="0.5" stop-color="#06d6a0"/>
+      <stop offset="0.5" stop-color="#ef476f"/>
+      <stop offset="1" stop-color="#ef476f"/>
+    </linearGradient>
+    <linearGradient id="e" xlink:href="#a" x1="0" y1="1" x2="1" y2="0"/>
+    <linearGradient id="f" x1="0.2" y1="0" x2="0.8" y2="0.4" spreadMethod="pad">
+      <stop offset="0.3" stop-color="black"/>
+      <stop offset="0.7" stop-color="white"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" fill="url(#a)"/>
+  <rect x="68" y="4" width="56" height="56" fill="url(#b)" stroke="url(#f)" stroke-width="4"/>
+  <rect x="4" y="68" width="56" height="56" fill="url(#d)"/>
+  <rect x="68" y="68" width="56" height="56" fill="url(#c)" opacity="0.9"/>
+  <circle cx="64" cy="64" r="20" fill="url(#e)" stroke="url(#missing)" stroke-width="2"/>
+  <path d="M10,10 L50,50" stroke="url(#f)" stroke-width="6" fill="none"/>
+</svg>
