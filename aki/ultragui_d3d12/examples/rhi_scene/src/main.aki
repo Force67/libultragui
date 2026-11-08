@@ -22,7 +22,7 @@ import {RhiFilter, RhiFormat, kInvalidTexture} from ultragui::rhi::rhi_types;
 import {TextEngine} from ultragui::text::text_engine;
 import {D3d12Rhi} from ultragui_d3d12::d3d12_rhi;
 import {glfw_create_window, glfw_init, glfw_poll_events, glfw_terminate, glfw_window_hint, glfw_window_should_close,
-  glfw_destroy_window, kGlfwClientApi, kGlfwFalse, kGlfwNoApi, kGlfwResizable} from ultragui_d3d12::sys::glfw;
+  glfw_destroy_window, kGlfwClientApi, kGlfwFalse, kGlfwNoApi, kGlfwResizable} from ultragui_glfw::sys::glfw;
 
 struct Batch {
   pub var v: List<Vertex2D> = List()

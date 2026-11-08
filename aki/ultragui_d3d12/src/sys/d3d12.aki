@@ -29,7 +29,7 @@
 
 module ultragui_d3d12::sys::d3d12;
 
-import {VkDevice, VkImage, VkInstance, VkPhysicalDevice, VkQueue} from ultragui_d3d12::sys::vulkan;
+import {VkDevice, VkImage, VkInstance, VkPhysicalDevice, VkQueue} from ultragui_vulkan::sys::vulkan;
 
 // --- Basic Windows types -----------------------------------------------------
 

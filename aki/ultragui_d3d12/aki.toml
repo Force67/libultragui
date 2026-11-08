@@ -1,6 +1,7 @@
 # ultragui's D3D12 backend (ugui/rhi/d3d12/d3d12_rhi.cc) in aki: an Rhi over
 # D3D12 (vkd3d on Linux, with presentation through a Vulkan swapchain) with the
-# COM interfaces and vkd3d calls declared by hand in src/sys/. See ../PORTING.md.
+# COM interfaces and vkd3d calls declared by hand in src/sys/; the GLFW and Vulkan
+# bindings are the shared ones (ultragui_glfw, ultragui_vulkan). See ../PORTING.md.
 [package]
 name = "ultragui_d3d12"
 kind = "lib"
@@ -9,6 +10,8 @@ description = "libultragui's D3D12 RHI in aki"
 
 [dependencies]
 ultragui = { path = "../ultragui" }
+ultragui_glfw = { path = "../ultragui_glfw" }
+ultragui_vulkan = { path = "../ultragui_vulkan" }
 
 # Linux: vkd3d (D3D12 over Vulkan) and its utils for D3D12SerializeRootSignature.
 [build.os.linux]

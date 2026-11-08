@@ -8,4 +8,5 @@ version = "0.1.0"
 
 [dependencies]
 ultragui = { path = "../../../ultragui" }
+ultragui_glfw = { path = "../../../ultragui_glfw" }
 ultragui_d3d12 = { path = "../.." }

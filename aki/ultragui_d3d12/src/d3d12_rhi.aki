@@ -49,19 +49,19 @@ import {Rhi, RhiConfig} from ultragui::rhi::rhi;
 import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
 import * from ultragui_d3d12::sys::d3d12;
 import {GlfwWindow, glfw_get_framebuffer_size, glfw_get_window_size, glfw_set_framebuffer_size_callback, glfw_wait_events}
-  from ultragui_d3d12::sys::glfw;
+  from ultragui_glfw::sys::glfw;
 import {VkDevice, VkExtent2D, VkFence, VkImage, VkInstance, VkPhysicalDevice, VkPhysicalDeviceProperties, VkPresentInfoKHR,
   VkQueue, VkQueueFamilyProperties, VkSurfaceCapabilitiesKHR, VkSurfaceFormatKHR, VkSurfaceKHR, VkSwapchainCreateInfoKHR,
   VkSwapchainKHR, VkFenceCreateInfo, glfw_create_window_surface, glfw_get_required_instance_extensions, kVkColorSpaceSrgbNonlinearKhr,
-  kVkCompositeAlphaOpaqueBitKhr, kVkErrorOutOfDateKhr, kVkFormatB8G8R8A8Srgb, kVkFormatB8G8R8A8Unorm, kVkFormatR8G8B8A8Srgb,
-  kVkFormatR8G8B8A8Unorm, kVkFormatUndefined, kVkImageUsageColorAttachmentBit, kVkPresentModeFifoKhr, kVkPresentModeMailboxKhr,
+  kVkCompositeAlphaOpaqueBitKhr, kVkErrorOutOfDateKhr, kVkFormatB8g8r8a8Srgb, kVkFormatB8g8r8a8Unorm, kVkFormatR8g8b8a8Srgb,
+  kVkFormatR8g8b8a8Unorm, kVkFormatUndefined, kVkImageUsageColorAttachmentBit, kVkPresentModeFifoKhr, kVkPresentModeMailboxKhr,
   kVkQueueGraphicsBit, kVkSharingModeConcurrent, kVkSharingModeExclusive, kVkSuboptimalKhr, kVkSuccess,
   vk_acquire_next_image_khr, vk_create_fence, vk_create_swapchain_khr, vk_destroy_fence, vk_destroy_surface_khr,
   vk_destroy_swapchain_khr, vk_enumerate_physical_devices, vk_get_device_queue, vk_get_physical_device_properties,
   vk_get_physical_device_queue_family_properties, vk_get_physical_device_surface_capabilities_khr,
   vk_get_physical_device_surface_formats_khr, vk_get_physical_device_surface_present_modes_khr,
   vk_get_physical_device_surface_support_khr, vk_get_swapchain_images_khr, vk_queue_present_khr, vk_reset_fences,
-  vk_wait_for_fences} from ultragui_d3d12::sys::vulkan;
+  vk_wait_for_fences} from ultragui_vulkan::sys::vulkan;
 import {kQuadPs, kQuadVs, kTextPs, kTextVs, kVideoPs, kVideoVs} from ultragui_d3d12::shaders;
 
 extern("memcpy") fn memcpy(dst: *var u8, src: *const u8, n: usize): *var u8;
@@ -76,12 +76,12 @@ comptime let kMaxTextures: u32 = 256;
 // choose_surface_format: sRGB B8G8R8A8 first, then UNORM, else the first.
 fn choose_surface_format(formats&: [VkSurfaceFormatKHR]): VkSurfaceFormatKHR {
   for (let f in formats) {
-    if (f.format == kVkFormatB8G8R8A8Srgb && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
+    if (f.format == kVkFormatB8g8r8a8Srgb && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
       return f;
     }
   }
   for (let f in formats) {
-    if (f.format == kVkFormatB8G8R8A8Unorm && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
+    if (f.format == kVkFormatB8g8r8a8Unorm && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
       return f;
     }
   }
@@ -115,10 +115,10 @@ fn choose_extent(caps&: VkSurfaceCapabilitiesKHR, window: *var GlfwWindow): VkEx
 
 // Map VkFormat (sRGB swapchain) to the matching DXGI format.
 fn vk_format_to_dxgi(vk_fmt: u32): u32 => match (vk_fmt) {
-  kVkFormatB8G8R8A8Srgb => kDxgiFormatB8G8R8A8UnormSrgb,
-  kVkFormatB8G8R8A8Unorm => kDxgiFormatB8G8R8A8Unorm,
-  kVkFormatR8G8B8A8Srgb => kDxgiFormatR8G8B8A8UnormSrgb,
-  kVkFormatR8G8B8A8Unorm => kDxgiFormatR8G8B8A8Unorm,
+  kVkFormatB8g8r8a8Srgb => kDxgiFormatB8G8R8A8UnormSrgb,
+  kVkFormatB8g8r8a8Unorm => kDxgiFormatB8G8R8A8Unorm,
+  kVkFormatR8g8b8a8Srgb => kDxgiFormatR8G8B8A8UnormSrgb,
+  kVkFormatR8g8b8a8Unorm => kDxgiFormatR8G8B8A8Unorm,
   _ => kDxgiFormatB8G8R8A8UnormSrgb,
 };
 
@@ -623,10 +623,10 @@ fn Impl::pick_physical_device(var self&): bool {
       var props = VkPhysicalDeviceProperties {};
       unsafe { vk_get_physical_device_properties(dev, &raw var props); }
       var name_len = 0usize;
-      while (name_len < 256 && props.device_name[name_len] != 0) {
+      while (name_len < 256 && props.device_name[name_len] != (0 as c_char)) {
         name_len += 1;
       }
-      let name = unsafe @slice(@ptr(props.device_name[..]), name_len);
+      let name = unsafe @slice(@ptr(props.device_name[..]) as *const u8, name_len);
       println(f"ultragui-d3d12: using GPU '{utf8_view(name as bytes) ?? ""}'");
       return true;
     }
