@@ -46,7 +46,7 @@ nix develop -c bash -c 'cmake -S . -B /tmp/ugui-ref -G Ninja && ninja -C /tmp/ug
 ```
 
 Reference values for bit-exact tests come from `aki/ultragui/tools/gen_reference.cc`
-(its header has the build line). Extend it with a function per subsystem,
+(its header has the build line); Renderer2D's from `tools/gen_renderer_reference.cc`. Extend it with a function per subsystem,
 print one tagged line per value (`TAG a b c`, floats as `0x%08x` bits), and
 paste the lines into the test as `static let` tables. The tables in
 `core_test.aki` and `text_engine_test.aki` were recorded on aarch64 Linux.
@@ -83,8 +83,8 @@ package), **gone** (no counterpart, reason given).
 | render/vertex.h | ultragui::render::vertex | ported |
 | render/draw_data.h | ultragui::render::draw_data | ported |
 | render/texture_backend.h | ultragui::render::texture_backend | ported (seam) |
-| render/renderer2d.{h,cc} | ultragui::render::renderer2d | next (a placeholder struct is there now; replace the file) |
-| render/paint.{h,cc} | ultragui::render::paint | next |
+| render/renderer2d.{h,cc} | ultragui::render::renderer2d | ported (not generic over the Rhi, see "Renderer2D and the Rhi"; vertices bit-exact vs C++) |
+| render/paint.{h,cc} | ultragui::render::paint | ported |
 | rhi/rhi.h | ultragui::rhi::rhi | ported (capability) |
 | rhi/rhi_types.h | ultragui::rhi::rhi_types | ported |
 | rhi/rhi_texture_backend.h | ultragui::rhi::rhi_texture_backend | ported |
@@ -94,7 +94,7 @@ package), **gone** (no counterpart, reason given).
 | rhi/d3d11/* | | pkg:ultragui_d3d11 |
 | rhi/d3d12/* | | pkg:ultragui_d3d12 |
 | input/input_queue.h | ultragui::input::input_queue | ported |
-| input/input.{h,cc} | ultragui::input::input | next |
+| input/input.{h,cc} | ultragui::input::input | ported (platform through the WidgetContext, see "InputRouter") |
 | platform/platform.h | ultragui::platform::platform | ported (capability + DynPlatform) |
 | platform/platform_host.{h,cc} | ultragui::platform::platform_host | ported |
 | platform/platform_open_url.cc | ultragui::platform::platform_open_url | ported |
@@ -108,11 +108,12 @@ package), **gone** (no counterpart, reason given).
 | widgets/widget_registry.{h,cc} | ultragui::widgets::widget_registry | ported (World; no Active()) |
 | widgets/components.h | ultragui::widgets::components | ported |
 | widgets/widget_context.h | ultragui::widgets::widget_context | ported |
-| widgets/widget.h, widget.cc | ultragui::widgets::widget | partial: next adds PaintWidget, InputToLayoutPoint, PopulateLayoutNode, ApplyLayoutResult (they need renderer2d, scroll_view, layout) |
+| widgets/widget.h, widget.cc | ultragui::widgets::widget | ported (PaintWidget overloads: paint_widget, paint_widget_styled) |
 | widgets/widget_vtable.{h,cc} | ultragui::widgets::widget_vtable | ported (match dispatch, arms added per kind) |
-| widgets/widget_tree.{h,cc} | ultragui::widgets::widget_tree | next |
-| widgets/{panel,text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | next |
-| layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} (+ sys::yoga) | next |
+| widgets/widget_tree.{h,cc} | ultragui::widgets::widget_tree | ported |
+| widgets/panel.{h,cc} | ultragui::widgets::panel | ported (no vtable arms: the C++ has none) |
+| widgets/{text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | next |
+| layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} (+ sys::yoga) | ported (test_layout_retained.cc ported) |
 | idl/parser.{h,cc}, builder.{h,cc} | ultragui::idl::{parser,builder} | next |
 | svg/* | ultragui::svg::* | next (pure code, core) |
 | anim/* | ultragui::anim::* | next (pure code, core) |
@@ -433,6 +434,103 @@ and widget code asks `widget_context_of(world, ctx, e)` (none where the C++
 pointer is null) or `has_widget_context(world, e)`. `ui_scale(world, ctx, e)`
 is 1.0 for a detached widget, as in the C++.
 
+### Renderer2D and the Rhi — `ultragui::render::renderer2d`
+
+The API is the C++ one in snake_case (`draw_rect`, `draw_rect_gradient`,
+`draw_shadow`, `draw_inset_shadow`, `draw_bordered_rect`, `draw_text`,
+`draw_text_layout`, `draw_radial_gradient`, `draw_multi_stop_gradient`,
+`draw_textured_rect`, `push_scissor`/`pop_scissor`,
+`push_transform`/`pop_transform`, `set_next_blur`, `set_display_size`,
+`get_draw_data`), same parameter order, C++ defaults as aki defaults. The one
+parameter-shape exception: `GradientStop* stops, u32 count` is
+`stops: &[GradientStop]` (`s.gradient_stops[..s.gradient_stop_count as usize]`).
+Widget code takes `var renderer&: Renderer2D` (no lifetime, no type parameter).
+
+Renderer2D is not generic over the Rhi and keeps no view of it. The C++
+reads `rhi_->display_size()` and `rhi_->dpi_scale()` while drawing; here an
+attached renderer keeps a snapshot of both, taken by `init_rhi` and refreshed
+by `begin_frame_rhi` (nothing changes them between begin and end of a frame):
+
+```aki
+var r = Renderer2D();
+r.init();                         // Init(nullptr): draw-data mode
+r.set_display_size(viewport);
+r.set_texture_backend(TextureBackendBox::of(host_textures));   // owned; none = flat gradients
+r.begin_frame();  paint...;  let dd = r.get_draw_data();       // DrawData views r's buffers
+
+r.init_rhi(rhi);                  // Init(&rhi): legacy mode
+r.set_rhi_texture_backend();      // gradients through the Rhi (UIContext's RHITextureBackend)
+r.begin_frame_rhi(rhi);  paint...;  r.end_frame(rhi);           // submits in emission order
+```
+
+Gradient textures: with a host backend (owned `TextureBackendBox`) they are
+created at draw time, as in the C++. The legacy RHI adapter borrows the Rhi
+its owner keeps, so the renderer cannot hold it; in Rhi-texture mode a new
+gradient gets a provisional id (counting down from `kFontTextureId - 1`,
+above anything an Rhi mints) and `end_frame(rhi)` (or
+`resolve_textures(rhi)`, for a get_draw_data user) creates the pending
+textures in request order and patches batches and cache before submitting.
+Batching only compares ids, so the batches are the C++ ones
+(renderer2d_test checks both modes against the C++). `texture_backend()`
+lends the owned host backend to other subsystems (UIContext's
+`texture_backend()` in draw-data mode).
+
+### Layout — `ultragui::layout::{layout,layout_tree}`
+
+```aki
+var engine = LayoutEngine();
+compute_widget_layout(world, ctx, root, LayoutViewport { width: w, height: h, scale: s }, engine);  // ComputeWidgetLayout
+engine.store_for(root_id)          // StoreFor -> &var NodeStore
+engine.compute(nodes, vp);         // Compute over the caller's own &var [LayoutNode]
+engine.compute_store(root_id, vp); // Compute over store_for(root_id).nodes (borrowing the engine once)
+engine.reset();
+```
+
+`kNoNode` is the C++ `~0u`. Yoga's C API is bound by hand in `sys::yoga`;
+the measure callback is an `extern fn` reading the node's context, which
+compute re-points at the caller's LayoutNode on every call.
+
+### Paint and the widget tree
+
+```aki
+paint_widget_tree(world, ctx, root, renderer);        // render::paint, PaintWidgetTree
+paint_widget(world, ctx, e, renderer);                // PaintWidget(world, e, r)
+paint_widget_styled(world, ctx, e, renderer, style);  // PaintWidget(world, e, r, computed)
+measure_widget_tree(world, ctx, root): u32;  update_widget_tree(world, ctx, root, dt);
+find_widget(world, root, name);  find_widget_by_id(world, root, id);
+input_to_layout_point(world, e, point);  populate_layout_node(world, e, node);  apply_layout_result(world, e, node);
+create_panel(world, id);
+```
+
+The tree walks copy a child list before recursing into it (the C++ walks the
+live vector; nothing in a walk restructures the tree).
+
+### InputRouter — `ultragui::input::input`
+
+The router reaches the platform through `ctx.platform` (no `Init(Platform*)`;
+UIContext points both at one platform, and `ctx.platform == none` is the C++
+`!platform_`). Everything that touches widgets takes the World and the
+context:
+
+```aki
+var router = InputRouter();
+router.set_on_click(own fn(w: WidgetId, b: MouseButton) { ... });   // ClickHandler, HoverHandler,
+router.register_shortcut(key, mods, own fn() { ... });              // ShortcutHandler, GamepadBackHandler
+let consumed = router.process(world, ctx, root);
+router.set_focus(world, ctx, e);  router.set_hover(world, ctx, e);
+router.refresh_hover(world, ctx, root);  router.reset_state(world, ctx);
+```
+
+process copies the platform's queue (widget calls need the context, which
+lends the platform) and clears the platform's queue at the end, as the C++
+does. Handlers keep the C++ signatures and get no World: an application
+handler that must reach widgets or the script runtime (the examples' Lua
+`on_<name>` dispatch) records the widget and acts after process returns.
+
+`widgets::scroll_view` exists as a stub (ScrollViewContent,
+kScrollViewContent, scroll_offset) in a commit titled "stub scroll_view ...":
+the widget-kinds port replaces the file.
+
 ### Widget dispatch — `ultragui::widgets::widget_vtable`
 
 Per-kind behaviour is a `match` on `WidgetKind` per vtable entry, calling the
@@ -490,6 +588,10 @@ so bit-exact tables are aarch64's.
   `row * pitch` unsigned).
 - KeyframeAnimation with a zero duration: the C++ casts inf to int (UB); the
   port saturates.
+- Renderer2D::DrawTextLayout computes a slack against `max_width` and throws
+  it away: every line is drawn left-aligned, whatever max_width says.
+- Renderer2D's gradient cache keys collide as the C++ ones do (the
+  multi-stop hash XORs shifted fields; a collision reuses the texture).
 
 ### Shape differences (not behavior)
 
@@ -528,6 +630,10 @@ so bit-exact tables are aarch64's.
 - Type arguments of generic calls with only literal arguments need a suffix
   (`min(3i32, 2)`).
 - `null` is a keyword (no method named `null`).
+- **`for (var b in list.iter_var())` binds a copy**: writes to `b` are lost.
+  Write through a view (`for (var b& in list)`) or the index (`list[j].f = x`).
+- Integer `+ - *` stop on overflow; hashes need the wrapping forms
+  (`h = h *% 1099511628211`). Shifts drop shifted-out bits unchecked.
 - C `long` differs per OS: use `CLong`/`CULong` from `ultragui::sys::c_long`
   (one module per OS under `os/`; each OS table in aki.toml needs its own
   directory, they cannot share one). Check Windows layouts with
