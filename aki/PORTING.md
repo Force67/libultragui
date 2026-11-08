@@ -46,7 +46,9 @@ nix develop -c bash -c 'cmake -S . -B /tmp/ugui-ref -G Ninja && ninja -C /tmp/ug
 ```
 
 Reference values for bit-exact tests come from `aki/ultragui/tools/gen_reference.cc`
-(its header has the build line); Renderer2D's from `tools/gen_renderer_reference.cc`. Extend it with a function per subsystem,
+(its header has the build line); Renderer2D's from `tools/gen_renderer_reference.cc`,
+layout + paint's from `tools/gen_paint_reference.cc` (links a Release build of the
+C++ library: at -O0 clang does not contract `a * b + c`, akiko always does). Extend it with a function per subsystem,
 print one tagged line per value (`TAG a b c`, floats as `0x%08x` bits), and
 paste the lines into the test as `static let` tables. The tables in
 `core_test.aki` and `text_engine_test.aki` were recorded on aarch64 Linux.
@@ -112,7 +114,7 @@ package), **gone** (no counterpart, reason given).
 | widgets/widget_vtable.{h,cc} | ultragui::widgets::widget_vtable | ported (match dispatch, arms added per kind) |
 | widgets/widget_tree.{h,cc} | ultragui::widgets::widget_tree | ported |
 | widgets/panel.{h,cc} | ultragui::widgets::panel | ported (no vtable arms: the C++ has none) |
-| widgets/{text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | next |
+| widgets/{text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | next (widgets/scroll_view.aki is a stub with scroll_offset only; the kinds port replaces it) |
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} (+ sys::yoga) | ported (test_layout_retained.cc ported) |
 | idl/parser.{h,cc}, builder.{h,cc} | ultragui::idl::{parser,builder} | next |
 | svg/* | ultragui::svg::* | next (pure code, core) |

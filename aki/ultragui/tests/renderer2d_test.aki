@@ -280,6 +280,7 @@ struct RecordingRhi : Rhi {
   pub var scissor: Rect = Rect {}
   pub var draws: List<Submitted> = List()
   pub var hashes: List<u64> = List()
+  pub var dpi: f32 = 1.0
 
   pub fn init(var self&, config&: RhiConfig): bool => true;
   pub fn shutdown(var self&) {}
@@ -316,7 +317,7 @@ struct RecordingRhi : Rhi {
   pub fn end_offscreen(var self&, target: RhiTextureHandle) {}
   pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {}
   pub fn display_size(self&): Vec2 => Vec2 { x: 800.0, y: 600.0 };
-  pub fn dpi_scale(self&): f32 => 1.0;
+  pub fn dpi_scale(self&): f32 => self.dpi;
 }
 
 // The scene of tools/gen_renderer_reference.cc, step for step.
@@ -448,6 +449,27 @@ pub fn main(): i32 {
     let dd = r.get_draw_data();
     check_draw_data(t, dd);
     t.that(rhi.hashes.len() == 3, "Rhi mode: second frame all cached");
+  }
+  // A fractional dpi from the attached Rhi snaps quad edges to physical
+  // pixels (not under a transform) and glyph boxes always.
+  {
+    var rhi = RecordingRhi { dpi: 1.25 };
+    var r = Renderer2D();
+    let _ = r.init_rhi(rhi);
+    r.begin_frame_rhi(rhi);
+    r.draw_rect(Rect::new(10.3, 20.7, 33.3, 11.1), Color::white());
+    r.push_transform(Vec2::new(0.0, 0.0), 0.0);
+    r.pop_transform();
+    let dd = r.get_draw_data();
+    let inv: f32 = 1.0 / 1.25;
+    let rx: f32 = 10.3;
+    let rw: f32 = 33.3;
+    let dpi: f32 = 1.25;
+    let x0 = @round(rx * dpi) * inv;
+    let x1 = @round((rx + rw) * dpi) * inv;
+    t.that(dd.quad_vertices[0].pos[0] == x0 && dd.quad_vertices[1].pos[0] == x1, "dpi snapping of quad edges");
+    t.that(dd.quad_vertices[0].half_size[0] == (x1 - x0) * 0.5, "half size of the snapped rect");
+    t.that(dd.commands[0].clip_rect.w == 800.0, "default scissor from the Rhi display size");
   }
   return t.finish();
 }
