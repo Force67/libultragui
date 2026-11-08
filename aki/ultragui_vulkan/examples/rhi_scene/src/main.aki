@@ -206,6 +206,15 @@ pub fn main(): i32 {
     quad(q, Rect::new(160.0, 240.0, 300.0, 200.0), color(0.3, 0.3, 0.6, 1.0), color(0.3, 0.3, 0.6, 1.0), pack_radii_uniform(30.0), 0.0,
       4.0, color(1.0, 0.8, 0.2, 1.0));  // 9
     solid(q, Rect::new(520.0, 320.0, 100.0, 100.0), color(1.0, 1.0, 1.0, 1.0), pack_radii_uniform(8.0));  // 10
+    // 5000 dots (20000 vertices) drawn after the first batches: the vertex
+    // buffer outgrows its first 16384 vertices mid-frame, so the RHI retires
+    // it and frees it at the fence.
+    var dust = Mesh {};
+    for (let k in 0u32..5000) {
+      let x = 20.0 + (k % 100) as f32 * 6.0;
+      let y = 375.0 + (k / 100) as f32 * 2.0;
+      solid(dust, Rect::new(x, y, 2.0, 1.0), color(1.0, 1.0, 1.0, 0.35), 0);
+    }
     text(tx, Vec2 { x: 20.0, y: 420.0 }, hello, color(1.0, 1.0, 1.0, 1.0));
     text(ctext, Vec2 { x: 170.0, y: 300.0 }, clipped, color(1.0, 0.95, 0.4, 1.0));
 
@@ -227,6 +236,7 @@ pub fn main(): i32 {
     draw(rhi, q, 7, 1, rt);
     draw(rhi, q, 8, 1, bgra_tex);
     draw(rhi, q, 10, 1, video);
+    draw(rhi, dust, 0, 5000, kInvalidTexture);
     draw_text(rhi, tx, atlas);
     rhi.set_scissor(Rect::new(200.0, 280.0, 180.0, 120.0));
     draw(rhi, q, 9, 1, kInvalidTexture);

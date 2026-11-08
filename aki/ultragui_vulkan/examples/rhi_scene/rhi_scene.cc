@@ -205,6 +205,15 @@ int main(int argc, char** argv) {
          {0.3f, 0.3f, 0.6f, 1}, Vertex2D::PackRadii(30), 0.0f, 4.0f,
          {1, 0.8f, 0.2f, 1});                                          // 9
     Solid(q, {520, 320, 100, 100}, {1, 1, 1, 1}, Vertex2D::PackRadii(8));  // 10
+    // 5000 dots (20000 vertices) drawn after the first batches: the vertex
+    // buffer outgrows its first 16384 vertices mid-frame, so the RHI retires
+    // it and frees it at the fence.
+    Mesh dust;
+    for (u32 k = 0; k < 5000; ++k) {
+      f32 x = 20.0f + static_cast<f32>(k % 100) * 6.0f;
+      f32 y = 375.0f + static_cast<f32>(k / 100) * 2.0f;
+      Solid(dust, {x, y, 2, 1}, {1, 1, 1, 0.35f}, 0);
+    }
     Text(text, {20, 420}, hello, {1, 1, 1, 1});
     Text(ctext, {170, 300}, clipped, {1, 0.95f, 0.4f, 1});
 
@@ -224,6 +233,7 @@ int main(int argc, char** argv) {
     Draw(rhi, q, 7, 1, rt);
     Draw(rhi, q, 8, 1, bgra_tex);
     Draw(rhi, q, 10, 1, video);
+    Draw(rhi, dust, 0, 5000, kInvalidTexture);
     rhi.DrawTextTriangles(text.v.data(), static_cast<u32>(text.v.size()),
                           text.i.data(), static_cast<u32>(text.i.size()),
                           atlas);
