@@ -1,0 +1,220 @@
+// rhi_scene (aki): GlfwPlatform and VulkanRhi driven directly, with no
+// UIContext: SDF rounded rects (radii, border, shadow, inner softness), a
+// gradient, textured quads (RGBA linear, BGRA nearest, updated each frame),
+// text from the TextEngine atlas, scissored content, and an offscreen render
+// target composited back. rhi_scene.cc is the C++ reference; it builds the
+// same vertices in the same order, and under aki/tools/xshot.sh the two
+// screenshots should be equal.
+//
+//   rhi_scene <shader_dir> <font.ttf> [frames]
+//
+// frames: exit after that many frames (0 or absent: run until closed).
+
+module rhi_scene;
+
+import {List} from akikit::containers::list;
+import {eprintln} from akikit::logging;
+import {arguments} from akikit::process::command_line;  // the arguments after the program path
+import {from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {WindowConfig} from ultragui::platform::platform;
+import {rhi_handle_from_texture_id} from ultragui::render::texture_backend;
+import {Vertex2D, pack_color, pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {TextEngine, TextRun} from ultragui::text::text_engine;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {VulkanRhi} from ultragui_vulkan::vulkan_rhi;
+
+struct Mesh {
+  pub var v: List<Vertex2D> = List()
+  pub var i: List<u32> = List()
+}
+
+fn color(r: f32, g: f32, b: f32, a: f32): Color => Color { r, g, b, a };
+
+// Renderer2D::EmitQuad at dpi 1 with no transform.
+fn quad(var m&: Mesh, r: Rect, c: Color, c2: Color, radii: u32, softness: f32, border_width: f32, border: Color) {
+  let col = pack_color(c.r, c.g, c.b, c.a);
+  let col2 = pack_color(c2.r, c2.g, c2.b, c2.a);
+  let bc = pack_color(border.r, border.g, border.b, border.a);
+  let hw = r.w * 0.5;
+  let hh = r.h * 0.5;
+  let base = m.v.len() as u32;
+  let corners = [(r.x, r.y, 0.0f32, 0.0f32), (r.x + r.w, r.y, 1.0, 0.0), (r.x + r.w, r.y + r.h, 1.0, 1.0), (r.x, r.y + r.h, 0.0, 1.0)];
+  for (let (x, y, u, v) in corners) {
+    m.v.push(Vertex2D {
+      pos: [x, y], uv: [u, v], color: col, color2: col2, corner_radii: radii, softness,
+      half_size: [hw, hh], border_width, border_color: bc,
+    });
+  }
+  for (let k in [0u32, 1, 2, 0, 2, 3]) {
+    m.i.push(base + k);
+  }
+}
+
+fn solid(var m&: Mesh, r: Rect, c: Color, radii: u32) {
+  quad(m, r, c, c, radii, 0.0, 0.0, color(0.0, 0.0, 0.0, 0.0));
+}
+
+// Renderer2D::DrawText at dpi 1 with no transform.
+fn text(var m&: Mesh, pos: Vec2, run&: TextRun, c: Color) {
+  let packed = pack_color(c.r, c.g, c.b, c.a);
+  var cursor_x = pos.x;
+  let baseline_y = pos.y + run.ascent;
+  for (let g in run.glyphs()) {
+    if (g.bmp_w <= 0.0 || g.bmp_h <= 0.0) {
+      cursor_x += g.x_advance;
+      continue;
+    }
+    let x = @round(cursor_x + g.bearing_x + g.x_offset);
+    let y = @round(baseline_y - g.bearing_y + g.y_offset);
+    let w = @round(g.bmp_w);
+    let h = @round(g.bmp_h);
+    let base = m.v.len() as u32;
+    let corners = [(x, y, g.u0, g.v0), (x + w, y, g.u1, g.v0), (x + w, y + h, g.u1, g.v1), (x, y + h, g.u0, g.v1)];
+    for (let (px, py, u, v) in corners) {
+      m.v.push(Vertex2D {
+        pos: [px, py], uv: [u, v], color: packed, color2: packed, corner_radii: 0, softness: 0.0,
+        half_size: [0.0, 0.0], border_width: 0.0, border_color: 0,
+      });
+    }
+    for (let k in [0u32, 1, 2, 0, 2, 3]) {
+      m.i.push(base + k);
+    }
+    cursor_x += g.x_advance;
+  }
+}
+
+fn draw(var rhi&: VulkanRhi, m&: Mesh, first_quad: usize, quad_count: usize, tex: RhiTextureHandle) {
+  rhi.draw_triangles(m.v.as_slice(), m.i.as_slice()[first_quad * 6..(first_quad + quad_count) * 6], tex);
+}
+
+fn draw_text(var rhi&: VulkanRhi, m&: Mesh, atlas: RhiTextureHandle) {
+  rhi.draw_text_triangles(m.v.as_slice(), m.i.as_slice(), atlas);
+}
+
+pub fn main(): i32 {
+  let args = arguments();
+  if (args.len() < 2) {
+    eprintln("usage: rhi_scene <shader_dir> <font.ttf> [frames]");
+    return 2;
+  }
+  var frames: u32 = 0;
+  if (args.len() > 2) {
+    for (let c in args[2]) {
+      frames = frames * 10 + (c as u32 - '0' as u32);
+    }
+  }
+
+  var platform = GlfwPlatform();
+  if (!platform.init(WindowConfig { width: 640, height: 480, title: from_str("rhi_scene"), resizable: false })) {
+    return 1;
+  }
+
+  var rhi = VulkanRhi();
+  let rc = RhiConfig { native_window: platform.native_handle(), validation: false, shader_dir: from_str(args[0]) };
+  if (!rhi.init(rc)) {
+    return 1;
+  }
+
+  var te = TextEngine();
+  te.init();
+  te.set_dpi_scale(rhi.dpi_scale());
+  let font = te.load_font(args[1]);
+
+  // An 8x8 RGBA checkerboard, sampled linearly.
+  var checker = [0u8; 256];
+  for (let y in 0usize..8) {
+    for (let x in 0usize..8) {
+      let p = (y * 8 + x) * 4;
+      let on = ((x + y) & 1) != 0;
+      checker[p] = on ? 240 : 40;
+      checker[p + 1] = on ? 200 : 60;
+      checker[p + 2] = on ? 80 : 160;
+      checker[p + 3] = 255;
+    }
+  }
+  let checker_tex = rhi.create_texture(8, 8, RhiFormat::Rgba8Unorm, checker[..] as bytes, RhiFilter::Linear);
+  // A 2x2 BGRA texture, sampled nearest.
+  let bgra: [u8; 16] = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128];
+  let bgra_tex = rhi.create_texture(2, 2, RhiFormat::Bgra8Unorm, bgra[..] as bytes, RhiFilter::Nearest);
+  let rt = rhi.create_render_target(128, 128);
+
+  let transparent = color(0.0, 0.0, 0.0, 0.0);
+  var frame: u32 = 0;
+  while (frames == 0 || frame < frames) {
+    frame += 1;
+    platform.poll_events();
+    if (platform.should_close()) {
+      break;
+    }
+
+    te.begin_frame();
+    let hello = te.shape(font, "Hello, ultragui!", 28.0);
+    let clipped = te.shape(font, "Scissored text is clipped here", 22.0);
+    let rt_label = te.shape(font, "RT", 40.0);
+    te.flush_atlas(rhi);
+    let atlas = rhi_handle_from_texture_id(te.atlas_texture());
+    rhi.update_texture(checker_tex, checker[..] as bytes);
+
+    // Offscreen target content.
+    var rq = Mesh {};
+    var rtext = Mesh {};
+    quad(rq, Rect::new(16.0, 16.0, 96.0, 96.0), color(1.0, 1.0, 1.0, 0.85), color(1.0, 1.0, 1.0, 0.85), pack_radii_uniform(24.0), 0.0,
+      3.0, color(0.9, 0.3, 0.5, 1.0));
+    text(rtext, Vec2 { x: 36.0, y: 38.0 }, rt_label, color(0.1, 0.1, 0.2, 1.0));
+
+    // Main pass content: quads 0..9 in one shared vertex array.
+    var q = Mesh {};
+    var tx = Mesh {};
+    var ctext = Mesh {};
+    solid(q, Rect::new(20.0, 20.0, 180.0, 100.0), color(0.23, 0.51, 0.96, 1.0), pack_radii_uniform(12.0));  // 0
+    quad(q, Rect::new(220.0, 20.0, 180.0, 100.0), color(0.9, 0.3, 0.3, 1.0), color(0.9, 0.3, 0.3, 1.0), pack_radii(0.0, 20.0, 40.0, 8.0),
+      0.0, 3.0, color(1.0, 1.0, 1.0, 0.9));  // 1
+    quad(q, Rect::new(410.0, 16.0, 220.0, 120.0), color(0.0, 0.0, 0.0, 0.6), color(0.0, 0.0, 0.0, 0.6), pack_radii_uniform(16.0), 10.0,
+      0.0, transparent);  // 2
+    solid(q, Rect::new(420.0, 20.0, 200.0, 100.0), color(0.95, 0.95, 0.97, 1.0), pack_radii_uniform(16.0));  // 3
+    quad(q, Rect::new(20.0, 140.0, 280.0, 80.0), color(1.0, 0.6, 0.1, 1.0), color(0.6, 0.1, 0.9, 1.0), pack_radii_uniform(10.0), 0.0,
+      0.0, transparent);  // 4
+    quad(q, Rect::new(20.0, 240.0, 120.0, 60.0), color(0.2, 0.8, 0.5, 1.0), color(0.2, 0.8, 0.5, 1.0), pack_radii_uniform(12.0), -4.0,
+      0.0, transparent);  // 5
+    solid(q, Rect::new(320.0, 140.0, 128.0, 128.0), color(1.0, 1.0, 1.0, 1.0), pack_radii_uniform(20.0));  // 6
+    solid(q, Rect::new(470.0, 140.0, 150.0, 150.0), color(1.0, 1.0, 1.0, 1.0), 0);  // 7
+    solid(q, Rect::new(20.0, 320.0, 64.0, 64.0), color(1.0, 1.0, 1.0, 1.0), 0);  // 8
+    quad(q, Rect::new(160.0, 240.0, 300.0, 200.0), color(0.3, 0.3, 0.6, 1.0), color(0.3, 0.3, 0.6, 1.0), pack_radii_uniform(30.0), 0.0,
+      4.0, color(1.0, 0.8, 0.2, 1.0));  // 9
+    text(tx, Vec2 { x: 20.0, y: 420.0 }, hello, color(1.0, 1.0, 1.0, 1.0));
+    text(ctext, Vec2 { x: 170.0, y: 300.0 }, clipped, color(1.0, 0.95, 0.4, 1.0));
+
+    if (!rhi.acquire_frame()) {
+      continue;
+    }
+    if (rhi.begin_offscreen(rt, color(0.1, 0.5, 0.4, 1.0))) {
+      draw(rhi, rq, 0, 1, kInvalidTexture);
+      draw_text(rhi, rtext, atlas);
+      rhi.end_offscreen(rt);
+    }
+
+    if (!rhi.begin_frame(color(0.08, 0.09, 0.12, 1.0))) {
+      continue;
+    }
+    draw(rhi, q, 0, 6, kInvalidTexture);
+    draw(rhi, q, 6, 1, checker_tex);
+    draw(rhi, q, 7, 1, rt);
+    draw(rhi, q, 8, 1, bgra_tex);
+    draw_text(rhi, tx, atlas);
+    rhi.set_scissor(Rect::new(200.0, 280.0, 180.0, 120.0));
+    draw(rhi, q, 9, 1, kInvalidTexture);
+    draw_text(rhi, ctext, atlas);
+    rhi.reset_scissor();
+    rhi.end_frame();
+  }
+
+  te.shutdown_with(rhi);
+  rhi.shutdown();
+  platform.shutdown();
+  return 0;
+}
