@@ -27,9 +27,9 @@ import {Device, DeviceContext, DxgiAdapter, DxgiDevice, DxgiFactory, SwapChain, 
   dxgi_adapter_get_parent, dxgi_device_get_adapter, dxgi_factory_create_swap_chain, release, swap_chain_get_buffer,
   swap_chain_present} from ultragui_d3d11::sys::d3d11_vtbl;
 import {Dx11Renderer} from ultragui_d3d11::ugui_impl_dx11;
-import {Expect} from support::expect;
-import {big_pixels, build_frame, checker_pixels, ramp_pixels} from support::draw_data_scene;
-import {kFontPath, kSceneHeight, kSceneWidth} from support::scene;
+import {Expect} from ultragui_testing::expect;
+import {big_pixels, build_frame, checker_pixels, ramp_pixels} from ultragui_scenes::draw_data_scene;
+import {kFontPath, kSceneHeight, kSceneWidth} from ultragui_scenes::scene;
 
 fn hold_seconds(): f64 {
   let v = get_environment_variable("UGUI_SCENE_SECS") else { return 0.0; };

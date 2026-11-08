@@ -20,7 +20,7 @@ import {RhiConfig} from ultragui::rhi::rhi;
 import {RhiFilter, RhiFormat, kInvalidTexture} from ultragui::rhi::rhi_types;
 import {GlfwPlatform} from ultragui_glfw::platform_glfw;
 import {VulkanRhi} from ultragui_vulkan::vulkan_rhi;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 fn quad(x: f32, y: f32, w: f32, h: f32): [Vertex2D; 4] {
   let c = pack_color(1.0, 1.0, 1.0, 1.0);

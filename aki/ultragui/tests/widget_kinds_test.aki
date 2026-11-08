@@ -36,7 +36,7 @@ import {
 import {CallbackEnv} from ultragui::widgets::callbacks;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 struct MeasureRef : Copy {
   pub let tag: str

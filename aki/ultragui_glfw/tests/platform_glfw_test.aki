@@ -12,7 +12,7 @@ import {from_str} from akikit::strings::string;
 import {DynPlatform, WindowConfig} from ultragui::platform::platform;
 import {Cursor} from ultragui::style::enums;
 import {GlfwPlatform} from ultragui_glfw::platform_glfw;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 fn mouse_queue_empty(var p&: DynPlatform): bool {
   p.poll_events();

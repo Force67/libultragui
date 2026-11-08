@@ -21,7 +21,7 @@ import {FlexDirection, WidgetState} from ultragui::style::enums;
 import {Length} from ultragui::style::property_types;
 import {GradientStop, Style, StyleMask, StyleOverride, resolve_style} from ultragui::style::style;
 import {EasingType, Transition, eval_easing, eval_transition} from ultragui::style::transition;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 struct FcRef {
   pub let text: str

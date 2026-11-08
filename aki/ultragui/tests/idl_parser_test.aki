@@ -15,7 +15,7 @@ import {read_file, real_path} from akikit::filesystem::file_util;
 import {parent} from akikit::filesystem::path;
 import {UguiDocument, ParseError, parse_ugui, parse_ugui_file} from ultragui::idl::parser;
 import {dump} from support::ugui_dump;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 // Splits the expected dumps into sections, each starting at a "== " line.
 fn sections(text: str): List<str> {

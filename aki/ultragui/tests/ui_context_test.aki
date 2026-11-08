@@ -36,7 +36,7 @@ import {Style} from ultragui::style::style;
 import {World} from ultragui::widgets::widget_registry;
 import {create_button, set_button_label} from ultragui::widgets::button;
 import {String, from_str} from akikit::strings::string;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 import {ClockPlatform} from support::clock_platform;
 
 comptime let kFont: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";

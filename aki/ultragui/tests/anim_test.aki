@@ -25,7 +25,7 @@ import {VectorAnimation} from ultragui::anim::vector_animation;
 import {TextureId} from ultragui::render::draw_data;
 import {TextureBackend} from ultragui::render::texture_backend;
 import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 fn b32(v: f32): u32 => @bit_cast(u32, v);
 fn b64(v: f64): u64 => @bit_cast(u64, v);

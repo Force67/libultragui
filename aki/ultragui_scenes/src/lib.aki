@@ -1,0 +1,8 @@
+// The scene of the GL and D3D11 backends' tests. Import from the modules directly:
+//   ultragui_scenes::scene             geometry, textures and draw_scene through any Rhi
+//                                      (aki/tools/rhi_scene.cc draws it through the C++ RHI)
+//   ultragui_scenes::draw_data_scene   the same scene as a DrawData
+//                                      (aki/tools/draw_data_scene*.cc are its C++ twins)
+// ../PORTING.md is the map and the contract.
+
+module ultragui_scenes;

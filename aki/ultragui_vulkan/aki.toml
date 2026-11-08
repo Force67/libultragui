@@ -12,6 +12,9 @@ description = "libultragui's Vulkan RHI and draw-data renderer in aki"
 ultragui = { path = "../ultragui" }
 ultragui_glfw = { path = "../ultragui_glfw" }
 
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+
 [build]
 link = ["-lvulkan"]
 

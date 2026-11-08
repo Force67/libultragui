@@ -18,6 +18,9 @@ description = "libultragui's Lua 5.4 scripting runtime in aki"
 [dependencies]
 ultragui = { path = "../ultragui" }
 
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+
 [build]
 link = ["-llua", "-lm"]
 

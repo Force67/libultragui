@@ -12,3 +12,6 @@ description = "libultragui's video Lua bindings in aki"
 ultragui = { path = "../ultragui" }
 ultragui_lua = { path = "../ultragui_lua" }
 ultragui_video = { path = "../ultragui_video" }
+
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }

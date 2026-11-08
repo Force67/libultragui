@@ -1,0 +1,6 @@
+// Test support shared by the aki packages. Import from the modules directly:
+//   ultragui_testing::expect   Expect, the failure counter (checks that report and run on)
+//   ultragui_testing::check    Suite and check, the C++ tests' TEST/ASSERT shape (a failed check exits)
+// ../PORTING.md is the map and the contract.
+
+module ultragui_testing;

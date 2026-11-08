@@ -19,9 +19,9 @@ import {GlfwPlatform} from ultragui_glfw::platform_glfw;
 import {glfw_get_proc_address, glfw_make_context_current, glfw_swap_buffers} from ultragui_glfw::sys::glfw;
 import {GlApi, kGlColorBufferBit, kGlFramebufferSrgb} from ultragui_opengl::sys::gl;
 import {GlRenderer, InitInfo} from ultragui_opengl::ugui_impl_opengl3;
-import {Expect} from support::expect;
-import {big_pixels, build_frame, checker_pixels, ramp_pixels} from support::draw_data_scene;
-import {kFontPath, kSceneHeight, kSceneWidth} from support::scene;
+import {Expect} from ultragui_testing::expect;
+import {big_pixels, build_frame, checker_pixels, ramp_pixels} from ultragui_scenes::draw_data_scene;
+import {kFontPath, kSceneHeight, kSceneWidth} from ultragui_scenes::scene;
 
 fn hold_seconds(): f64 {
   let v = get_environment_variable("UGUI_SCENE_SECS") else { return 0.0; };

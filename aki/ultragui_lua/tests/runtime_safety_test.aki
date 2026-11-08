@@ -12,7 +12,7 @@ import {ScriptRuntime} from ultragui::scripting::script_runtime;
 import {destroy_widget, kWidgetNode} from ultragui::widgets::widget;
 import {World} from ultragui::widgets::widget_registry;
 import {LuaRuntime} from ultragui_lua::lua_runtime;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 // Through the capability, as UIContext<_, _, LuaRuntime> calls it.
 fn registry_cleared<S: ScriptRuntime>(var t&: Expect, var rt&: S) {

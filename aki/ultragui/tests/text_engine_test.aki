@@ -19,7 +19,7 @@ import {FontStyle, FontWeight} from ultragui::style::enums;
 import {FtBitmap, FtFaceRec, FtGlyphSlotRec, FtOpenArgs, FtSizeMetrics, FtSizeRec} from ultragui::sys::freetype;
 import {HbGlyphInfo, HbGlyphPosition} from ultragui::sys::harfbuzz;
 import {Glyph, TextEngine, TextLayoutConfig, TextRun, kInvalidFont} from ultragui::text::text_engine;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 comptime let kFont: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 

@@ -12,7 +12,7 @@ import {CharDecoder, Decoded, Input, InputKind, KeyState, decode_message, is_key
   kKeyEnter, kKeyKpEnter, kKeyLeftAlt, kKeyLeftControl, kKeyLeftShift, kKeyRightAlt, kKeyRightControl, kKeyRightShift,
   kKeyUnknown, kModAlt, kModCapsLock, kModControl, kModNumLock, kModShift, kModSuper, mods_from_state, scancode_of}
   from ultragui_d3d11::win32_keys;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 comptime let kExt: i64 = 0x01000000;  // KF_EXTENDED (0x100) in HIWORD(lparam)
 static let one: Vec2 = Vec2 { x: 1.0, y: 1.0 };

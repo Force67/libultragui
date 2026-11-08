@@ -12,7 +12,7 @@ import {println} from akikit::logging;
 import {write_bytes} from akikit::filesystem::file_util;
 import {get_environment_variable} from akikit::process::environment_variables;
 import {load_svg_memory} from ultragui::svg::svg;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 import {kCases, kFiles} from support::svg_corpus;
 
 fn fnv1a64(pixels&: [u8]): u64 {

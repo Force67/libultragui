@@ -21,7 +21,7 @@ import {DragHandle, Movable, kDragHandle, kMovable} from ultragui::widgets::comp
 import {add_child, kStyleC, kTransform, kWidgetNode, set_context, widget_state_of} from ultragui::widgets::widget;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 static let kClicks: Atomic<u32> = Atomic::<u32>(0);
 static let kLastClicked: Atomic<u32> = Atomic::<u32>(0);

@@ -13,6 +13,9 @@ ultragui = { path = "../ultragui" }
 ultragui_glfw = { path = "../ultragui_glfw" }
 ultragui_vulkan = { path = "../ultragui_vulkan" }
 
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+
 # Linux: vkd3d (D3D12 over Vulkan) and its utils for D3D12SerializeRootSignature.
 [build.os.linux]
 link = ["-lvulkan", "-lglfw", "-lvkd3d", "-lvkd3d-utils"]

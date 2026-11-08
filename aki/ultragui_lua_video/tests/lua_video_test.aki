@@ -24,7 +24,7 @@ import {VideoPlayer} from ultragui_video::video;
 import {LuaCall} from ultragui_lua::lua_call;
 import {LuaRuntime} from ultragui_lua::lua_runtime;
 import {register_video_lua} from ultragui_lua_video::lua_video;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 comptime let kScript: str = r"""
 local v = ugui.load_video(VIDEO_PATH)

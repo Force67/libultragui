@@ -13,6 +13,9 @@ description = "libultragui's Lottie animation player in aki, over rlottie"
 [dependencies]
 ultragui = { path = "../ultragui" }
 
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+
 [build]
 # The reference build is -O3 (CMake Release); rlottie's rasterizer is slow
 # below that, and its output must match the C++'s, so keep the level.

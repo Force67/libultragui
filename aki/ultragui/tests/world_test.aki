@@ -27,7 +27,7 @@ import {
 } from ultragui::widgets::widget;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 // A host component, as in test_runtime_safety.cc's TestTag.
 struct TestTag : Copy {

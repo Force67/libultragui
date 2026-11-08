@@ -1,6 +1,8 @@
-// The tests' ASSERT as a function and the line each test prints.
+// Shared by the tests: the C++ tests' ASSERT as a function, and the line each
+// TEST prints. A failed assertion prints what failed and exits 1, as the C++
+// does.
 
-module support::check;
+module ultragui_testing::check;
 
 import {println} from akikit::logging;
 import {exit} from akikit::process::process;
@@ -11,7 +13,7 @@ pub struct Suite {
 
   pub fn Suite(): Suite => Suite {};
 
-  // A test ran to its end without a failed check.
+  // A test ran to its end without a failed ASSERT.
   pub fn pass(var self&, name: str) {
     self.run += 1;
     self.passed += 1;
@@ -24,6 +26,7 @@ pub struct Suite {
   }
 }
 
+// ASSERT(cond)
 pub fn check(cond: bool, what: str) {
   if (!cond) {
     println(f" FAIL\n    Assertion failed: {what}");

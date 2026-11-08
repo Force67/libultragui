@@ -1,7 +1,7 @@
 // Shared by the tests: a failure counter that reports each failed check and
 // lets the test run on, so one run lists everything that differs.
 
-module support::expect;
+module ultragui_testing::expect;
 
 import {eprintln} from akikit::logging;
 

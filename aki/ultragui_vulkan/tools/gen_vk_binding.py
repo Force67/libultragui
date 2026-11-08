@@ -638,7 +638,7 @@ def main():
     w("")
     w("module vulkan_layout_test;")
     w("")
-    w("import {Expect} from support::expect;")
+    w("import {Expect} from ultragui_testing::expect;")
     w("import ultragui_vulkan::sys::vulkan;")
     w("")
     w("pub fn main(): i32 {")

@@ -24,7 +24,7 @@ import {create_panel} from ultragui::widgets::panel;
 import {WidgetKind, add_child, destroy_widget, kStyleC, kTransform, kWidgetNode, mark_dirty, set_style} from ultragui::widgets::widget;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 comptime let kViewport: LayoutViewport = LayoutViewport { width: 400.0, height: 400.0, scale: 1.0 };
 

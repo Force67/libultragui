@@ -9,7 +9,7 @@ import {DrawData, kNullTextureId} from ultragui::render::draw_data;
 import {DynTextureBackend} from ultragui::render::texture_backend;
 import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
 import {VulkanBackend} from ultragui_vulkan::ugui_impl_vulkan;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 pub fn main(): i32 {
   var t = Expect();

@@ -12,6 +12,9 @@ description = "libultragui's miniaudio audio backend in aki"
 [dependencies]
 ultragui = { path = "../ultragui" }
 
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+
 [build]
 c_sources = ["csrc/ugui_ma.c"]
 c_flags = ["-I../../third_party/miniaudio", "-Wno-#warnings"]

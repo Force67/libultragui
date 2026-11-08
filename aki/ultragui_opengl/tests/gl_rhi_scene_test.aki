@@ -18,8 +18,8 @@ import {WindowConfig} from ultragui::platform::platform;
 import {TextEngine} from ultragui::text::text_engine;
 import {GlfwPlatform} from ultragui_glfw::platform_glfw;
 import {OpenGlRhi} from ultragui_opengl::opengl_rhi;
-import {Expect} from support::expect;
-import {destroy_textures, draw_scene, kFontPath, kSceneHeight, kSceneWidth, make_textures} from support::scene;
+import {Expect} from ultragui_testing::expect;
+import {destroy_textures, draw_scene, kFontPath, kSceneHeight, kSceneWidth, make_textures} from ultragui_scenes::scene;
 
 fn hold_seconds(): f64 {
   let v = get_environment_variable("UGUI_SCENE_SECS") else { return 0.0; };

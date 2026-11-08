@@ -6,7 +6,7 @@
 module svg_test;
 
 import {SvgImage, load_svg_memory} from ultragui::svg::svg;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 comptime let k_parse_simple_rect: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"10\" y=\"10\" width=\"80\" height=\"80\" fill=\"red\"/>\n        </svg>\n    ";
 comptime let k_parse_circle: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"blue\"/>\n        </svg>\n    ";

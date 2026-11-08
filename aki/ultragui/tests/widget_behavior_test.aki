@@ -54,7 +54,7 @@ import {
 } from ultragui::widgets::widget;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 // What callbacks saw; handlers write here through `static` atomics since
 // they own their captures.

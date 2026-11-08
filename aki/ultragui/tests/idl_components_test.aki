@@ -21,7 +21,7 @@ import {kTextContent} from ultragui::widgets::text;
 import {destroy_widget, hit_test, kHierarchy, kStyleC, kTransform, kWidgetNode, set_style} from ultragui::widgets::widget;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 fn parse(var t&: Expect, src: str): UguiDocument {
   var doc = UguiDocument {};

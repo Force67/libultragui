@@ -8,7 +8,7 @@
 // The vertex building follows Renderer2D::EmitQuad and DrawText at dpi 1.
 // Generic over the Rhi, so the same file runs on every backend package.
 
-module support::scene;
+module ultragui_scenes::scene;
 
 import {List} from akikit::containers::list;
 import {Color} from ultragui::core::color;

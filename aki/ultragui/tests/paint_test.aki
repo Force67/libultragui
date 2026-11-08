@@ -30,7 +30,7 @@ import {add_child, kStyleC, kTransform, kWidgetNode, set_context, set_widget_sta
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
 import {CmdRef, DrawRef, check_draw_data, fnv} from support::draw_check;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 // COUNTS: quad vertices, quad indices, text vertices, text indices, commands
 comptime let kCounts: [u32; 5] = [52, 78, 0, 0, 8];

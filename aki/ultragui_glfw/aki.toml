@@ -10,5 +10,8 @@ description = "libultragui's GLFW platform in aki"
 [dependencies]
 ultragui = { path = "../ultragui" }
 
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+
 [build]
 link = ["-lglfw"]

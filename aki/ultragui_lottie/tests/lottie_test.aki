@@ -16,7 +16,7 @@ import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
 import {LottieAnimation} from ultragui_lottie::lottie;
 import {RlottieAnimation} from ultragui_lottie::sys::rlottie;
 import {kCounts, kLoads, kSteps} from support::lottie_reference;
-import {Suite, check} from support::check;
+import {Suite, check} from ultragui_testing::check;
 
 // Minimal Lottie JSON: a red circle that moves across the frame
 // 30fps, 60 frames (2 seconds), 100x100 viewport

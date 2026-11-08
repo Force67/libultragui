@@ -16,6 +16,10 @@ description = "libultragui's Direct3D 11 RHI, draw-data renderer and Win32 input
 ultragui = { path = "../ultragui" }
 ultragui_glfw = { path = "../ultragui_glfw" }
 
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+ultragui_scenes = { path = "../ultragui_scenes" }
+
 [build]
 
 [build.os.linux]

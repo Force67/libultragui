@@ -12,3 +12,7 @@ description = "libultragui's OpenGL RHI and draw-data renderer in aki"
 [dependencies]
 ultragui = { path = "../ultragui" }
 ultragui_glfw = { path = "../ultragui_glfw" }
+
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+ultragui_scenes = { path = "../ultragui_scenes" }

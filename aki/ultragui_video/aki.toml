@@ -12,6 +12,9 @@ description = "libultragui's MPEG-1 video player in aki, over pl_mpeg"
 ultragui = { path = "../ultragui" }
 ultragui_audio = { path = "../ultragui_audio" }
 
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+
 [build]
 c_flags = ["-I../../third_party/pl_mpeg", "-Wno-#warnings"]
 link = ["-lm"]

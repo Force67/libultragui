@@ -24,7 +24,7 @@ import {D3d12Rhi} from ultragui_d3d12::d3d12_rhi;
 import {sleep, milliseconds} from akikit::time::time;
 import {glfw_create_window, glfw_destroy_window, glfw_init, glfw_poll_events, glfw_set_window_size, glfw_terminate, glfw_window_hint,
   kGlfwClientApi, kGlfwFalse, kGlfwNoApi, kGlfwResizable} from ultragui_glfw::sys::glfw;
-import {Suite, check} from support::check;
+import {Suite, check} from ultragui_testing::check;
 
 fn rgba(n: usize): List<u8> {
   var px = List::<u8>();

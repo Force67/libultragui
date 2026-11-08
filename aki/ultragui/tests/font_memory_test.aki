@@ -7,7 +7,7 @@ import {List} from akikit::containers::list;
 import {path_exists, read_bytes} from akikit::filesystem::file_util;
 import {println} from akikit::logging;
 import {TextEngine, kInvalidFont} from ultragui::text::text_engine;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 // A face to test with; the test skips when the machine has none.
 fn find_system_font(): str? {

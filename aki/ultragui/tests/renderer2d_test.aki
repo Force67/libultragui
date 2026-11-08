@@ -24,7 +24,7 @@ import {GradientType} from ultragui::style::enums;
 import {GradientStop} from ultragui::style::style;
 import {TextEngine, TextLayout, TextLayoutConfig, TextRun} from ultragui::text::text_engine;
 import {CmdRef, DrawRef, check_draw_data as support_check, fnv} from support::draw_check;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 // COUNTS: quad vertices, quad indices, text vertices, text indices, commands
 comptime let kCounts: [u32; 5] = [56, 84, 132, 198, 14];

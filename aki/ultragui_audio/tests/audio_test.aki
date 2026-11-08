@@ -8,7 +8,7 @@ import {println} from akikit::logging;
 import {write_bytes} from akikit::filesystem::file_util;
 import {AudioBackendBox, kInvalidSound} from ultragui::audio::audio_backend;
 import {AudioEngine} from ultragui_audio::ugui_impl_miniaudio;
-import {Suite, check} from support::check;
+import {Suite, check} from ultragui_testing::check;
 
 fn test_init_shutdown() {
   var engine = AudioEngine();

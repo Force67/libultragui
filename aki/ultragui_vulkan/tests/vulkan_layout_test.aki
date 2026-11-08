@@ -4,7 +4,7 @@
 
 module vulkan_layout_test;
 
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 import ultragui_vulkan::sys::vulkan;
 
 pub fn main(): i32 {

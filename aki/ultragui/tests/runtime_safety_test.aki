@@ -23,7 +23,7 @@ import {
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {ComponentKey} from ultragui::core::component_store;
 import {World} from ultragui::widgets::widget_registry;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 struct TestTag : Copy {
   pub var v: i32

@@ -5,7 +5,7 @@ module support::draw_check;
 
 import {DrawData} from ultragui::render::draw_data;
 import {Vertex2D} from ultragui::render::vertex;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 // One CMD line: clip (bits), texture, index offset, count, is_text, blur (bits).
 pub struct CmdRef : Copy {

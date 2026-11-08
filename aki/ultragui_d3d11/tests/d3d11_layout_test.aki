@@ -5,7 +5,7 @@
 
 module d3d11_layout_test;
 
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 import {entries} from support::d3d_layout_table;
 
 pub fn main(): i32 {

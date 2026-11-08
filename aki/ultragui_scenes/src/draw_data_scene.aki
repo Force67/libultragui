@@ -2,7 +2,7 @@
 // for the draw-data renderers (ugui_impl_*): the same geometry, with the
 // textures as host TextureIds. tools/draw_data_scene.cc is the C++ twin.
 
-module support::draw_data_scene;
+module ultragui_scenes::draw_data_scene;
 
 import {List} from akikit::containers::list;
 import {Vec2} from ultragui::core::math;
@@ -10,7 +10,7 @@ import {Rect} from ultragui::core::rect;
 import {DrawCmd, DrawData, TextureId, kFontTextureId} from ultragui::render::draw_data;
 import {rhi_handle_from_texture_id, texture_id_from_rhi_handle} from ultragui::render::texture_backend;
 import {FontHandle, TextEngine} from ultragui::text::text_engine;
-import {Geometry, build_main} from support::scene;
+import {Geometry, build_main} from ultragui_scenes::scene;
 
 // The geometry and commands of one frame, owned here; `data()` lends them as a
 // DrawData.

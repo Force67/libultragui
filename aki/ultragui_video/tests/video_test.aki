@@ -25,7 +25,7 @@ import {kWidth, kHeight, kDurationBits, kFrameRateBits, kTextureHandle, kYHandle
 import {kPlaneW, kPlaneH, kChromaW, kChromaH, kFirstConvert} from support::video_reference;
 import {kVolumeWithBridgeBits, kMutedWithBridge, kVolumeWithoutBridgeBits, kMutedWithoutBridge} from support::video_reference;
 import {kUnloadDestroys, kTargetCreates, kTargetDestroys, kTotalConverts, kLiveAfterUnload} from support::video_reference;
-import {Suite, check} from support::check;
+import {Suite, check} from ultragui_testing::check;
 
 // The demo clip, relative to the repository root.
 fn demo_path(): String => from_str(f"{@package_dir()}/../../examples/demo.mpg");
