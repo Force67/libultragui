@@ -14,8 +14,8 @@
 // * On Linux the call into vkd3d and its blob go through csrc/d3dcompile_abi.c,
 //   because vkd3d's COM surface is ms_abi on x86-64 and aki cannot spell that
 //   (the C++ writes the attribute); on aarch64 the shim is a plain call. The
-//   Windows build calls D3DCompile and the blob directly. Not run on x86-64
-//   Linux (this port was built on aarch64).
+//   Windows build calls D3DCompile and the blob directly. The
+//   x86-64 ms_abi path was not run (this port was built and tested on aarch64).
 
 module ultragui_d3d11::d3d_shader_compiler;
 
