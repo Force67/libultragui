@@ -44,3 +44,6 @@ tests/cmake_install.cmake
 examples/ultragui_video_demo
 examples/ultragui_game_overlay
 build-*/
+
+# The Vulkan package embeds its compiled shaders (aki/ultragui_vulkan/shaders/README.md).
+!aki/ultragui_vulkan/shaders/*.spv
