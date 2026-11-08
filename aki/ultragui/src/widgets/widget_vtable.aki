@@ -35,6 +35,9 @@ import {button_click, button_draw, button_measure} from ultragui::widgets::butto
 import {checkbox_click, checkbox_draw, checkbox_measure} from ultragui::widgets::checkbox;
 import {image_draw, image_measure} from ultragui::widgets::image;
 import {radio_click, radio_draw, radio_measure} from ultragui::widgets::radio;
+import {
+  scroll_view_draw, scroll_view_hit_test, scroll_view_layout, scroll_view_scroll, scroll_view_update,
+} from ultragui::widgets::scroll_view;
 import {text_draw, text_measure} from ultragui::widgets::text;
 import {toggle_click, toggle_draw, toggle_measure, toggle_update} from ultragui::widgets::toggle;
 
@@ -43,6 +46,7 @@ import {toggle_click, toggle_draw, toggle_measure, toggle_update} from ultragui:
 // toggle, scroll view).
 pub fn custom_paint(kind: WidgetKind): bool => match (kind) {
   WidgetKind::Toggle => true,
+  WidgetKind::ScrollView => true,
   _ => false,
 };
 
@@ -73,6 +77,10 @@ pub fn vt_draw(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: 
       toggle_draw(world, ctx, e, renderer);
       true
     },
+    WidgetKind::ScrollView => {
+      scroll_view_draw(world, ctx, e, renderer);
+      true
+    },
     _ => false,
   };
 
@@ -91,6 +99,7 @@ pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, 
 // entry.
 pub fn vt_hit_test(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, point: Vec2): WidgetId? =>
   match (kind) {
+    WidgetKind::ScrollView => scroll_view_hit_test(world, ctx, e, point),
     _ => none,
   };
 
@@ -110,12 +119,17 @@ pub fn vt_on_update(kind: WidgetKind, var world&: World, var ctx&: WidgetContext
       toggle_update(world, ctx, e, dt);
       true
     },
+    WidgetKind::ScrollView => {
+      scroll_view_update(world, ctx, e, dt);
+      true
+    },
     _ => false,
   };
 
 // WidgetVTable::on_scroll
 pub fn vt_on_scroll(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, delta: Vec2): bool? =>
   match (kind) {
+    WidgetKind::ScrollView => scroll_view_scroll(world, ctx, e, delta),
     _ => none,
   };
 
@@ -123,6 +137,10 @@ pub fn vt_on_scroll(kind: WidgetKind, var world&: World, var ctx&: WidgetContext
 // False when the kind has no entry.
 pub fn vt_on_layout(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, rect: Rect,
                     content_rect: Rect): bool => match (kind) {
+  WidgetKind::ScrollView => {
+    scroll_view_layout(world, ctx, e, rect, content_rect);
+    true
+  },
   _ => false,
 };
 

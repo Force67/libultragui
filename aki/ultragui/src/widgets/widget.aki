@@ -8,10 +8,10 @@
 // (widgets::widget_context explains why it is an argument).
 //
 // Ported here: the data, the tree, style/state, dirty marking, tooltips,
-// hit testing and the vtable dispatch except paint. Next wave:
-// PaintWidget (needs Renderer2D), InputToLayoutPoint (needs ScrollOffset from
-// widgets::scroll_view), PopulateLayoutNode/ApplyLayoutResult (need
-// layout::layout's LayoutNode); they belong in this module.
+// hit testing, InputToLayoutPoint and the vtable dispatch except paint.
+// Next wave: PaintWidget (needs Renderer2D), PopulateLayoutNode/
+// ApplyLayoutResult (need layout::layout's LayoutNode); they belong in this
+// module.
 //
 // Where the C++ dereferences a component it assumes is there
 // (world.Get<StyleC>(e)->style), the port stops with `!` on the same
@@ -31,6 +31,7 @@ import {PointerEvents, Visibility, WidgetState} from ultragui::style::enums;
 import {Style, StyleOverride, resolve_style} from ultragui::style::style;
 import {Transition} from ultragui::style::transition;
 import {AnimStyle, StateStyle, StateTransitionRule, Tooltip, kAnimStyle, kStateStyle, kTooltip} from ultragui::widgets::components;
+import {scroll_offset} from ultragui::widgets::scroll_view;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
 import {
@@ -363,6 +364,18 @@ pub fn mark_paint_dirty(var world&: World, e: WidgetId) {
   if (var t& = world.get_var(kTransform, e)) {
     t.paint_dirty = true;
   }
+}
+
+// InputToLayoutPoint: a point in screen space moved into e's layout space,
+// adding the offset of every scroll view above it.
+pub fn input_to_layout_point(world&: World, e: WidgetId, point: Vec2): Vec2 {
+  var out = point;
+  var p = world.get(kHierarchy, e)!.parent;
+  while (p.valid()) {
+    out = out + scroll_offset(world, p);  // (0,0) for non-scroll-view ancestors
+    p = world.get(kHierarchy, p)!.parent;
+  }
+  return out;
 }
 
 // HitTest: the topmost widget under `point` in e's subtree, or the null
