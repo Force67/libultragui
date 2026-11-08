@@ -12,11 +12,21 @@ import {WidgetId} from ultragui::core::handle;
 import {Vec2} from ultragui::core::math;
 import {MouseButton} from ultragui::input::input_queue;
 import {NullRhi} from ultragui::rhi::null_rhi;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle} from ultragui::rhi::rhi_types;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D} from ultragui::render::vertex;
+import {ComponentKey} from ultragui::core::component_store;
+import {FrameEnv, UiExtension} from ultragui::scripting::script_host;
+import {ScriptRuntime} from ultragui::scripting::script_runtime;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {List} from akikit::containers::list;
 import {NoScript} from ultragui::scripting::script_runtime;
 import {FlexDirection, ViewportScaleMode} from ultragui::style::enums;
 import {Length} from ultragui::style::property_types;
 import {kInvalidFont} from ultragui::text::text_engine;
-import {FrameReuse, UIConfig, UIContext} from ultragui::ui_context;
+import {FrameReuse, PaintEnv, UIConfig, UIContext} from ultragui::ui_context;
 import {set_button_click} from ultragui::widgets::button;
 import {CallbackEnv} from ultragui::widgets::callbacks;
 import {create_panel} from ultragui::widgets::panel;
@@ -25,7 +35,7 @@ import {add_child, kHierarchy, kStyleC, kTransform, set_style} from ultragui::wi
 import {Style} from ultragui::style::style;
 import {World} from ultragui::widgets::widget_registry;
 import {create_button, set_button_label} from ultragui::widgets::button;
-import {from_str} from akikit::strings::string;
+import {String, from_str} from akikit::strings::string;
 import {Expect} from support::expect;
 import {ClockPlatform} from support::clock_platform;
 
@@ -45,13 +55,13 @@ fn make_ui(var t&: Expect, config: UIConfig): Ui {
 }
 
 // One frame dt seconds later; its draw command count.
-fn frame(var ui&: Ui, dt: f64): u32 {
+fn frame<S: ScriptRuntime>(var ui&: UIContext<ClockPlatform, NullRhi, S>, dt: f64): u32 {
   ui.platform.clock += dt;
   let dd = ui.render_draw_data();
   return dd.command_count();
 }
 
-fn center(var ui&: Ui, w: WidgetId): Vec2 {
+fn center<S: ScriptRuntime>(var ui&: UIContext<ClockPlatform, NullRhi, S>, w: WidgetId): Vec2 {
   let r = ui.world.get(kTransform, w)!.rect;
   return Vec2 { x: r.x + r.w * 0.5, y: r.y + r.h * 0.5 };
 }
@@ -247,6 +257,198 @@ fn check_errors(var t&: Expect) {
   ui.shutdown();
 }
 
+// --- Legacy mode: a fake Rhi that counts what UIContext::update sends it ---
+
+struct CountingRhi : Rhi {
+  pub var frames: u32 = 0
+  pub var ended: u32 = 0
+  pub var draws: u32 = 0
+  pub var text_draws: u32 = 0
+  pub var textures: u32 = 0
+  pub var updates: u32 = 0
+  pub var offscreen: u32 = 0
+  pub var acquired: u32 = 0
+  pub var shut: bool = false
+
+  pub fn init(var self&, config&: RhiConfig): bool => true;
+  pub fn shutdown(var self&) {
+    self.shut = true;
+  }
+  pub fn begin_frame(var self&, clear_color: Color): bool {
+    self.frames += 1;
+    return true;
+  }
+  pub fn end_frame(var self&) {
+    self.ended += 1;
+  }
+  pub fn set_scissor(var self&, rect: Rect) {}
+  pub fn reset_scissor(var self&) {}
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+    self.draws += 1;
+  }
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+    self.text_draws += 1;
+  }
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle {
+    self.textures += 1;
+    return self.textures;
+  }
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+    self.updates += 1;
+  }
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {}
+  pub fn acquire_frame(var self&): bool {
+    self.acquired += 1;
+    return true;
+  }
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle {
+    self.textures += 1;
+    return self.textures;
+  }
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {}
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool {
+    self.offscreen += 1;
+    return true;
+  }
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {}
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {}
+  pub fn display_size(self&): Vec2 => Vec2 { x: 640.0, y: 480.0 };
+  pub fn dpi_scale(self&): f32 => 1.0;
+}
+
+// A frame extension (the shape of ultragui_video's players).
+struct Ticker : UiExtension {
+  pub var updates: u32 = 0
+  pub var converts: u32 = 0
+  pub var dt_sum: f64 = 0.0
+  pub var pending: bool = true
+
+  pub fn update(var self&, var env&: FrameEnv) {
+    self.updates += 1;
+    self.dt_sum += env.dt;
+  }
+  pub fn needs_convert(self&): bool => self.pending;
+  pub fn convert(var self&, var env&: FrameEnv) {
+    self.converts += 1;
+    self.pending = false;
+    let _ = env.rhi.acquire_frame();
+  }
+}
+static let kTicker: ComponentKey<Ticker> = ComponentKey();
+static let kShutdowns: Atomic<u32> = Atomic::<u32>(0);
+static let kPaints: Atomic<u32> = Atomic::<u32>(0);
+
+fn check_legacy_update(var t&: Expect) {
+  var ui = UIContext::<ClockPlatform, CountingRhi, NoScript>(ClockPlatform(), CountingRhi {}, NoScript());
+  t.that(ui.init(UIConfig { width: 640, height: 480 }), "legacy init");
+  ui.platform.host.set_viewport(Vec2 { x: 640.0, y: 480.0 }, Vec2 { x: 640.0, y: 480.0 });
+  ui.set_default_font(ui.load_font(kFont));
+  let _ = ui.load_ui_string(r"""
+panel root {
+  width: 640; height: 480; padding: 10;
+  background: #102030; gradient-stops: #102030 0%, #304050 50%, #102030 100%;
+  text hello { text: "through the RHI"; }
+}
+""", "legacy");
+  let idx = ui.add_extension(kTicker, Ticker {});
+  ui.platform.clock += 0.25;
+  ui.update();
+  t.eq_u32(ui.rhi.frames, 1, "one swapchain frame");
+  t.eq_u32(ui.rhi.ended, 1, "ended");
+  t.that(ui.rhi.draws > 0 && ui.rhi.text_draws > 0, "quads and text submitted");
+  t.that(ui.rhi.textures >= 2, "atlas and gradient textures created through the RHI");
+  if (var tk& = ui.extension_var(kTicker, idx)) {
+    t.eq_u32(tk.updates, 1, "extension updated");
+    t.eq_u32(tk.converts, 1, "extension converted after acquire_frame");
+    t.that(tk.dt_sum == 0.25, "extension gets dt");
+  } else {
+    t.that(false, "extension_var finds the extension");
+  }
+
+  // Offscreen pass, then a paint callback replacing the root's paint.
+  let target = ui.create_render_target(64, 64);
+  ui.queue_offscreen(target, ui.root(), Color::from_hex(0x000000));
+  ui.set_on_paint(own fn(env: &var PaintEnv<CountingRhi>) {
+    let _ = kPaints.fetch_add(1);
+    env.renderer.draw_rect(Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, Color::from_hex(0xff0000));
+  });
+  ui.platform.clock += 0.25;
+  ui.update();
+  t.eq_u32(ui.rhi.offscreen, 1, "offscreen pass rendered");
+  t.eq_u32(kPaints.load(), 1, "paint callback ran");
+  ui.platform.clock += 0.25;
+  ui.update();
+  t.eq_u32(kPaints.load(), 2, "and stays installed");
+  ui.shutdown();
+  t.that(ui.rhi.shut, "shutdown shuts the RHI down");
+}
+
+// --- Script hooks: a fake runtime that records handler calls ------------------
+
+struct RecordingScript : ScriptRuntime {
+  pub var calls: List<String> = List()
+  pub var host_seen: u32 = 0
+  pub var found: WidgetId = WidgetId { index: 0, generation: 0 }
+
+  pub fn init(var self&): bool => true;
+  pub fn shutdown(var self&) {}
+  pub fn exec(var self&, var world&: World, var ctx&: WidgetContext, script: str, name: str): bool {
+    if (var h& = ctx.host) {
+      self.host_seen += 1;
+      self.found = h.find_widget(world, script);
+    }
+    return true;
+  }
+  pub fn exec_file(var self&, var world&: World, var ctx&: WidgetContext, path: str): bool => false;
+  pub fn register_widget(var self&, world&: World, widget: WidgetId) {}
+  pub fn unregister_widget(var self&, world&: World, widget: WidgetId) {}
+  pub fn clear_widget_registry(var self&) {}
+  pub fn call_handler(var self&, var world&: World, var ctx&: WidgetContext, func_name: str, widget: WidgetId): bool {
+    self.calls.push(from_str(func_name));
+    if (ctx.host != none) {
+      self.host_seen += 1;
+    }
+    return true;
+  }
+  pub fn find_registered_widget(self&, name: str): WidgetId => WidgetId { index: 0, generation: 0 };
+  pub fn sync_timer_clock(var self&, current_time: f64) {}
+  pub fn clear_timers_and_tweens(var self&) {}
+  pub fn update_timers(var self&, var world&: World, var ctx&: WidgetContext, current_time: f64) {}
+  pub fn wire_change_handlers(var self&, var world&: World, root: WidgetId) {}
+}
+
+fn check_script_hooks(var t&: Expect) {
+  var ui = UIContext::<ClockPlatform, NullRhi, RecordingScript>(ClockPlatform(), NullRhi(), RecordingScript {});
+  t.that(ui.init(UIConfig { draw_data: true, width: 640, height: 480 }), "init");
+  ui.platform.host.set_viewport(Vec2 { x: 640.0, y: 480.0 }, Vec2 { x: 640.0, y: 480.0 });
+  ui.set_default_font(ui.load_font(kFont));
+  let _ = ui.load_ui_string(r"""
+panel root {
+  width: 640; height: 480;
+  button play { text: "Play"; width: 200; height: 60; }
+}
+""", "hooks");
+  ui.set_script_click_dispatch();
+  let _ = frame(ui, 0.1);
+  let play = ui.find_widget("play");
+
+  // exec gets the host: find_widget through UIContext's cache.
+  t.that(ui.exec_script("play", "chunk"), "exec");
+  t.that(ui.script.found == play, "ScriptHost::find_widget");
+
+  ui.platform.host.push_mouse_move(center(ui, play));
+  ui.platform.host.push_mouse_button(MouseButton::Left, true);
+  ui.platform.host.push_mouse_button(MouseButton::Left, false);
+  let _ = frame(ui, 0.1);
+  t.that(ui.script.calls.len() == 1 && ui.script.calls[0].as_str() == "on_play", "click dispatched to on_play");
+  t.that(ui.script.host_seen == 2, "handlers get the host");
+  ui.platform.host.push_mouse_button(MouseButton::Right, true);
+  ui.platform.host.push_mouse_button(MouseButton::Right, false);
+  let _ = frame(ui, 0.1);
+  t.that(ui.script.calls.len() == 1, "right clicks are not dispatched");
+  ui.shutdown();
+}
+
 pub fn main(): i32 {
   var t = Expect();
   check_tooltip(t);
@@ -255,5 +457,7 @@ pub fn main(): i32 {
   check_media_reapply(t);
   check_scaling(t);
   check_errors(t);
+  check_legacy_update(t);
+  check_script_hooks(t);
   return t.finish();
 }
