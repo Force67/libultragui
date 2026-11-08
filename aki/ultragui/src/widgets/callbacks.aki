@@ -27,6 +27,7 @@
 
 module ultragui::widgets::callbacks;
 
+import {String} from akikit::strings::string;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
 
@@ -47,5 +48,7 @@ pub type BoolHandler = own fn(&var CallbackEnv, bool): ();
 pub type F32Handler = own fn(&var CallbackEnv, f32): ();
 
 // Function<void(const String&)>: text-input on_change / on_submit. The text
-// is a copy taken before the call.
-pub type TextHandler = own fn(&var CallbackEnv, str): ();
+// is a copy taken before the call, passed owned: akiko refuses a `str`
+// argument beside the CallbackEnv for the same reason as the two views
+// above (the callee might store the one in the other).
+pub type TextHandler = own fn(&var CallbackEnv, String): ();

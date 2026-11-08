@@ -33,6 +33,9 @@ import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
 import {button_click, button_draw, button_measure} from ultragui::widgets::button;
 import {checkbox_click, checkbox_draw, checkbox_measure} from ultragui::widgets::checkbox;
+import {
+  dropdown_click, dropdown_draw, dropdown_hit_test, dropdown_measure, dropdown_update,
+} from ultragui::widgets::dropdown;
 import {image_draw, image_measure} from ultragui::widgets::image;
 import {radio_click, radio_draw, radio_measure} from ultragui::widgets::radio;
 import {
@@ -83,6 +86,10 @@ pub fn vt_draw(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: 
       slider_draw(world, ctx, e, renderer);
       true
     },
+    WidgetKind::Dropdown => {
+      dropdown_draw(world, ctx, e, renderer);
+      true
+    },
     WidgetKind::ScrollView => {
       scroll_view_draw(world, ctx, e, renderer);
       true
@@ -99,6 +106,7 @@ pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, 
   WidgetKind::Radio => radio_measure(world, ctx, e),
   WidgetKind::Toggle => toggle_measure(world, ctx, e),
   WidgetKind::Slider => slider_measure(world, ctx, e),
+  WidgetKind::Dropdown => dropdown_measure(world, ctx, e),
   _ => none,
 };
 
@@ -106,6 +114,7 @@ pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, 
 // entry.
 pub fn vt_hit_test(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, point: Vec2): WidgetId? =>
   match (kind) {
+    WidgetKind::Dropdown => dropdown_hit_test(world, ctx, e, point),
     WidgetKind::ScrollView => scroll_view_hit_test(world, ctx, e, point),
     _ => none,
   };
@@ -117,6 +126,7 @@ pub fn vt_on_click(kind: WidgetKind, var world&: World, var ctx&: WidgetContext,
   WidgetKind::Radio => radio_click(world, ctx, e),
   WidgetKind::Toggle => toggle_click(world, ctx, e),
   WidgetKind::Slider => slider_click(world, ctx, e),
+  WidgetKind::Dropdown => dropdown_click(world, ctx, e),
   _ => none,
 };
 
@@ -129,6 +139,10 @@ pub fn vt_on_update(kind: WidgetKind, var world&: World, var ctx&: WidgetContext
     },
     WidgetKind::Slider => {
       slider_update(world, ctx, e, dt);
+      true
+    },
+    WidgetKind::Dropdown => {
+      dropdown_update(world, ctx, e, dt);
       true
     },
     WidgetKind::ScrollView => {
