@@ -1,0 +1,98 @@
+// ugui/style/transition.{h,cc}: easing curves and property transitions.
+
+module ultragui::style::transition;
+
+// Easing function type for property transitions and animations.
+pub enum EasingType as u8 { Linear, EaseIn, EaseOut, EaseInOut, CubicBezier, Spring }
+
+// Describes how a property transitions between values.
+pub struct Transition : Copy, Equal {
+  pub var duration: f32 = 0.0   // seconds
+  pub var delay: f32 = 0.0      // seconds
+  pub var easing: EasingType = EasingType::EaseInOut
+  // For CubicBezier: control points
+  pub var bezier: [f32; 4] = [0.25, 0.1, 0.25, 1.0]
+  // For Spring: damped harmonic oscillator parameters
+  pub var spring_stiffness: f32 = 300.0
+  pub var spring_damping: f32 = 20.0
+  pub var spring_mass: f32 = 1.0
+
+  pub fn is_instant(self&): bool => self.duration <= 0.0;
+}
+
+fn cubic_bezier(p1x: f32, p1y: f32, p2x: f32, p2y: f32, t: f32): f32 {
+  // Newton-Raphson to find t_curve for given t on x-axis, then evaluate y
+  let cx = 3.0 * p1x;
+  let bx = 3.0 * (p2x - p1x) - cx;
+  let ax = 1.0 - cx - bx;
+
+  let cy = 3.0 * p1y;
+  let by = 3.0 * (p2y - p1y) - cy;
+  let ay = 1.0 - cy - by;
+
+  // Solve for s where sample_x(s) == t
+  var s = t;
+  for (let i in 0..8) {
+    // sample_x(s) - t: the C++ lambda returns the product, and only then is
+    // t subtracted, so the last product must not fuse into the subtraction.
+    let sample_x = ((ax * s + bx) * s + cx) * s;
+    let x = sample_x - t;
+    if (@abs(x) < 1e-6) {
+      break;
+    }
+    let dx = (3.0 * ax * s + 2.0 * bx) * s + cx;
+    if (@abs(dx) < 1e-6) {
+      break;
+    }
+    s -= x / dx;
+  }
+  s = s < 0.0 ? 0.0 : (s > 1.0 ? 1.0 : s);
+  return ((ay * s + by) * s + cy) * s;
+}
+
+// EvalEasing(type, t, bezier): evaluate an easing curve at t (clamped to
+// 0..1). `bezier` is the C++ pointer that may be null: none makes
+// CubicBezier linear.
+pub fn eval_easing(kind: EasingType, t_in: f32, bezier: [f32; 4]? = none): f32 {
+  let t = t_in < 0.0 ? 0.0 : (t_in > 1.0 ? 1.0 : t_in);
+  return match (kind) {
+    EasingType::Linear => t,
+    EasingType::EaseIn => t * t * t,
+    EasingType::EaseOut => ease_out(t),
+    EasingType::EaseInOut => t < 0.5 ? 4.0 * t * t * t : 1.0 - 0.5 * @pow((-2.0) * t + 2.0, 3.0f32),
+    EasingType::CubicBezier => bezier_or_linear(bezier, t),
+    EasingType::Spring => t,
+  };
+}
+
+fn ease_out(t: f32): f32 {
+  let inv = 1.0 - t;
+  return 1.0 - inv * inv * inv;
+}
+
+fn bezier_or_linear(bezier: [f32; 4]?, t: f32): f32 {
+  if (let b = bezier) {
+    return cubic_bezier(b[0], b[1], b[2], b[3], t);
+  }
+  return t;
+}
+
+fn eval_spring(stiffness: f32, damping: f32, mass: f32, t: f32): f32 {
+  let omega = @sqrt(stiffness / mass);
+  let zeta = damping / (2.0 * @sqrt(stiffness * mass));
+
+  if (zeta < 1.0) {
+    let omega_d = omega * @sqrt(1.0 - zeta * zeta);
+    return 1.0 - @exp(-zeta * omega * t) * (@cos(omega_d * t) + (zeta * omega / omega_d) * @sin(omega_d * t));
+  }
+  return 1.0 - @exp(-omega * t) * (1.0 + omega * t);
+}
+
+// EvalEasing(const Transition&, t).
+pub fn eval_transition(transition&: Transition, t_in: f32): f32 {
+  if (transition.easing == EasingType::Spring) {
+    let t = t_in < 0.0 ? 0.0 : (t_in > 1.0 ? 1.0 : t_in);
+    return eval_spring(transition.spring_stiffness, transition.spring_damping, transition.spring_mass, t);
+  }
+  return eval_easing(transition.easing, t_in, transition.bezier);
+}

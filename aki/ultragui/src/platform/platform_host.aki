@@ -1,0 +1,243 @@
+// ugui/platform/platform_host.{h,cc}: a Platform with no window of its own,
+// for embedding ultragui where the host already has one it does not hand
+// over, a game's say. Run UIContext in draw-data mode with it; it is
+// UIContext's default Platform.
+//
+// The host reports the viewport and feeds input; the context takes both when
+// it polls, at the start of its frame. The C++ host:: functions may be called
+// from any thread; here they are methods of HostPlatform and of HostFeed, a
+// Send handle from feed() that a window procedure on another thread keeps.
+//
+// Keys are GLFW key codes, as everywhere in ultragui.
+
+module ultragui::platform::platform_host;
+
+import {String, from_str, with_nul} from akikit::strings::string;
+import {filled} from akikit::containers::list;
+import {Arc, make_arc} from akikit::memory::arc;
+import {Mutex} from akikit::threading::mutex;
+import {Instant, now} from akikit::time::time;
+import {Vec2} from ultragui::core::math;
+import {InputQueue, MouseButton} from ultragui::input::input_queue;
+import {Platform, WindowConfig} from ultragui::platform::platform;
+import {Cursor} from ultragui::style::enums;
+
+// What the host writes and the UI reads, under one lock (Platform::Impl's
+// locked part).
+struct HostShared : Send {
+  // Filled by the host between polls; handed to the queue by poll_events.
+  pub var pending: InputQueue = InputQueue {}
+  pub var window_size: Vec2 = Vec2 { x: 0.0, y: 0.0 }
+  pub var framebuffer_size: Vec2 = Vec2 { x: 0.0, y: 0.0 }
+  pub var cursor: Cursor = Cursor::Default
+}
+
+// The feeding half of a HostPlatform, for another thread. Every call takes
+// the platform's lock, as each host:: function does.
+pub struct HostFeed : Send {
+  var shared: Arc<Mutex<HostShared>>
+
+  // host::SetViewport: the size the UI lays out in, and the render target's
+  // size in pixels. They differ on a scaled display, or when the host draws
+  // at another resolution than its window; the ratio becomes the draw data's
+  // framebuffer_scale.
+  pub fn set_viewport(self&, window_size: Vec2, framebuffer_size: Vec2) {
+    self.shared.get().with(fn(s: &var HostShared) {
+      s.window_size = window_size;
+      s.framebuffer_size = framebuffer_size;
+    });
+  }
+
+  // host::PushMouseMove. Positions are in the units of window_size.
+  pub fn push_mouse_move(self&, position: Vec2) {
+    self.shared.get().with(fn(s: &var HostShared) => s.pending.push_move(position));
+  }
+
+  // host::PushMouseButton
+  pub fn push_mouse_button(self&, button: MouseButton, pressed: bool) {
+    self.shared.get().with(fn(s: &var HostShared) => s.pending.push_button(button, pressed));
+  }
+
+  // host::PushScroll
+  pub fn push_scroll(self&, delta: Vec2) {
+    self.shared.get().with(fn(s: &var HostShared) => s.pending.push_scroll(delta));
+  }
+
+  // host::PushKey
+  pub fn push_key(self&, key: i32, scancode: i32, pressed: bool, repeat: bool, mods: i32) {
+    self.shared.get().with(fn(s: &var HostShared) => s.pending.push_key(key, scancode, pressed, repeat, mods));
+  }
+
+  // host::PushChar
+  pub fn push_char(self&, codepoint: u32) {
+    self.shared.get().with(fn(s: &var HostShared) => s.pending.push_char(codepoint));
+  }
+
+  // host::RequestedCursor: the cursor the UI asked for last, for a host that
+  // draws its own.
+  pub fn requested_cursor(self&): Cursor => self.shared.get().read(fn(s: &HostShared): Cursor => s.cursor);
+}
+
+fn HostFeed::from_shared(shared: Arc<Mutex<HostShared>>): HostFeed => HostFeed { shared };
+
+pub struct HostPlatform : Platform {
+  var shared: Arc<Mutex<HostShared>>
+  // What the input router reads this frame.
+  var queue: InputQueue
+  var start: Instant
+  var clipboard: String
+
+  pub fn HostPlatform(): HostPlatform;
+
+  // A handle that feeds this platform from any thread.
+  pub fn feed(self&): HostFeed => HostFeed::from_shared(self.shared.share());
+
+  // The host:: functions, called on the platform itself.
+  pub fn set_viewport(self&, window_size: Vec2, framebuffer_size: Vec2) => self.feed().set_viewport(window_size, framebuffer_size);
+  pub fn push_mouse_move(self&, position: Vec2) => self.feed().push_mouse_move(position);
+  pub fn push_mouse_button(self&, button: MouseButton, pressed: bool) => self.feed().push_mouse_button(button, pressed);
+  pub fn push_scroll(self&, delta: Vec2) => self.feed().push_scroll(delta);
+  pub fn push_key(self&, key: i32, scancode: i32, pressed: bool, repeat: bool, mods: i32) =>
+    self.feed().push_key(key, scancode, pressed, repeat, mods);
+  pub fn push_char(self&, codepoint: u32) => self.feed().push_char(codepoint);
+  pub fn requested_cursor(self&): Cursor => self.feed().requested_cursor();
+
+  // --- Platform ---
+  pub fn init(var self&, config&: WindowConfig): bool;
+  pub fn shutdown(var self&) {}
+  pub fn should_close(self&): bool => false;
+  pub fn poll_events(var self&);
+  pub fn window_size(self&): Vec2 => self.shared.get().read(fn(s: &HostShared): Vec2 => s.window_size);
+  pub fn framebuffer_size(self&): Vec2 => self.shared.get().read(fn(s: &HostShared): Vec2 => s.framebuffer_size);
+  pub fn dpi_scale(self&): f32;
+  pub fn time(self&): f64 => self.start.elapsed().as_seconds_f64();
+  pub fn native_handle(self&): *var u8 => null;
+  pub fn set_cursor(var self&, cursor: Cursor) {
+    self.shared.get().with(fn(s: &var HostShared) {
+      s.cursor = cursor;
+    });
+  }
+  pub fn clipboard_text(var self&): str;
+  pub fn set_clipboard_text(var self&, text: str);
+  pub fn input_queue(var self&): &var InputQueue => self.queue;
+}
+
+fn HostPlatform::HostPlatform(): HostPlatform => HostPlatform {
+  shared: make_arc(Mutex(HostShared {})),
+  queue: InputQueue {},
+  start: now(),
+  clipboard: String(),
+};
+
+fn HostPlatform::init(var self&, config&: WindowConfig): bool {
+  self.start = now();
+  let size = Vec2 { x: config.width as f32, y: config.height as f32 };
+  self.shared.get().with(fn(s: &var HostShared) {
+    s.window_size = size;
+    s.framebuffer_size = size;
+  });
+  return true;
+}
+
+fn HostPlatform::poll_events(var self&) {
+  var taken = InputQueue {};
+  self.shared.get().with(fn(s: &var HostShared) {
+    taken = s.pending;
+    s.pending.clear();
+    // The pointer stays where it last was, with or without new events.
+    s.pending.mouse_pos = taken.mouse_pos;
+  });
+  self.queue = taken;
+}
+
+fn HostPlatform::dpi_scale(self&): f32 => self.shared.get().read(fn(s: &HostShared): f32 =>
+  s.window_size.x > 0.0 ? s.framebuffer_size.x / s.window_size.x : 1.0);
+
+// --- Clipboard ---------------------------------------------------------------
+// Windows: the system clipboard, as UTF-8; the returned text lives until the
+// next call. Elsewhere there is no system clipboard to reach without a window
+// system, so the platform keeps one.
+
+fn HostPlatform::clipboard_text(var self&): str {
+  if (comptime @target_os() == "windows") {
+    win_clipboard_text(self.clipboard);
+  }
+  return self.clipboard.as_str();
+}
+
+fn HostPlatform::set_clipboard_text(var self&, text: str) {
+  if (comptime @target_os() == "windows") {
+    win_set_clipboard_text(text);
+  } else {
+    self.clipboard = from_str(text);
+  }
+}
+
+extern("OpenClipboard") fn win_open_clipboard(owner: *var u8): i32;
+extern("CloseClipboard") fn win_close_clipboard(): i32;
+extern("EmptyClipboard") fn win_empty_clipboard(): i32;
+extern("GetClipboardData") fn win_get_clipboard_data(format: u32): *var u8;
+extern("SetClipboardData") fn win_set_clipboard_data(format: u32, mem: *var u8): *var u8;
+extern("GlobalLock") fn win_global_lock(mem: *var u8): *var u8;
+extern("GlobalUnlock") fn win_global_unlock(mem: *var u8): i32;
+extern("GlobalAlloc") fn win_global_alloc(flags: u32, bytes: usize): *var u8;
+extern("GlobalFree") fn win_global_free(mem: *var u8): *var u8;
+extern("WideCharToMultiByte") fn win_wide_to_multi(code_page: u32, flags: u32, wide: *const u16, wide_count: i32,
+                                                   out: *var c_char, out_bytes: i32, default_char: *const c_char,
+                                                   used_default: *var i32): i32;
+extern("MultiByteToWideChar") fn win_multi_to_wide(code_page: u32, flags: u32, text: *const c_char, text_bytes: i32,
+                                                   out: *var u16, out_count: i32): i32;
+
+comptime let kCfUnicodeText: u32 = 13;
+comptime let kCpUtf8: u32 = 65001;
+comptime let kGmemMoveable: u32 = 2;
+
+fn win_clipboard_text(var out&: String) {
+  out.clear();
+  unsafe {
+    if (win_open_clipboard(null) == 0) {
+      return;
+    }
+    let data = win_get_clipboard_data(kCfUnicodeText);
+    if (data != null) {
+      let wide = win_global_lock(data) as *const u16;
+      if (wide != null) {
+        let bytes = win_wide_to_multi(kCpUtf8, 0, wide, -1, null, 0, null, null);
+        if (bytes > 1) {
+          var raw = filled::<u8>(bytes as usize, 0);
+          let _ = win_wide_to_multi(kCpUtf8, 0, wide, -1, @ptr(raw.as_slice_var()) as *var c_char, bytes, null, null);
+          // WideCharToMultiByte writes UTF-8 from valid UTF-16; drop the NUL.
+          let _ = out.push_utf8(raw.as_slice()[..(bytes - 1) as usize] as bytes);
+        }
+        let _ = win_global_unlock(data);
+      }
+    }
+    let _ = win_close_clipboard();
+  }
+}
+
+fn win_set_clipboard_text(text: str) {
+  let z = with_nul(text);
+  unsafe {
+    let c_text = @ptr(z.as_str()) as *const c_char;
+    let wide_count = win_multi_to_wide(kCpUtf8, 0, c_text, -1, null, 0);
+    if (wide_count <= 0 || win_open_clipboard(null) == 0) {
+      return;
+    }
+    let _ = win_empty_clipboard();
+    let memory = win_global_alloc(kGmemMoveable, wide_count as usize * 2);
+    if (memory != null) {
+      let wide = win_global_lock(memory) as *var u16;
+      if (wide != null) {
+        let _ = win_multi_to_wide(kCpUtf8, 0, c_text, -1, wide, wide_count);
+        let _ = win_global_unlock(memory);
+        if (win_set_clipboard_data(kCfUnicodeText, memory) == null) {
+          let _ = win_global_free(memory);
+        }
+      } else {
+        let _ = win_global_free(memory);
+      }
+    }
+    let _ = win_close_clipboard();
+  }
+}

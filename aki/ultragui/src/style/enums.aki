@@ -1,0 +1,115 @@
+// ugui/style/enums.h.
+//
+// The two flag sets, WidgetState and TextDecoration, are open enums: every
+// u16/u8 value is one of them, so a combination is a value of the type, as in
+// the C++. operator| is `a.with(b)`, operator& is `a.masked(b)`, and
+// HasState/HasDecoration are has_state/has_decoration (or `flags.has(test)`).
+
+module ultragui::style::enums;
+
+// Interactive state of a widget, used for style selector matching. Multiple
+// flags can be active simultaneously.
+pub open enum WidgetState as u16 {
+  None = 0,
+  Hovered = 1,
+  Pressed = 2,
+  Focused = 4,
+  Disabled = 8,
+  Checked = 16,
+  Selected = 32,
+  Active = 64,
+
+  // operator|
+  pub fn with(self, other: WidgetState): WidgetState => (self as u16 | other as u16) as WidgetState;
+  // operator&
+  pub fn masked(self, other: WidgetState): WidgetState => (self as u16 & other as u16) as WidgetState;
+  // The flags of self that `other` does not have: a & ~b.
+  pub fn without(self, other: WidgetState): WidgetState => (self as u16 & ~(other as u16)) as WidgetState;
+  pub fn has(self, test: WidgetState): bool => (self as u16 & test as u16) != 0;
+}
+
+// HasState(flags, test).
+pub fn has_state(flags: WidgetState, test: WidgetState): bool => (flags as u16 & test as u16) != 0;
+
+// Layout direction
+pub enum FlexDirection as u8 { Row, Column, RowReverse, ColumnReverse }
+
+// Main-axis alignment
+pub enum JustifyContent as u8 { Start, End, Center, SpaceBetween, SpaceAround, SpaceEvenly }
+
+// Cross-axis alignment
+pub enum AlignItems as u8 { Start, End, Center, Stretch, Baseline }
+
+// Self-alignment override; Auto inherits from the parent's AlignItems.
+pub enum AlignSelf as u8 { Auto, Start, End, Center, Stretch }
+
+// Cross-axis alignment of wrapped lines (effective with FlexWrap::Wrap*)
+pub enum AlignContent as u8 { Start, End, Center, Stretch, SpaceBetween, SpaceAround, SpaceEvenly }
+
+// How content overflows its container
+pub enum Overflow as u8 { Visible, Hidden, Scroll }
+
+// Text alignment within a text block
+pub enum TextAlign as u8 { Left, Center, Right }
+
+// Positioning mode. Relative: normal flow, offsets relative to the natural
+// position. Absolute: removed from flow, positioned relative to the parent.
+// Sticky: stays in flow but clamps to the scroll parent's visible area.
+pub enum Position as u8 { Relative, Absolute, Sticky }
+
+// Flex wrapping
+pub enum FlexWrap as u8 { NoWrap, Wrap, WrapReverse }
+
+// Visibility. Collapsed: hidden and takes up no space.
+pub enum Visibility as u8 { Visible, Hidden, Collapsed }
+
+// Font weight (CSS font-weight numeric scale)
+pub enum FontWeight as u16 {
+  Thin = 100,
+  ExtraLight = 200,
+  Light = 300,
+  Regular = 400,
+  Medium = 500,
+  SemiBold = 600,
+  Bold = 700,
+  ExtraBold = 800,
+  Black = 900,
+}
+
+// Font style
+pub enum FontStyle as u8 { Normal, Italic }
+
+// Text transform (CSS text-transform)
+pub enum TextTransform as u8 { None, Uppercase, Lowercase, Capitalize }
+
+// Text decoration (flags: can combine underline + strikethrough)
+pub open enum TextDecoration as u8 {
+  None = 0,
+  Underline = 1,
+  Strikethrough = 2,
+
+  // operator|
+  pub fn with(self, other: TextDecoration): TextDecoration => (self as u8 | other as u8) as TextDecoration;
+  pub fn has(self, test: TextDecoration): bool => (self as u8 & test as u8) != 0;
+}
+
+// HasDecoration(flags, test).
+pub fn has_decoration(flags: TextDecoration, test: TextDecoration): bool => (flags as u8 & test as u8) != 0;
+
+// Gradient type
+pub enum GradientType as u8 { Linear, Radial }
+
+// Whether a widget takes the pointer: None leaves it and everything under it
+// out of hit testing, so clicks and hover reach whatever is beneath. For
+// overlays that only show something, a drawn cursor or a tooltip.
+pub enum PointerEvents as u8 { Auto, None }
+
+// Cursor style
+pub enum Cursor as u8 { Auto, Default, Pointer, Text, Move, NotAllowed }
+
+// Viewport scaling mode: how UI scales when the window is resized. The scale
+// factor is the ratio of the current viewport dimension(s) to the design
+// dimension(s). None: fixed pixel sizes. Width: viewport_width /
+// design_width. Height: viewport_height / design_height. Contain: min of the
+// two ratios (fits inside). Cover: max of the two (fills the viewport).
+pub enum ViewportScaleMode as u8 { None, Width, Height, Contain, Cover }

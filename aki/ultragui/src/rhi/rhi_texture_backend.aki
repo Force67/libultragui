@@ -1,0 +1,43 @@
+// ugui/rhi/rhi_texture_backend.h: a TextureBackend forwarding to the bundled
+// device-owning RHI, used in legacy mode so subsystems create textures
+// through the same seam as draw-data mode. Maps RHI u32 handles into the
+// TextureId space via the +1 bias (texture_id_from_rhi_handle).
+//
+// The C++ holds an RHI* that may be null; here it views the RHI, `none` for
+// null. Pass it on as DynTextureBackend::of(adapter).
+
+module ultragui::rhi::rhi_texture_backend;
+
+import {TextureId, kNullTextureId} from ultragui::render::draw_data;
+import {TextureBackend, rhi_handle_from_texture_id, texture_id_from_rhi_handle} from ultragui::render::texture_backend;
+import {Rhi} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+
+pub struct RhiTextureBackend<'a, R: Rhi> : TextureBackend {
+  var rhi: (&'a var R)?
+
+  pub fn RhiTextureBackend(rhi: (&'a var R)?): RhiTextureBackend<'a, R> => RhiTextureBackend::<'a, R> { rhi };
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId;
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes);
+  pub fn destroy_texture(var self&, id: TextureId);
+}
+
+fn RhiTextureBackend<'a, R: Rhi>::create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+  if (let r& = self.rhi) {
+    return texture_id_from_rhi_handle(r.create_texture(width, height, format, pixels, filter));
+  }
+  return kNullTextureId;
+}
+
+fn RhiTextureBackend<'a, R: Rhi>::update_texture(var self&, id: TextureId, pixels: bytes) {
+  if (let r& = self.rhi) {
+    r.update_texture(rhi_handle_from_texture_id(id), pixels);
+  }
+}
+
+fn RhiTextureBackend<'a, R: Rhi>::destroy_texture(var self&, id: TextureId) {
+  if (let r& = self.rhi) {
+    r.destroy_texture(rhi_handle_from_texture_id(id));
+  }
+}

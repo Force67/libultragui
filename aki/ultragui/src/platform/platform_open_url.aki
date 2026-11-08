@@ -1,0 +1,47 @@
+// ugui/platform/platform_open_url.cc: the default Platform::OpenURL, which
+// opens a URL in the system's default browser. The Platform capability's
+// default open_url method calls it; a platform that routes URLs through the
+// host defines open_url itself (the C++ ULTRAGUI_DEFAULT_OPEN_URL=OFF).
+
+module ultragui::platform::platform_open_url;
+
+import {with_nul} from akikit::strings::string;
+
+extern("fork") fn c_fork(): i32;
+extern("execlp") fn c_execlp(file: *const c_char, arg0: *const c_char, ...): i32;
+extern("_exit") fn c_exit(status: i32);
+extern("waitpid") fn c_waitpid(pid: i32, status: *var i32, options: i32): i32;
+extern("ShellExecuteA") fn c_shell_execute(hwnd: *var u8, op: *const c_char, file: *const c_char, params: *const c_char,
+                                           dir: *const c_char, show: i32): *var u8;
+
+// SW_SHOWNORMAL
+comptime let kSwShowNormal: i32 = 1;
+
+pub fn open_url(url: str) {
+  if (#url == 0) {
+    return;
+  }
+  let z = with_nul(url);
+  let c_url = unsafe (@ptr(z.as_str()) as *const c_char);
+  if (comptime @target_os() == "windows") {
+    unsafe {
+      let _ = c_shell_execute(null, c"open", c_url, null, null, kSwShowNormal);
+    }
+  } else {
+    let launcher: *const c_char = (comptime @target_os() == "macos") ? c"open" : c"xdg-open";
+    // Double-fork so the launcher reparents to init: no zombie is left behind
+    // and the browser keeps running independently of this process.
+    unsafe {
+      let pid = c_fork();
+      if (pid == 0) {
+        if (c_fork() == 0) {
+          let _ = c_execlp(launcher, launcher, c_url, null as *const c_char);
+          c_exit(127);  // exec failed
+        }
+        c_exit(0);
+      } else if (pid > 0) {
+        let _ = c_waitpid(pid, null, 0);  // reap the short-lived intermediate child
+      }
+    }
+  }
+}

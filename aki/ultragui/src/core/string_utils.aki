@@ -1,0 +1,32 @@
+// ugui/core/string_utils.{h,cc}.
+
+module ultragui::core::string_utils;
+
+import {FromCharsError, from_chars_u32} from ultragui::core::from_chars;
+import akikit::strings::string_search;
+
+// ParseHexColor: "#RRGGBB" or "#RRGGBBAA" (the '#' optional) into a u32.
+// The bool-and-out-parameter of the C++ is an optional: none where it
+// returned false.
+pub fn parse_hex_color(s: str): u32? {
+  if (#s == 0) {
+    return none;
+  }
+  var digits = s;
+  // Skip leading '#'
+  if (digits[0] == '#') {
+    digits = digits[1..];
+  }
+  if (#digits != 6 && #digits != 8) {
+    return none;
+  }
+  var out: u32 = 0;
+  let result = from_chars_u32(digits, out, 16);
+  // As in the C++, a parse that stops early still succeeds with what it read:
+  // only the error code counts, not whether every digit was consumed.
+  return result.ec == FromCharsError::None ? out : none;
+}
+
+pub fn starts_with(s: str, prefix: str): bool => akikit::strings::string_search::starts_with(s, prefix);
+
+pub fn ends_with(s: str, suffix: str): bool => akikit::strings::string_search::ends_with(s, suffix);

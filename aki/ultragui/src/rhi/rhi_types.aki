@@ -1,0 +1,20 @@
+// ugui/rhi/rhi_types.h.
+
+module ultragui::rhi::rhi_types;
+
+pub type RhiTextureHandle = u32;
+pub comptime let kInvalidTexture: RhiTextureHandle = 0xFFFF_FFFF;
+
+pub enum RhiFormat as u8 { R8Unorm, Rgba8Unorm, Bgra8Unorm, Rgba32Float }
+
+// Linear: bilinear interpolation (smooth scaling, default for images).
+// Nearest: nearest-texel snap (pixel-perfect, use for text atlases).
+pub enum RhiFilter as u8 { Linear, Nearest }
+
+// Bytes per pixel of a format, for slices of tightly packed pixels.
+pub fn bytes_per_pixel(format: RhiFormat): usize => match (format) {
+  RhiFormat::R8Unorm => 1,
+  RhiFormat::Rgba8Unorm => 4,
+  RhiFormat::Bgra8Unorm => 4,
+  RhiFormat::Rgba32Float => 16,
+};

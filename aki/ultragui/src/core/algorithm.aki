@@ -1,0 +1,280 @@
+// ugui/core/algorithm.h.
+//
+// min/max/clamp_min_max compare exactly as libstdc++'s std::min, std::max and
+// std::clamp do. intro_sort is libstdc++'s std::sort step for step, so equal
+// elements end up in the same (unstable) order the C++ build leaves them in:
+// draw order of equal z-index, keyframes at one time and gradient stops at one
+// offset depend on it. Do not swap in akikit::algorithm::sort_by, which is a
+// different (pattern-defeating) quicksort and orders ties differently.
+
+module ultragui::core::algorithm;
+
+import {List} from akikit::containers::list;
+import {HashMap} from akikit::containers::hash_map;
+import {swap_at} from akikit::algorithm;
+
+// std::min: the second argument only when it is strictly smaller.
+pub fn min<T: Order>(a: T, b: T): T => b < a ? b : a;
+
+// std::max: the second argument only when the first is strictly smaller.
+pub fn max<T: Order>(a: T, b: T): T => a < b ? b : a;
+
+// std::clamp as libstdc++ spells it, min(max(v, lo), hi): NaN passes through
+// and hi wins when lo > hi. Not clamp() in core::math, which returns lo for
+// v < lo even when lo > hi.
+pub fn clamp_min_max<T: Order>(v: T, lo: T, hi: T): T => min(max(v, lo), hi);
+
+// f32 forms of the three, for float code (f32 compares with IEEE `<`, which
+// is what the C++ templates do).
+pub fn min_f32(a: f32, b: f32): f32 => b < a ? b : a;
+pub fn max_f32(a: f32, b: f32): f32 => a < b ? b : a;
+pub fn clamp_min_max_f32(v: f32, lo: f32, hi: f32): f32 => min_f32(max_f32(v, lo), hi);
+
+// --- IntroSort --------------------------------------------------------------
+// Positions are i64 like the C++ ptrdiff_t, so (hole - 1) / 2 truncates toward
+// zero at hole 0 exactly as it does there. Every element move is a bitwise
+// move through the slice's pointer, as ugui::move is in the C++: a value read
+// out leaves its slot to be written before anything reads it again.
+
+unsafe fn at<T>(p: *var T, i: i64): *var T => unsafe (p + i as usize);
+
+unsafe fn iter_swap<T>(a: *var T, b: *var T) {
+  unsafe {
+    let tmp = @read(a);
+    @write(a, @read(b));
+    @write(b, tmp);
+  }
+}
+
+unsafe fn move_median_to_first<T>(result: *var T, a: *var T, b: *var T, c: *var T, less: fn(&T, &T): bool) {
+  unsafe {
+    if (less(*a, *b)) {
+      if (less(*b, *c)) {
+        iter_swap(result, b);
+      } else if (less(*a, *c)) {
+        iter_swap(result, c);
+      } else {
+        iter_swap(result, a);
+      }
+    } else if (less(*a, *c)) {
+      iter_swap(result, a);
+    } else if (less(*b, *c)) {
+      iter_swap(result, c);
+    } else {
+      iter_swap(result, b);
+    }
+  }
+}
+
+// [first, last) and the pivot as positions from p.
+unsafe fn unguarded_partition<T>(p: *var T, first_in: i64, last_in: i64, pivot: i64, less: fn(&T, &T): bool): i64 {
+  var first = first_in;
+  var last = last_in;
+  unsafe {
+    while (true) {
+      while (less(*at(p, first), *at(p, pivot))) {
+        first += 1;
+      }
+      last -= 1;
+      while (less(*at(p, pivot), *at(p, last))) {
+        last -= 1;
+      }
+      if (!(first < last)) {
+        return first;
+      }
+      iter_swap(at(p, first), at(p, last));
+      first += 1;
+    }
+  }
+  return first;
+}
+
+unsafe fn push_heap<T>(first: *var T, hole_in: i64, top: i64, value: T, less: fn(&T, &T): bool) {
+  var hole = hole_in;
+  unsafe {
+    var parent = (hole - 1) / 2;
+    while (hole > top && less(*at(first, parent), value)) {
+      @write(at(first, hole), @read(at(first, parent)));
+      hole = parent;
+      parent = (hole - 1) / 2;
+    }
+    @write(at(first, hole), value);
+  }
+}
+
+unsafe fn adjust_heap<T>(first: *var T, hole_in: i64, len: i64, value: T, less: fn(&T, &T): bool) {
+  var hole = hole_in;
+  let top = hole;
+  var child = hole;
+  unsafe {
+    while (child < (len - 1) / 2) {
+      child = 2 * (child + 1);
+      if (less(*at(first, child), *at(first, child - 1))) {
+        child -= 1;
+      }
+      @write(at(first, hole), @read(at(first, child)));
+      hole = child;
+    }
+    if ((len & 1) == 0 && child == (len - 2) / 2) {
+      child = 2 * (child + 1);
+      @write(at(first, hole), @read(at(first, child - 1)));
+      hole = child - 1;
+    }
+    push_heap(first, hole, top, value, less);
+  }
+}
+
+unsafe fn heap_sort<T>(first: *var T, len_in: i64, less: fn(&T, &T): bool) {
+  let len = len_in;
+  unsafe {
+    if (len >= 2) {
+      var parent = (len - 2) / 2;
+      while (true) {
+        let value = @read(at(first, parent));
+        adjust_heap(first, parent, len, value, less);
+        if (parent == 0) {
+          break;
+        }
+        parent -= 1;
+      }
+    }
+    var last = len;
+    while (last > 1) {
+      last -= 1;
+      let value = @read(at(first, last));
+      @write(at(first, last), @read(first));
+      adjust_heap(first, 0, last, value, less);
+    }
+  }
+}
+
+unsafe fn unguarded_linear_insert<T>(p: *var T, last_in: i64, less: fn(&T, &T): bool) {
+  var last = last_in;
+  unsafe {
+    let value = @read(at(p, last));
+    var next = last - 1;
+    while (less(value, *at(p, next))) {
+      @write(at(p, last), @read(at(p, next)));
+      last = next;
+      next -= 1;
+    }
+    @write(at(p, last), value);
+  }
+}
+
+unsafe fn insertion_sort<T>(p: *var T, first: i64, last: i64, less: fn(&T, &T): bool) {
+  if (first == last) {
+    return;
+  }
+  unsafe {
+    var i = first + 1;
+    while (i != last) {
+      if (less(*at(p, i), *at(p, first))) {
+        let value = @read(at(p, i));
+        var q = i;
+        while (q != first) {
+          @write(at(p, q), @read(at(p, q - 1)));
+          q -= 1;
+        }
+        @write(at(p, first), value);
+      } else {
+        unguarded_linear_insert(p, i, less);
+      }
+      i += 1;
+    }
+  }
+}
+
+comptime let kIntroSortThreshold: i64 = 16;
+
+unsafe fn intro_sort_loop<T>(p: *var T, first: i64, last_in: i64, depth_in: i64, less: fn(&T, &T): bool) {
+  var last = last_in;
+  var depth_limit = depth_in;
+  unsafe {
+    while (last - first > kIntroSortThreshold) {
+      if (depth_limit == 0) {
+        heap_sort(at(p, first), last - first, less);
+        return;
+      }
+      depth_limit -= 1;
+      let mid = first + (last - first) / 2;
+      move_median_to_first(at(p, first), at(p, first + 1), at(p, mid), at(p, last - 1), less);
+      let cut = unguarded_partition(p, first + 1, last, first, less);
+      intro_sort_loop(p, cut, last, depth_limit, less);
+      last = cut;
+    }
+  }
+}
+
+// IntroSort: sorts xs exactly as libstdc++'s std::sort does, unstable, with
+// the same tie order. `less(a, b)` says whether a goes before b.
+pub fn intro_sort<T>(var xs&: [T], less: fn(&T, &T): bool) {
+  let n = #xs as i64;
+  if (n == 0) {
+    return;
+  }
+  unsafe {
+    let p = @ptr(xs);
+    var lg: i64 = 0;
+    var k = n;
+    while (k > 1) {
+      lg += 1;
+      k >>= 1;
+    }
+    intro_sort_loop(p, 0, n, lg * 2, less);
+    if (n > kIntroSortThreshold) {
+      insertion_sort(p, 0, kIntroSortThreshold, less);
+      var i = kIntroSortThreshold;
+      while (i != n) {
+        unguarded_linear_insert(p, i, less);
+        i += 1;
+      }
+    } else {
+      insertion_sort(p, 0, n, less);
+    }
+  }
+}
+
+// --- Containers --------------------------------------------------------------
+
+// SortedEntries: the entries of a HashMap as (key, value) views in ascending
+// key order. HashMap iteration order is unspecified, so anything whose result
+// depends on the order walks this instead. Keys are unique, so the order is
+// fully determined.
+pub fn sorted_entries<'a, K: Hash + Equal + Order, V>(map: &'a HashMap<K, V>): List<(&'a K, &'a V)> {
+  var entries: List<(&'a K, &'a V)> = List();
+  entries.reserve(map.len());
+  for (let (key, value) in map) {
+    entries.push((key, value));
+  }
+  intro_sort(entries.as_slice_var(), fn(a&: (&'a K, &'a V), b&: (&'a K, &'a V)): bool => a.0 < b.0);
+  return entries;
+}
+
+// EraseIf: erase every element matching `pred`, keeping the survivors in
+// order (what erase(remove_if(...)) does).
+pub fn erase_if<T>(var list&: List<T>, pred: fn(&T): bool) {
+  var kept: usize = 0;
+  let n = list.len();
+  for (let i in 0..n) {
+    if (pred(list[i])) {
+      continue;
+    }
+    if (kept != i) {
+      swap_at(list.as_slice_var(), kept, i);
+    }
+    kept += 1;
+  }
+  list.truncate(kept);
+}
+
+// IndexOf: index of the first element equal to `value`. The C++ returns
+// container.size() on a miss; here a miss is none.
+pub fn index_of<T: Equal>(xs&: [T], value&: T): usize? {
+  for (let i in 0..#xs) {
+    if (xs[i] == value) {
+      return i;
+    }
+  }
+  return none;
+}

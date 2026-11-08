@@ -1,0 +1,80 @@
+// ugui/core/rect.h: Rect and EdgeInsets.
+
+module ultragui::core::rect;
+
+import {Vec2} from ultragui::core::math;
+
+pub struct Rect : Copy, Equal {
+  pub var x: f32 = 0.0
+  pub var y: f32 = 0.0
+  pub var w: f32 = 0.0
+  pub var h: f32 = 0.0
+
+  pub fn new(x: f32, y: f32, w: f32, h: f32): Rect => Rect { x, y, w, h };
+  // Rect(Vec2 pos, Vec2 size).
+  pub fn from_pos_size(pos: Vec2, size: Vec2): Rect => Rect { x: pos.x, y: pos.y, w: size.x, h: size.y };
+
+  pub fn pos(self&): Vec2 => Vec2 { x: self.x, y: self.y };
+  pub fn size(self&): Vec2 => Vec2 { x: self.w, y: self.h };
+  pub fn center(self&): Vec2 => Vec2 { x: self.x + self.w * 0.5, y: self.y + self.h * 0.5 };
+
+  pub fn left(self&): f32 => self.x;
+  pub fn right(self&): f32 => self.x + self.w;
+  pub fn top(self&): f32 => self.y;
+  pub fn bottom(self&): f32 => self.y + self.h;
+
+  pub fn top_left(self&): Vec2 => Vec2 { x: self.x, y: self.y };
+  pub fn top_right(self&): Vec2 => Vec2 { x: self.x + self.w, y: self.y };
+  pub fn bottom_left(self&): Vec2 => Vec2 { x: self.x, y: self.y + self.h };
+  pub fn bottom_right(self&): Vec2 => Vec2 { x: self.x + self.w, y: self.y + self.h };
+
+  pub fn contains(self&, p: Vec2): bool =>
+    p.x >= self.x && p.x <= self.x + self.w && p.y >= self.y && p.y <= self.y + self.h;
+
+  pub fn intersects(self&, other: Rect): bool =>
+    self.x < other.x + other.w && self.x + self.w > other.x && self.y < other.y + other.h && self.y + self.h > other.y;
+
+  pub fn intersected(self&, other: Rect): Rect;
+
+  // Expand rect by `amount` on each side.
+  pub fn expanded(self&, amount: f32): Rect =>
+    Rect { x: self.x - amount, y: self.y - amount, w: self.w + amount * 2.0, h: self.h + amount * 2.0 };
+  // Shrink rect by `amount` on each side.
+  pub fn shrunk(self&, amount: f32): Rect => self.expanded(-amount);
+  pub fn translated(self&, offset: Vec2): Rect => Rect { x: self.x + offset.x, y: self.y + offset.y, w: self.w, h: self.h };
+
+  pub fn eq(self&, rhs&: Rect): bool => self.x == rhs.x && self.y == rhs.y && self.w == rhs.w && self.h == rhs.h;
+}
+
+fn Rect::intersected(self&, other: Rect): Rect {
+  let ix = self.x > other.x ? self.x : other.x;
+  let iy = self.y > other.y ? self.y : other.y;
+  let ir = (self.x + self.w < other.x + other.w) ? self.x + self.w : other.x + other.w;
+  let ib = (self.y + self.h < other.y + other.h) ? self.y + self.h : other.y + other.h;
+  let iw = ir - ix;
+  let ih = ib - iy;
+  if (iw <= 0.0 || ih <= 0.0) {
+    return Rect {};
+  }
+  return Rect { x: ix, y: iy, w: iw, h: ih };
+}
+
+// Edge insets (padding, margin, border).
+pub struct EdgeInsets : Copy, Equal {
+  pub var top: f32 = 0.0
+  pub var right: f32 = 0.0
+  pub var bottom: f32 = 0.0
+  pub var left: f32 = 0.0
+
+  // EdgeInsets(all), EdgeInsets(vertical, horizontal), EdgeInsets(t, r, b, l).
+  pub fn all(v: f32): EdgeInsets => EdgeInsets { top: v, right: v, bottom: v, left: v };
+  pub fn symmetric(vertical: f32, horizontal: f32): EdgeInsets =>
+    EdgeInsets { top: vertical, right: horizontal, bottom: vertical, left: horizontal };
+  pub fn new(top: f32, right: f32, bottom: f32, left: f32): EdgeInsets => EdgeInsets { top, right, bottom, left };
+
+  pub fn horizontal(self&): f32 => self.left + self.right;
+  pub fn vertical(self&): f32 => self.top + self.bottom;
+
+  pub fn eq(self&, rhs&: EdgeInsets): bool =>
+    self.top == rhs.top && self.right == rhs.right && self.bottom == rhs.bottom && self.left == rhs.left;
+}

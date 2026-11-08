@@ -1,0 +1,62 @@
+// ugui/core/arena.{h,cc}: a linear (bump) allocator over one malloc'd block.
+//
+// Nothing in ugui outside core/arena uses it, so this is the minimal port: the
+// block, the bump and reset, with the C++ asserts as stops. Arena::create<T>
+// and AllocArray<T> (placement new) have no safe aki form; a caller that
+// needs typed storage writes through the pointer alloc() returns, in unsafe,
+// and owns the values' drops itself, as the C++ caller did. New code should
+// use List/Box, not this. ArenaScope is not ported: it resets the whole
+// arena, not to its saved offset (see PORTING.md, "Known C++ quirks kept"),
+// and has no user to keep that for.
+
+module ultragui::core::arena;
+
+extern("malloc") fn c_malloc(n: usize): *var u8;
+extern("free") fn c_free(p: *var u8);
+
+// alignof(max_align_t) on the supported targets.
+pub comptime let kMaxAlign: usize = 16;
+
+pub struct Arena {
+  var buffer: *var u8
+  var capacity_: usize
+  var offset: usize
+
+  pub fn Arena(capacity: usize = 1048576): Arena;
+  fn ~Arena();
+
+  // Allocate `size` bytes with the given alignment (a power of two). Stops
+  // when the arena is out of room, as the C++ assert does. The memory is
+  // uninitialized and valid until reset() or the arena drops.
+  pub unsafe fn alloc(var self&, size: usize, alignment: usize = kMaxAlign): *var u8;
+
+  // All prior allocations become invalid.
+  pub fn reset(var self&) {
+    self.offset = 0;
+  }
+
+  pub fn used(self&): usize => self.offset;
+  pub fn capacity(self&): usize => self.capacity_;
+  pub fn remaining(self&): usize => self.capacity_ - self.offset;
+}
+
+fn Arena::Arena(capacity: usize): Arena {
+  let buffer = unsafe c_malloc(capacity);
+  if (buffer == null) {
+    @stop("Arena: allocation failed");
+  }
+  return Arena { buffer, capacity_: capacity, offset: 0 };
+}
+
+fn Arena::~Arena() {
+  unsafe c_free(self.buffer);
+}
+
+unsafe fn Arena::alloc(var self&, size: usize, alignment: usize): *var u8 {
+  let aligned = (self.offset + alignment - 1) & ~(alignment - 1);
+  if (aligned + size > self.capacity_) {
+    @stop("Arena: out of memory");
+  }
+  self.offset = aligned + size;
+  return unsafe (self.buffer + aligned);
+}

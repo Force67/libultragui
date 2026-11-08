@@ -1,0 +1,354 @@
+// ugui/style/style.{h,cc}: the complete visual style of a widget, state
+// overrides, and their resolution.
+
+module ultragui::style::style;
+
+import {Color, lerp_color} from ultragui::core::color;
+import {Vec2, lerp, lerp_vec2} from ultragui::core::math;
+import {EdgeInsets} from ultragui::core::rect;
+import {max} from ultragui::core::algorithm;
+import {
+  AlignContent, AlignItems, AlignSelf, Cursor, FlexDirection, FlexWrap, FontStyle, FontWeight, GradientType,
+  JustifyContent, Overflow, PointerEvents, Position, TextAlign, TextDecoration, TextTransform, Visibility,
+  WidgetState, has_state,
+} from ultragui::style::enums;
+import {Length} from ultragui::style::property_types;
+import {Transition} from ultragui::style::transition;
+
+// A single color stop in a multi-stop gradient.
+pub struct GradientStop : Copy, Equal {
+  pub var position: f32 = 0.0  // 0.0 to 1.0
+  pub var color: Color = Color {}
+}
+
+// Box shadow definition (CSS-like).
+pub struct BoxShadow : Copy, Equal {
+  pub var color: Color = Color::transparent()
+  pub var blur: f32 = 0.0
+  pub var spread: f32 = 0.0
+  pub var offset: Vec2 = Vec2::zero()
+  pub var inset: bool = false
+}
+
+// Style::kMaxGradientStops
+pub comptime let kMaxGradientStops: u32 = 8;
+
+// Complete visual style for a widget. Every widget has one of these.
+// Properties use CSS-like naming. Default values (`Style {}`) produce an
+// invisible, auto-sized, flow-layout element (like an unstyled <div>).
+// Equality is field by field with float `==`, as the C++ `= default`.
+pub struct Style : Copy, Equal {
+  // --- Enums (grouped in the C++ for layout; akiko orders fields itself) ---
+  pub var flex_direction: FlexDirection = FlexDirection::Row
+  pub var justify_content: JustifyContent = JustifyContent::Start
+  pub var align_items: AlignItems = AlignItems::Stretch
+  pub var align_self: AlignSelf = AlignSelf::Auto
+  pub var align_content: AlignContent = AlignContent::Start
+  pub var flex_wrap: FlexWrap = FlexWrap::NoWrap
+  pub var position: Position = Position::Relative
+  pub var overflow: Overflow = Overflow::Visible
+  pub var visibility: Visibility = Visibility::Visible
+  pub var gradient_type: GradientType = GradientType::Linear
+  pub var text_align: TextAlign = TextAlign::Left
+  pub var text_transform: TextTransform = TextTransform::None
+  pub var font_style: FontStyle = FontStyle::Normal
+  pub var text_decoration: TextDecoration = TextDecoration::None
+  pub var cursor: Cursor = Cursor::Auto
+  pub var pointer_events: PointerEvents = PointerEvents::Auto
+  pub var font_weight: FontWeight = FontWeight::Regular
+
+  // --- Sizing ---
+  pub var width: Length = Length::auto()
+  pub var height: Length = Length::auto()
+  pub var min_width: Length = Length::px(0.0)
+  pub var min_height: Length = Length::px(0.0)
+  pub var max_width: Length = Length::px(1e6)  // effectively unbounded
+  pub var max_height: Length = Length::px(1e6)
+  pub var flex_grow: f32 = 0.0
+  pub var flex_shrink: f32 = 1.0
+  pub var flex_basis: Length = Length::auto()
+
+  // --- Spacing ---
+  pub var margin: EdgeInsets = EdgeInsets {}
+  pub var padding: EdgeInsets = EdgeInsets {}
+  pub var gap: f32 = 0.0
+  pub var row_gap: f32 = -1.0     // -1 = use gap
+  pub var column_gap: f32 = -1.0  // -1 = use gap
+
+  // --- Position offsets (for Position::Absolute or Relative offsets) ---
+  pub var top: Length = Length::auto()
+  pub var right_offset: Length = Length::auto()
+  pub var bottom: Length = Length::auto()
+  pub var left_offset: Length = Length::auto()
+
+  // --- Visual ---
+  pub var background: Color = Color::transparent()
+  // If != transparent, linear gradient top->bottom
+  pub var background_end: Color = Color::transparent()
+  pub var gradient_angle: f32 = 180.0  // CSS degrees: 180 = top-to-bottom (default)
+  pub var gradient_stops: [GradientStop; 8] = [GradientStop {}; 8]
+  pub var gradient_stop_count: u32 = 0
+  pub var border_color: Color = Color::transparent()
+  pub var border_width: f32 = 0.0
+  pub var corner_radius: f32 = 0.0     // Convenience: sets all 4 corners
+  pub var corner_radius_tl: f32 = 0.0  // Per-corner: top-left
+  pub var corner_radius_tr: f32 = 0.0  // Per-corner: top-right
+  pub var corner_radius_br: f32 = 0.0  // Per-corner: bottom-right
+  pub var corner_radius_bl: f32 = 0.0  // Per-corner: bottom-left
+  pub var opacity: f32 = 1.0
+  pub var backdrop_blur: f32 = 0.0  // Blur radius for frosted glass effect (0 = none)
+  pub var aspect_ratio: f32 = 0.0   // 0 = none, positive = width/height
+
+  // --- Transform ---
+  // Widget rotation about its own centre, degrees clockwise (CSS
+  // `transform: rotate()`). Applied to emitted geometry at paint time; the
+  // scissor rect stays axis-aligned.
+  pub var rotation: f32 = 0.0
+
+  // --- Box shadow ---
+  pub var shadow: BoxShadow = BoxShadow {}
+
+  // --- Text ---
+  pub var text_color: Color = Color::white()
+  pub var font_size: f32 = 16.0
+  pub var letter_spacing: f32 = 0.0          // Extra pixels between characters
+  pub var line_height_multiplier: f32 = 1.0  // Multiplier on default line height
+  // transparent = inherit text_color
+  pub var text_decoration_color: Color = Color::transparent()
+
+  // --- Text shadow ---
+  pub var text_shadow_color: Color = Color::transparent()
+  pub var text_shadow_blur: f32 = 0.0
+  pub var text_shadow_offset: Vec2 = Vec2::zero()
+
+  // --- Transitions (keyed by property group) ---
+  pub var background_transition: Transition = Transition {}
+  pub var transform_transition: Transition = Transition {}
+  pub var opacity_transition: Transition = Transition {}
+
+  // Check if this style has a gradient background
+  pub fn has_gradient(self&): bool => self.background_end.a > 0.0 && self.background_end != self.background;
+
+  // Check if this style has a multi-stop gradient (3+ colors)
+  pub fn has_multi_stop_gradient(self&): bool => self.gradient_stop_count >= 2;
+
+  // Check if this style has a box shadow
+  pub fn has_shadow(self&): bool => self.shadow.color.a > 0.0 && (self.shadow.blur > 0.0 || self.shadow.spread > 0.0);
+
+  // Scale visual pixel properties (font, border, corner radius, shadows,
+  // blur). Layout properties are scaled by the layout engine instead.
+  pub fn scale(var self&, s: f32);
+
+  // Style::Lerp: interpolate animatable properties (colors, sizes,
+  // opacity, ...); the rest snaps to b at t >= 0.5.
+  pub fn lerp(a&: Style, b&: Style, t: f32): Style;
+}
+
+fn lerp_length(a: Length, b: Length, t: f32): Length {
+  if (a.unit != b.unit) {
+    return t < 0.5 ? a : b;
+  }
+  return Length { value: lerp(a.value, b.value, t), unit: a.unit };
+}
+
+fn lerp_insets(a: EdgeInsets, b: EdgeInsets, t: f32): EdgeInsets => EdgeInsets {
+  top: lerp(a.top, b.top, t),
+  right: lerp(a.right, b.right, t),
+  bottom: lerp(a.bottom, b.bottom, t),
+  left: lerp(a.left, b.left, t),
+};
+
+fn lerp_shadow(a: BoxShadow, b: BoxShadow, t: f32): BoxShadow => BoxShadow {
+  color: lerp_color(a.color, b.color, t),
+  blur: lerp(a.blur, b.blur, t),
+  spread: lerp(a.spread, b.spread, t),
+  offset: lerp_vec2(a.offset, b.offset, t),
+  inset: t < 0.5 ? a.inset : b.inset,
+};
+
+fn Style::scale(var self&, s: f32) {
+  if (s == 1.0) {
+    return;
+  }
+  self.font_size *= s;
+  self.letter_spacing *= s;
+  self.border_width *= s;
+  self.corner_radius *= s;
+  self.corner_radius_tl *= s;
+  self.corner_radius_tr *= s;
+  self.corner_radius_br *= s;
+  self.corner_radius_bl *= s;
+  self.shadow.blur *= s;
+  self.shadow.spread *= s;
+  self.shadow.offset.x *= s;
+  self.shadow.offset.y *= s;
+  self.text_shadow_blur *= s;
+  self.text_shadow_offset.x *= s;
+  self.text_shadow_offset.y *= s;
+  self.backdrop_blur *= s;
+}
+
+fn Style::lerp(a&: Style, b&: Style, t: f32): Style {
+  var result = a;  // Start with 'a', interpolate animatable fields
+
+  result.background = lerp_color(a.background, b.background, t);
+  result.background_end = lerp_color(a.background_end, b.background_end, t);
+  result.gradient_angle = lerp(a.gradient_angle, b.gradient_angle, t);
+  result.rotation = lerp(a.rotation, b.rotation, t);
+  result.border_color = lerp_color(a.border_color, b.border_color, t);
+  result.border_width = lerp(a.border_width, b.border_width, t);
+  result.corner_radius = lerp(a.corner_radius, b.corner_radius, t);
+  result.corner_radius_tl = lerp(a.corner_radius_tl, b.corner_radius_tl, t);
+  result.corner_radius_tr = lerp(a.corner_radius_tr, b.corner_radius_tr, t);
+  result.corner_radius_br = lerp(a.corner_radius_br, b.corner_radius_br, t);
+  result.corner_radius_bl = lerp(a.corner_radius_bl, b.corner_radius_bl, t);
+  result.opacity = lerp(a.opacity, b.opacity, t);
+  result.backdrop_blur = lerp(a.backdrop_blur, b.backdrop_blur, t);
+  result.aspect_ratio = lerp(a.aspect_ratio, b.aspect_ratio, t);
+  result.text_color = lerp_color(a.text_color, b.text_color, t);
+  result.font_size = lerp(a.font_size, b.font_size, t);
+  result.gap = lerp(a.gap, b.gap, t);
+  result.letter_spacing = lerp(a.letter_spacing, b.letter_spacing, t);
+  result.line_height_multiplier = lerp(a.line_height_multiplier, b.line_height_multiplier, t);
+  result.text_shadow_color = lerp_color(a.text_shadow_color, b.text_shadow_color, t);
+  result.text_shadow_blur = lerp(a.text_shadow_blur, b.text_shadow_blur, t);
+  result.text_shadow_offset = lerp_vec2(a.text_shadow_offset, b.text_shadow_offset, t);
+  result.text_decoration_color = lerp_color(a.text_decoration_color, b.text_decoration_color, t);
+
+  result.shadow = lerp_shadow(a.shadow, b.shadow, t);
+
+  // Gradient stops: a style with fewer stops repeats its last one (or stop 0
+  // when it has none).
+  result.gradient_stop_count = max(a.gradient_stop_count, b.gradient_stop_count);
+  for (let i in 0..result.gradient_stop_count) {
+    let ia = i < a.gradient_stop_count ? i : (a.gradient_stop_count > 0 ? a.gradient_stop_count - 1 : 0);
+    let ib = i < b.gradient_stop_count ? i : (b.gradient_stop_count > 0 ? b.gradient_stop_count - 1 : 0);
+    let sa = a.gradient_stops[ia as usize];
+    let sb = b.gradient_stops[ib as usize];
+    result.gradient_stops[i as usize].position = lerp(sa.position, sb.position, t);
+    result.gradient_stops[i as usize].color = lerp_color(sa.color, sb.color, t);
+  }
+
+  result.width = lerp_length(a.width, b.width, t);
+  result.height = lerp_length(a.height, b.height, t);
+  result.margin = lerp_insets(a.margin, b.margin, t);
+  result.padding = lerp_insets(a.padding, b.padding, t);
+
+  // Non-animatable properties snap at t >= 0.5. align_content,
+  // text_transform, text_decoration, cursor and pointer_events are not in the
+  // C++ list and stay a's.
+  if (t >= 0.5) {
+    result.flex_direction = b.flex_direction;
+    result.justify_content = b.justify_content;
+    result.align_items = b.align_items;
+    result.align_self = b.align_self;
+    result.flex_wrap = b.flex_wrap;
+    result.position = b.position;
+    result.overflow = b.overflow;
+    result.visibility = b.visibility;
+    result.text_align = b.text_align;
+    result.font_weight = b.font_weight;
+    result.font_style = b.font_style;
+    result.gradient_type = b.gradient_type;
+  }
+
+  return result;
+}
+
+// A style override for a specific widget state (e.g. :hover, :pressed). Only
+// the fields `mask` names are taken from `style`.
+pub struct StyleOverride : Copy, Equal {
+  pub var state: WidgetState = WidgetState::None
+  pub var style: Style = Style {}  // Only masked properties are used
+  pub var mask: u64 = 0           // Bitmask of which properties are overridden
+}
+
+// Property mask bits for StyleOverride.
+namespace StyleMask {
+  pub comptime let kBackground: u64 = 1;
+  pub comptime let kBorderColor: u64 = 2;
+  pub comptime let kBorderWidth: u64 = 4;
+  pub comptime let kCornerRadius: u64 = 8;
+  pub comptime let kOpacity: u64 = 16;
+  pub comptime let kTextColor: u64 = 32;
+  pub comptime let kFontSize: u64 = 64;
+  pub comptime let kWidth: u64 = 128;
+  pub comptime let kHeight: u64 = 256;
+  pub comptime let kMargin: u64 = 512;
+  pub comptime let kPadding: u64 = 1024;
+  pub comptime let kTransform: u64 = 2048;
+  pub comptime let kShadow: u64 = 4096;
+  pub comptime let kBackgroundEnd: u64 = 8192;
+  pub comptime let kGradientAngle: u64 = 16384;
+}
+
+// ---------------------------------------------------------------------------
+// Table-driven style override resolution
+// ---------------------------------------------------------------------------
+
+struct MaskApply : Copy {
+  pub let mask: u64
+  pub let apply: static fn(&var Style, &Style): ()
+}
+
+fn apply_background(r: &var Style, s: &Style) { r.background = s.background; }
+fn apply_background_end(r: &var Style, s: &Style) { r.background_end = s.background_end; }
+fn apply_border_color(r: &var Style, s: &Style) { r.border_color = s.border_color; }
+fn apply_border_width(r: &var Style, s: &Style) { r.border_width = s.border_width; }
+fn apply_corner_radius(r: &var Style, s: &Style) {
+  r.corner_radius = s.corner_radius;
+  r.corner_radius_tl = s.corner_radius_tl;
+  r.corner_radius_tr = s.corner_radius_tr;
+  r.corner_radius_br = s.corner_radius_br;
+  r.corner_radius_bl = s.corner_radius_bl;
+}
+fn apply_opacity(r: &var Style, s: &Style) { r.opacity = s.opacity; }
+fn apply_text_color(r: &var Style, s: &Style) { r.text_color = s.text_color; }
+fn apply_font_size(r: &var Style, s: &Style) { r.font_size = s.font_size; }
+fn apply_width(r: &var Style, s: &Style) { r.width = s.width; }
+fn apply_height(r: &var Style, s: &Style) { r.height = s.height; }
+fn apply_margin(r: &var Style, s: &Style) { r.margin = s.margin; }
+fn apply_padding(r: &var Style, s: &Style) { r.padding = s.padding; }
+fn apply_shadow(r: &var Style, s: &Style) { r.shadow = s.shadow; }
+fn apply_gradient_angle(r: &var Style, s: &Style) { r.gradient_angle = s.gradient_angle; }
+fn apply_transform(r: &var Style, s: &Style) { r.rotation = s.rotation; }
+
+// kMaskApplicators, in the C++ order.
+static let kMaskApplicators: [MaskApply; 15] = [
+  MaskApply { mask: StyleMask::kBackground, apply: apply_background },
+  MaskApply { mask: StyleMask::kBackgroundEnd, apply: apply_background_end },
+  MaskApply { mask: StyleMask::kBorderColor, apply: apply_border_color },
+  MaskApply { mask: StyleMask::kBorderWidth, apply: apply_border_width },
+  MaskApply { mask: StyleMask::kCornerRadius, apply: apply_corner_radius },
+  MaskApply { mask: StyleMask::kOpacity, apply: apply_opacity },
+  MaskApply { mask: StyleMask::kTextColor, apply: apply_text_color },
+  MaskApply { mask: StyleMask::kFontSize, apply: apply_font_size },
+  MaskApply { mask: StyleMask::kWidth, apply: apply_width },
+  MaskApply { mask: StyleMask::kHeight, apply: apply_height },
+  MaskApply { mask: StyleMask::kMargin, apply: apply_margin },
+  MaskApply { mask: StyleMask::kPadding, apply: apply_padding },
+  MaskApply { mask: StyleMask::kShadow, apply: apply_shadow },
+  MaskApply { mask: StyleMask::kGradientAngle, apply: apply_gradient_angle },
+  MaskApply { mask: StyleMask::kTransform, apply: apply_transform },
+];
+
+fn apply_masked_override(var result&: Style, ov&: StyleOverride) {
+  for (let entry in kMaskApplicators) {
+    if ((ov.mask & entry.mask) != 0) {
+      (entry.apply)(result, ov.style);
+    }
+  }
+}
+
+// ResolveStyle: the effective style for a widget given its base style, state
+// overrides, and current interactive state. An override with state None
+// always applies; the others apply when any of their flags is active.
+pub fn resolve_style(base&: Style, overrides&: [StyleOverride], current_state: WidgetState): Style {
+  var result = base;
+  for (let ov in overrides) {
+    if (ov.state == WidgetState::None || has_state(current_state, ov.state)) {
+      apply_masked_override(result, ov);
+    }
+  }
+  return result;
+}

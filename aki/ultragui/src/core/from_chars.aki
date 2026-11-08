@@ -1,0 +1,206 @@
+// ugui/core/from_chars_compat.h and from_chars.cc: std::from_chars without
+// <charconv>. The parsers accept exactly what std::from_chars accepts and
+// produce the same values: no leading whitespace, no '+', no "0x" prefix,
+// '-' only for floats. On a range error the value is left untouched and ptr
+// points past the number; when nothing matches, ptr is 0.
+//
+// The C++ takes [first, last) and returns a pointer; here the text is a
+// `str` and `ptr` is the byte offset into it that the pointer would be.
+
+module ultragui::core::from_chars;
+
+import {with_nul} from akikit::strings::string;
+
+pub enum FromCharsError as u8 { None, InvalidArgument, OutOfRange }
+
+pub struct FromCharsResult : Copy, Equal {
+  // Bytes of `s` the number used: the C++ `ptr - first`.
+  pub let ptr: usize
+  pub let ec: FromCharsError
+}
+
+fn digit_value(c: c8): u32 {
+  let b = c as u32;
+  if (c >= '0' && c <= '9') {
+    return b - '0' as u32;
+  }
+  if (c >= 'a' && c <= 'z') {
+    return b - 'a' as u32 + 10;
+  }
+  if (c >= 'A' && c <= 'Z') {
+    return b - 'A' as u32 + 10;
+  }
+  return 99;
+}
+
+fn is_digit(c: c8): bool => c >= '0' && c <= '9';
+
+// Case-insensitive match of the lowercase `word` at s[p..].
+fn match_word(s: str, p: usize, word: str): bool {
+  for (let i in 0..#word) {
+    if (p + i == #s || (s[p + i] as u8 | 0x20) != word[i] as u8) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Unsigned integers in `base` (2..36), as std::from_chars(first, last, value,
+// base).
+pub fn from_chars_u32(s: str, var value&: u32, base: u32 = 10): FromCharsResult {
+  var p: usize = 0;
+  var mag: u32 = 0;
+  var overflow = false;
+  while (p != #s) {
+    let d = digit_value(s[p]);
+    if (d >= base) {
+      break;
+    }
+    if (overflow || mag > (0xFFFF_FFFF - d) / base) {
+      overflow = true;
+    } else {
+      mag = mag * base + d;
+    }
+    p += 1;
+  }
+  if (p == 0) {
+    return FromCharsResult { ptr: 0, ec: FromCharsError::InvalidArgument };
+  }
+  if (overflow) {
+    return FromCharsResult { ptr: p, ec: FromCharsError::OutOfRange };
+  }
+  value = mag;
+  return FromCharsResult { ptr: p, ec: FromCharsError::None };
+}
+
+// Floats in the general (fixed or scientific) format, as
+// std::from_chars(first, last, value): correctly rounded, decimal point '.'
+// whatever the process locale, and inf/infinity/nan/nan(...) in any case.
+pub fn from_chars_f32(s: str, var value&: f32): FromCharsResult {
+  var p: usize = 0;
+  let negative = p != #s && s[p] == '-';
+  if (negative) {
+    p += 1;
+  }
+
+  // inf, infinity and nan[(chars)]: std::from_chars yields the plain quiet
+  // NaN whatever the payload, where strtof would encode it.
+  if (match_word(s, p, "inf")) {
+    p += match_word(s, p, "infinity") ? 8 : 3;
+    let inf = @bit_cast(f32, 0x7F80_0000u32);
+    value = negative ? -inf : inf;
+    return FromCharsResult { ptr: p, ec: FromCharsError::None };
+  }
+  if (match_word(s, p, "nan")) {
+    p += 3;
+    if (p != #s && s[p] == '(') {
+      var q = p + 1;
+      while (q != #s && (is_digit(s[q]) || (s[q] >= 'a' && s[q] <= 'z') || (s[q] >= 'A' && s[q] <= 'Z') || s[q] == '_')) {
+        q += 1;
+      }
+      if (q != #s && s[q] == ')') {
+        p = q + 1;
+      }
+    }
+    // NAN is the positive quiet NaN; -NAN flips only the sign bit.
+    value = @bit_cast(f32, negative ? 0xFFC0_0000u32 : 0x7FC0_0000u32);
+    return FromCharsResult { ptr: p, ec: FromCharsError::None };
+  }
+
+  // digits [. digits] [e [+-] digits], at least one mantissa digit. An
+  // exponent without digits is not part of the number. Scanning the grammar
+  // here, not in strtof, is what keeps out whitespace, '+' and hex floats.
+  var nonzero = false;
+  let mantissa = p;
+  while (p != #s && is_digit(s[p])) {
+    nonzero = nonzero || s[p] != '0';
+    p += 1;
+  }
+  var digits = p - mantissa;
+  if (p != #s && s[p] == '.') {
+    p += 1;
+    let frac = p;
+    while (p != #s && is_digit(s[p])) {
+      nonzero = nonzero || s[p] != '0';
+      p += 1;
+    }
+    digits += p - frac;
+  }
+  if (digits == 0) {
+    return FromCharsResult { ptr: 0, ec: FromCharsError::InvalidArgument };
+  }
+  if (p != #s && (s[p] == 'e' || s[p] == 'E')) {
+    var q = p + 1;
+    if (q != #s && (s[q] == '+' || s[q] == '-')) {
+      q += 1;
+    }
+    if (q != #s && is_digit(s[q])) {
+      while (q != #s && is_digit(s[q])) {
+        q += 1;
+      }
+      p = q;
+    }
+  }
+
+  let parsed = str_to_float_c(s[..p]);
+
+  // std::from_chars reports a result that rounds to infinity, or a nonzero
+  // mantissa that rounds to zero, as out of range and keeps the old value.
+  if (is_inf(parsed) || (parsed == 0.0 && nonzero)) {
+    return FromCharsResult { ptr: p, ec: FromCharsError::OutOfRange };
+  }
+  value = parsed;
+  return FromCharsResult { ptr: p, ec: FromCharsError::None };
+}
+
+fn is_inf(v: f32): bool => (@bit_cast(u32, v) & 0x7FFF_FFFF) == 0x7F80_0000;
+
+// strtof in the "C" locale. The scanned span already has the std::from_chars
+// grammar, so only the decimal point could still differ.
+fn str_to_float_c(text: str): f32 {
+  // The C++ copies into a 128-byte stack buffer, or a heap String when the
+  // text is longer; the copy only adds the NUL.
+  var stack: [c_char; 128] = [0 as c_char; 128];
+  if (#text < 128) {
+    for (let i in 0..#text) {
+      stack[i] = text[i] as u8 as c_char;
+    }
+    return unsafe strtof_c(@ptr(stack[..]) as *const c_char);
+  }
+  let owned = with_nul(text);
+  return unsafe strtof_c(@ptr(owned.as_str()) as *const c_char);
+}
+
+// One "C" locale per thread, made on first use (the C++ keeps one per
+// process in a function static).
+static(thread) var t_c_locale: *var u8 = null;
+
+extern("newlocale") fn c_newlocale(mask: i32, locale: *const c_char, base: *var u8): *var u8;
+extern("strtof_l") fn c_strtof_l(s: *const c_char, end: *var *var c_char, locale: *var u8): f32;
+extern("_create_locale") fn c_create_locale(category: i32, locale: *const c_char): *var u8;
+extern("_strtof_l") fn c_win_strtof_l(s: *const c_char, end: *var *var c_char, locale: *var u8): f32;
+
+// LC_ALL_MASK: glibc ORs every category bit (0x1FBF); the BSDs and macOS use
+// 0x3F. Windows takes the category LC_ALL (0) instead.
+fn lc_all_mask(): i32 {
+  if (comptime @target_os() == "macos" || @target_os() == "freebsd") {
+    return 0x3F;
+  }
+  return 0x1FBF;
+}
+
+unsafe fn strtof_c(s: *const c_char): f32 {
+  unsafe {
+    if (t_c_locale == null) {
+      if (comptime @target_os() == "windows") {
+        t_c_locale = c_create_locale(0, c"C");
+      } else {
+        t_c_locale = c_newlocale(lc_all_mask(), c"C", null);
+      }
+    }
+    if (comptime @target_os() == "windows") {
+      return c_win_strtof_l(s, null, t_c_locale);
+    }
+    return c_strtof_l(s, null, t_c_locale);
+  }
+}

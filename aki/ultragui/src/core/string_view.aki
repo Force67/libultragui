@@ -1,0 +1,42 @@
+// ugui/core/string_view.h. StringView is aki's `str`; this module keeps the
+// members whose std::string_view semantics differ from akikit's string
+// helpers, so ported code reads the same numbers. Offsets count bytes.
+// StringView::npos is `none`.
+
+module ultragui::core::string_view;
+
+// StringView::npos, for a count that means "to the end".
+pub comptime let kNpos: usize = 18446744073709551615;
+
+// StringView::substr(pos, count): count clamps to what is left. pos > #s is a
+// bug in C++ (std::string_view would throw) and stops here.
+pub fn substr<'a>(s: str<'a>, pos: usize, count: usize = kNpos): str<'a> {
+  let rest = #s - pos;
+  return s[pos..pos + (count < rest ? count : rest)];
+}
+
+// StringView::find(char c, pos).
+pub fn find_char(s: str, c: c8, pos: usize = 0): usize? {
+  for (let i in pos..#s) {
+    s[i] == c ? return i;
+  }
+  return none;
+}
+
+// StringView::find(StringView needle, pos).
+pub fn find(s: str, needle: str, pos: usize = 0): usize? {
+  if (pos > #s || #needle > #s - pos) {
+    return none;
+  }
+  var i = pos;
+  while (i + #needle <= #s) {
+    if (s[i..i + #needle] == needle) {
+      return i;
+    }
+    i += 1;
+  }
+  return none;
+}
+
+// StringView::remove_prefix(n).
+pub fn remove_prefix<'a>(s: str<'a>, n: usize): str<'a> => s[n..];

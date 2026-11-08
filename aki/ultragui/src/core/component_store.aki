@@ -1,0 +1,103 @@
+// ugui/core/component_store.{h,cc}: sparse-set storage for one component type.
+//
+// Dense data for cache-friendly iteration; `sparse` maps entity index to dense
+// slot. Lookups are generation-checked, so a stale handle never reads a
+// reused entity's slot. add/remove may move elements (swap-and-pop): a view
+// returned by get/add lives only until the next structural change, which the
+// borrow checker enforces.
+//
+// ComponentTypeId / ComponentTypeIdFor (the process-wide type-name table) have
+// no aki counterpart: aki has no type names at run time, and World finds a
+// built-in store by its field type at compile time instead (see
+// widgets::widget_registry). IComponentStore, the erased base World used to
+// drop an entity's components, is ErasedStore in widget_registry.
+
+module ultragui::core::component_store;
+
+import {List, resize} from akikit::containers::list;
+import {swap_at} from akikit::algorithm;
+import {WidgetId} from ultragui::core::handle;
+
+comptime let kInvalid: u32 = 0xFFFF_FFFF;
+
+pub struct ComponentStore<C> {
+  var data: List<C>
+  var dense_ids: List<WidgetId>
+  var sparse: List<u32>
+
+  pub fn ComponentStore(): ComponentStore<C> => ComponentStore::<C> { data: List(), dense_ids: List(), sparse: List() };
+
+  // Attach (or overwrite) the component for `id`.
+  pub fn add(var self&, id: WidgetId, value: C): &var C;
+
+  // The component for `id`, or none if absent or the handle is stale.
+  pub fn get(self&, id: WidgetId): (&C)?;
+  pub fn get_var(var self&, id: WidgetId): (&var C)?;
+  pub fn has(self&, id: WidgetId): bool => self.slot(id) != none;
+
+  pub fn remove(var self&, id: WidgetId);
+
+  // --- Dense iteration for systems ---
+  pub fn len(self&): usize => self.data.len();
+  pub fn ids(self&): &[WidgetId] => self.dense_ids.as_slice();
+  // The components, in the same order as ids().
+  pub fn as_slice(self&): &[C] => self.data.as_slice();
+  pub fn as_slice_var(var self&): &var [C] => self.data.as_slice_var();
+}
+
+// The dense slot of `id`, when it holds this very handle.
+fn ComponentStore<C>::slot(self&, id: WidgetId): usize? {
+  if (id.index as usize >= self.sparse.len()) {
+    return none;
+  }
+  let d = self.sparse[id.index as usize];
+  if (d == kInvalid || d as usize >= self.dense_ids.len() || self.dense_ids[d as usize] != id) {
+    return none;
+  }
+  return d as usize;
+}
+
+fn ComponentStore<C>::add(var self&, id: WidgetId, value: C): &var C {
+  // EnsureSparse
+  if (id.index as usize >= self.sparse.len()) {
+    resize(self.sparse, id.index as usize + 1, kInvalid);
+  }
+  let d = self.sparse[id.index as usize];
+  if (d != kInvalid && (d as usize) < self.dense_ids.len() && self.dense_ids[d as usize] == id) {
+    self.data[d as usize] = value;
+    return self.data.at_var(d as usize);
+  }
+  self.sparse[id.index as usize] = self.data.len() as u32;
+  self.dense_ids.push(id);
+  self.data.push(value);
+  let last = self.data.len() - 1;
+  return self.data.at_var(last);
+}
+
+fn ComponentStore<C>::get(self&, id: WidgetId): (&C)? {
+  let d = self.slot(id) else {
+    return none;
+  };
+  return self.data[d];
+}
+
+fn ComponentStore<C>::get_var(var self&, id: WidgetId): (&var C)? {
+  let d = self.slot(id) else {
+    return none;
+  };
+  return self.data.at_var(d);
+}
+
+fn ComponentStore<C>::remove(var self&, id: WidgetId) {
+  let d = self.slot(id) else {
+    return;
+  };
+  let last = self.data.len() - 1;
+  // data[d] = move(data[last]); dense_ids[d] = dense_ids[last]; pop both.
+  swap_at(self.data.as_slice_var(), d, last);
+  self.dense_ids[d] = self.dense_ids[last];
+  self.sparse[self.dense_ids[d].index as usize] = d as u32;
+  let _ = self.data.pop();
+  let _ = self.dense_ids.pop();
+  self.sparse[id.index as usize] = kInvalid;
+}

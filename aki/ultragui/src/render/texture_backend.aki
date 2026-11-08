@@ -1,0 +1,127 @@
+// ugui/render/texture_backend.h: the host-providable GPU texture sink, the
+// Dear ImGui style middleware seam. Whoever owns the graphics device (the
+// bundled RHI in legacy mode, the application's renderer in draw-data mode)
+// implements it, so SVG, Image, Lottie, and animation textures flow through
+// one TextureId space.
+//
+// TextureId conventions (see draw_data): 0 = none/white, ~0 = font atlas,
+// anything else = a real texture meaningful to the backend that minted it.
+//
+// The C++ virtual interface becomes:
+//
+// * `capability TextureBackend`, which a backend type implements (in any
+//   package);
+// * `DynTextureBackend<'a>`, a borrowed backend of any type, which core
+//   subsystems take where the C++ took `TextureBackend*`: they call it without
+//   knowing the concrete type. A null C++ pointer is a `none` optional.
+// * `TextureBackendBox`, an owned backend of any type, for an owner that keeps
+//   one across calls (UIContext::set_texture_backend). `as_dyn()` lends it.
+//
+// `pixels` is the tightly packed pixel data (bytes_per_pixel(format) * width *
+// height bytes); an empty slice stands for the C++ nullptr.
+
+module ultragui::render::texture_backend;
+
+import {ErasedBox, ErasedRef} from ultragui::core::erased;
+import {TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+
+pub capability TextureBackend {
+  // Upload `pixels` and return an id; kNullTextureId on failure.
+  fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId;
+
+  // Re-upload pixels into an existing texture (same dimensions/format).
+  fn update_texture(var self&, id: TextureId, pixels: bytes);
+
+  // Release a texture. No-op for kNullTextureId / kFontTextureId.
+  fn destroy_texture(var self&, id: TextureId);
+}
+
+// The thunks: each casts the erased pointer back to T and calls T's method.
+fn create_thunk<T: TextureBackend>(p: *var u8, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+  unsafe {
+    var t& = *(p as *var T);
+    return t.create_texture(width, height, format, pixels, filter);
+  }
+}
+
+fn update_thunk<T: TextureBackend>(p: *var u8, id: TextureId, pixels: bytes) {
+  unsafe {
+    var t& = *(p as *var T);
+    t.update_texture(id, pixels);
+  }
+}
+
+fn destroy_thunk<T: TextureBackend>(p: *var u8, id: TextureId) {
+  unsafe {
+    var t& = *(p as *var T);
+    t.destroy_texture(id);
+  }
+}
+
+// The methods of one backend type, as function values.
+struct TextureBackendFns : Copy {
+  pub let create: static fn(*var u8, u32, u32, RhiFormat, bytes, RhiFilter): TextureId
+  pub let update: static fn(*var u8, TextureId, bytes): ()
+  pub let destroy: static fn(*var u8, TextureId): ()
+}
+
+fn fns_for<T: TextureBackend>(): TextureBackendFns =>
+  TextureBackendFns { create: create_thunk::<T>, update: update_thunk::<T>, destroy: destroy_thunk::<T> };
+
+// A borrowed TextureBackend of any type: `TextureBackend*` in the C++.
+pub struct DynTextureBackend<'a> : TextureBackend {
+  var object: ErasedRef<'a>
+  let fns: TextureBackendFns
+
+  // Borrows `backend` for as long as the result lives.
+  pub fn of<'a, T: TextureBackend>(backend: &'a var T): DynTextureBackend<'a> =>
+    DynTextureBackend { object: ErasedRef::of(backend), fns: fns_for::<T>() };
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId =>
+    (self.fns.create)(self.object.ptr(), width, height, format, pixels, filter);
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {
+    (self.fns.update)(self.object.ptr(), id, pixels);
+  }
+  pub fn destroy_texture(var self&, id: TextureId) {
+    (self.fns.destroy)(self.object.ptr(), id);
+  }
+}
+
+fn DynTextureBackend::from_parts<'a>(object: ErasedRef<'a>, fns: TextureBackendFns): DynTextureBackend<'a> =>
+  DynTextureBackend { object, fns };
+
+// An owned TextureBackend of any type, dropped with the box.
+pub struct TextureBackendBox : TextureBackend {
+  var object: ErasedBox
+  let fns: TextureBackendFns
+
+  // Moves `backend` into the box.
+  pub fn of<T: TextureBackend>(backend: T): TextureBackendBox =>
+    TextureBackendBox { object: ErasedBox::of(backend), fns: fns_for::<T>() };
+
+  // Lends the boxed backend to code that takes a DynTextureBackend.
+  pub fn as_dyn(var self&): DynTextureBackend => DynTextureBackend::from_parts(self.object.as_ref(), self.fns);
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId =>
+    (self.fns.create)(self.object.ptr(), width, height, format, pixels, filter);
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {
+    (self.fns.update)(self.object.ptr(), id, pixels);
+  }
+  pub fn destroy_texture(var self&, id: TextureId) {
+    (self.fns.destroy)(self.object.ptr(), id);
+  }
+}
+
+// TextureIdFromRhiHandle: map the RHI's internal u32 handle space into the
+// unified TextureId space, keeping 0 ("none/white") and ~0 ("font atlas")
+// reserved. A valid RHI handle h becomes h + 1, so even RHI handle 0 lands on
+// a non-null id.
+pub fn texture_id_from_rhi_handle(h: RhiTextureHandle): TextureId =>
+  h == kInvalidTexture ? kNullTextureId : h as TextureId + 1;
+
+// RhiHandleFromTextureId: the inverse. The reserved ids (none, font) map back
+// to kInvalidTexture so the legacy RHI submit path falls through to its white
+// / atlas fallbacks. An id above 2^32 truncates as the C++ static_cast does.
+pub fn rhi_handle_from_texture_id(id: TextureId): RhiTextureHandle =>
+  (id == kNullTextureId || id == kFontTextureId) ? kInvalidTexture : (id - 1) as RhiTextureHandle;

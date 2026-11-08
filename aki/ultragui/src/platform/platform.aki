@@ -1,0 +1,183 @@
+// ugui/platform/platform.h: window, events, time, cursor and clipboard.
+//
+// The C++ Platform is one concrete class whose implementation is swapped at
+// link time (platform_glfw.cc, platform_host.cc). Here it is the capability
+// Platform: UIContext is generic over it, HostPlatform
+// (ultragui::platform::platform_host) is the in-core implementation, and
+// ultragui_glfw provides the GLFW one. Platform::impl() and the Impl struct
+// are gone: an implementation's own functions are its own methods.
+//
+// Code that must reach "the platform" without being generic over it (the
+// widgets, through WidgetContext) takes a DynPlatform, a borrowed Platform of
+// any type.
+
+module ultragui::platform::platform;
+
+import {String, from_str} from akikit::strings::string;
+import {ErasedRef} from ultragui::core::erased;
+import {Vec2} from ultragui::core::math;
+import {InputQueue} from ultragui::input::input_queue;
+import {open_url} from ultragui::platform::platform_open_url;
+import {Cursor} from ultragui::style::enums;
+
+// Platform::WindowConfig.
+pub struct WindowConfig {
+  pub var width: i32 = 1280
+  pub var height: i32 = 720
+  pub var title: String = from_str("ultragui")
+  pub var resizable: bool = true
+  pub var vsync: bool = true
+  // Create an OpenGL 3.3 core context instead of a no-API window.
+  pub var opengl: bool = false
+  // Attach to a host-created window (GLFWwindow*) instead of creating one;
+  // the host owns GLFW and the window's lifetime.
+  pub unowned var external_window: *var u8 = null
+}
+
+pub capability Platform {
+  fn init(var self&, config&: WindowConfig): bool;
+  fn shutdown(var self&);
+
+  fn should_close(self&): bool;
+  fn poll_events(var self&);
+  fn window_size(self&): Vec2;
+  fn framebuffer_size(self&): Vec2;
+  fn dpi_scale(self&): f32;
+  fn time(self&): f64;
+
+  // The native window handle, for RHI backend initialization (RhiConfig).
+  fn native_handle(self&): *var u8;
+
+  // Set the mouse cursor style.
+  fn set_cursor(var self&, cursor: Cursor);
+
+  // Clipboard access. The text lives until the next clipboard call. A `var`
+  // receiver where the C++ is const: an implementation may fetch into a
+  // buffer of its own (the Windows host platform does).
+  fn clipboard_text(var self&): str;
+  fn set_clipboard_text(var self&, text: str);
+
+  // Platform::OpenURL: open a URL in the system's default browser. The C++
+  // links a default (platform_open_url.cc, ULTRAGUI_DEFAULT_OPEN_URL) that a
+  // host replaces by linking its own; here the default body calls it and an
+  // implementation that routes URLs elsewhere defines the method itself.
+  fn open_url(var self&, url: str) {
+    open_url(url);
+  }
+
+  // The platform's input event queue, filled during poll_events(), consumed
+  // by the input router.
+  fn input_queue(var self&): &var InputQueue;
+}
+
+// --- DynPlatform -------------------------------------------------------------
+
+fn init_thunk<P: Platform>(p: *var u8, config&: WindowConfig): bool => unsafe (*(p as *var P)).init(config);
+fn shutdown_thunk<P: Platform>(p: *var u8) {
+  unsafe (*(p as *var P)).shutdown();
+}
+fn should_close_thunk<P: Platform>(p: *var u8): bool => unsafe (*(p as *var P)).should_close();
+fn poll_events_thunk<P: Platform>(p: *var u8) {
+  unsafe (*(p as *var P)).poll_events();
+}
+fn window_size_thunk<P: Platform>(p: *var u8): Vec2 => unsafe (*(p as *var P)).window_size();
+fn framebuffer_size_thunk<P: Platform>(p: *var u8): Vec2 => unsafe (*(p as *var P)).framebuffer_size();
+fn dpi_scale_thunk<P: Platform>(p: *var u8): f32 => unsafe (*(p as *var P)).dpi_scale();
+fn time_thunk<P: Platform>(p: *var u8): f64 => unsafe (*(p as *var P)).time();
+fn native_handle_thunk<P: Platform>(p: *var u8): *var u8 => unsafe (*(p as *var P)).native_handle();
+fn set_cursor_thunk<P: Platform>(p: *var u8, cursor: Cursor) {
+  unsafe (*(p as *var P)).set_cursor(cursor);
+}
+fn clipboard_text_thunk<P: Platform>(p: *var u8): str {
+  unsafe {
+    var t& = *(p as *var P);
+    return t.clipboard_text();
+  }
+}
+fn set_clipboard_text_thunk<P: Platform>(p: *var u8, text: str) {
+  unsafe (*(p as *var P)).set_clipboard_text(text);
+}
+fn open_url_thunk<P: Platform>(p: *var u8, url: str) {
+  unsafe (*(p as *var P)).open_url(url);
+}
+fn input_queue_thunk<P: Platform>(p: *var u8): &var InputQueue {
+  unsafe {
+    var t& = *(p as *var P);
+    return t.input_queue();
+  }
+}
+
+struct PlatformFns : Copy {
+  pub let init: static fn(*var u8, &WindowConfig): bool
+  pub let shutdown: static fn(*var u8): ()
+  pub let should_close: static fn(*var u8): bool
+  pub let poll_events: static fn(*var u8): ()
+  pub let window_size: static fn(*var u8): Vec2
+  pub let framebuffer_size: static fn(*var u8): Vec2
+  pub let dpi_scale: static fn(*var u8): f32
+  pub let time: static fn(*var u8): f64
+  pub let native_handle: static fn(*var u8): *var u8
+  pub let set_cursor: static fn(*var u8, Cursor): ()
+  pub let clipboard_text: static fn(*var u8): str
+  pub let set_clipboard_text: static fn(*var u8, str): ()
+  pub let open_url: static fn(*var u8, str): ()
+  pub let input_queue: static fn(*var u8): &var InputQueue
+}
+
+// A borrowed Platform of any type: the `Platform*` that WidgetContext and the
+// input router carry in the C++. It is a Platform itself.
+pub struct DynPlatform<'a> : Platform {
+  var object: ErasedRef<'a>
+  let fns: PlatformFns
+
+  // Borrows `platform` for as long as the result lives.
+  pub fn of<'a, P: Platform>(platform: &'a var P): DynPlatform<'a>;
+
+  pub fn init(var self&, config&: WindowConfig): bool => (self.fns.init)(self.object.ptr(), config);
+  pub fn shutdown(var self&) {
+    (self.fns.shutdown)(self.object.ptr());
+  }
+  pub fn should_close(self&): bool => (self.fns.should_close)(self.raw());
+  pub fn poll_events(var self&) {
+    (self.fns.poll_events)(self.object.ptr());
+  }
+  pub fn window_size(self&): Vec2 => (self.fns.window_size)(self.raw());
+  pub fn framebuffer_size(self&): Vec2 => (self.fns.framebuffer_size)(self.raw());
+  pub fn dpi_scale(self&): f32 => (self.fns.dpi_scale)(self.raw());
+  pub fn time(self&): f64 => (self.fns.time)(self.raw());
+  pub fn native_handle(self&): *var u8 => (self.fns.native_handle)(self.raw());
+  pub fn set_cursor(var self&, cursor: Cursor) {
+    (self.fns.set_cursor)(self.object.ptr(), cursor);
+  }
+  pub fn clipboard_text(var self&): str => (self.fns.clipboard_text)(self.object.ptr());
+  pub fn set_clipboard_text(var self&, text: str) {
+    (self.fns.set_clipboard_text)(self.object.ptr(), text);
+  }
+  pub fn open_url(var self&, url: str) {
+    (self.fns.open_url)(self.object.ptr(), url);
+  }
+  pub fn input_queue(var self&): &var InputQueue => (self.fns.input_queue)(self.object.ptr());
+}
+
+fn DynPlatform::of<'a, P: Platform>(platform: &'a var P): DynPlatform<'a> => DynPlatform {
+  object: ErasedRef::of(platform),
+  fns: PlatformFns {
+    init: init_thunk::<P>,
+    shutdown: shutdown_thunk::<P>,
+    should_close: should_close_thunk::<P>,
+    poll_events: poll_events_thunk::<P>,
+    window_size: window_size_thunk::<P>,
+    framebuffer_size: framebuffer_size_thunk::<P>,
+    dpi_scale: dpi_scale_thunk::<P>,
+    time: time_thunk::<P>,
+    native_handle: native_handle_thunk::<P>,
+    set_cursor: set_cursor_thunk::<P>,
+    clipboard_text: clipboard_text_thunk::<P>,
+    set_clipboard_text: set_clipboard_text_thunk::<P>,
+    open_url: open_url_thunk::<P>,
+    input_queue: input_queue_thunk::<P>,
+  },
+};
+
+// The object pointer for a read-only call. The thunk only reads through it.
+fn DynPlatform::raw(self&): *var u8 => self.object.const_ptr();

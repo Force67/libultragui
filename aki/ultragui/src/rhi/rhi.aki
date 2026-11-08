@@ -1,0 +1,88 @@
+// ugui/rhi/rhi.h: the GPU abstraction.
+//
+// The C++ RHI is one concrete class whose implementation is swapped at link
+// time (vulkan_rhi.cc, opengl_rhi.cc, null_rhi.cc, ...). Here it is the
+// capability Rhi: UIContext is generic over it, NullRhi
+// (ultragui::rhi::null_rhi) is the in-core implementation, and the
+// backend packages (ultragui_vulkan, ultragui_opengl, ultragui_d3d11,
+// ultragui_d3d12) each provide one.
+//
+// Pointer+count arguments are slices; `const void* pixels` is `bytes`, empty
+// for the C++ nullptr. The C++ default arguments (texture = kInvalidTexture,
+// filter = kLinear) are spelled out by callers.
+
+module ultragui::rhi::rhi;
+
+import {String} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D} from ultragui::render::vertex;
+import {RhiFilter, RhiFormat, RhiTextureHandle} from ultragui::rhi::rhi_types;
+
+// RHIConfig. The C++ carries the Platform* only for its native_handle(), the
+// window to present to; UIContext fills native_window from
+// Platform::native_handle() instead, so an RHI need not know the platform's
+// type.
+pub struct RhiConfig {
+  pub unowned var native_window: *var u8 = null
+  pub var validation: bool = true
+  pub var vsync: bool = true
+  // Where the backend finds its shaders; empty for the C++ nullptr.
+  pub var shader_dir: String = String()
+  // Embedded mode: the host owns the frame. The RHI renders into the host
+  // surface without clearing on begin_frame or presenting on end_frame.
+  pub var embedded: bool = false
+}
+
+pub capability Rhi {
+  fn init(var self&, config&: RhiConfig): bool;
+  fn shutdown(var self&);
+
+  fn begin_frame(var self&, clear_color: Color): bool;
+  fn end_frame(var self&);
+
+  fn set_scissor(var self&, rect: Rect);
+  fn reset_scissor(var self&);
+
+  // Upload and draw a batch of 2D vertices. With kInvalidTexture the white
+  // fallback texture is used.
+  fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle);
+
+  // Draw text glyphs using the R8 alpha-only pipeline.
+  fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle);
+
+  fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle;
+  fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes);
+  fn destroy_texture(var self&, handle: RhiTextureHandle);
+
+  // Acquire the next frame (fence wait, image, command buffer begin) without
+  // starting a render pass. begin_frame() calls this internally if you don't.
+  fn acquire_frame(var self&): bool;
+
+  // An offscreen render target that can be drawn into and sampled as a
+  // texture: a handle usable with both begin_offscreen() and texture draws.
+  fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle;
+
+  // Destroy a render target and release all associated GPU resources.
+  fn destroy_render_target(var self&, handle: RhiTextureHandle);
+
+  // Begin rendering to an offscreen target. Must be called after
+  // acquire_frame() and outside any other render pass.
+  fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool;
+
+  // End the offscreen render pass and transition the image to
+  // shader-readable layout.
+  fn end_offscreen(var self&, target: RhiTextureHandle);
+
+  // Convert YCbCr planes to RGBA via the video shader into `target` (from
+  // create_render_target()). y/cb/cr are R8 textures. Requires
+  // acquire_frame(), outside any other render pass.
+  fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle);
+
+  fn display_size(self&): Vec2;
+
+  // Ratio of framebuffer pixels to window coordinates: 1.0 on standard
+  // displays, 2.0 on typical HiDPI/Retina displays.
+  fn dpi_scale(self&): f32;
+}
