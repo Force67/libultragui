@@ -1,8 +1,12 @@
-// No C++ counterpart: the SPIR-V of the bundled shaders, embedded at build
-// time, for the `embed_shaders` feature (see shaders/README.md). The C++
-// always reads them from its shader_dir.
+// The SPIR-V loading both backends share: read_file() of vulkan_rhi.cc and
+// ReadFile() of ugui_impl_vulkan.cc, and (no C++ counterpart) the SPIR-V of
+// the bundled shaders embedded at build time for the `embed_shaders` feature
+// (see shaders/README.md); the C++ always reads them from its shader_dir.
 
 module ultragui_vulkan::shaders;
+
+import {List} from akikit::containers::list;
+import {read_bytes} from akikit::filesystem::file_util;
 
 static let kQuadVert: bytes = @embed("../shaders/quad.vert.spv");
 static let kQuadFrag: bytes = @embed("../shaders/quad.frag.spv");
@@ -33,4 +37,20 @@ pub fn embedded_shader(filename: str): bytes {
     return kVideoFrag;
   }
   return [];
+}
+
+// read_file: the file's bytes, empty when it cannot be read.
+fn read_file(path: str): List<byte> => read_bytes(path) ?? List();
+
+// The SPIR-V of `filename`: from `dir` (empty when it cannot be read), or the
+// embedded copy with the `embed_shaders` feature.
+pub fn shader_code(dir: str, filename: str): List<byte> {
+  if (comptime @feature("embed_shaders")) {
+    var code: List<byte> = List();
+    for (let b in embedded_shader(filename)) {
+      code.push(b);
+    }
+    return code;
+  }
+  return read_file(f"{dir}/{filename}".as_str());
 }

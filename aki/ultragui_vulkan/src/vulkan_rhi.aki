@@ -19,7 +19,6 @@
 module ultragui_vulkan::vulkan_rhi;
 
 import {List, filled} from akikit::containers::list;
-import {read_bytes} from akikit::filesystem::file_util;
 import {eprintln, println} from akikit::logging;
 import {Box} from akikit::memory::box;
 import {String, from_str} from akikit::strings::string;
@@ -33,7 +32,8 @@ import {Rhi, RhiConfig} from ultragui::rhi::rhi;
 import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
 import {GlfwWindow, glfw_get_framebuffer_size, glfw_get_window_size, glfw_set_framebuffer_size_callback,
   glfw_wait_events} from ultragui_glfw::sys::glfw;
-import {embedded_shader} from ultragui_vulkan::shaders;
+import {color_range, vertex_attributes} from ultragui_vulkan::common;
+import {shader_code} from ultragui_vulkan::shaders;
 import * from ultragui_vulkan::sys::vulkan;
 
 extern fn memcpy(dst: *var u8, src: *const u8, n: usize): *var u8;
@@ -73,9 +73,6 @@ unsafe fn c_text(p: *const c_char): str {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// read_file: the file's bytes, empty when it cannot be read.
-fn read_file(path: str): List<byte> => read_bytes(path) ?? List();
 
 fn choose_surface_format(formats&: [VkSurfaceFormatKHR]): VkSurfaceFormatKHR {
   // Prefer sRGB format: the GPU automatically converts linear framebuffer
@@ -158,35 +155,6 @@ fn unorm_view_format(srgb: VkFormat): VkFormat {
     return kVkFormatR8g8b8a8Unorm;
   }
   return srgb;  // already a UNORM fallback; there is no encode to undo
-}
-
-fn color_range(): VkImageSubresourceRange =>
-  VkImageSubresourceRange { aspect_mask: kVkImageAspectColorBit, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
-
-// The Vertex2D vertex layout both 2D pipelines read.
-fn vertex_attributes(): [VkVertexInputAttributeDescription; 9] => [
-  VkVertexInputAttributeDescription { location: 0, binding: 0, format: kVkFormatR32g32Sfloat, offset: @offset_of(Vertex2D, pos) as u32 },
-  VkVertexInputAttributeDescription { location: 1, binding: 0, format: kVkFormatR32g32Sfloat, offset: @offset_of(Vertex2D, uv) as u32 },
-  VkVertexInputAttributeDescription { location: 2, binding: 0, format: kVkFormatR32Uint, offset: @offset_of(Vertex2D, color) as u32 },
-  VkVertexInputAttributeDescription { location: 3, binding: 0, format: kVkFormatR32Uint, offset: @offset_of(Vertex2D, color2) as u32 },
-  VkVertexInputAttributeDescription { location: 4, binding: 0, format: kVkFormatR32Uint, offset: @offset_of(Vertex2D, corner_radii) as u32 },
-  VkVertexInputAttributeDescription { location: 5, binding: 0, format: kVkFormatR32Sfloat, offset: @offset_of(Vertex2D, softness) as u32 },
-  VkVertexInputAttributeDescription { location: 6, binding: 0, format: kVkFormatR32g32Sfloat, offset: @offset_of(Vertex2D, half_size) as u32 },
-  VkVertexInputAttributeDescription { location: 7, binding: 0, format: kVkFormatR32Sfloat, offset: @offset_of(Vertex2D, border_width) as u32 },
-  VkVertexInputAttributeDescription { location: 8, binding: 0, format: kVkFormatR32Uint, offset: @offset_of(Vertex2D, border_color) as u32 },
-];
-
-// The SPIR-V of `filename`: from `dir` (empty when it cannot be read), or the
-// embedded copy with the `embed_shaders` feature.
-pub fn shader_code(dir: str, filename: str): List<byte> {
-  if (comptime @feature("embed_shaders")) {
-    var code: List<byte> = List();
-    for (let b in embedded_shader(filename)) {
-      code.push(b);
-    }
-    return code;
-  }
-  return read_file(f"{dir}/{filename}".as_str());
 }
 
 // ---------------------------------------------------------------------------
