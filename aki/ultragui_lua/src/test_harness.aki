@@ -26,6 +26,8 @@ import {lossy_utf8} from ultragui_lua::lua_call;
 extern let stdout: *var u8;
 extern fn setvbuf(stream: *var u8, buf: *var u8, mode: i32, size: usize): i32;
 extern fn fwrite(p: *const u8, size: usize, n: usize, stream: *var u8): usize;
+extern fn getpid(): i32;
+extern fn unlink(path: *const c_char): i32;
 extern fn dup(fd: i32): i32;
 extern fn dup2(fd: i32, fd2: i32): i32;
 extern fn close(fd: i32): i32;
@@ -179,7 +181,8 @@ pub fn setup() {
 pub fn run_captured(name: str, expected: str, body: fn(): ()): bool {
   let saved_out = unsafe dup(1);
   let saved_err = unsafe dup(2);
-  let path = c_text_of(f"/tmp/ultragui_lua_test_{name}.txt");
+  // The pid keeps two runs on one machine (two worktrees, a test_all.sh beside a single test) from sharing the file.
+  let path = c_text_of(f"/tmp/ultragui_lua_test_{name}_{unsafe getpid()}.txt");
   let fd = unsafe open(@ptr(path.as_str()) as *const c_char, kOpenFlags, 420i32);
   unsafe {
     dup2(fd, 1);
@@ -205,6 +208,8 @@ pub fn run_captured(name: str, expected: str, body: fn(): ()): bool {
     eprintln(f"FAILED: {name}: output differs from the C++ at {d}");
     return false;
   }
+  // Kept when it differs, for a look.
+  unsafe unlink(@ptr(path.as_str()) as *const c_char);
   eprintln(f"ok {name}");
   return true;
 }
