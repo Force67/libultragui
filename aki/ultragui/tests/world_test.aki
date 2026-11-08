@@ -21,7 +21,7 @@ import {TextEngine} from ultragui::text::text_engine;
 import {kAnimStyle} from ultragui::widgets::components;
 import {
   WidgetKind, add_child, add_state_override, add_state_transition, clear_animation_style, computed_style,
-  destroy_widget, has_widget_context, hit_test, kHierarchy, kStyleC, kTransform, kWidgetNode, layout_widget,
+  destroy_widget, has_widget_context, hit_test, widget_context_of, kHierarchy, kStyleC, kTransform, kWidgetNode, layout_widget,
   measure_widget, remove_child, set_animation_style, set_context, set_selected, set_style,
   set_tooltip, set_widget_state, tooltip_text, ui_scale, widget_revision, widget_state_of,
 } from ultragui::widgets::widget;
@@ -188,6 +188,22 @@ struct Ui {
   }
 }
 
+// The shape of a widget kind's measure entry: the text engine through the
+// context, only when the widget has one (the C++ text_engine(world, e)).
+fn label_width(var world&: World, var ctx&: WidgetContext, e: WidgetId, label: str): f32 {
+  let c& = widget_context_of(world, ctx, e) else {
+    return 0.0;
+  };
+  // Read the plain fields first: the engine's write view borrows the
+  // context until its last use.
+  let font = c.default_font;
+  let sc = ui_scale(world, c, e);
+  var te& = c.text_engine else {
+    return 0.0;
+  };
+  return te.shape(font, label, 16.0 * sc).total_advance;
+}
+
 fn check_context(var t&: Expect) {
   var ui = Ui {};
   let e = ui.world.create();
@@ -215,6 +231,14 @@ fn check_context(var t&: Expect) {
   t.that(widget_state_of(ui.world, e) == WidgetState::Hovered, "selected off");
 
   t.that(ui_scale(ui.world, ctx, e) == 1.5 && ui_scale(ui.world, ctx, detached) == 1.0, "ui_scale needs a context");
+
+  // A measure-style function reaching the text engine through the context.
+  t.that(ui.text.init(), "text init");
+  let font = ui.text.load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+  var tctx = WidgetContext { text_engine: ui.text, default_font: font, ui_scale: 2.0 };
+  let w2 = label_width(ui.world, tctx, e, "Hi");
+  t.that(w2 > 0.0, "attached widget shapes through the context");
+  t.that(label_width(ui.world, tctx, detached, "Hi") == 0.0, "detached widget has no context");
 
   // The animator writes styles back into the World through its callback:
   // views of the two fields first, then the call (a literal cannot capture
