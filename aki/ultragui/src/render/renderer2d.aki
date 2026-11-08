@@ -1,9 +1,55 @@
 // ugui/render/renderer2d.{h,cc}: PLACEHOLDER. The next wave ports the 2D
 // batch renderer here and replaces this file wholesale. It exists now only so
 // widgets::widget_vtable can name the type its draw entries take.
+//
+// STUB (widget kinds): the method declarations below follow the fixed naming
+// rule for the real port (snake_case of the C++ name, same parameter order,
+// `const T&` as `&T`, C++ default parameters as aki defaults) so the widget
+// kinds compile against them. Every body stops. The real renderer2d.aki
+// replaces this whole file; nothing else needs to change.
 
 module ultragui::render::renderer2d;
 
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {TextureId} from ultragui::render::draw_data;
+import {TextRun} from ultragui::text::text_engine;
+
 pub struct Renderer2D {
   pub fn Renderer2D(): Renderer2D => Renderer2D {};
+
+  // --- STUB: widget kinds' calls, bodies stop until the real port lands ---
+  pub fn draw_rect(var self&, rect: Rect, color: Color, corner_radii: u32 = 0);
+  pub fn draw_textured_rect(var self&, rect: Rect, texture: TextureId, tint: Color = Color::white(), corner_radii: u32 = 0);
+  pub fn draw_bordered_rect(var self&, rect: Rect, fill: Color, border_color: Color, border_width: f32,
+                            corner_radii: u32 = 0);
+  pub fn draw_text(var self&, pos: Vec2, run&: TextRun, color: Color, atlas_texture: TextureId);
+  pub fn push_scissor(var self&, rect: Rect);
+  pub fn pop_scissor(var self&);
+}
+
+fn Renderer2D::draw_rect(var self&, rect: Rect, color: Color, corner_radii: u32) {
+  @stop("placeholder");
+}
+
+fn Renderer2D::draw_textured_rect(var self&, rect: Rect, texture: TextureId, tint: Color, corner_radii: u32) {
+  @stop("placeholder");
+}
+
+fn Renderer2D::draw_bordered_rect(var self&, rect: Rect, fill: Color, border_color: Color, border_width: f32,
+                                  corner_radii: u32) {
+  @stop("placeholder");
+}
+
+fn Renderer2D::draw_text(var self&, pos: Vec2, run&: TextRun, color: Color, atlas_texture: TextureId) {
+  @stop("placeholder");
+}
+
+fn Renderer2D::push_scissor(var self&, rect: Rect) {
+  @stop("placeholder");
+}
+
+fn Renderer2D::pop_scissor(var self&) {
+  @stop("placeholder");
 }
