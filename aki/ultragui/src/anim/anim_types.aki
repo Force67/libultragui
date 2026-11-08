@@ -1,0 +1,111 @@
+// ugui/anim/anim_types.h: the data model of a .uganim document.
+//
+// Differences in shape: the forward declarations of svg types are gone (the
+// renderer imports them); enum variants lose their `k`; `loop` is `looping`
+// (`loop` is a keyword).
+
+module ultragui::anim::anim_types;
+
+import {List} from akikit::containers::list;
+import {HashMap} from akikit::containers::hash_map;
+import {String, from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {EasingType} from ultragui::style::transition;
+
+// Property types that can be animated in a .uganim layer.
+pub enum AnimProperty as u8 {
+  X, Y, W, H, R, Cx, Cy, Rx, Ry, Rotation, ScaleX, ScaleY, Opacity, StrokeWidth, CornerRadius,
+  Fill, Stroke,  // color properties
+}
+
+// A single keyframe: time + value + easing.
+pub struct AnimKeyframe : Copy {
+  pub var t: f32 = 0.0      // normalized time (0.0-1.0 within duration)
+  pub var value: f32 = 0.0  // for scalar properties
+  pub var color: Color = Color {}  // for color properties (Fill, Stroke)
+  pub var easing: EasingType = EasingType::Linear
+}
+
+// A track of keyframes for one property.
+pub struct AnimPropertyTrack {
+  pub var property: AnimProperty = AnimProperty::X
+  pub var keyframes: List<AnimKeyframe> = List()
+}
+
+// Shape types supported in .uganim.
+pub enum AnimShapeType as u8 { Rect, Circle, Ellipse, Path, Group }
+
+// A layer in the animation. Each layer has a shape, static defaults,
+// keyframed property tracks, and optional children (for groups).
+pub struct AnimLayer {
+  pub var name: String = String()
+  pub var shape_type: AnimShapeType = AnimShapeType::Rect
+
+  // Static shape parameters (defaults, overridden by keyframes)
+  pub var x: f32 = 0.0
+  pub var y: f32 = 0.0
+  pub var w: f32 = 0.0
+  pub var h: f32 = 0.0
+  pub var r: f32 = 0.0
+  pub var cx: f32 = 0.0
+  pub var cy: f32 = 0.0
+  pub var rx: f32 = 0.0
+  pub var ry: f32 = 0.0
+  pub var corner_radius: f32 = 0.0
+  pub var rotation: f32 = 0.0
+  pub var scale_x: f32 = 1.0
+  pub var scale_y: f32 = 1.0
+  pub var opacity: f32 = 1.0
+  pub var stroke_width: f32 = 1.0
+
+  // Path data (for shape_type == Path)
+  pub var path_data: String = String()  // SVG path "d" attribute string
+
+  // Fill and stroke (as color strings or "$gradient_name")
+  pub var fill_str: String = from_str("none")
+  pub var stroke_str: String = from_str("none")
+
+  // Mask: name of another layer to clip by
+  pub var mask_layer: String = String()
+
+  // Animated property tracks
+  pub var tracks: List<AnimPropertyTrack> = List()
+
+  // Children (for groups)
+  pub var children: List<AnimLayer> = List()
+}
+
+// Evaluated layer state at a specific point in time.
+pub struct EvaluatedLayer : Copy {
+  pub var x: f32 = 0.0
+  pub var y: f32 = 0.0
+  pub var w: f32 = 0.0
+  pub var h: f32 = 0.0
+  pub var r: f32 = 0.0
+  pub var cx: f32 = 0.0
+  pub var cy: f32 = 0.0
+  pub var rx: f32 = 0.0
+  pub var ry: f32 = 0.0
+  pub var corner_radius: f32 = 0.0
+  pub var rotation: f32 = 0.0
+  pub var scale_x: f32 = 0.0
+  pub var scale_y: f32 = 0.0
+  pub var opacity: f32 = 0.0
+  pub var stroke_width: f32 = 0.0
+  pub var fill_color: Color = Color {}
+  pub var stroke_color: Color = Color {}
+  pub var fill_animated: bool = false
+  pub var stroke_animated: bool = false
+}
+
+// Top-level animation document parsed from .uganim JSON.
+pub struct AnimDocument {
+  pub var version: u32 = 1
+  pub var width: f32 = 0.0
+  pub var height: f32 = 0.0
+  pub var duration: f32 = 1.0
+  pub var looping: bool = false
+
+  pub var gradients_json: HashMap<String, String> = HashMap()  // raw gradient data for svg
+  pub var layers: List<AnimLayer> = List()
+}
