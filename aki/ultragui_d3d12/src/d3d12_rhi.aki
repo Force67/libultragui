@@ -29,9 +29,8 @@
 //   C++ when out of range).
 // * HRESULTs print as 0x%08lx of the int in the C++ (the high bits of the
 //   long are unspecified there); here as the 32-bit value.
-// * Shutdown follows the C++ order exactly, including that it never releases
-//   the vertex/index upload buffers' ... (it does: see shutdown below) and
-//   that the destructor of RHI does not call Shutdown.
+// * Shutdown follows the C++ order exactly, and the D3d12Rhi destructor, like
+//   RHI::~RHI, only frees the Impl: shutdown() must be called.
 
 module ultragui_d3d12::d3d12_rhi;
 
