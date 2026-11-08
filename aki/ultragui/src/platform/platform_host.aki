@@ -120,6 +120,7 @@ pub struct HostPlatform : Platform {
   pub fn clipboard_text(var self&): str;
   pub fn set_clipboard_text(var self&, text: str);
   pub fn input_queue(var self&): &var InputQueue => self.queue;
+  pub fn host_fed(self&): bool => true;
 }
 
 fn HostPlatform::HostPlatform(): HostPlatform => HostPlatform {

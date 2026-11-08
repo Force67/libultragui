@@ -1,0 +1,93 @@
+// tests/test_font_memory.cc: loading a font from memory. The face has to come
+// up from bytes alone and keep working after the caller's buffer is gone.
+
+module font_memory_test;
+
+import {List} from akikit::containers::list;
+import {path_exists, read_bytes} from akikit::filesystem::file_util;
+import {println} from akikit::logging;
+import {TextEngine, kInvalidFont} from ultragui::text::text_engine;
+import {Expect} from support::expect;
+
+// A face to test with; the test skips when the machine has none.
+fn find_system_font(): str? {
+  let candidates = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+  ];
+  for (let c in candidates) {
+    if (path_exists(c)) {
+      return c;
+    }
+  }
+  return none;
+}
+
+fn read_font(path: str): List<byte> {
+  let b = read_bytes(path) else {
+    return List::<byte>();
+  };
+  return b;
+}
+
+// No RHI: nothing here reaches the atlas texture.
+fn load_from_memory(var t&: Expect, path: str) {
+  let bytes = read_font(path);
+  t.that(bytes.len() > 0, "read the font");
+  var engine = TextEngine();
+  t.that(engine.init(), "init");
+  let font = engine.load_font_memory(bytes.as_slice());
+  t.that(font != kInvalidFont, "load_from_memory");
+  engine.shutdown();
+}
+
+fn survives_the_callers_buffer(var t&: Expect, path: str) {
+  var bytes = read_font(path);
+  t.that(bytes.len() > 0, "read the font");
+  var engine = TextEngine();
+  t.that(engine.init(), "init");
+  let font = engine.load_font_memory(bytes.as_slice());
+  t.that(font != kInvalidFont, "loaded");
+
+  // FreeType reads through its pointer for the life of the face: scribble
+  // over the caller's buffer and drop it.
+  for (let i in 0..bytes.len()) {
+    bytes[i] = 0;
+  }
+  bytes = List::<byte>();
+
+  let run = engine.shape(font, "ultragui", 16.0);
+  t.eq_u32(run.glyph_count(), 8, "shapes after the caller's buffer is gone");
+  engine.shutdown();
+}
+
+fn rejects_garbage(var t&: Expect, path: str) {
+  var engine = TextEngine();
+  t.that(engine.init(), "init");
+
+  let junk = [0u8; 64];
+  t.that(engine.load_font_memory(junk[..] as bytes) == kInvalidFont, "64 zero bytes rejected");
+  t.that(engine.load_font_memory([]) == kInvalidFont, "no bytes rejected");
+  t.that(engine.load_font_memory("" as bytes) == kInvalidFont, "empty bytes rejected");
+
+  // A rejected load must leave the slot free.
+  let bytes = read_font(path);
+  t.that(bytes.len() > 0, "read the font");
+  t.that(engine.load_font_memory(bytes.as_slice()) != kInvalidFont, "a good font still loads");
+  engine.shutdown();
+}
+
+pub fn main(): i32 {
+  let path = find_system_font() else {
+    println("test_font_memory: no system font found, skipping");
+    return 0;
+  };
+  var t = Expect();
+  load_from_memory(t, path);
+  survives_the_callers_buffer(t, path);
+  rejects_garbage(t, path);
+  return t.finish();
+}

@@ -14,6 +14,7 @@
 module ultragui::rhi::rhi;
 
 import {String} from akikit::strings::string;
+import {ErasedRef} from ultragui::core::erased;
 import {Color} from ultragui::core::color;
 import {Vec2} from ultragui::core::math;
 import {Rect} from ultragui::core::rect;
@@ -85,4 +86,167 @@ pub capability Rhi {
   // Ratio of framebuffer pixels to window coordinates: 1.0 on standard
   // displays, 2.0 on typical HiDPI/Retina displays.
   fn dpi_scale(self&): f32;
+
+  // UIContext::Init's ULTRAGUI_BACKEND_OPENGL: the platform window needs an
+  // OpenGL 3.3 core context (WindowConfig::opengl). An OpenGL RHI says true.
+  fn wants_opengl(self&): bool {
+    return false;
+  }
 }
+
+// --- DynRhi ------------------------------------------------------------------
+
+// A borrowed Rhi of any type, for code that must reach UIContext's Rhi
+// without being generic over it (UIContext's frame extensions, see
+// ui_context::FrameEnv). It is an Rhi itself, so generic code (VideoPlayer)
+// takes it as any other.
+fn rhi_init_thunk<R: Rhi>(p: *var u8, config&: RhiConfig): bool => unsafe (*(p as *var R)).init(config);
+fn rhi_shutdown_thunk<R: Rhi>(p: *var u8) {
+  unsafe (*(p as *var R)).shutdown();
+}
+fn rhi_begin_frame_thunk<R: Rhi>(p: *var u8, clear_color: Color): bool => unsafe (*(p as *var R)).begin_frame(clear_color);
+fn rhi_end_frame_thunk<R: Rhi>(p: *var u8) {
+  unsafe (*(p as *var R)).end_frame();
+}
+fn rhi_set_scissor_thunk<R: Rhi>(p: *var u8, rect: Rect) {
+  unsafe (*(p as *var R)).set_scissor(rect);
+}
+fn rhi_reset_scissor_thunk<R: Rhi>(p: *var u8) {
+  unsafe (*(p as *var R)).reset_scissor();
+}
+fn rhi_draw_triangles_thunk<R: Rhi>(p: *var u8, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+  unsafe (*(p as *var R)).draw_triangles(vertices, indices, texture);
+}
+fn rhi_draw_text_triangles_thunk<R: Rhi>(p: *var u8, vertices&: [Vertex2D], indices&: [u32], atlas: RhiTextureHandle) {
+  unsafe (*(p as *var R)).draw_text_triangles(vertices, indices, atlas);
+}
+fn rhi_create_texture_thunk<R: Rhi>(p: *var u8, width: u32, height: u32, format: RhiFormat, pixels: bytes,
+                                    filter: RhiFilter): RhiTextureHandle =>
+  unsafe (*(p as *var R)).create_texture(width, height, format, pixels, filter);
+fn rhi_update_texture_thunk<R: Rhi>(p: *var u8, handle: RhiTextureHandle, pixels: bytes) {
+  unsafe (*(p as *var R)).update_texture(handle, pixels);
+}
+fn rhi_destroy_texture_thunk<R: Rhi>(p: *var u8, handle: RhiTextureHandle) {
+  unsafe (*(p as *var R)).destroy_texture(handle);
+}
+fn rhi_acquire_frame_thunk<R: Rhi>(p: *var u8): bool => unsafe (*(p as *var R)).acquire_frame();
+fn rhi_create_render_target_thunk<R: Rhi>(p: *var u8, width: u32, height: u32): RhiTextureHandle =>
+  unsafe (*(p as *var R)).create_render_target(width, height);
+fn rhi_destroy_render_target_thunk<R: Rhi>(p: *var u8, handle: RhiTextureHandle) {
+  unsafe (*(p as *var R)).destroy_render_target(handle);
+}
+fn rhi_begin_offscreen_thunk<R: Rhi>(p: *var u8, target: RhiTextureHandle, clear_color: Color): bool =>
+  unsafe (*(p as *var R)).begin_offscreen(target, clear_color);
+fn rhi_end_offscreen_thunk<R: Rhi>(p: *var u8, target: RhiTextureHandle) {
+  unsafe (*(p as *var R)).end_offscreen(target);
+}
+fn rhi_convert_video_frame_thunk<R: Rhi>(p: *var u8, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle,
+                                         cr: RhiTextureHandle) {
+  unsafe (*(p as *var R)).convert_video_frame(target, y, cb, cr);
+}
+fn rhi_display_size_thunk<R: Rhi>(p: *var u8): Vec2 => unsafe (*(p as *var R)).display_size();
+fn rhi_dpi_scale_thunk<R: Rhi>(p: *var u8): f32 => unsafe (*(p as *var R)).dpi_scale();
+fn rhi_wants_opengl_thunk<R: Rhi>(p: *var u8): bool => unsafe (*(p as *var R)).wants_opengl();
+
+struct RhiFns : Copy {
+  pub let init: static fn(*var u8, &RhiConfig): bool
+  pub let shutdown: static fn(*var u8): ()
+  pub let begin_frame: static fn(*var u8, Color): bool
+  pub let end_frame: static fn(*var u8): ()
+  pub let set_scissor: static fn(*var u8, Rect): ()
+  pub let reset_scissor: static fn(*var u8): ()
+  pub let draw_triangles: static fn(*var u8, &[Vertex2D], &[u32], RhiTextureHandle): ()
+  pub let draw_text_triangles: static fn(*var u8, &[Vertex2D], &[u32], RhiTextureHandle): ()
+  pub let create_texture: static fn(*var u8, u32, u32, RhiFormat, bytes, RhiFilter): RhiTextureHandle
+  pub let update_texture: static fn(*var u8, RhiTextureHandle, bytes): ()
+  pub let destroy_texture: static fn(*var u8, RhiTextureHandle): ()
+  pub let acquire_frame: static fn(*var u8): bool
+  pub let create_render_target: static fn(*var u8, u32, u32): RhiTextureHandle
+  pub let destroy_render_target: static fn(*var u8, RhiTextureHandle): ()
+  pub let begin_offscreen: static fn(*var u8, RhiTextureHandle, Color): bool
+  pub let end_offscreen: static fn(*var u8, RhiTextureHandle): ()
+  pub let convert_video_frame: static fn(*var u8, RhiTextureHandle, RhiTextureHandle, RhiTextureHandle, RhiTextureHandle): ()
+  pub let display_size: static fn(*var u8): Vec2
+  pub let dpi_scale: static fn(*var u8): f32
+  pub let wants_opengl: static fn(*var u8): bool
+}
+
+pub struct DynRhi<'a> : Rhi {
+  var object: ErasedRef<'a>
+  let fns: RhiFns
+
+  // Borrows `rhi` for as long as the result lives.
+  pub fn of<'a, R: Rhi>(rhi: &'a var R): DynRhi<'a>;
+
+  pub fn init(var self&, config&: RhiConfig): bool => (self.fns.init)(self.object.ptr(), config);
+  pub fn shutdown(var self&) {
+    (self.fns.shutdown)(self.object.ptr());
+  }
+  pub fn begin_frame(var self&, clear_color: Color): bool => (self.fns.begin_frame)(self.object.ptr(), clear_color);
+  pub fn end_frame(var self&) {
+    (self.fns.end_frame)(self.object.ptr());
+  }
+  pub fn set_scissor(var self&, rect: Rect) {
+    (self.fns.set_scissor)(self.object.ptr(), rect);
+  }
+  pub fn reset_scissor(var self&) {
+    (self.fns.reset_scissor)(self.object.ptr());
+  }
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+    (self.fns.draw_triangles)(self.object.ptr(), vertices, indices, texture);
+  }
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+    (self.fns.draw_text_triangles)(self.object.ptr(), vertices, indices, atlas_texture);
+  }
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle =>
+    (self.fns.create_texture)(self.object.ptr(), width, height, format, pixels, filter);
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+    (self.fns.update_texture)(self.object.ptr(), handle, pixels);
+  }
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {
+    (self.fns.destroy_texture)(self.object.ptr(), handle);
+  }
+  pub fn acquire_frame(var self&): bool => (self.fns.acquire_frame)(self.object.ptr());
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle =>
+    (self.fns.create_render_target)(self.object.ptr(), width, height);
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {
+    (self.fns.destroy_render_target)(self.object.ptr(), handle);
+  }
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool =>
+    (self.fns.begin_offscreen)(self.object.ptr(), target, clear_color);
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {
+    (self.fns.end_offscreen)(self.object.ptr(), target);
+  }
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {
+    (self.fns.convert_video_frame)(self.object.ptr(), target, y, cb, cr);
+  }
+  pub fn display_size(self&): Vec2 => (self.fns.display_size)(self.object.const_ptr());
+  pub fn dpi_scale(self&): f32 => (self.fns.dpi_scale)(self.object.const_ptr());
+  pub fn wants_opengl(self&): bool => (self.fns.wants_opengl)(self.object.const_ptr());
+}
+
+fn DynRhi::of<'a, R: Rhi>(rhi: &'a var R): DynRhi<'a> => DynRhi {
+  object: ErasedRef::of(rhi),
+  fns: RhiFns {
+    init: rhi_init_thunk::<R>,
+    shutdown: rhi_shutdown_thunk::<R>,
+    begin_frame: rhi_begin_frame_thunk::<R>,
+    end_frame: rhi_end_frame_thunk::<R>,
+    set_scissor: rhi_set_scissor_thunk::<R>,
+    reset_scissor: rhi_reset_scissor_thunk::<R>,
+    draw_triangles: rhi_draw_triangles_thunk::<R>,
+    draw_text_triangles: rhi_draw_text_triangles_thunk::<R>,
+    create_texture: rhi_create_texture_thunk::<R>,
+    update_texture: rhi_update_texture_thunk::<R>,
+    destroy_texture: rhi_destroy_texture_thunk::<R>,
+    acquire_frame: rhi_acquire_frame_thunk::<R>,
+    create_render_target: rhi_create_render_target_thunk::<R>,
+    destroy_render_target: rhi_destroy_render_target_thunk::<R>,
+    begin_offscreen: rhi_begin_offscreen_thunk::<R>,
+    end_offscreen: rhi_end_offscreen_thunk::<R>,
+    convert_video_frame: rhi_convert_video_frame_thunk::<R>,
+    display_size: rhi_display_size_thunk::<R>,
+    dpi_scale: rhi_dpi_scale_thunk::<R>,
+    wants_opengl: rhi_wants_opengl_thunk::<R>,
+  },
+};

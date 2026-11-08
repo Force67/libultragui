@@ -68,6 +68,13 @@ pub capability Platform {
   // The platform's input event queue, filled during poll_events(), consumed
   // by the input router.
   fn input_queue(var self&): &var InputQueue;
+
+  // UIContext::Init's ULTRAGUI_PLATFORM_HOST: true for a platform the host
+  // feeds (no window of its own), which draw-data mode accepts without an
+  // external window. HostPlatform says true.
+  fn host_fed(self&): bool {
+    return false;
+  }
 }
 
 // --- DynPlatform -------------------------------------------------------------

@@ -1,0 +1,13 @@
+# The aki side of the draw-data golden comparison: plays a scenario against
+# the aki port (package ultragui) and writes the dump ugui_golden.cc writes.
+# See ../README.md. Built at -O2 like the C++ Release build.
+[package]
+name = "aki_golden"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../../ultragui" }
+
+[build]
+opt = 2

@@ -44,6 +44,20 @@ operation per line; `#` starts a comment:
 
 The first line that needs a context initializes it.
 
+## Extra scenarios
+
+`extra/` holds hand-written scenarios for what the example UIs do not
+exercise: `media_scale.txt` (with `media_scale.ugui`) covers `scale_mode`,
+`ui_scale`, `@media` breakpoints across resizes and tooltip dwell. `run.sh`
+takes them as arguments: `run.sh <c++> <aki> aki/tools/golden/extra/*.txt`.
+
+## The aki side
+
+`aki_golden/` is the aki runner (`cd aki/tools/golden/aki_golden && akiko
+build` -> `build/aki_golden`, built at -O2). Its script runtime is the one
+alias `Runtime` in `src/main.aki` (NoScript today), so the `_lua` scenarios
+need ultragui_lua's runtime named there.
+
 ## The C++ side
 
 `ugui_golden.cc` documents the dump format. `golden_platform.cc` is

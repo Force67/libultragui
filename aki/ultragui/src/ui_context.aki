@@ -1,0 +1,1524 @@
+// ugui/ui_context.{h,cc}: UIContext, which owns every subsystem and drives a
+// frame: input, timers, animations, measure, layout, paint, tooltip,
+// overlays; UIConfig, FrameReuse, FrameStats.
+//
+// Shape differences (not behavior):
+//
+// * UIContext<P: Platform, R: Rhi, S: ScriptRuntime> is generic over the
+//   three link-time seams (PORTING.md, "Seams"); the defaults are the host
+//   platform, NullRhi and NoScript.
+// * Init takes the UIConfig by value. A C++ draw-data Init without an
+//   external window fails unless ULTRAGUI_PLATFORM_HOST; here unless the
+//   platform says it is host-fed (`Platform::host_fed`).
+// * There is no widget context member pointing at the subsystems: every call
+//   into widget code builds a WidgetContext from views of this struct's
+//   fields (text engine, animator, platform, the clock, the default font and
+//   ui scale) and lends it beside the World, the way the C++'s widget_ctx_
+//   is read. `ui_scale()` is that member's ui_scale.
+// * The texture seam: draw-data mode keeps the host's TextureBackendBox in
+//   the renderer (Renderer2D owns it, `texture_backend()` lends it); legacy
+//   mode routes textures through the Rhi (the C++ RHITextureBackend), which
+//   the renderer resolves in end_frame and LoadSvg/LoadAnim reach through an
+//   RhiTextureBackend built per call.
+// * LoadAnim returns an AnimId (an index; animations live until Shutdown, as
+//   in the C++) and `anim(id)`/`anim_var(id)` resolve it; the C++ hands out
+//   the VectorAnimation*.
+// * LoadLottie/LoadVideo live in their packages (the core cannot import
+//   them). Their players reach UIContext through frame extensions: a
+//   `UiExtension` (see below) added with `add_extension` is updated where the
+//   C++ updates lottie_anims_ and video_players_, asked for NeedsConvert /
+//   ConvertFrame where the C++ asks the video players, and shut down where
+//   the C++ deletes them.
+// * The script runtime's hooks into UIContext (the C++ Init registers
+//   RegisterAnimLua & co. with lambdas capturing `this`): `script_host()`
+//   lends a ScriptHost (anim loading, widget lookup by name, extensions)
+//   beside the World and the WidgetContext, see ScriptHost.
+// * The audio backend is an owned AudioBackendBox (`set_audio(box)`), silent
+//   by default; UIContext inits and shuts it down as the C++ does.
+// * PaintCallback is `own fn(&var Renderer2D, &var R): ()`.
+// * The animator's apply/done callbacks are collected and applied after
+//   Animator::update returns (a closure cannot lend the World twice); they
+//   only write the widgets' animation styles, in the same order.
+
+module ultragui::ui_context;
+
+import {swap} from akikit::algorithm;
+import {List} from akikit::containers::list;
+import {Atomic} from akikit::threading::atomic;
+import {Mutex} from akikit::threading::mutex;
+import {Arc} from akikit::memory::arc;
+import {String, from_str} from akikit::strings::string;
+import {eprintln} from akikit::logging;
+import {Animator} from ultragui::animation::animator;
+import {AudioBackendBox} from ultragui::audio::audio_backend;
+import {VectorAnimation} from ultragui::anim::vector_animation;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {UguiBuilder} from ultragui::idl::builder;
+import {ParseError, UguiDocument, parse_ugui, parse_ugui_file} from ultragui::idl::parser;
+import {InputRouter} from ultragui::input::input;
+import {MouseButton} from ultragui::input::input_queue;
+import {LayoutEngine, LayoutViewport} from ultragui::layout::layout;
+import {compute_widget_layout} from ultragui::layout::layout_tree;
+import {DynPlatform, Platform, WindowConfig} from ultragui::platform::platform;
+import {HostPlatform} from ultragui::platform::platform_host;
+import {DrawData, TextureId} from ultragui::render::draw_data;
+import {paint_widget_tree} from ultragui::render::paint;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {DynTextureBackend, TextureBackendBox} from ultragui::render::texture_backend;
+import {Vertex2D, pack_radii_uniform} from ultragui::render::vertex;
+import {NullRhi} from ultragui::rhi::null_rhi;
+import {DynRhi, Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiTextureBackend} from ultragui::rhi::rhi_texture_backend;
+import {RhiTextureHandle} from ultragui::rhi::rhi_types;
+import {AnimId, FrameEnv, ScriptHost, UiExtension, UiExtensionBox, WidgetCache} from ultragui::scripting::script_host;
+import {NoScript, ScriptRuntime} from ultragui::scripting::script_runtime;
+import {ViewportScaleMode} from ultragui::style::enums;
+import {Style} from ultragui::style::style;
+import {Theme} from ultragui::style::theme;
+import {load_svg_texture} from ultragui::svg::svg;
+import {FontHandle, TextEngine, kInvalidFont} from ultragui::text::text_engine;
+import {
+  clear_animation_style, click_widget, destroy_widget, dismiss_widget, hit_test, kHierarchy, kTransform,
+  kWidgetNode, set_animation_style, set_context, tooltip_text, widget_revision,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {Overlays} from ultragui::widgets::overlays;
+import {World} from ultragui::widgets::widget_registry;
+import {measure_widget_tree, update_widget_tree} from ultragui::widgets::widget_tree;
+
+// Configuration for UIContext initialization.
+pub struct UIConfig {
+  pub var title: String = from_str("ultragui")
+  pub var width: i32 = 1280
+  pub var height: i32 = 720
+  pub var resizable: bool = true
+  pub var vsync: bool = true
+  pub var validation: bool = true
+  pub var clear_color: Color = Color::from_hex(0x0f0f1a)
+  pub var shader_dir: String = String()  // empty: the backend's default (the C++ nullptr)
+
+  // Pixel sizes (font, border, padding, ...) scale by viewport_size /
+  // design_size. None disables scaling.
+  pub var scale_mode: ViewportScaleMode = ViewportScaleMode::None
+  pub var design_width: f32 = 1280.0
+  pub var design_height: f32 = 720.0
+
+  // Attach to a host-created window (GLFWwindow*) instead of creating one.
+  // Not needed with the host platform, which the host feeds instead. With
+  // embedded=true the host clears and presents.
+  pub unowned var external_window: *var u8 = null
+  pub var embedded: bool = false
+
+  // No graphics device; render_draw_data() returns a draw list for the
+  // host's backend. Requires external_window, or the host platform. The host
+  // owns the GPU and uploads the glyph atlas (TextEngine::atlas_pixels()).
+  pub var draw_data: bool = false
+}
+
+// What render_draw_data() should do when a frame would come out identical to
+// the last one.
+pub enum FrameReuse as u8 {
+  Off,     // always rebuild (the default)
+  On,      // hand back the previous draw list
+  Verify,  // rebuild anyway and report any frame reuse would have got wrong
+}
+
+// Where one frame's CPU time went, and how much work each stage did. Filled
+// by render_draw_data().
+pub struct FrameStats : Copy {
+  pub var input_ms: f64 = 0.0
+  pub var update_ms: f64 = 0.0  // timers, animation, per-widget update
+  pub var measure_ms: f64 = 0.0
+  pub var layout_ms: f64 = 0.0
+  pub var paint_ms: f64 = 0.0
+  pub var total_ms: f64 = 0.0
+  pub var widgets: u32 = 0       // widgets walked by measure
+  pub var layout_nodes: u32 = 0  // nodes handed to the layout engine
+  pub var shape_calls: u32 = 0   // text runs shaped (see TextEngine::shape_calls)
+  pub var shape_hits: u32 = 0    // of those, served from the shaping cache
+  pub var draw_commands: u32 = 0
+  pub var reused: bool = false  // the previous draw list was handed back unchanged
+}
+
+// What UIContext::PaintCallback is lent: the renderer and the Rhi.
+pub struct PaintEnv<'a, R: Rhi> {
+  pub var renderer: &'a var Renderer2D
+  pub var rhi: &'a var R
+}
+
+// UIContext::PaintCallback (Function<void(Renderer2D&, RHI*)>): replaces
+// layout + paint of the root in the swapchain pass.
+pub type PaintCallback<R: Rhi> = own fn(&var PaintEnv<R>): ();
+
+// ---------------------------------------------------------------------------
+// UIContext
+// ---------------------------------------------------------------------------
+
+comptime let kTooltipDelay: f64 = 0.5;
+
+struct OffscreenPass : Copy {
+  pub var target: RhiTextureHandle
+  pub var root: WidgetId
+  pub var clear_color: Color
+}
+
+// Collected animator callbacks (see the header comment).
+struct AnimStep {
+  pub var widget_id: u32
+  pub var style: Style?
+}
+
+fn compute_viewport_scale(cfg&: UIConfig, display: Vec2, override_scale: f32): f32 {
+  if (override_scale > 0.0) {
+    return override_scale;  // set_ui_scale() wins
+  }
+  let sw = (cfg.design_width > 0.0) ? display.x / cfg.design_width : 1.0;
+  let sh = (cfg.design_height > 0.0) ? display.y / cfg.design_height : 1.0;
+  return match (cfg.scale_mode) {
+    ViewportScaleMode::Width => sw,
+    ViewportScaleMode::Height => sh,
+    ViewportScaleMode::Contain => fminf(sw, sh),
+    ViewportScaleMode::Cover => fmaxf(sw, sh),
+    _ => 1.0f32,
+  };
+}
+
+// C fminf/fmaxf: a NaN argument yields the other one.
+fn fminf(a: f32, b: f32): f32 {
+  if (a != a) { return b; }
+  if (b != b) { return a; }
+  return a < b ? a : b;
+}
+fn fmaxf(a: f32, b: f32): f32 {
+  if (a != a) { return b; }
+  if (b != b) { return a; }
+  return a > b ? a : b;
+}
+
+// FNV-1a over the bytes a backend would actually upload (kVerify).
+struct Fnv : Copy {
+  pub var h: u64 = 1469598103934665603
+}
+
+fn Fnv::feed(var self&, b: bytes) {
+  for (let x in b) {
+    self.h = self.h ^ (x as u64);
+    self.h = self.h *% 1099511628211;
+  }
+}
+
+fn Fnv::feed_u32(var self&, v: u32) {
+  for (let i in 0u32..4) {
+    self.h = self.h ^ ((v >> (i * 8)) & 0xFF) as u64;
+    self.h = self.h *% 1099511628211;
+  }
+}
+
+fn Fnv::feed_f32(var self&, v: f32) => self.feed_u32(@bit_cast(u32, v));
+
+fn Fnv::feed_u64(var self&, v: u64) {
+  self.feed_u32((v & 0xFFFFFFFF) as u32);
+  self.feed_u32((v >> 32) as u32);
+}
+
+fn Fnv::feed_vec2(var self&, v: Vec2) {
+  self.feed_f32(v.x);
+  self.feed_f32(v.y);
+}
+
+fn Fnv::feed_vertices(var self&, v: &[Vertex2D]) {
+  if (#v == 0) {
+    return;
+  }
+  let p = unsafe (@ptr(v) as *const u8);
+  self.feed(unsafe @slice(p, #v * 48) as bytes);
+}
+
+fn Fnv::feed_u32s(var self&, v: &[u32]) {
+  for (let x in v) {
+    self.feed_u32(x);
+  }
+}
+
+// HashDrawData. A DrawCmd is fed as its C layout (40 bytes, the 3 padding
+// bytes after is_text as zeros).
+pub fn hash_draw_data(dd&: DrawData): u64 {
+  var f = Fnv {};
+  f.feed_vec2(dd.display_size);
+  f.feed_vec2(dd.display_pos);
+  f.feed_vec2(dd.framebuffer_scale);
+  for (let c in dd.commands) {
+    f.feed_f32(c.clip_rect.x);
+    f.feed_f32(c.clip_rect.y);
+    f.feed_f32(c.clip_rect.w);
+    f.feed_f32(c.clip_rect.h);
+    f.feed_u64(c.texture_id);
+    f.feed_u32(c.index_offset);
+    f.feed_u32(c.elem_count);
+    f.feed_u32(c.is_text ? 1 : 0);
+    f.feed_f32(c.blur);
+  }
+  f.feed_vertices(dd.quad_vertices);
+  f.feed_u32s(dd.quad_indices);
+  f.feed_vertices(dd.text_vertices);
+  f.feed_u32s(dd.text_indices);
+  return f.h;
+}
+
+// Owns all subsystems and drives one frame of the UI.
+//
+//   var ui = UIContext::<HostPlatform, NullRhi, NoScript>();
+//   ui.init(UIConfig { draw_data: true });
+//   let font = ui.load_font("path/to/font.ttf");
+//   ui.set_default_font(font);
+//   ui.load_ui("path/to/ui.ugui");
+//   while (ui.running()) { let dd = ui.render_draw_data(); ... }
+//   ui.shutdown();
+pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRuntime = NoScript> {
+  pub var platform: P
+  pub var rhi: R
+  pub var renderer: Renderer2D = Renderer2D()
+  pub var text_engine: TextEngine = TextEngine()
+  pub var layout_engine: LayoutEngine = LayoutEngine()
+  pub var input: InputRouter = InputRouter()
+  pub var animator: Animator = Animator()
+  pub var script: S
+  pub var builder: UguiBuilder = UguiBuilder()
+  pub var audio: AudioBackendBox = AudioBackendBox::silent()
+  pub var world: World = World()
+  pub var overlays: Overlays = Overlays()
+  pub var widget_cache: WidgetCache = WidgetCache()
+
+  var rhi_textures: bool = false  // legacy mode: texture_backend_ is the RHI adapter
+  var vector_anims: List<VectorAnimation> = List()
+  var extensions: List<UiExtensionBox> = List()
+
+  var root_: WidgetId = kNullWidget
+  var default_font: FontHandle = kInvalidFont
+  var config: UIConfig = UIConfig {}
+  var ui_scale_override: f32 = 0.0  // set_ui_scale(); 0 defers to scale_mode
+  var ui_scale_: f32 = 1.0          // widget_ctx_.ui_scale
+
+  var last_time: f64 = 0.0
+  var dt_: f64 = 0.0
+
+  var stats: FrameStats = FrameStats {}
+  var last_input_ms: f64 = 0.0
+
+  var frame_reuse_: FrameReuse = FrameReuse::Off
+  var have_built_frame: bool = false
+  var last_widget_revision: u64 = 0
+  var last_draw_hash: u64 = 0
+  var reuse_mismatches: u64 = 0
+  var reuse_candidates: u64 = 0
+  var last_reuse_viewport: Vec2 = Vec2 { x: -1.0, y: -1.0 }
+  var last_reuse_scale: f32 = -1.0
+  var last_tooltip_target: WidgetId = kNullWidget
+  var last_tooltip_visible: bool = false
+  var last_overlay_widgets: List<WidgetId> = List()
+
+  var owns_root: bool = false
+  var initialized: bool = false
+  var input_pumped_this_frame: bool = false
+  var media_viewport: Vec2 = Vec2 { x: -1.0, y: -1.0 }
+  var current_theme_name: String = String()
+
+  var offscreen_queue: List<OffscreenPass> = List()
+  var on_paint_cb: PaintCallback<R>? = none
+
+  var script_clicks: Arc<Mutex<List<WidgetId>>>? = none  // set_script_click_dispatch
+
+  var tooltip_target: WidgetId = kNullWidget
+  var tooltip_visible: bool = false
+  var tooltip_hover_start: f64 = 0.0
+
+  pub fn UIContext(platform: P, rhi: R, script: S): UIContext<P, R, S> =>
+    UIContext::<P, R, S> { platform, rhi, script };
+
+  // Initialize all subsystems. False on failure.
+  pub fn init(var self&, config: UIConfig): bool;
+  // Load a TTF/OTF font; kInvalidFont on failure.
+  pub fn load_font(var self&, path: str): FontHandle;
+  // Load a font from bytes (copied).
+  pub fn load_font_memory(var self&, data: bytes): FontHandle;
+  // The default font used for text/button widgets.
+  pub fn set_default_font(var self&, font: FontHandle) {
+    self.default_font = font;
+  }
+  pub fn default_font(self&): FontHandle => self.default_font;
+  // Load a .ugui layout file and build the widget tree; the root entity.
+  pub fn load_ui(var self&, path: str): WidgetId;
+  // Load a .ugui layout from a string (name: "inline" in the C++).
+  pub fn load_ui_string(var self&, source: str, name: str = "inline"): WidgetId;
+  // Load and execute a script file through the runtime.
+  pub fn load_script(var self&, path: str): bool;
+  // Execute a script string (name: "chunk" in the C++).
+  pub fn exec_script(var self&, script: str, name: str = "chunk"): bool;
+  // Set the root widget directly (painted, not owned).
+  pub fn set_root(var self&, root: WidgetId);
+  pub fn root(self&): WidgetId => self.root_;
+  // True while the window is open.
+  pub fn running(self&): bool => self.initialized && !self.platform.should_close();
+  // Dispatch input through the widget tree (idempotent until the frame ends).
+  pub fn pump_input(var self&);
+  // Legacy mode: one full frame through the Rhi.
+  pub fn update(var self&);
+  // Draw-data mode: the frame as a draw list, valid until the next call.
+  pub fn render_draw_data(var self&): DrawData;
+  // Clean up all subsystems.
+  pub fn shutdown(var self&);
+  // The C++ destructor: shutdown() if initialized.
+  fn ~UIContext();
+
+  // Wire in an audio backend (call before init); UIContext inits and shuts
+  // it down.
+  pub fn set_audio(var self&, backend: AudioBackendBox) {
+    self.audio = backend;
+  }
+
+  // Current time in seconds (0 before init).
+  pub fn time(self&): f64 => self.initialized ? self.platform.time() : 0.0;
+  pub fn delta_time(self&): f64 => self.dt_;
+  pub fn set_clear_color(var self&, color: Color) {
+    self.config.clear_color = color;
+  }
+  // Override the scale applied to all pixel sizes; 0 returns to scale_mode.
+  pub fn set_ui_scale(var self&, scale: f32) {
+    self.ui_scale_override = scale;
+  }
+  pub fn ui_scale(self&): f32 => self.ui_scale_;
+
+  // Find a widget by name (cached).
+  pub fn find_widget(var self&, name: str): WidgetId => self.widget_cache.find(self.world, self.root_, name);
+  // Resolve a widget id through the same cache.
+  pub fn widget_by_id(var self&, id: u32): WidgetId => self.widget_cache.by_id(self.world, self.root_, id);
+  // Invalidate the widget name cache (after adding children dynamically).
+  pub fn invalidate_widget_cache(var self&) {
+    self.widget_cache.invalidate();
+  }
+
+  // Draw-data mode: the host's texture backend (none: no textures; gradients
+  // fall back to flat colors). Replaces the Rhi adapter in legacy mode.
+  pub fn set_texture_backend(var self&, backend: TextureBackendBox?) {
+    self.rhi_textures = false;
+    self.renderer.set_texture_backend(backend);
+  }
+  // The host's texture backend, lent (none in legacy mode, where textures go
+  // through the Rhi, and in draw-data mode until one is set).
+  pub fn texture_backend(var self&): (&var TextureBackendBox)? => self.renderer.texture_backend();
+
+  // Load an SVG file into a texture through the active backend (0 sizes: the
+  // SVG's own); kNullTextureId without a backend.
+  pub fn load_svg(var self&, path: str, width: u32 = 0, height: u32 = 0): TextureId;
+  // Load a .uganim vector animation, owned and updated each frame by
+  // UIContext; none on failure.
+  pub fn load_anim(var self&, path: str, width: u32, height: u32): AnimId?;
+  pub fn anim(self&, id: AnimId): (&VectorAnimation)? => self.vector_anims.at(id as usize);
+  pub fn anim_var(var self&, id: AnimId): (&var VectorAnimation)? => self.vector_anims.at_var(id as usize);
+
+  // Add a frame extension (a package's players, see UiExtension); its index.
+  pub fn add_extension<T: UiExtension>(var self&, key&: ComponentKey<T>, extension: T): u32;
+  // The extension added at `index`, as the type `key` names; none if out of
+  // range or of another type.
+  pub fn extension_var<T: UiExtension>(var self&, key&: ComponentKey<T>, index: u32): (&var T)?;
+
+  // ScriptRuntime::CallHandler with UIContext's World and context (and the
+  // script host): the examples' `on_<name>` click dispatch, run after
+  // pump_input (see set_script_click_dispatch).
+  pub fn call_handler(var self&, func_name: str, widget: WidgetId): bool;
+
+  // The examples' click wiring (showcase, game_overlay): a left click on a
+  // named widget calls the script's `on_<name>(widget)`. Installs the input
+  // router's on_click (replacing any); the handlers run at the end of
+  // pump_input, after the router has processed the frame's input, where the
+  // C++ lambda runs inside it (router handlers get no World here).
+  pub fn set_script_click_dispatch(var self&);
+
+  // Create an offscreen render target (delegates to the Rhi).
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle => self.rhi.create_render_target(width, height);
+  // Render a widget tree into `target` during the next update().
+  pub fn queue_offscreen(var self&, target: RhiTextureHandle, root: WidgetId, clear_color: Color) {
+    self.offscreen_queue.push(OffscreenPass { target, root, clear_color });
+  }
+
+  // Show a widget as an overlay at a screen position (above the tree).
+  pub fn show_overlay(var self&, widget: WidgetId, position: Vec2) => self.overlays.show(self.world, widget, position);
+  pub fn hide_overlay(var self&, widget: WidgetId) => self.overlays.hide(widget);
+
+  // Replace layout + paint of the swapchain pass.
+  pub fn set_on_paint(var self&, cb: PaintCallback<R>?) {
+    self.on_paint_cb = cb;
+  }
+
+  // Set every theme token as a builder variable (effective on the next
+  // load_ui / load_ui_string).
+  pub fn set_theme(var self&, theme&: Theme);
+  pub fn theme_name(self&): str => self.current_theme_name.as_str();
+
+  pub fn frame_stats(self&): FrameStats => self.stats;
+  pub fn set_frame_reuse(var self&, mode: FrameReuse) {
+    self.frame_reuse_ = mode;
+  }
+  pub fn frame_reuse(self&): FrameReuse => self.frame_reuse_;
+  pub fn frame_reuse_mismatches(self&): u64 => self.reuse_mismatches;
+  pub fn frame_reuse_candidates(self&): u64 => self.reuse_candidates;
+
+  // Tooltip state, for tests and hosts (the C++ keeps it private).
+  pub fn tooltip_target(self&): WidgetId => self.tooltip_target;
+  pub fn tooltip_visible(self&): bool => self.tooltip_visible;
+}
+
+
+// ---------------------------------------------------------------------------
+// UIContext's methods
+// ---------------------------------------------------------------------------
+
+// RegisterWidgetTree (scripting/lua_widgets.cc): register every named widget
+// of a tree with the runtime, depth first.
+pub fn register_widget_tree<S: ScriptRuntime>(var rt&: S, world&: World, root: WidgetId) {
+  if (!root.valid()) {
+    return;
+  }
+  var named = false;
+  if (let n& = world.get(kWidgetNode, root)) {
+    named = n.name.len() > 0;
+  } else {
+    return;
+  }
+  if (named) {
+    rt.register_widget(world, root);
+  }
+  var children = List::<WidgetId>();
+  for (let c in world.get(kHierarchy, root)!.children.iter()) {
+    children.push(c);
+  }
+  for (let child in children.iter()) {
+    register_widget_tree(rt, world, child);
+  }
+}
+
+fn UIContext<P, R, S>::~UIContext() {
+  if (self.initialized) {
+    self.shutdown();
+  }
+}
+
+fn UIContext<P, R, S>::init(var self&, config: UIConfig): bool {
+  self.config = config;
+
+  // The GLFW platform attaches to the host's window; the host platform has
+  // none, and is fed by the host instead.
+  if (self.config.draw_data && self.config.external_window == null && !self.platform.host_fed()) {
+    eprintln("ultragui: draw_data mode requires external_window");
+    return false;
+  }
+
+  // Platform
+  let wcfg = WindowConfig {
+    width: self.config.width,
+    height: self.config.height,
+    title: self.config.title.clone(),
+    resizable: self.config.resizable,
+    vsync: self.config.vsync,
+    opengl: self.rhi.wants_opengl(),
+    external_window: self.config.external_window,
+  };
+  if (!self.platform.init(wcfg)) {
+    eprintln("ultragui: failed to initialize platform");
+    return false;
+  }
+
+  // RHI. Skipped in draw-data mode: the host owns the GPU.
+  let size = Vec2 { x: self.config.width as f32, y: self.config.height as f32 };
+  if (!self.config.draw_data) {
+    let rcfg = RhiConfig {
+      native_window: self.platform.native_handle(),
+      validation: self.config.validation,
+      vsync: self.config.vsync,
+      shader_dir: self.config.shader_dir.clone(),
+      embedded: self.config.embedded,
+    };
+    if (!self.rhi.init(rcfg)) {
+      eprintln("ultragui: failed to initialize RHI");
+      self.platform.shutdown();
+      return false;
+    }
+    let _ = self.renderer.init_rhi(self.rhi);
+  } else {
+    let _ = self.renderer.init();
+  }
+  self.renderer.set_display_size(size);
+
+  // Texture seam. Legacy mode renders through the bundled RHI, so its
+  // adapter is the default sink; draw-data mode waits for the host's.
+  if (!self.config.draw_data) {
+    self.rhi_textures = true;
+    self.renderer.set_rhi_texture_backend();
+  }
+
+  // Text engine
+  if (!self.text_engine.init()) {
+    eprintln("ultragui: failed to initialize text engine");
+  }
+  self.sync_dpi_scale();
+
+  // Scripting runtime
+  let _ = self.script.init();
+
+  if (!self.audio.init()) {
+    eprintln("ultragui: audio init failed (non-fatal)");
+  }
+
+  self.ui_scale_ = compute_viewport_scale(self.config, size, self.ui_scale_override);
+
+  // Builder
+  self.builder.set_viewport_size(size);
+
+  self.last_time = self.platform.time();
+  self.initialized = true;
+  return true;
+}
+
+// The C++ TextEngine reads rhi_->dpi_scale() on every Shape; 1.0 with no RHI
+// (draw-data mode).
+fn UIContext<P, R, S>::sync_dpi_scale(var self&) {
+  if (!self.config.draw_data) {
+    self.text_engine.set_dpi_scale(self.rhi.dpi_scale());
+  }
+}
+
+// FlushAtlas through the RHI the C++ TextEngine was given: none in draw-data
+// mode, where the C++ calls the linked RHI class through a null pointer (the
+// null RHI's CreateTexture/UpdateTexture touch nothing); NullRhi does that.
+fn UIContext<P, R, S>::flush_atlas(var self&) {
+  if (self.config.draw_data) {
+    var none_rhi = NullRhi();
+    self.text_engine.flush_atlas(none_rhi);
+  } else {
+    self.text_engine.flush_atlas(self.rhi);
+  }
+}
+
+fn UIContext<P, R, S>::load_font(var self&, path: str): FontHandle {
+  let font = self.text_engine.load_font(path);
+  if (font == kInvalidFont) {
+    eprintln(f"ultragui: failed to load font '{path}'");
+  }
+  return font;
+}
+
+fn UIContext<P, R, S>::load_font_memory(var self&, data: bytes): FontHandle {
+  let font = self.text_engine.load_font_memory(data);
+  if (font == kInvalidFont) {
+    eprintln(f"ultragui: failed to load font from {#data} bytes");
+  }
+  return font;
+}
+
+fn print_parse_errors(errors&: List<ParseError>) {
+  for (let e& in errors) {
+    eprintln(f"ultragui: parse error in {e.file}:{e.line}:{e.column}: {e.message}");
+  }
+}
+
+fn UIContext<P, R, S>::load_ui(var self&, path: str): WidgetId {
+  var doc = UguiDocument {};
+  var errors = List::<ParseError>();
+  if (!parse_ugui_file(path, doc, errors)) {
+    print_parse_errors(errors);
+    return kNullWidget;
+  }
+  return self.install_document(doc);
+}
+
+fn UIContext<P, R, S>::load_ui_string(var self&, source: str, name: str): WidgetId {
+  var doc = UguiDocument {};
+  var errors = List::<ParseError>();
+  if (!parse_ugui(source, name, doc, errors)) {
+    print_parse_errors(errors);
+    return kNullWidget;
+  }
+  return self.install_document(doc);
+}
+
+// The common tail of LoadUi and LoadUiString.
+fn UIContext<P, R, S>::install_document(var self&, doc&: UguiDocument): WidgetId {
+  if (self.root_.valid()) {
+    {
+      var ctx = WidgetContext {
+        text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+        current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+      };
+      self.input.reset_state(self.world, ctx);
+    }
+    self.tooltip_target = kNullWidget;
+    self.tooltip_visible = false;
+    self.script.clear_timers_and_tweens();
+    self.script.clear_widget_registry();
+    if (self.owns_root) {
+      destroy_widget(self.world, self.root_);
+    }
+  }
+
+  {
+    var ctx = WidgetContext {
+      text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+      current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    };
+    self.root_ = self.builder.build(self.world, ctx, doc);
+  }
+  self.owns_root = true;
+
+  if (self.root_.valid()) {
+    set_context(self.world, self.root_, true);
+    register_widget_tree(self.script, self.world, self.root_);
+    self.script.wire_change_handlers(self.world, self.root_);
+  }
+  // The layout engine holds a Yoga tree per root; the widgets it was built
+  // from are gone.
+  self.layout_engine.reset();
+  self.widget_cache.invalidate();
+  return self.root_;
+}
+
+fn UIContext<P, R, S>::load_script(var self&, path: str): bool {
+  self.script.sync_timer_clock(self.platform.time());
+  var adapter = RhiTextureBackend::<R>(self.rhi);
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    },
+  };
+  return self.script.exec_file(self.world, ctx, path);
+}
+
+fn UIContext<P, R, S>::exec_script(var self&, script: str, name: str): bool {
+  self.script.sync_timer_clock(self.platform.time());
+  var adapter = RhiTextureBackend::<R>(self.rhi);
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    },
+  };
+  return self.script.exec(self.world, ctx, script, name);
+}
+
+fn UIContext<P, R, S>::set_root(var self&, root: WidgetId) {
+  {
+    var ctx = WidgetContext {
+      text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+      current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    };
+    self.input.reset_state(self.world, ctx);
+  }
+  self.tooltip_target = kNullWidget;
+  self.tooltip_visible = false;
+  self.script.clear_timers_and_tweens();
+  self.script.clear_widget_registry();
+
+  if (self.owns_root && self.root_.valid()) {
+    destroy_widget(self.world, self.root_);
+  }
+  self.root_ = root;
+  self.owns_root = false;
+  if (self.root_.valid()) {
+    set_context(self.world, self.root_, true);
+    register_widget_tree(self.script, self.world, self.root_);
+  }
+  self.layout_engine.reset();
+  self.widget_cache.invalidate();
+}
+
+fn UIContext<P, R, S>::pump_input(var self&) {
+  if (self.input_pumped_this_frame) {
+    return;
+  }
+  self.input_pumped_this_frame = true;
+  let input_start = self.platform.time();
+
+  // Poll OS input (processes window resize events, fires platform callbacks
+  // that may push events into the queue).
+  self.platform.poll_events();
+
+  // The platform's window_size() reflects resizes immediately, unlike the
+  // RHI's display_size().
+  let viewport = self.platform.window_size();
+  self.builder.set_viewport_size(viewport);
+  self.ui_scale_ = compute_viewport_scale(self.config, viewport, self.ui_scale_override);
+
+  // Viewport changed: re-resolve @media breakpoints.
+  if (viewport.x != self.media_viewport.x || viewport.y != self.media_viewport.y) {
+    self.media_viewport = viewport;
+    if (self.root_.valid()) {
+      self.builder.reapply_media_queries(self.world, self.root_);
+    }
+  }
+
+  // Route input - overlays intercept clicks before the root tree. Press on
+  // an overlay dispatches OnClick; press outside dismisses all. The queue's
+  // button events are worked on in a copy (widget calls lend the platform
+  // through the context) and written back.
+  if (self.overlays.entries.len() > 0) {
+    var queue = self.platform.input_queue();
+    {
+      var adapter = RhiTextureBackend::<R>(self.rhi);
+      var ctx = WidgetContext {
+        text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+        current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+        host: ScriptHost {
+          anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+          widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+        },
+      };
+      var i = 0u32;
+      while (i < queue.button_count) {
+        let evt = queue.button_events[i as usize];
+        if (!evt.pressed) {
+          i += 1;
+          continue;
+        }
+
+        var hit = kNullWidget;
+        var j = self.overlays.entries.len() as i64 - 1;
+        while (j >= 0) {
+          let w = self.overlays.entries[j as usize].widget;
+          j -= 1;
+          if (!w.valid()) {
+            continue;
+          }
+          let deepest = hit_test(self.world, ctx, w, evt.position);
+          if (deepest.valid()) {
+            hit = deepest;
+            break;
+          }
+        }
+
+        if (hit.valid()) {
+          // Dispatch click to overlay widget, then consume the event.
+          let _ = click_widget(self.world, ctx, hit);
+        } else {
+          // Click outside - dismiss every overlay and consume the press so it
+          // doesn't also trigger something in the root tree.
+          var snap = List::<WidgetId>();
+          for (let entry in self.overlays.entries.iter()) {
+            snap.push(entry.widget);
+          }
+          self.overlays.entries.clear();
+          for (let w in snap.iter()) {
+            if (w.valid()) {
+              dismiss_widget(self.world, ctx, w);
+            }
+          }
+        }
+        for (let k in (i + 1)..queue.button_count) {
+          queue.button_events[(k - 1) as usize] = queue.button_events[k as usize];
+        }
+        queue.button_count -= 1;
+      }
+    }
+    var q& = self.platform.input_queue();
+    q.button_events = queue.button_events;
+    q.button_count = queue.button_count;
+  }
+
+  if (self.root_.valid()) {
+    var adapter = RhiTextureBackend::<R>(self.rhi);
+    var ctx = WidgetContext {
+      text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+      current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+      host: ScriptHost {
+        anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+        widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+      },
+    };
+    let _ = self.input.process(self.world, ctx, self.root_);
+  }
+  self.dispatch_script_clicks();
+
+  // Kept aside rather than written into stats: an application that pumps
+  // early does so before the frame's stats are reset.
+  self.last_input_ms = (self.platform.time() - input_start) * 1000.0;
+}
+
+// animator_.Update with the C++ callbacks (resolve the id through the
+// cache, then set or clear the widget's animation style), applied in the
+// order the animator made them.
+fn UIContext<P, R, S>::step_animator(var self&, now: f64) {
+  var steps = List::<AnimStep>();
+  var dones = List::<u64>();  // per on_done: how many applies preceded it
+  {
+    let applied = Atomic::<u64>(0);
+    var st& = steps;
+    var dn& = dones;
+    let _ = self.animator.update(now, fn(id: u32, s&: Style) {
+      st.push(AnimStep { widget_id: id, style: s });
+      let _ = applied.fetch_add(1);
+    }, fn(id: u32) {
+      dn.push(applied.load());
+      let _ = id;
+    });
+  }
+  // A done always follows its own apply: replay the applies, each followed
+  // by the dones recorded right after it.
+  var next_done = 0usize;
+  var merged = List::<AnimStep>();
+  for (let i in 0..steps.len()) {
+    merged.push(AnimStep { widget_id: steps[i].widget_id, style: steps[i].style });
+    while (next_done < dones.len() && dones[next_done] == (i + 1) as u64) {
+      merged.push(AnimStep { widget_id: steps[i].widget_id, style: none });
+      next_done += 1;
+    }
+  }
+  for (let step& in merged) {
+    let w = self.widget_cache.by_id(self.world, self.root_, step.widget_id);
+    if (!w.valid()) {
+      continue;
+    }
+    if (let s& = step.style) {
+      set_animation_style(self.world, w, s);
+    } else {
+      clear_animation_style(self.world, w);
+    }
+  }
+}
+
+fn UIContext<P, R, S>::update_timers(var self&, now: f64) {
+  var adapter = RhiTextureBackend::<R>(self.rhi);
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    },
+  };
+  self.script.update_timers(self.world, ctx, now);
+}
+
+fn UIContext<P, R, S>::update_widgets(var self&) {
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+  };
+  update_widget_tree(self.world, ctx, self.root_, self.dt_);
+}
+
+fn UIContext<P, R, S>::measure_tree(var self&, root: WidgetId): u32 {
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+  };
+  return measure_widget_tree(self.world, ctx, root);
+}
+
+fn UIContext<P, R, S>::layout_tree(var self&, root: WidgetId, vp&: LayoutViewport) {
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+  };
+  compute_widget_layout(self.world, ctx, root, vp, self.layout_engine);
+}
+
+fn UIContext<P, R, S>::paint_tree(var self&, root: WidgetId) {
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+  };
+  paint_widget_tree(self.world, ctx, root, self.renderer);
+}
+
+fn UIContext<P, R, S>::overlay_widgets(self&): List<WidgetId> {
+  var out = List::<WidgetId>();
+  for (let o in self.overlays.entries.iter()) {
+    out.push(o.widget);
+  }
+  return out;
+}
+
+fn UIContext<P, R, S>::frame_env_dt(var self&): f64 => self.dt_;
+
+fn UIContext<P, R, S>::update(var self&) {
+  // Timing
+  let now = self.platform.time();
+  self.dt_ = now - self.last_time;
+  self.last_time = now;
+
+  // Drain input first if the application hasn't already.
+  self.pump_input();
+  self.sync_dpi_scale();
+
+  let viewport = self.platform.window_size();
+
+  // Fire pending timers
+  self.update_timers(now);
+
+  // Update tooltip display
+  self.update_tooltip();
+
+  // Update animations
+  if (self.root_.valid()) {
+    self.step_animator(now);
+  }
+
+  // Update widgets (scroll momentum, etc.)
+  if (self.root_.valid()) {
+    self.update_widgets();
+  }
+
+  // Update all animations: the vector animations, then the extensions'
+  // players (the C++ lottie_anims_, video_players_).
+  {
+    let dt = self.dt_;
+    var textures = self.renderer.texture_backend();
+    if (var b& = textures) {
+      for (var a& in self.vector_anims) {
+        a.update(b, dt);
+      }
+    } else if (self.rhi_textures) {
+      var adapter = RhiTextureBackend::<R>(self.rhi);
+      for (var a& in self.vector_anims) {
+        a.update(adapter, dt);
+      }
+    } else {
+      for (var a& in self.vector_anims) {
+        a.update::<TextureBackendBox>(none, dt);
+      }
+    }
+  }
+  if (self.extensions.len() > 0) {
+    var env = FrameEnv {
+      rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+      audio: self.audio,
+    };
+    for (var e& in self.extensions) {
+      (e.fns.update)(e.ptr(), env);
+    }
+    // GPU YCbCr -> RGBA conversion for players with new frames, after
+    // AcquireFrame and before the main render pass.
+    var need_convert = false;
+    for (var e& in self.extensions) {
+      if ((e.fns.needs_convert)(e.ptr())) {
+        need_convert = true;
+        break;
+      }
+    }
+    if (need_convert && env.rhi.acquire_frame()) {
+      for (var e& in self.extensions) {
+        if ((e.fns.needs_convert)(e.ptr())) {
+          (e.fns.convert)(e.ptr(), env);
+        }
+      }
+    }
+  }
+
+  // --- Text shaping and atlas management (BEFORE render pass) ---
+  self.text_engine.begin_frame();
+  if (self.root_.valid()) {
+    let _ = self.measure_tree(self.root_);
+  }
+  let queued = self.offscreen_queue.clone();
+  for (let pass in queued.iter()) {
+    if (pass.root.valid()) {
+      let _ = self.measure_tree(pass.root);
+    }
+  }
+  let overlay_list = self.overlay_widgets();
+  for (let w in overlay_list.iter()) {
+    if (w.valid()) {
+      let _ = self.measure_tree(w);
+    }
+  }
+  self.flush_atlas();
+
+  // --- Offscreen render passes ---
+  if (self.offscreen_queue.len() > 0) {
+    if (!self.rhi.acquire_frame()) {
+      self.offscreen_queue.clear();
+      return;
+    }
+    let vp = LayoutViewport { width: viewport.x, height: viewport.y, scale: self.ui_scale_ };
+    let passes = self.offscreen_queue.clone();
+    for (let pass in passes.iter()) {
+      if (!self.rhi.begin_offscreen(pass.target, pass.clear_color)) {
+        continue;
+      }
+      self.renderer.begin_frame_rhi(self.rhi);
+      if (pass.root.valid()) {
+        self.layout_tree(pass.root, vp);
+        self.paint_tree(pass.root);
+      }
+      self.flush_atlas();
+      self.renderer.end_frame(self.rhi);
+      self.rhi.end_offscreen(pass.target);
+    }
+    self.offscreen_queue.clear();
+  }
+
+  // --- Main swapchain render pass ---
+  if (!self.rhi.begin_frame(self.config.clear_color)) {
+    return;
+  }
+
+  self.renderer.begin_frame_rhi(self.rhi);
+
+  if (self.run_paint_callback()) {
+  } else if (self.root_.valid()) {
+    let vp = LayoutViewport { width: viewport.x, height: viewport.y, scale: self.ui_scale_ };
+    self.layout_tree(self.root_, vp);
+    self.paint_tree(self.root_);
+  }
+
+  // Paint overlays on top of everything
+  let overlay_list2 = self.overlay_widgets();
+  for (let w in overlay_list2.iter()) {
+    if (w.valid()) {
+      let ovp = LayoutViewport { width: viewport.x, height: viewport.y, scale: self.ui_scale_ };
+      self.layout_tree(w, ovp);
+      self.paint_tree(w);
+    }
+  }
+
+  // Flush any new glyphs from paint pass
+  self.flush_atlas();
+
+  // Tooltip (drawn last, on top of everything)
+  self.draw_tooltip();
+
+  self.renderer.end_frame(self.rhi);
+  self.rhi.end_frame();
+
+  // Reset the per-frame input-pumped flag.
+  self.input_pumped_this_frame = false;
+}
+
+// on_paint_cb_(renderer_, &rhi_), if set. The callback is taken out of its
+// slot for the call (it is lent fields beside it) and put back unless it
+// installed a replacement.
+fn UIContext<P, R, S>::run_paint_callback(var self&): bool {
+  var slot: PaintCallback<R>? = none;
+  swap(self.on_paint_cb, slot);
+  let handler = slot else {
+    return false;
+  };
+  {
+    var env = PaintEnv::<R> { renderer: self.renderer, rhi: self.rhi };
+    handler(env);
+  }
+  if (self.on_paint_cb == none) {
+    self.on_paint_cb = handler;
+  }
+  return true;
+}
+
+// --- Frame reuse ------------------------------------------------------------
+
+fn UIContext<P, R, S>::frame_would_repeat(self&): bool {
+  if (!self.have_built_frame) {
+    return false;
+  }
+  // Every mutation that changes what is drawn marks the widget dirty, and
+  // every mark bumps the revision (animations included).
+  if (widget_revision() != self.last_widget_revision) {
+    return false;
+  }
+  let viewport = self.platform.window_size();
+  if (viewport.x != self.last_reuse_viewport.x || viewport.y != self.last_reuse_viewport.y) {
+    return false;
+  }
+  if (self.ui_scale_ != self.last_reuse_scale) {
+    return false;
+  }
+  // The tooltip is drawn straight into the list, not a widget.
+  if (self.tooltip_visible != self.last_tooltip_visible) {
+    return false;
+  }
+  if (self.tooltip_target != self.last_tooltip_target) {
+    return false;
+  }
+  if (self.overlays.entries.len() != self.last_overlay_widgets.len()) {
+    return false;
+  }
+  for (let i in 0..self.overlays.entries.len()) {
+    if (self.overlays.entries[i].widget != self.last_overlay_widgets[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// RecordBuiltFrame, minus the hash (the caller computes it while it holds
+// the draw list).
+fn UIContext<P, R, S>::record_built_frame(var self&, draw_hash: u64) {
+  self.have_built_frame = true;
+  self.last_widget_revision = widget_revision();
+  self.last_reuse_viewport = self.platform.window_size();
+  self.last_reuse_scale = self.ui_scale_;
+  self.last_tooltip_visible = self.tooltip_visible;
+  self.last_tooltip_target = self.tooltip_target;
+  self.last_overlay_widgets = self.overlay_widgets();
+  if (self.frame_reuse_ == FrameReuse::Verify) {
+    self.last_draw_hash = draw_hash;
+  }
+}
+
+fn UIContext<P, R, S>::render_draw_data(var self&): DrawData {
+  // Timing
+  let now = self.platform.time();
+  self.dt_ = now - self.last_time;
+  self.last_time = now;
+  let frame_start = now;
+  self.stats = FrameStats {};
+
+  // Input (via the attached host window) + viewport
+  self.pump_input();  // no-op if the application already pumped this frame
+  let viewport = self.platform.window_size();
+  self.renderer.set_display_size(viewport);
+  var mark = self.platform.time();
+  self.stats.input_ms = self.last_input_ms;
+
+  self.update_timers(now);
+  self.update_tooltip();
+
+  // Animations + per-widget update (texture-backed animations are not
+  // produced in draw-data mode, since the host owns the GPU).
+  if (self.root_.valid()) {
+    self.step_animator(now);
+    self.update_widgets();
+  }
+  self.stats.update_ms = (self.platform.time() - mark) * 1000.0;
+  mark = self.platform.time();
+
+  // Everything above can itself change the tree, so the question is only
+  // worth asking now.
+  let would_repeat = self.frame_reuse_ != FrameReuse::Off && self.frame_would_repeat();
+  if (would_repeat && self.frame_reuse_ == FrameReuse::On) {
+    // The renderer's buffers still hold the last list.
+    self.input_pumped_this_frame = false;
+    self.stats.reused = true;
+    let t = (self.platform.time() - frame_start) * 1000.0;
+    self.stats.total_ms = t;
+    let dd = self.renderer.get_draw_data();
+    self.stats.draw_commands = dd.command_count();
+    return dd;
+  }
+
+  // Text shaping (no GPU upload: the host uploads from text_engine.)
+  self.text_engine.begin_frame();
+  if (self.root_.valid()) {
+    self.stats.widgets += self.measure_tree(self.root_);
+  }
+  let overlay_list = self.overlay_widgets();
+  for (let w in overlay_list.iter()) {
+    if (w.valid()) {
+      self.stats.widgets += self.measure_tree(w);
+    }
+  }
+  self.stats.measure_ms = (self.platform.time() - mark) * 1000.0;
+
+  // Paint into the renderer; collect as a draw list instead of submitting.
+  self.renderer.begin_frame();
+  let vp = LayoutViewport { width: viewport.x, height: viewport.y, scale: self.ui_scale_ };
+  if (self.root_.valid()) {
+    mark = self.platform.time();
+    self.layout_tree(self.root_, vp);
+    self.stats.layout_ms += (self.platform.time() - mark) * 1000.0;
+    let rid = self.world.get(kWidgetNode, self.root_)!.id;
+    self.stats.layout_nodes += self.layout_engine.store_for(rid).nodes.len() as u32;
+    mark = self.platform.time();
+    self.paint_tree(self.root_);
+    self.stats.paint_ms += (self.platform.time() - mark) * 1000.0;
+  }
+  for (let w in overlay_list.iter()) {
+    if (w.valid()) {
+      mark = self.platform.time();
+      self.layout_tree(w, vp);
+      self.stats.layout_ms += (self.platform.time() - mark) * 1000.0;
+      let oid = self.world.get(kWidgetNode, w)!.id;
+      self.stats.layout_nodes += self.layout_engine.store_for(oid).nodes.len() as u32;
+      mark = self.platform.time();
+      self.paint_tree(w);
+      self.stats.paint_ms += (self.platform.time() - mark) * 1000.0;
+    }
+  }
+  self.draw_tooltip();
+
+  self.input_pumped_this_frame = false;
+  var draw_hash = 0u64;
+  {
+    let dd = self.renderer.get_draw_data();
+    self.stats.draw_commands = dd.command_count();
+    if (self.frame_reuse_ == FrameReuse::Verify) {
+      draw_hash = hash_draw_data(dd);
+    }
+  }
+  self.stats.shape_calls = self.text_engine.shape_calls();
+  self.stats.shape_hits = self.text_engine.shape_hits();
+
+  // kVerify: a frame the predicate called a repeat that did not come out
+  // byte-identical is something changing what is drawn without marking the
+  // widget dirty.
+  if (self.frame_reuse_ == FrameReuse::Verify && would_repeat) {
+    self.reuse_candidates += 1;
+    self.stats.reused = true;  // "would have been", in this mode
+    if (draw_hash != self.last_draw_hash) {
+      self.reuse_mismatches += 1;
+      eprintln(f"ultragui: frame reuse would have shown a stale frame (mismatch {self.reuse_mismatches})");
+    }
+  }
+  self.record_built_frame(draw_hash);
+
+  self.stats.total_ms = (self.platform.time() - frame_start) * 1000.0;
+  return self.renderer.get_draw_data();
+}
+
+fn UIContext<P, R, S>::update_tooltip(var self&) {
+  let hovered = self.input.hovered_widget();
+
+  // Find the nearest ancestor with a tooltip (walk up the tree)
+  var tip_target = hovered;
+  while (tip_target.valid() && tooltip_text(self.world, tip_target).len() == 0) {
+    if (let h& = self.world.get(kHierarchy, tip_target)) {
+      tip_target = h.parent;
+    } else {
+      tip_target = kNullWidget;
+    }
+  }
+
+  if (tip_target != self.tooltip_target) {
+    self.tooltip_target = tip_target;
+    self.tooltip_visible = false;
+    self.tooltip_hover_start = self.last_time;
+  }
+
+  // Show tooltip after delay; drawing happens in the frame.
+  if (self.tooltip_target.valid() && !self.tooltip_visible && (self.last_time - self.tooltip_hover_start) >= kTooltipDelay) {
+    self.tooltip_visible = true;
+  }
+}
+
+fn UIContext<P, R, S>::draw_tooltip(var self&) {
+  if (!self.tooltip_visible || !self.tooltip_target.valid()) {
+    return;
+  }
+  let tip = from_str(tooltip_text(self.world, self.tooltip_target));
+  if (tip.len() == 0) {
+    return;
+  }
+
+  let fh = self.default_font;
+  if (fh == kInvalidFont) {
+    return;
+  }
+
+  let sc = self.ui_scale_;
+  let font_size = 12.0 * sc;
+  let run = self.text_engine.shape(fh, tip.as_str(), font_size, 0.0, 1.0);
+
+  let pad_x = 10.0 * sc;
+  let pad_y = 6.0 * sc;
+  let w = run.total_advance + pad_x * 2.0;
+  let h = run.line_height + pad_y * 2.0;
+
+  let target_rect = self.world.get(kTransform, self.tooltip_target)!.rect;
+  var x = target_rect.x;
+  var y = target_rect.y + target_rect.h + 6.0;
+
+  // Clamp to viewport
+  let vp = self.rhi.display_size();
+  if (x + w > vp.x) {
+    x = vp.x - w - 4.0;
+  }
+  if (y + h > vp.y) {
+    y = target_rect.y - h - 6.0;
+  }
+
+  let radii = pack_radii_uniform(6.0);
+
+  // Shadow
+  self.renderer.draw_shadow(Rect { x, y, w, h }, Color::from_hex(0x000000, 0.4), 6.0, 0.0, Vec2 { x: 0.0, y: 2.0 }, radii);
+  // Background
+  self.renderer.draw_bordered_rect(Rect { x, y, w, h }, Color::from_hex(0x181828, 0.95), Color::from_hex(0xffffff, 0.08), 1.0,
+                                   radii);
+  // Text
+  self.flush_atlas();
+  self.renderer.draw_text(Vec2 { x: x + pad_x, y: y + pad_y }, run, Color::from_hex(0xd0d0e0), self.text_engine.atlas_texture());
+}
+
+fn UIContext<P, R, S>::shutdown(var self&) {
+  if (!self.initialized) {
+    return;
+  }
+
+  {
+    var ctx = WidgetContext {
+      text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+      current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    };
+    self.input.reset_state(self.world, ctx);
+  }
+  self.tooltip_target = kNullWidget;
+  self.tooltip_visible = false;
+  self.overlays.entries.clear();
+  self.script.clear_widget_registry();
+
+  if (self.owns_root && self.root_.valid()) {
+    destroy_widget(self.world, self.root_);
+  }
+  self.root_ = kNullWidget;
+  self.owns_root = false;
+
+  // delete anim: VectorAnimation's destructor unloads through its backend.
+  {
+    if (var b& = self.renderer.texture_backend()) {
+      for (var a& in self.vector_anims) {
+        a.unload(b);
+      }
+    } else if (self.rhi_textures) {
+      var adapter = RhiTextureBackend::<R>(self.rhi);
+      for (var a& in self.vector_anims) {
+        a.unload(adapter);
+      }
+    } else {
+      for (var a& in self.vector_anims) {
+        a.unload::<TextureBackendBox>(none);
+      }
+    }
+  }
+  self.vector_anims.clear();
+
+  if (self.extensions.len() > 0) {
+    var env = FrameEnv {
+      rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+      audio: self.audio,
+    };
+    for (var e& in self.extensions) {
+      (e.fns.shutdown)(e.ptr(), env);
+    }
+  }
+  self.extensions.clear();
+
+  self.audio.shutdown();  // the wired backend's own shutdown; the box stays
+  self.script.shutdown();
+  self.renderer.shutdown();
+  if (self.config.draw_data) {
+    self.text_engine.shutdown();
+  } else {
+    self.text_engine.shutdown_with(self.rhi);
+    self.rhi.shutdown();
+  }
+  self.platform.shutdown();
+
+  self.initialized = false;
+}
+
+fn UIContext<P, R, S>::load_svg(var self&, path: str, width: u32, height: u32): TextureId {
+  if (var b& = self.renderer.texture_backend()) {
+    return load_svg_texture(b, path, width, height);
+  }
+  if (self.rhi_textures) {
+    var adapter = RhiTextureBackend::<R>(self.rhi);
+    return load_svg_texture(adapter, path, width, height);
+  }
+  return load_svg_texture::<TextureBackendBox>(none, path, width, height);
+}
+
+fn UIContext<P, R, S>::load_anim(var self&, path: str, width: u32, height: u32): AnimId? {
+  var adapter = RhiTextureBackend::<R>(self.rhi);
+  var host = ScriptHost {
+    anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+    widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+  };
+  return host.load_anim(path, width, height);
+}
+
+// texture_backend_: the host's backend (draw-data mode), the RHI adapter
+// (legacy mode), or none.
+fn textures_of<'a, R: Rhi>(renderer: &'a var Renderer2D, adapter: &'a var RhiTextureBackend<'a, R>, rhi_textures: bool): DynTextureBackend<'a>? {
+  if (var b& = renderer.texture_backend()) {
+    return b.as_dyn();
+  }
+  if (rhi_textures) {
+    return DynTextureBackend::of(adapter);
+  }
+  return none;
+}
+
+fn UIContext<P, R, S>::set_script_click_dispatch(var self&) {
+  let queue = Arc::<Mutex<List<WidgetId>>>(Mutex::<List<WidgetId>>(List::<WidgetId>()));
+  let shared = queue.share();
+  self.input.set_on_click(own fn(w: WidgetId, b: MouseButton) {
+    if (b != MouseButton::Left) {
+      return;
+    }
+    shared.get().with(fn(l: &var List<WidgetId>) {
+      l.push(w);
+    });
+  });
+  self.script_clicks = queue;
+}
+
+fn UIContext<P, R, S>::dispatch_script_clicks(var self&) {
+  var clicked = List::<WidgetId>();
+  if (let q& = self.script_clicks) {
+    q.get().with(fn(l: &var List<WidgetId>) {
+      swap(l, clicked);
+    });
+  }
+  for (let w in clicked.iter()) {
+    var handler = String();
+    if (let n& = self.world.get(kWidgetNode, w)) {
+      if (n.name.len() == 0) {
+        continue;
+      }
+      handler = from_str("on_");
+      handler.push_str(n.name.as_str());
+    } else {
+      continue;
+    }
+    let _ = self.call_handler(handler.as_str(), w);
+  }
+}
+
+fn UIContext<P, R, S>::call_handler(var self&, func_name: str, widget: WidgetId): bool {
+  var adapter = RhiTextureBackend::<R>(self.rhi);
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    },
+  };
+  return self.script.call_handler(self.world, ctx, func_name, widget);
+}
+
+fn UIContext<P, R, S>::add_extension<T: UiExtension>(var self&, key&: ComponentKey<T>, extension: T): u32 {
+  self.extensions.push(UiExtensionBox::of(key, extension));
+  return (self.extensions.len() - 1) as u32;
+}
+
+fn UIContext<P, R, S>::extension_var<T: UiExtension>(var self&, key&: ComponentKey<T>, index: u32): (&var T)? {
+  if (index as usize >= self.extensions.len()) {
+    return none;
+  }
+  return self.extensions[index as usize].downcast(key);
+}
+
+fn UIContext<P, R, S>::set_theme(var self&, theme&: Theme) {
+  self.current_theme_name = theme.name.clone();
+  // Every theme token as a builder variable (the C++ walks the map; setting
+  // variables commutes, so the order is not observable).
+  for (let (name, value) in theme.tokens.iter()) {
+    self.builder.set_variable(name.as_str(), value.as_str());
+  }
+}
