@@ -1,0 +1,259 @@
+// UIContext (ugui/ui_context.cc) in draw-data mode on a clock the test sets:
+// tooltip timing, frame reuse (On and Verify, including a change that skips
+// MarkDirty), overlays intercepting and dismissing presses, @media
+// re-resolved on a viewport change, viewport scaling, load errors. The
+// frame-by-frame equality with the C++ is aki/tools/golden's job; this
+// checks the behaviours one at a time.
+
+module ui_context_test;
+
+import {Atomic} from akikit::threading::atomic;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {MouseButton} from ultragui::input::input_queue;
+import {NullRhi} from ultragui::rhi::null_rhi;
+import {NoScript} from ultragui::scripting::script_runtime;
+import {FlexDirection, ViewportScaleMode} from ultragui::style::enums;
+import {Length} from ultragui::style::property_types;
+import {kInvalidFont} from ultragui::text::text_engine;
+import {FrameReuse, UIConfig, UIContext} from ultragui::ui_context;
+import {set_button_click} from ultragui::widgets::button;
+import {CallbackEnv} from ultragui::widgets::callbacks;
+import {create_panel} from ultragui::widgets::panel;
+import {kTextContent} from ultragui::widgets::text;
+import {add_child, kHierarchy, kStyleC, kTransform, set_style} from ultragui::widgets::widget;
+import {Style} from ultragui::style::style;
+import {World} from ultragui::widgets::widget_registry;
+import {create_button, set_button_label} from ultragui::widgets::button;
+import {from_str} from akikit::strings::string;
+import {Expect} from support::expect;
+import {ClockPlatform} from support::clock_platform;
+
+comptime let kFont: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+type Ui = UIContext<ClockPlatform, NullRhi, NoScript>;
+
+fn make_ui(var t&: Expect, config: UIConfig): Ui {
+  var ui = UIContext::<ClockPlatform, NullRhi, NoScript>(ClockPlatform(), NullRhi(), NoScript());
+  let size = Vec2 { x: config.width as f32, y: config.height as f32 };
+  t.that(ui.init(config), "init");
+  ui.platform.host.set_viewport(size, size);
+  let font = ui.load_font(kFont);
+  t.that(font != kInvalidFont, "font");
+  ui.set_default_font(font);
+  return ui;
+}
+
+// One frame dt seconds later; its draw command count.
+fn frame(var ui&: Ui, dt: f64): u32 {
+  ui.platform.clock += dt;
+  let dd = ui.render_draw_data();
+  return dd.command_count();
+}
+
+fn center(var ui&: Ui, w: WidgetId): Vec2 {
+  let r = ui.world.get(kTransform, w)!.rect;
+  return Vec2 { x: r.x + r.w * 0.5, y: r.y + r.h * 0.5 };
+}
+
+fn check_tooltip(var t&: Expect) {
+  var ui = make_ui(t, UIConfig { draw_data: true, width: 640, height: 480 });
+  let root = ui.load_ui_string(r"""
+panel root {
+  width: 640; height: 480; padding: 20;
+  button tipped { text: "Hover"; width: 120; height: 40; tooltip: "help text"; }
+  panel plain { width: 120; height: 40; }
+}
+""", "tooltip");
+  t.that(root.valid(), "tooltip ui builds");
+  let base = frame(ui, 0.1);
+  let b = ui.find_widget("tipped");
+  let p = ui.find_widget("plain");
+  t.that(b.valid() && p.valid(), "find_widget through the cache");
+
+  ui.platform.host.push_mouse_move(center(ui, b));
+  let _ = frame(ui, 0.25);  // hover starts the delay (dyadic steps: exact sums)
+  t.that(ui.tooltip_target() == b, "hovered widget is the tooltip target");
+  t.that(!ui.tooltip_visible(), "not visible before the delay");
+  let _ = frame(ui, 0.25);
+  t.that(!ui.tooltip_visible(), "not visible at 0.25 s");
+  let shown = frame(ui, 0.25);  // 0.5 s: kTooltipDelay reached
+  t.that(ui.tooltip_visible(), "visible at 0.5 s");
+  t.that(shown > base, "the tooltip adds draw commands");
+
+  ui.platform.host.push_mouse_move(center(ui, p));
+  let _ = frame(ui, 0.1);
+  t.that(!ui.tooltip_target().valid() && !ui.tooltip_visible(), "leaving hides it");
+  ui.shutdown();
+}
+
+fn check_frame_reuse(var t&: Expect) {
+  var ui = make_ui(t, UIConfig { draw_data: true, width: 640, height: 480 });
+  let _ = ui.load_ui_string(r"""
+panel root {
+  width: 640; height: 480;
+  text label { text: "steady"; }
+}
+""", "reuse");
+  ui.set_frame_reuse(FrameReuse::Verify);
+  for (let _i in 0..5) {
+    let _ = frame(ui, 1.0 / 60.0);
+  }
+  t.that(ui.frame_reuse_candidates() > 0, "a static UI repeats");
+  t.that(ui.frame_reuse_mismatches() == 0, "and repeats byte-identically");
+  t.that(ui.frame_stats().reused, "verify reports would-have-reused");
+
+  // A change that skips MarkDirty: verify catches the stale frame.
+  let label = ui.find_widget("label");
+  ui.world.get_var(kTextContent, label)!.text = from_str("changed behind the dirty flag");
+  let _ = frame(ui, 1.0 / 60.0);
+  t.that(ui.frame_reuse_mismatches() == 1, "a change without MarkDirty is a mismatch");
+
+  // On: a repeat hands back the previous list.
+  ui.set_frame_reuse(FrameReuse::On);
+  let a = frame(ui, 1.0 / 60.0);
+  t.that(ui.frame_stats().reused, "On reuses a repeated frame");
+  let b = frame(ui, 1.0 / 60.0);
+  t.that(a == b, "the reused list is the same list");
+
+  // A viewport change is never a repeat.
+  ui.platform.host.set_viewport(Vec2 { x: 600.0, y: 480.0 }, Vec2 { x: 600.0, y: 480.0 });
+  let _ = frame(ui, 1.0 / 60.0);
+  t.that(!ui.frame_stats().reused, "a resize rebuilds");
+  ui.shutdown();
+}
+
+static let kRootClicks: Atomic<u32> = Atomic::<u32>(0);
+static let kOverlayClicks: Atomic<u32> = Atomic::<u32>(0);
+
+fn check_overlays(var t&: Expect) {
+  var ui = make_ui(t, UIConfig { draw_data: true, width: 640, height: 480 });
+  let _ = ui.load_ui_string(r"""
+panel root {
+  width: 640; height: 480;
+  button under { text: "Under"; width: 200; height: 60; }
+}
+""", "overlays");
+  let _ = frame(ui, 0.1);
+  let under = ui.find_widget("under");
+  set_button_click(ui.world, under, own fn(env: &var CallbackEnv) {
+    let _ = kRootClicks.fetch_add(1);
+  });
+  let pos = center(ui, under);
+
+  // A clickable overlay widget, laid out over the same spot.
+  let ov = load_overlay_button(ui.world);
+  let over_btn = ui.world.get(kHierarchy, ov)!.children[0];
+  set_button_click(ui.world, over_btn, own fn(env: &var CallbackEnv) {
+    let _ = kOverlayClicks.fetch_add(1);
+  });
+  ui.show_overlay(ov, Vec2 { x: 0.0, y: 0.0 });
+  let _ = frame(ui, 0.1);
+
+  // Press on the overlay: its click runs, the root never sees the press.
+  ui.platform.host.push_mouse_move(center(ui, over_btn));
+  ui.platform.host.push_mouse_button(MouseButton::Left, true);
+  ui.platform.host.push_mouse_button(MouseButton::Left, false);
+  let _ = frame(ui, 0.1);
+  t.eq_u32(kOverlayClicks.load(), 1, "press on an overlay clicks it");
+  t.eq_u32(kRootClicks.load(), 0, "and is consumed");
+  t.that(ui.overlays.entries.len() == 1, "the overlay stays");
+
+  // Press outside every overlay: all dismissed, the press consumed.
+  ui.platform.host.push_mouse_move(Vec2 { x: 630.0, y: 470.0 });
+  ui.platform.host.push_mouse_button(MouseButton::Left, true);
+  ui.platform.host.push_mouse_button(MouseButton::Left, false);
+  let _ = frame(ui, 0.1);
+  t.that(ui.overlays.entries.len() == 0, "an outside press dismisses the overlays");
+
+  // With no overlay the root gets its clicks again.
+  ui.platform.host.push_mouse_move(pos);
+  ui.platform.host.push_mouse_button(MouseButton::Left, true);
+  ui.platform.host.push_mouse_button(MouseButton::Left, false);
+  let _ = frame(ui, 0.1);
+  t.eq_u32(kRootClicks.load(), 1, "the root clicks without overlays");
+  ui.shutdown();
+}
+
+// An overlay subtree built outside the root: a 300x300 panel holding a
+// button, positioned where `under` is.
+fn load_overlay_button(var world&: World): WidgetId {
+  let panel = create_panel(world, 9001);
+  var ps = Style {};
+  ps.width = Length::px(300.0);
+  ps.height = Length::px(300.0);
+  set_style(world, panel, ps);
+  let btn = create_button(world, 9002);
+  set_button_label(world, btn, "Over");
+  var bs = Style {};
+  bs.width = Length::px(200.0);
+  bs.height = Length::px(60.0);
+  set_style(world, btn, bs);
+  add_child(world, panel, btn);
+  return panel;
+}
+
+fn check_media_reapply(var t&: Expect) {
+  var ui = make_ui(t, UIConfig { draw_data: true, width: 1280, height: 720 });
+  let _ = ui.load_ui_string(r"""
+panel root {
+  panel main {
+    layout: row; width: 600;
+    @media (max-width: 800) { layout: column; width: 300; }
+  }
+}
+""", "media");
+  let _ = frame(ui, 0.1);
+  let main = ui.find_widget("main");
+  t.that(ui.world.get(kStyleC, main)!.style.flex_direction == FlexDirection::Row, "wide: base style");
+  ui.platform.host.set_viewport(Vec2 { x: 640.0, y: 720.0 }, Vec2 { x: 640.0, y: 720.0 });
+  let _ = frame(ui, 0.1);
+  let s = ui.world.get(kStyleC, main)!.style;
+  t.that(s.flex_direction == FlexDirection::Column && s.width == Length::px(300.0), "narrow: @media applied on resize");
+  t.that(ui.world.get(kTransform, main)!.rect.w == 300.0, "and laid out with it");
+  ui.platform.host.set_viewport(Vec2 { x: 1280.0, y: 720.0 }, Vec2 { x: 1280.0, y: 720.0 });
+  let _ = frame(ui, 0.1);
+  t.that(ui.world.get(kStyleC, main)!.style.flex_direction == FlexDirection::Row, "wide again: base style back");
+  ui.shutdown();
+}
+
+fn check_scaling(var t&: Expect) {
+  var ui = make_ui(t, UIConfig {
+    draw_data: true, width: 1280, height: 720, scale_mode: ViewportScaleMode::Contain, design_width: 640.0,
+    design_height: 480.0,
+  });
+  t.that(ui.ui_scale() == 1.5, "contain: min(1280/640, 720/480)");
+  ui.platform.host.set_viewport(Vec2 { x: 640.0, y: 960.0 }, Vec2 { x: 640.0, y: 960.0 });
+  let _ = frame(ui, 0.1);
+  t.that(ui.ui_scale() == 1.0, "rescaled on resize");
+  ui.set_ui_scale(2.0);
+  let _ = frame(ui, 0.1);
+  t.that(ui.ui_scale() == 2.0, "set_ui_scale wins");
+  ui.set_ui_scale(0.0);
+  let _ = frame(ui, 0.1);
+  t.that(ui.ui_scale() == 1.0, "0 returns to scale_mode");
+  ui.shutdown();
+}
+
+fn check_errors(var t&: Expect) {
+  var ui = make_ui(t, UIConfig { draw_data: true });
+  let root = ui.load_ui_string("panel root { width: 10; }", "ok");
+  t.that(root.valid(), "a document loads");
+  let bad = ui.load_ui_string("class { }", "bad");
+  t.that(!bad.valid(), "a parse error returns the null widget");
+  t.that(ui.root() == root, "and keeps the previous root");
+  t.that(!ui.load_ui("/nonexistent/x.ugui").valid(), "a missing file fails");
+  t.that(!ui.load_script("/nonexistent/x.lua"), "NoScript runs nothing");
+  ui.shutdown();
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  check_tooltip(t);
+  check_frame_reuse(t);
+  check_overlays(t);
+  check_media_reapply(t);
+  check_scaling(t);
+  check_errors(t);
+  return t.finish();
+}
