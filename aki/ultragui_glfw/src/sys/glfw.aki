@@ -1,0 +1,82 @@
+// No C++ counterpart: the GLFW 3 API (GLFW/glfw3.h) that platform_glfw and
+// the windowed RHIs call, declared by hand. Only what the port calls is here.
+// GLFW's handles are opaque C types behind pointers; its callbacks are
+// `extern fn` values. The Vulkan entry points of GLFW
+// (glfwGetRequiredInstanceExtensions, glfwCreateWindowSurface) take Vulkan
+// types and live with the Vulkan binding in ultragui_vulkan.
+
+module ultragui_glfw::sys::glfw;
+
+pub extern type GlfwWindow;
+pub extern type GlfwMonitor;
+pub extern type GlfwCursor;
+
+pub comptime let kGlfwTrue: i32 = 1;
+pub comptime let kGlfwFalse: i32 = 0;
+
+pub comptime let kGlfwRelease: i32 = 0;
+pub comptime let kGlfwPress: i32 = 1;
+pub comptime let kGlfwRepeat: i32 = 2;
+
+// Window hints
+pub comptime let kGlfwResizable: i32 = 0x00020003;
+pub comptime let kGlfwSrgbCapable: i32 = 0x0002100E;
+pub comptime let kGlfwClientApi: i32 = 0x00022001;
+pub comptime let kGlfwContextVersionMajor: i32 = 0x00022002;
+pub comptime let kGlfwContextVersionMinor: i32 = 0x00022003;
+pub comptime let kGlfwOpenglForwardCompat: i32 = 0x00022006;
+pub comptime let kGlfwOpenglProfile: i32 = 0x00022008;
+pub comptime let kGlfwNoApi: i32 = 0;
+pub comptime let kGlfwOpenglApi: i32 = 0x00030001;
+pub comptime let kGlfwOpenglCoreProfile: i32 = 0x00032001;
+
+// Standard cursor shapes
+pub comptime let kGlfwArrowCursor: i32 = 0x00036001;
+pub comptime let kGlfwIbeamCursor: i32 = 0x00036002;
+pub comptime let kGlfwCrosshairCursor: i32 = 0x00036003;
+pub comptime let kGlfwHandCursor: i32 = 0x00036004;  // GLFW_POINTING_HAND_CURSOR
+pub comptime let kGlfwNotAllowedCursor: i32 = 0x0003600A;
+
+// Callback types
+pub type GlfwCursorPosFun = extern fn(*var GlfwWindow, f64, f64): ();
+pub type GlfwMouseButtonFun = extern fn(*var GlfwWindow, i32, i32, i32): ();
+pub type GlfwScrollFun = extern fn(*var GlfwWindow, f64, f64): ();
+pub type GlfwKeyFun = extern fn(*var GlfwWindow, i32, i32, i32, i32): ();
+pub type GlfwCharFun = extern fn(*var GlfwWindow, u32): ();
+pub type GlfwFramebufferSizeFun = extern fn(*var GlfwWindow, i32, i32): ();
+
+pub extern("glfwInit") fn glfw_init(): i32;
+pub extern("glfwTerminate") fn glfw_terminate(): ();
+pub extern("glfwWindowHint") fn glfw_window_hint(hint: i32, value: i32): ();
+pub extern("glfwCreateWindow") fn glfw_create_window(width: i32, height: i32, title: *const c_char, monitor: *var GlfwMonitor,
+  share: *var GlfwWindow): *var GlfwWindow;
+pub extern("glfwDestroyWindow") fn glfw_destroy_window(window: *var GlfwWindow): ();
+pub extern("glfwWindowShouldClose") fn glfw_window_should_close(window: *var GlfwWindow): i32;
+pub extern("glfwPollEvents") fn glfw_poll_events(): ();
+pub extern("glfwWaitEvents") fn glfw_wait_events(): ();
+pub extern("glfwGetWindowSize") fn glfw_get_window_size(window: *var GlfwWindow, width: *var i32, height: *var i32): ();
+pub extern("glfwGetFramebufferSize") fn glfw_get_framebuffer_size(window: *var GlfwWindow, width: *var i32, height: *var i32): ();
+pub extern("glfwGetWindowContentScale") fn glfw_get_window_content_scale(window: *var GlfwWindow, xscale: *var f32,
+  yscale: *var f32): ();
+pub extern("glfwGetTime") fn glfw_get_time(): f64;
+pub extern("glfwSetWindowUserPointer") fn glfw_set_window_user_pointer(window: *var GlfwWindow, pointer: *var u8): ();
+pub extern("glfwGetWindowUserPointer") fn glfw_get_window_user_pointer(window: *var GlfwWindow): *var u8;
+pub extern("glfwCreateStandardCursor") fn glfw_create_standard_cursor(shape: i32): *var GlfwCursor;
+pub extern("glfwSetCursor") fn glfw_set_cursor(window: *var GlfwWindow, cursor: *var GlfwCursor): ();
+pub extern("glfwGetClipboardString") fn glfw_get_clipboard_string(window: *var GlfwWindow): *const c_char;
+pub extern("glfwSetClipboardString") fn glfw_set_clipboard_string(window: *var GlfwWindow, text: *const c_char): ();
+pub extern("glfwMakeContextCurrent") fn glfw_make_context_current(window: *var GlfwWindow): ();
+pub extern("glfwSwapBuffers") fn glfw_swap_buffers(window: *var GlfwWindow): ();
+pub extern("glfwSwapInterval") fn glfw_swap_interval(interval: i32): ();
+
+// The set*Callback functions return the previous callback, which may be null.
+pub extern("glfwSetCursorPosCallback") fn glfw_set_cursor_pos_callback(window: *var GlfwWindow,
+  callback: GlfwCursorPosFun?): GlfwCursorPosFun?;
+pub extern("glfwSetMouseButtonCallback") fn glfw_set_mouse_button_callback(window: *var GlfwWindow,
+  callback: GlfwMouseButtonFun?): GlfwMouseButtonFun?;
+pub extern("glfwSetScrollCallback") fn glfw_set_scroll_callback(window: *var GlfwWindow,
+  callback: GlfwScrollFun?): GlfwScrollFun?;
+pub extern("glfwSetKeyCallback") fn glfw_set_key_callback(window: *var GlfwWindow, callback: GlfwKeyFun?): GlfwKeyFun?;
+pub extern("glfwSetCharCallback") fn glfw_set_char_callback(window: *var GlfwWindow, callback: GlfwCharFun?): GlfwCharFun?;
+pub extern("glfwSetFramebufferSizeCallback") fn glfw_set_framebuffer_size_callback(window: *var GlfwWindow,
+  callback: GlfwFramebufferSizeFun?): GlfwFramebufferSizeFun?;

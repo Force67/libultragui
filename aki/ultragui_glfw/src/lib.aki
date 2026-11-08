@@ -1,0 +1,9 @@
+// The GLFW platform of libultragui, ported from ugui/platform/platform_glfw.cc.
+// Import from the modules directly:
+//   ultragui_glfw::platform_glfw   GlfwPlatform, the Platform
+//   ultragui_glfw::sys::glfw                 the GLFW binding (for RHIs)
+// ../PORTING.md is the map and the contract.
+
+module ultragui_glfw;
+
+pub fn version(): str => @package_version();

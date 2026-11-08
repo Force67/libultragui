@@ -1,0 +1,74 @@
+// GlfwPlatform against a real GLFW window: init (no-API and OpenGL windows),
+// sizes, time, cursor, clipboard, polling, attaching to a host window
+// (external_window), and DynPlatform over it. Needs a display; without one
+// (glfwInit fails) it says so and passes, so `akiko test` stays usable on a
+// headless machine. Run it with a display under Xvfb:
+//   xvfb-run -a nix develop -c bash -c 'cd aki/ultragui_glfw && akiko test'
+
+module platform_glfw_test;
+
+import {println} from akikit::logging;
+import {from_str} from akikit::strings::string;
+import {DynPlatform, WindowConfig} from ultragui::platform::platform;
+import {Cursor} from ultragui::style::enums;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {Expect} from support::expect;
+
+fn mouse_queue_empty(var p&: DynPlatform): bool {
+  p.poll_events();
+  return p.input_queue().move_count == 0 && p.input_queue().key_count == 0;
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var p = GlfwPlatform();
+  let config = WindowConfig { width: 320, height: 200, title: from_str("platform_glfw_test"), resizable: false };
+  if (!p.init(config)) {
+    println("platform_glfw_test: no display (glfwInit or window creation failed), skipped");
+    return 0;
+  }
+  let ws = p.window_size();
+  t.that(ws.x == 320.0 && ws.y == 200.0, f"window_size {ws.x}x{ws.y}");
+  let fs = p.framebuffer_size();
+  t.that(fs.x >= 320.0 && fs.y >= 200.0, f"framebuffer_size {fs.x}x{fs.y}");
+  t.that(p.dpi_scale() > 0.0, "dpi_scale > 0");
+  t.that(!p.should_close(), "a new window should not close");
+  t.that(p.native_handle() != null, "native_handle");
+  let t0 = p.time();
+  t.that(t0 >= 0.0, "time");
+
+  for (let c in [Cursor::Auto, Cursor::Default, Cursor::Pointer, Cursor::Text, Cursor::Move, Cursor::NotAllowed]) {
+    p.set_cursor(c);
+  }
+
+  p.set_clipboard_text("ultragui clipboard");
+  let clip = from_str(p.clipboard_text());
+  t.that(clip == "ultragui clipboard", f"clipboard round trip: '{clip}'");
+
+  // Embedding: a second platform attached to the first one's window. It
+  // takes over the window's callbacks and leaves the window alone on
+  // shutdown.
+  var host = GlfwPlatform();
+  t.that(host.init(WindowConfig { external_window: p.native_handle() }), "attach to an external window");
+  t.that(host.native_handle() == p.native_handle(), "attached handle");
+  t.that(host.window_size().x == 320.0, "attached window size");
+  {
+    var d = DynPlatform::of(host);
+    t.that(mouse_queue_empty(d), "no input without events");
+  }
+  host.shutdown();
+  t.that(host.native_handle() == null, "detached on shutdown");
+  t.that(!p.should_close(), "the owner's window survives the attached shutdown");
+  p.shutdown();
+  t.that(p.native_handle() == null, "window destroyed on shutdown");
+
+  // An OpenGL 3.3 core window, the opengl option.
+  var gl = GlfwPlatform();
+  if (gl.init(WindowConfig { width: 64, height: 64, opengl: true })) {
+    t.that(gl.window_size().x == 64.0, "opengl window size");
+    gl.shutdown();
+  } else {
+    println("platform_glfw_test: no OpenGL 3.3 core context here, skipped that part");
+  }
+  return t.finish();
+}

@@ -1,0 +1,238 @@
+// ugui/platform/platform_glfw.cc: the Platform over a GLFW window.
+//
+// Shape differences from the C++:
+// * The C++ Platform class with this .cc linked in is GlfwPlatform here, a
+//   type implementing the Platform capability; UIContext<GlfwPlatform, ...>
+//   picks it where the C++ build linked platform_glfw.cc.
+// * Platform::Impl stays a separate heap object (GlfwImpl in a Box), because
+//   GLFW keeps its address as the window user pointer for the input
+//   callbacks; the GlfwPlatform value itself may move.
+// * clipboard_text() returns "" where glfwGetClipboardString returns NULL (no
+//   clipboard, or text that is not UTF-8); the C++ hands NULL on.
+// * The standard cursors are module statics created on first use and never
+//   destroyed, as the C++ function-local statics are (see PORTING.md, quirks:
+//   they outlive a glfwTerminate).
+
+module ultragui_glfw::platform_glfw;
+
+import {Box} from akikit::memory::box;
+import {eprintln} from akikit::logging;
+import {with_nul} from akikit::strings::string;
+import {is_string_utf8} from akikit::text::code_point_validation;
+import {Vec2} from ultragui::core::math;
+import {InputQueue, MouseButton} from ultragui::input::input_queue;
+import {Platform, WindowConfig} from ultragui::platform::platform;
+import {Cursor} from ultragui::style::enums;
+import {GlfwCursor, GlfwWindow, glfw_create_standard_cursor, glfw_create_window, glfw_destroy_window, glfw_get_clipboard_string,
+  glfw_get_framebuffer_size, glfw_get_time, glfw_get_window_content_scale, glfw_get_window_size, glfw_get_window_user_pointer,
+  glfw_init, glfw_poll_events, glfw_set_char_callback, glfw_set_clipboard_string, glfw_set_cursor, glfw_set_cursor_pos_callback,
+  glfw_set_key_callback, glfw_set_mouse_button_callback, glfw_set_scroll_callback, glfw_set_window_user_pointer, glfw_terminate,
+  glfw_window_hint, glfw_window_should_close, kGlfwArrowCursor, kGlfwClientApi, kGlfwContextVersionMajor,
+  kGlfwContextVersionMinor, kGlfwCrosshairCursor, kGlfwFalse, kGlfwHandCursor, kGlfwIbeamCursor, kGlfwNoApi, kGlfwNotAllowedCursor,
+  kGlfwOpenglApi, kGlfwOpenglCoreProfile, kGlfwOpenglForwardCompat, kGlfwOpenglProfile, kGlfwPress, kGlfwRepeat, kGlfwResizable,
+  kGlfwSrgbCapable, kGlfwTrue} from ultragui_glfw::sys::glfw;
+
+extern fn strlen(s: *const c_char): usize;
+
+// Platform::Impl
+struct GlfwImpl {
+  pub unowned var window: *var GlfwWindow = null
+  pub var external: bool = false  // window owned by the host (embedding)
+  pub var queue: InputQueue = InputQueue {}
+}
+
+// The Impl a window's user pointer names. Only called from GLFW callbacks of
+// a window whose user pointer init() set to a live GlfwImpl.
+unsafe fn impl_of(window: *var GlfwWindow): *var GlfwImpl => unsafe glfw_get_window_user_pointer(window) as *var GlfwImpl;
+
+extern fn glfw_mouse_pos_cb(window: *var GlfwWindow, x: f64, y: f64) {
+  unsafe {
+    let s = impl_of(window);
+    (*s).queue.push_move(Vec2 { x: x as f32, y: y as f32 });
+  }
+}
+
+extern fn glfw_mouse_button_cb(window: *var GlfwWindow, button: i32, action: i32, mods: i32) {
+  unsafe {
+    let s = impl_of(window);
+    (*s).queue.push_button(button as u8 as MouseButton, action == kGlfwPress);
+  }
+}
+
+extern fn glfw_scroll_cb(window: *var GlfwWindow, x: f64, y: f64) {
+  unsafe {
+    let s = impl_of(window);
+    (*s).queue.push_scroll(Vec2 { x: x as f32, y: y as f32 });
+  }
+}
+
+extern fn glfw_key_cb(window: *var GlfwWindow, key: i32, scancode: i32, action: i32, mods: i32) {
+  unsafe {
+    let s = impl_of(window);
+    (*s).queue.push_key(key, scancode, action == kGlfwPress, action == kGlfwRepeat, mods);
+  }
+}
+
+extern fn glfw_char_cb(window: *var GlfwWindow, codepoint: u32) {
+  unsafe {
+    let s = impl_of(window);
+    (*s).queue.push_char(codepoint);
+  }
+}
+
+// SetCursor's `static GLFWcursor* cursors[6]` and `static bool init`.
+static var cursors: [*var GlfwCursor; 6] = [null; 6];
+static var cursors_init: bool = false;
+
+pub struct GlfwPlatform : Platform {
+  var impl_: Box<GlfwImpl>
+
+  pub fn GlfwPlatform(): GlfwPlatform => GlfwPlatform { impl_: Box(GlfwImpl {}) };
+
+  pub fn init(var self&, config&: WindowConfig): bool;
+  pub fn shutdown(var self&);
+
+  pub fn should_close(self&): bool => unsafe glfw_window_should_close(self.window()) != 0;
+  pub fn poll_events(var self&) {
+    self.impl_.get_var().queue.clear();
+    unsafe glfw_poll_events();
+  }
+  pub fn window_size(self&): Vec2;
+  pub fn framebuffer_size(self&): Vec2;
+  pub fn dpi_scale(self&): f32;
+  pub fn time(self&): f64 => unsafe glfw_get_time();
+
+  // The GLFWwindow*, for RHI backend initialization.
+  pub fn native_handle(self&): *var u8 => unsafe (self.window() as *var u8);
+
+  pub fn set_cursor(var self&, cursor: Cursor);
+  pub fn clipboard_text(var self&): str;
+  pub fn set_clipboard_text(var self&, text: str);
+  pub fn input_queue(var self&): &var InputQueue => self.impl_.get_var().queue;
+
+  // The window, for code that knows it runs on GLFW.
+  pub fn window(self&): *var GlfwWindow => self.impl_.get().window;
+}
+
+fn GlfwPlatform::init(var self&, config&: WindowConfig): bool {
+  var im& = self.impl_.get_var();
+  if (config.external_window != null) {
+    // Embedding: the host already created and owns the window/context.
+    im.window = unsafe (config.external_window as *var GlfwWindow);
+    im.external = true;
+  } else {
+    if (unsafe glfw_init() == 0) {
+      eprintln("ultragui: glfwInit() failed");
+      return false;
+    }
+
+    unsafe {
+      if (config.opengl) {
+        glfw_window_hint(kGlfwClientApi, kGlfwOpenglApi);
+        glfw_window_hint(kGlfwContextVersionMajor, 3);
+        glfw_window_hint(kGlfwContextVersionMinor, 3);
+        glfw_window_hint(kGlfwOpenglProfile, kGlfwOpenglCoreProfile);
+        glfw_window_hint(kGlfwOpenglForwardCompat, kGlfwTrue);
+        glfw_window_hint(kGlfwSrgbCapable, kGlfwTrue);
+      } else {
+        glfw_window_hint(kGlfwClientApi, kGlfwNoApi);
+      }
+      glfw_window_hint(kGlfwResizable, config.resizable ? kGlfwTrue : kGlfwFalse);
+
+      let title = with_nul(config.title.as_str());
+      im.window = glfw_create_window(config.width, config.height, @ptr(title.as_str()) as *const c_char, null, null);
+    }
+    if (im.window == null) {
+      eprintln("ultragui: glfwCreateWindow() failed");
+      unsafe glfw_terminate();
+      return false;
+    }
+  }
+
+  // Install input callbacks
+  unsafe {
+    let w = im.window;
+    var target& = im;
+    glfw_set_window_user_pointer(w, &raw var target as *var u8);
+    let _ = glfw_set_cursor_pos_callback(w, @c_fn(glfw_mouse_pos_cb));
+    let _ = glfw_set_mouse_button_callback(w, @c_fn(glfw_mouse_button_cb));
+    let _ = glfw_set_scroll_callback(w, @c_fn(glfw_scroll_cb));
+    let _ = glfw_set_key_callback(w, @c_fn(glfw_key_cb));
+    let _ = glfw_set_char_callback(w, @c_fn(glfw_char_cb));
+  }
+  return true;
+}
+
+fn GlfwPlatform::shutdown(var self&) {
+  var im& = self.impl_.get_var();
+  // When embedding, the host owns the window and GLFW lifecycle.
+  if (im.external) {
+    im.window = null;
+    return;
+  }
+  if (im.window != null) {
+    unsafe glfw_destroy_window(im.window);
+    im.window = null;
+  }
+  unsafe glfw_terminate();
+}
+
+fn GlfwPlatform::window_size(self&): Vec2 {
+  var w: i32 = 0;
+  var h: i32 = 0;
+  unsafe glfw_get_window_size(self.window(), &raw var w, &raw var h);
+  return Vec2 { x: w as f32, y: h as f32 };
+}
+
+fn GlfwPlatform::framebuffer_size(self&): Vec2 {
+  var w: i32 = 0;
+  var h: i32 = 0;
+  unsafe glfw_get_framebuffer_size(self.window(), &raw var w, &raw var h);
+  return Vec2 { x: w as f32, y: h as f32 };
+}
+
+fn GlfwPlatform::dpi_scale(self&): f32 {
+  var xscale: f32 = 0.0;
+  var yscale: f32 = 0.0;
+  unsafe glfw_get_window_content_scale(self.window(), &raw var xscale, &raw var yscale);
+  return xscale;
+}
+
+fn GlfwPlatform::set_cursor(var self&, cursor: Cursor) {
+  unsafe {
+    // Create cursors on first use
+    if (!cursors_init) {
+      cursors[1] = glfw_create_standard_cursor(kGlfwArrowCursor);
+      cursors[2] = glfw_create_standard_cursor(kGlfwHandCursor);
+      cursors[3] = glfw_create_standard_cursor(kGlfwIbeamCursor);
+      cursors[4] = glfw_create_standard_cursor(kGlfwCrosshairCursor);
+      cursors[5] = glfw_create_standard_cursor(kGlfwNotAllowedCursor);
+      cursors_init = true;
+    }
+    let idx = cursor as usize;
+    if (idx > 0 && idx < 6 && cursors[idx] != null) {
+      glfw_set_cursor(self.window(), cursors[idx]);
+    } else {
+      glfw_set_cursor(self.window(), null);  // default
+    }
+  }
+}
+
+fn GlfwPlatform::clipboard_text(var self&): str {
+  unsafe {
+    let p = glfw_get_clipboard_string(self.window());
+    if (p == null) {
+      return "";
+    }
+    let raw = @slice(p as *const byte, strlen(p));
+    if (!is_string_utf8(raw)) {
+      return "";
+    }
+    return @str(p as *const c8, #raw);
+  }
+}
+
+fn GlfwPlatform::set_clipboard_text(var self&, text: str) {
+  let z = with_nul(text);
+  unsafe glfw_set_clipboard_string(self.window(), @ptr(z.as_str()) as *const c_char);
+}
