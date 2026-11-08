@@ -1,9 +1,926 @@
-// ugui/render/renderer2d.{h,cc}: PLACEHOLDER. The next wave ports the 2D
-// batch renderer here and replaces this file wholesale. It exists now only so
-// widgets::widget_vtable can name the type its draw entries take.
+// ugui/render/renderer2d.{h,cc}: the batched 2D renderer. Collects draw
+// commands during a frame, then either submits them through an Rhi
+// (end_frame) or hands them out as a DrawData (get_draw_data).
+//
+// The API is the C++ one in snake_case, same parameter order, C++ defaults
+// as aki defaults: draw_rect, draw_textured_rect, draw_rect_gradient,
+// draw_shadow, draw_inset_shadow, draw_bordered_rect, draw_text,
+// draw_text_layout, draw_radial_gradient, draw_multi_stop_gradient,
+// push_scissor, pop_scissor, push_transform, pop_transform, get_draw_data,
+// set_display_size, set_texture_backend, set_next_blur, begin_frame.
+//
+// Differences in shape (PORTING.md, "Renderer2D and the Rhi"):
+//
+// * `GradientStop* stops, u32 stop_count` is a slice `stops: &[GradientStop]`.
+// * The Renderer2D is not generic over the Rhi and does not keep one. The
+//   C++ reads `rhi_->display_size()` / `rhi_->dpi_scale()` while drawing; here
+//   `init_rhi(rhi)` attaches (Init(rhi)) and `begin_frame_rhi(rhi)` refreshes
+//   a snapshot of both, which the draw calls read. Nothing changes an Rhi's
+//   size or dpi between begin and end of a frame, so the values are the same.
+//   `init()` is Init(nullptr). `end_frame(rhi)` takes the Rhi to submit to
+//   (the C++ EndFrame dereferences rhi_ unchecked).
+// * Texture sink for cached gradients: `set_texture_backend(box)` gives the
+//   renderer an owned host backend (draw-data mode; the C++ pointer). Legacy
+//   mode's RHI adapter cannot be owned by the renderer (it borrows the Rhi
+//   its owner keeps), so `set_rhi_texture_backend()` selects "create through
+//   the Rhi": a gradient made while painting gets a provisional id above any
+//   RHI-minted id, and `end_frame(rhi)` (or `resolve_textures(rhi)`) creates
+//   the pending textures in request order and patches the batches and the
+//   cache with the real ids before anything is submitted. Batching compares
+//   ids for equality only, so the batches come out as the C++ makes them.
+// * get_draw_data returns the DrawData by value, viewing this renderer's
+//   buffers (the C++ returns a reference to a member that points into them).
 
 module ultragui::render::renderer2d;
 
+import {HashMap} from akikit::containers::hash_map;
+import {List} from akikit::containers::list;
+import {max_f32} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {Vec2, clamp} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {DrawCmd, DrawData, TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
+import {TextureBackendBox, rhi_handle_from_texture_id, texture_id_from_rhi_handle} from ultragui::render::texture_backend;
+import {Vertex2D, pack_color, pack_radii} from ultragui::render::vertex;
+import {Rhi} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {GradientType} from ultragui::style::enums;
+import {GradientStop} from ultragui::style::style;
+import {Glyph, TextLayout, TextRun} from ultragui::text::text_engine;
+
+struct DrawBatch : Copy {
+  pub var texture: TextureId = kNullTextureId
+  pub var scissor: Rect = Rect {}
+  pub var index_offset: u32 = 0
+  pub var index_count: u32 = 0
+  pub var blur: f32 = 0.0  // backdrop-blur radius for this batch (0 = none)
+}
+
+// Commands point into batches_ or text_batches_. end_frame walks draw_order_
+// so quads and text reach the GPU in emission order; otherwise earlier text
+// renders on top of later backgrounds, breaking modal overlays.
+enum DrawKind as u8 { Quad, Text }
+
+struct DrawCommand : Copy {
+  pub var kind: DrawKind = DrawKind::Quad
+  pub var batch_index: u32 = 0
+}
+
+// 2D affine transform applied to vertex positions:
+//   (x', y') = (a*x + b*y + tx, c*x + d*y + ty)
+struct Affine2D : Copy {
+  pub var a: f32 = 1.0
+  pub var b: f32 = 0.0
+  pub var c: f32 = 0.0
+  pub var d: f32 = 1.0
+  pub var tx: f32 = 0.0
+  pub var ty: f32 = 0.0
+  pub var identity: bool = true
+
+  pub fn apply(self&, p: Vec2): Vec2 => Vec2 { x: self.a * p.x + self.b * p.y + self.tx, y: self.c * p.x + self.d * p.y + self.ty };
+}
+
+// What the renderer reads off an attached Rhi (see the header).
+struct RhiSnapshot : Copy {
+  pub var display_size: Vec2 = Vec2 {}
+  pub var dpi_scale: f32 = 1.0
+}
+
+// A gradient texture requested while the Rhi was not at hand.
+struct PendingTexture {
+  pub var id: TextureId = kNullTextureId  // provisional
+  pub var key: u64 = 0                    // its gradient_cache_ key
+  pub var pixels: List<u8> = List()
+}
+
+// The gradient texture size (kSize in the C++).
+comptime let kGradientSize: u32 = 64;
+
 pub struct Renderer2D {
+  var rhi_: RhiSnapshot? = none
+  var texture_backend_: TextureBackendBox? = none
+  var rhi_textures_: bool = false
+  var pending_textures_: List<PendingTexture> = List()
+  var provisional_count_: u64 = 0
+
+  // Quad batching
+  var vertices_: List<Vertex2D> = List()
+  var indices_: List<u32> = List()
+  var batches_: List<DrawBatch> = List()
+
+  // Text batching (separate pass with text pipeline)
+  var text_vertices_: List<Vertex2D> = List()
+  var text_indices_: List<u32> = List()
+  var text_batches_: List<DrawBatch> = List()
+  var current_text_atlas_: TextureId = kNullTextureId
+
+  // Submission order across both batch lists.
+  var draw_order_: List<DrawCommand> = List()
+
+  var xform_: Affine2D = Affine2D {}  // current (composed) transform
+  var xform_stack_: List<Affine2D> = List()
+
+  var scissor_stack_: List<Rect> = List()
+  var gradient_cache_: HashMap<u64, TextureId> = HashMap()
+  var current_texture_: TextureId = kNullTextureId
+  var current_scissor_: Rect = Rect {}
+  var next_blur_: f32 = 0.0   // caller-set blur for upcoming quads
+  var batch_blur_: f32 = 0.0  // blur of the currently accumulating quad batch
+
+  // Draw-data output (get_draw_data)
+  var draw_cmds_: List<DrawCmd> = List()
+  var display_size_: Vec2 = Vec2 { x: 0.0, y: 0.0 }
+
   pub fn Renderer2D(): Renderer2D => Renderer2D {};
+
+  // Init(nullptr): draw-data mode, no Rhi.
+  pub fn init(var self&): bool;
+  // Init(rhi): attach an Rhi (snapshot its display size and dpi scale).
+  pub fn init_rhi<R: Rhi>(var self&, rhi&: R): bool;
+  pub fn shutdown(var self&);
+
+  pub fn begin_frame(var self&);
+  // Refresh the Rhi snapshot, then begin_frame (the C++ reads the live RHI).
+  pub fn begin_frame_rhi<R: Rhi>(var self&, rhi&: R);
+  // Finalize the batches and submit them through `rhi` in emission order.
+  pub fn end_frame<R: Rhi>(var self&, var rhi&: R);
+
+  // --- Solid color drawing ---
+  pub fn draw_rect(var self&, rect: Rect, color: Color, corner_radii: u32 = 0);
+  pub fn draw_textured_rect(var self&, rect: Rect, texture: TextureId, tint: Color = Color::white(), corner_radii: u32 = 0);
+
+  // --- Visual effects ---
+
+  // A rectangle with a linear gradient at the given angle. angle_deg follows
+  // CSS: 180 = top-to-bottom, 90 = left-to-right.
+  pub fn draw_rect_gradient(var self&, rect: Rect, start_color: Color, end_color: Color, corner_radii: u32 = 0,
+                            angle_deg: f32 = 180.0);
+
+  // A box shadow behind a rectangle. blur = softness of edge, spread = expand
+  // beyond rect, offset = shadow displacement.
+  pub fn draw_shadow(var self&, rect: Rect, shadow_color: Color, blur: f32, spread: f32, offset: Vec2, corner_radii: u32 = 0);
+
+  // An inset shadow inside a rectangle.
+  pub fn draw_inset_shadow(var self&, rect: Rect, shadow_color: Color, blur: f32, spread: f32, offset: Vec2,
+                           corner_radii: u32 = 0);
+
+  // A rect with a border (fill + outline in one draw).
+  pub fn draw_bordered_rect(var self&, rect: Rect, fill: Color, border_color: Color, border_width: f32, corner_radii: u32 = 0);
+
+  // --- Text ---
+
+  // Shaped text at `pos` (top-left origin); `run` comes from TextEngine::shape.
+  pub fn draw_text(var self&, pos: Vec2, run&: TextRun, color: Color, atlas_texture: TextureId);
+
+  // Laid-out text (multi-line with alignment).
+  pub fn draw_text_layout(var self&, pos: Vec2, run&: TextRun, layout&: TextLayout, color: Color, atlas_texture: TextureId,
+                          max_width: f32 = 0.0);
+
+  // A radial gradient (center color fading to edge color).
+  pub fn draw_radial_gradient(var self&, rect: Rect, center_color: Color, edge_color: Color, corner_radii: u32 = 0);
+
+  // A multi-stop gradient (linear or radial).
+  pub fn draw_multi_stop_gradient(var self&, rect: Rect, stops: &[GradientStop], type_: GradientType, angle_deg: f32,
+                                  corner_radii: u32 = 0);
+
+  pub fn push_scissor(var self&, rect: Rect);
+  pub fn pop_scissor(var self&);
+
+  // Push a clockwise rotation (degrees) about `pivot`. Composes with the
+  // outer transform, so a rotated parent rotates its subtree. Baked into
+  // vertex positions; shaders unchanged. Scissor rects stay axis-aligned.
+  pub fn push_transform(var self&, pivot: Vec2, degrees: f32);
+  pub fn pop_transform(var self&);
+
+  // Finalize batches and return a renderer-agnostic draw list instead of
+  // submitting via an Rhi. Call after painting, instead of end_frame. Views
+  // this renderer, so it lives until the renderer is next changed.
+  pub fn get_draw_data(var self&): DrawData;
+
+  // Display (window-coordinate) viewport size, used to seed the default
+  // scissor when no Rhi is attached (draw-data / embedded use).
+  pub fn set_display_size(var self&, size: Vec2) {
+    self.display_size_ = size;
+  }
+
+  // Texture sink for cached gradients, owned (draw-data mode: the host's
+  // backend). none means gradients fall back to flat color.
+  pub fn set_texture_backend(var self&, backend: TextureBackendBox?) {
+    self.texture_backend_ = backend;
+    self.rhi_textures_ = false;
+  }
+
+  // Legacy mode's sink: create gradient textures through the Rhi passed to
+  // end_frame / resolve_textures (see the header).
+  pub fn set_rhi_texture_backend(var self&) {
+    self.texture_backend_ = none;
+    self.rhi_textures_ = true;
+  }
+
+  // The owned host backend, lent (UIContext::texture_backend in draw-data mode).
+  pub fn texture_backend(var self&): (&var TextureBackendBox)? {
+    if (var b& = self.texture_backend_) {
+      return b;
+    }
+    return none;
+  }
+
+  // Create the gradient textures requested since the last call through `rhi`
+  // and patch their provisional ids. end_frame calls it; a get_draw_data user
+  // in Rhi-sink mode calls it before get_draw_data.
+  pub fn resolve_textures<R: Rhi>(var self&, var rhi&: R);
+
+  // Backdrop-blur radius (px) for the next plain quads. Reset to 0 after the
+  // blurred quad.
+  pub fn set_next_blur(var self&, radius: f32) {
+    self.next_blur_ = radius;
+  }
+}
+
+fn Renderer2D::init(var self&): bool {
+  self.rhi_ = none;
+  self.reserve_buffers();
+  return true;
+}
+
+fn Renderer2D::init_rhi<R: Rhi>(var self&, rhi&: R): bool {
+  self.rhi_ = RhiSnapshot { display_size: rhi.display_size(), dpi_scale: rhi.dpi_scale() };
+  self.reserve_buffers();
+  return true;
+}
+
+fn Renderer2D::reserve_buffers(var self&) {
+  self.vertices_.reserve(4096);
+  self.indices_.reserve(8192);
+  self.batches_.reserve(64);
+  self.text_vertices_.reserve(4096);
+  self.text_indices_.reserve(8192);
+  self.text_batches_.reserve(16);
+  self.draw_order_.reserve(128);
+}
+
+fn Renderer2D::shutdown(var self&) {
+  self.rhi_ = none;
+  self.vertices_.clear();
+  self.indices_.clear();
+  self.batches_.clear();
+  self.text_vertices_.clear();
+  self.text_indices_.clear();
+  self.text_batches_.clear();
+  self.draw_order_.clear();
+}
+
+fn Renderer2D::begin_frame(var self&) {
+  self.vertices_.clear();
+  self.indices_.clear();
+  self.batches_.clear();
+  self.text_vertices_.clear();
+  self.text_indices_.clear();
+  self.text_batches_.clear();
+  self.draw_order_.clear();
+  self.scissor_stack_.clear();
+  self.xform_stack_.clear();
+  self.xform_ = Affine2D {};
+  self.current_texture_ = kNullTextureId;
+  self.current_text_atlas_ = kNullTextureId;
+  self.next_blur_ = 0.0;
+  self.batch_blur_ = 0.0;
+  var vp = self.display_size_;
+  if (let r = self.rhi_) {
+    vp = r.display_size;
+  }
+  self.current_scissor_ = Rect { x: 0.0, y: 0.0, w: vp.x, h: vp.y };
+}
+
+fn Renderer2D::begin_frame_rhi<R: Rhi>(var self&, rhi&: R) {
+  if (let _ = self.rhi_) {
+    self.rhi_ = RhiSnapshot { display_size: rhi.display_size(), dpi_scale: rhi.dpi_scale() };
+  }
+  self.begin_frame();
+}
+
+// rhi_ ? rhi_->dpi_scale() : 1.0f
+fn Renderer2D::dpi(self&): f32 {
+  if (let r = self.rhi_) {
+    return r.dpi_scale;
+  }
+  return 1.0;
+}
+
+fn Renderer2D::get_draw_data(var self&): DrawData {
+  // Finalize into batches as end_frame does, but expose instead of submit.
+  self.flush_batch();
+  self.flush_text_batch();
+
+  self.draw_cmds_.clear();
+  self.draw_cmds_.reserve(self.draw_order_.len());
+  for (let cmd in self.draw_order_) {
+    var out = DrawCmd {};
+    if (cmd.kind == DrawKind::Quad) {
+      let batch = self.batches_[cmd.batch_index as usize];
+      out.clip_rect = batch.scissor;
+      out.index_offset = batch.index_offset;
+      out.elem_count = batch.index_count;
+      out.is_text = false;
+      out.texture_id = batch.texture;
+      out.blur = batch.blur;
+    } else {
+      let batch = self.text_batches_[cmd.batch_index as usize];
+      out.clip_rect = batch.scissor;
+      out.index_offset = batch.index_offset;
+      out.elem_count = batch.index_count;
+      out.is_text = true;
+      out.texture_id = kFontTextureId;
+    }
+    self.draw_cmds_.push(out);
+  }
+
+  return DrawData {
+    quad_vertices: self.vertices_.as_slice(),
+    quad_indices: self.indices_.as_slice(),
+    text_vertices: self.text_vertices_.as_slice(),
+    text_indices: self.text_indices_.as_slice(),
+    commands: self.draw_cmds_.as_slice(),
+    display_size: self.display_size_,
+    valid: true,
+  };
+}
+
+fn Renderer2D::end_frame<R: Rhi>(var self&, var rhi&: R) {
+  self.flush_batch();
+  self.flush_text_batch();
+  self.resolve_textures(rhi);
+
+  // Walk submission order so quads and text interleave exactly as emitted.
+  for (let cmd in self.draw_order_) {
+    if (cmd.kind == DrawKind::Quad) {
+      let batch = self.batches_[cmd.batch_index as usize];
+      rhi.set_scissor(batch.scissor);
+      let start = batch.index_offset as usize;
+      rhi.draw_triangles(self.vertices_.as_slice(), self.indices_.as_slice()[start..start + batch.index_count as usize],
+                         rhi_handle_from_texture_id(batch.texture));
+    } else {
+      let batch = self.text_batches_[cmd.batch_index as usize];
+      rhi.set_scissor(batch.scissor);
+      let start = batch.index_offset as usize;
+      rhi.draw_text_triangles(self.text_vertices_.as_slice(),
+                              self.text_indices_.as_slice()[start..start + batch.index_count as usize],
+                              rhi_handle_from_texture_id(batch.texture));
+    }
+  }
+}
+
+fn Renderer2D::resolve_textures<R: Rhi>(var self&, var rhi&: R) {
+  if (self.pending_textures_.len() == 0) {
+    return;
+  }
+  var i: usize = 0;
+  while (i < self.pending_textures_.len()) {
+    let p& = self.pending_textures_[i];
+    let provisional = p.id;
+    let key = p.key;
+    let real = texture_id_from_rhi_handle(
+      rhi.create_texture(kGradientSize, kGradientSize, RhiFormat::Rgba8Unorm, p.pixels.as_slice() as bytes, RhiFilter::Linear));
+    self.gradient_cache_.insert(key, real);
+    for (var b in self.batches_.iter_var()) {
+      if (b.texture == provisional) {
+        b.texture = real;
+      }
+    }
+    if (self.current_texture_ == provisional) {
+      self.current_texture_ = real;
+    }
+    i += 1;
+  }
+  self.pending_textures_.clear();
+}
+
+// Hand a 64x64 RGBA gradient to the sink: the host backend now, the Rhi at
+// resolve time, or nothing (kNullTextureId: flat color).
+fn Renderer2D::create_gradient_texture(var self&, key: u64, pixels: List<u8>): TextureId {
+  if (var tb& = self.texture_backend_) {
+    return tb.create_texture(kGradientSize, kGradientSize, RhiFormat::Rgba8Unorm, pixels.as_slice() as bytes, RhiFilter::Linear);
+  }
+  // Provisional ids count down from below the font id: an RHI-minted id is
+  // at most 2^32, so they never meet.
+  self.provisional_count_ += 1;
+  let id = kFontTextureId - self.provisional_count_;
+  self.pending_textures_.push(PendingTexture { id, key, pixels });
+  return id;
+}
+
+fn Renderer2D::has_texture_sink(self&): bool => self.texture_backend_ != none || self.rhi_textures_;
+
+fn Renderer2D::draw_rect(var self&, rect: Rect, color: Color, corner_radii: u32) {
+  let packed = pack_color(color.r, color.g, color.b, color.a);
+  self.emit_quad(rect, packed, packed, corner_radii, 0.0, 0.0, 0, kNullTextureId);
+}
+
+fn Renderer2D::draw_textured_rect(var self&, rect: Rect, texture: TextureId, tint: Color, corner_radii: u32) {
+  let packed = pack_color(tint.r, tint.g, tint.b, tint.a);
+  self.emit_quad(rect, packed, packed, corner_radii, 0.0, 0.0, 0, texture);
+}
+
+fn lerp_channel(a: f32, b: f32, t: f32): f32 => a + (b - a) * t;
+
+fn quad_vertex(x: f32, y: f32, u: f32, v: f32, color: u32, color2: u32, corner_radii: u32, softness: f32, hw: f32, hh: f32,
+               border_width: f32, border_color: u32): Vertex2D =>
+  Vertex2D {
+    pos: [x, y], uv: [u, v], color, color2, corner_radii, softness, half_size: [hw, hh], border_width, border_color,
+  };
+
+fn Renderer2D::push_quad_indices(var self&, base: u32) {
+  // Two triangles: 0-1-2, 0-2-3
+  self.indices_.push(base + 0);
+  self.indices_.push(base + 1);
+  self.indices_.push(base + 2);
+  self.indices_.push(base + 0);
+  self.indices_.push(base + 2);
+  self.indices_.push(base + 3);
+}
+
+// Snap rect edges to physical pixels at a fractional dpi.
+fn snap_rect(rect: Rect, dpi: f32): Rect {
+  let inv = 1.0 / dpi;
+  let x0 = @round(rect.x * dpi) * inv;
+  let y0 = @round(rect.y * dpi) * inv;
+  let x1 = @round((rect.x + rect.w) * dpi) * inv;
+  let y1 = @round((rect.y + rect.h) * dpi) * inv;
+  return Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+fn Renderer2D::draw_rect_gradient(var self&, rect: Rect, start_color: Color, end_color: Color, corner_radii: u32,
+                                  angle_deg: f32) {
+  // Batch management
+  if (kNullTextureId != self.current_texture_) {
+    self.flush_batch();
+    self.current_texture_ = kNullTextureId;
+  }
+
+  // DPI pixel snapping
+  var r = rect;
+  let dpi = self.dpi();
+  if (dpi != 1.0) {
+    r = snap_rect(r, dpi);
+  }
+
+  let hw = r.w * 0.5;
+  let hh = r.h * 0.5;
+
+  // Gradient direction (CSS: 0deg=to-top, 90deg=to-right, 180deg=to-bottom)
+  let angle_rad = angle_deg * (3.14159265 / 180.0);
+  let dx = @sin(angle_rad);
+  let dy = -@cos(angle_rad);
+
+  // Max projection onto gradient axis (for normalization to [0,1])
+  var max_proj = @abs(hw * dx) + @abs(hh * dy);
+  if (max_proj < 0.001) {
+    max_proj = 1.0;
+  }
+
+  // Corner offsets from center: TL, TR, BR, BL
+  let corners: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+
+  var colors: [u32; 4] = [0, 0, 0, 0];
+  for (let i in 0..4) {
+    let cx = corners[i][0] * hw;
+    let cy = corners[i][1] * hh;
+    let t = clamp((cx * dx + cy * dy) / max_proj * 0.5 + 0.5, 0.0, 1.0);
+    let c = Color {
+      r: lerp_channel(start_color.r, end_color.r, t),
+      g: lerp_channel(start_color.g, end_color.g, t),
+      b: lerp_channel(start_color.b, end_color.b, t),
+      a: lerp_channel(start_color.a, end_color.a, t),
+    };
+    colors[i] = pack_color(c.r, c.g, c.b, c.a);
+  }
+
+  // Per-vertex gradient colors (color == color2 per vertex, so the shader's
+  // mix() is a no-op and bilinear interpolation produces the gradient)
+  let base = self.vertices_.len() as u32;
+  self.vertices_.push(quad_vertex(r.x, r.y, 0.0, 0.0, colors[0], colors[0], corner_radii, 0.0, hw, hh, 0.0, 0));
+  self.vertices_.push(quad_vertex(r.x + r.w, r.y, 1.0, 0.0, colors[1], colors[1], corner_radii, 0.0, hw, hh, 0.0, 0));
+  self.vertices_.push(quad_vertex(r.x + r.w, r.y + r.h, 1.0, 1.0, colors[2], colors[2], corner_radii, 0.0, hw, hh, 0.0, 0));
+  self.vertices_.push(quad_vertex(r.x, r.y + r.h, 0.0, 1.0, colors[3], colors[3], corner_radii, 0.0, hw, hh, 0.0, 0));
+  self.push_quad_indices(base);
+}
+
+// static_cast<u8>(Clamp(v, 0, 1) * 255.0f): truncation of a value in [0, 255].
+fn to_byte(v: f32): u8 => @saturating_cast(u8, clamp(v, 0.0, 1.0) * 255.0);
+
+fn Renderer2D::get_radial_gradient_texture(var self&, center: Color, edge: Color): TextureId {
+  if (!self.has_texture_sink()) {
+    return kNullTextureId;  // no sink: fall back to flat
+  }
+  let c1 = pack_color(center.r, center.g, center.b, center.a);
+  let c2 = pack_color(edge.r, edge.g, edge.b, edge.a);
+  let key = c1 as u64 | (c2 as u64 << 32);
+
+  if (let cached& = self.gradient_cache_.get(key)) {
+    return cached;
+  }
+
+  let size = kGradientSize;
+  var pixels: List<u8> = List();
+  pixels.reserve((size * size * 4) as usize);
+  let half = size as f32 * 0.5;
+  for (let y in 0..size) {
+    for (let x in 0..size) {
+      let dx = (x as f32 + 0.5 - half) / half;
+      let dy = (y as f32 + 0.5 - half) / half;
+      let t = clamp(@sqrt(dx * dx + dy * dy), 0.0, 1.0);
+      pixels.push(to_byte(center.r + (edge.r - center.r) * t));
+      pixels.push(to_byte(center.g + (edge.g - center.g) * t));
+      pixels.push(to_byte(center.b + (edge.b - center.b) * t));
+      pixels.push(to_byte(center.a + (edge.a - center.a) * t));
+    }
+  }
+
+  let tex = self.create_gradient_texture(key, pixels);
+  self.gradient_cache_.insert(key, tex);
+  return tex;
+}
+
+fn Renderer2D::draw_radial_gradient(var self&, rect: Rect, center_color: Color, edge_color: Color, corner_radii: u32) {
+  let tex = self.get_radial_gradient_texture(center_color, edge_color);
+  self.draw_textured_rect(rect, tex, Color::white(), corner_radii);
+}
+
+fn lerp_stop_color(a: Color, b: Color, t: f32): Color => Color {
+  r: a.r + (b.r - a.r) * t,
+  g: a.g + (b.g - a.g) * t,
+  b: a.b + (b.b - a.b) * t,
+  a: a.a + (b.a - a.a) * t,
+};
+
+fn sample_gradient(stops: &[GradientStop], t: f32): Color {
+  let count = #stops;
+  if (count == 0) {
+    return Color::transparent();
+  }
+  if (t <= stops[0].position || count == 1) {
+    return stops[0].color;
+  }
+  if (t >= stops[count - 1].position) {
+    return stops[count - 1].color;
+  }
+
+  for (let i in 0..count - 1) {
+    if (t >= stops[i].position && t <= stops[i + 1].position) {
+      let range = stops[i + 1].position - stops[i].position;
+      let local_t = (range > 0.001) ? (t - stops[i].position) / range : 0.0;
+      return lerp_stop_color(stops[i].color, stops[i + 1].color, local_t);
+    }
+  }
+  return stops[count - 1].color;
+}
+
+fn Renderer2D::get_multi_stop_gradient_texture(var self&, stops: &[GradientStop], type_: GradientType, angle_deg: f32): TextureId {
+  if (!self.has_texture_sink()) {
+    return kNullTextureId;  // no sink: fall back to flat
+  }
+  let count = #stops as u32;
+  // Hash the gradient parameters for caching
+  var hash = count as u64 ^ (type_ as u8 as u64 << 8);
+  for (let i in 0..count) {
+    let s = stops[i as usize];
+    let pc = pack_color(s.color.r, s.color.g, s.color.b, s.color.a);
+    hash ^= pc as u64 << ((i * 7) % 32) as u64;
+    let pos_bits = @bit_cast(u32, s.position);
+    hash ^= pos_bits as u64 << ((i * 13) % 32) as u64;
+  }
+  let angle_bits = @bit_cast(u32, angle_deg);
+  hash ^= angle_bits as u64 << 48;
+
+  if (let cached& = self.gradient_cache_.get(hash)) {
+    return cached;
+  }
+
+  // Always a 64x64 2D texture for both linear and radial
+  let size = kGradientSize;
+  var pixels: List<u8> = List();
+  pixels.reserve((size * size * 4) as usize);
+
+  let angle_rad = angle_deg * (3.14159265 / 180.0);
+  let dx = @sin(angle_rad);
+  let dy = -@cos(angle_rad);
+
+  for (let y in 0..size) {
+    for (let x in 0..size) {
+      let u = (x as f32 + 0.5) / size as f32;
+      let v = (y as f32 + 0.5) / size as f32;
+      var t: f32 = 0.0;
+      if (type_ == GradientType::Radial) {
+        let cx = u - 0.5;
+        let cy = v - 0.5;
+        t = clamp(@sqrt(cx * cx + cy * cy) * 2.0, 0.0, 1.0);
+      } else {
+        let max_proj = @abs(0.5 * dx) + @abs(0.5 * dy);
+        if (max_proj > 0.001) {
+          t = clamp(((u - 0.5) * dx + (v - 0.5) * dy) / (max_proj * 2.0) + 0.5, 0.0, 1.0);
+        } else {
+          t = 0.5;
+        }
+      }
+      let c = sample_gradient(stops, t);
+      pixels.push(to_byte(c.r));
+      pixels.push(to_byte(c.g));
+      pixels.push(to_byte(c.b));
+      pixels.push(to_byte(c.a));
+    }
+  }
+
+  let tex = self.create_gradient_texture(hash, pixels);
+  self.gradient_cache_.insert(hash, tex);
+  return tex;
+}
+
+fn Renderer2D::draw_multi_stop_gradient(var self&, rect: Rect, stops: &[GradientStop], type_: GradientType, angle_deg: f32,
+                                        corner_radii: u32) {
+  let tex = self.get_multi_stop_gradient_texture(stops, type_, angle_deg);
+  self.draw_textured_rect(rect, tex, Color::white(), corner_radii);
+}
+
+fn Renderer2D::draw_shadow(var self&, rect: Rect, shadow_color: Color, blur: f32, spread: f32, offset: Vec2, corner_radii: u32) {
+  let shadow_rect = Rect {
+    x: rect.x + offset.x - spread - blur,
+    y: rect.y + offset.y - spread - blur,
+    w: rect.w + (spread + blur) * 2.0,
+    h: rect.h + (spread + blur) * 2.0,
+  };
+  let packed = pack_color(shadow_color.r, shadow_color.g, shadow_color.b, shadow_color.a);
+  let tl = corner_radii & 0xFF;
+  let tr = (corner_radii >> 8) & 0xFF;
+  let br = (corner_radii >> 16) & 0xFF;
+  let bl = (corner_radii >> 24) & 0xFF;
+  let shadow_radii = pack_radii(tl as f32 + spread, tr as f32 + spread, br as f32 + spread, bl as f32 + spread);
+  self.emit_quad(shadow_rect, packed, packed, shadow_radii, blur, 0.0, 0, kNullTextureId);
+}
+
+fn Renderer2D::draw_inset_shadow(var self&, rect: Rect, shadow_color: Color, blur: f32, spread: f32, offset: Vec2,
+                                 corner_radii: u32) {
+  // Inset shadow: shrink the SDF rect by spread, offset it, and use negative
+  // softness to signal the shader to fade from edge inward
+  let shadow_rect = Rect {
+    x: rect.x + offset.x + spread, y: rect.y + offset.y + spread, w: rect.w - spread * 2.0, h: rect.h - spread * 2.0,
+  };
+  if (shadow_rect.w <= 0.0 || shadow_rect.h <= 0.0) {
+    return;
+  }
+  let packed = pack_color(shadow_color.r, shadow_color.g, shadow_color.b, shadow_color.a);
+  // Shrink corner radii by spread
+  let tl = corner_radii & 0xFF;
+  let tr = (corner_radii >> 8) & 0xFF;
+  let br = (corner_radii >> 16) & 0xFF;
+  let bl = (corner_radii >> 24) & 0xFF;
+  let inner_radii = pack_radii(max_f32(0.0, tl as f32 - spread), max_f32(0.0, tr as f32 - spread),
+                               max_f32(0.0, br as f32 - spread), max_f32(0.0, bl as f32 - spread));
+  // Negative softness signals inset mode to the shader
+  self.emit_quad(shadow_rect, packed, packed, inner_radii, -blur, 0.0, 0, kNullTextureId);
+}
+
+fn Renderer2D::draw_bordered_rect(var self&, rect: Rect, fill: Color, border_color: Color, border_width: f32, corner_radii: u32) {
+  let fill_packed = pack_color(fill.r, fill.g, fill.b, fill.a);
+  let border_packed = pack_color(border_color.r, border_color.g, border_color.b, border_color.a);
+  self.emit_quad(rect, fill_packed, fill_packed, corner_radii, 0.0, border_width, border_packed, kNullTextureId);
+}
+
+fn Renderer2D::push_scissor(var self&, rect: Rect) {
+  self.flush_batch();
+  self.flush_text_batch();
+  self.scissor_stack_.push(self.current_scissor_);
+  self.current_scissor_ = self.current_scissor_.intersected(rect);
+}
+
+fn Renderer2D::pop_scissor(var self&) {
+  self.flush_batch();
+  self.flush_text_batch();
+  if (let top = self.scissor_stack_.pop()) {
+    self.current_scissor_ = top;
+  }
+}
+
+fn Renderer2D::push_transform(var self&, pivot: Vec2, degrees: f32) {
+  self.xform_stack_.push(self.xform_);
+  if (degrees == 0.0) {
+    return;  // identity push (keeps stack balanced)
+  }
+  let r = degrees * 0.01745329252;  // deg -> rad
+  let cs = @cos(r);
+  let sn = @sin(r);
+  // Rotation about `pivot`: p' = pivot + R*(p - pivot).
+  let rot = Affine2D {
+    a: cs, b: -sn, c: sn, d: cs,
+    tx: pivot.x - (cs * pivot.x - sn * pivot.y),
+    ty: pivot.y - (sn * pivot.x + cs * pivot.y),
+    identity: false,
+  };
+  // Compose onto the current transform: new(p) = xform_(rot(p)), so a rotated
+  // parent already on the stack also rotates this widget's local rotation.
+  let a = self.xform_;
+  let b = rot;
+  self.xform_ = Affine2D {
+    a: a.a * b.a + a.b * b.c,
+    b: a.a * b.b + a.b * b.d,
+    c: a.c * b.a + a.d * b.c,
+    d: a.c * b.b + a.d * b.d,
+    tx: a.a * b.tx + a.b * b.ty + a.tx,
+    ty: a.c * b.tx + a.d * b.ty + a.ty,
+    identity: false,
+  };
+}
+
+fn Renderer2D::pop_transform(var self&) {
+  if (let top = self.xform_stack_.pop()) {
+    self.xform_ = top;
+  }
+}
+
+fn Renderer2D::emit_quad(var self&, rect: Rect, color: u32, color2: u32, corner_radii: u32, softness: f32, border_width: f32,
+                         border_color: u32, texture: TextureId) {
+  // Flush any pending text first so the upcoming quad renders on top of it
+  // instead of batching with earlier quads (which draw before text).
+  var expected_text_end: u32 = 0;
+  if (let prev& = self.text_batches_.last()) {
+    expected_text_end = prev.index_offset + prev.index_count;
+  }
+  if (self.text_indices_.len() as u32 > expected_text_end) {
+    self.flush_text_batch();
+  }
+
+  // A blur-radius change breaks the batch (like a texture change): the prior
+  // run flushes carrying its own blur, then a new run accumulates with the new.
+  if (self.next_blur_ != self.batch_blur_) {
+    self.flush_batch();
+    self.batch_blur_ = self.next_blur_;
+  }
+
+  // Start a new batch if texture changed
+  if (texture != self.current_texture_) {
+    self.flush_batch();
+    self.current_texture_ = texture;
+  }
+
+  // Snap rect edges to physical pixels for crisp edges on fractional DPI.
+  // Skipped under an active transform: per-axis rounding would shear a
+  // rotated quad.
+  var r = rect;
+  let dpi = self.dpi();
+  if (dpi != 1.0 && self.xform_.identity) {
+    r = snap_rect(r, dpi);
+  }
+
+  // half_size stays the UNrotated half-extents: the fragment shader evaluates
+  // the rounded-rect SDF in UV/local space, so only the corner positions rotate.
+  let hw = r.w * 0.5;
+  let hh = r.h * 0.5;
+
+  var p0 = Vec2 { x: r.x, y: r.y };
+  var p1 = Vec2 { x: r.x + r.w, y: r.y };
+  var p2 = Vec2 { x: r.x + r.w, y: r.y + r.h };
+  var p3 = Vec2 { x: r.x, y: r.y + r.h };
+  if (!self.xform_.identity) {
+    p0 = self.xform_.apply(p0);
+    p1 = self.xform_.apply(p1);
+    p2 = self.xform_.apply(p2);
+    p3 = self.xform_.apply(p3);
+  }
+
+  let base = self.vertices_.len() as u32;
+  self.vertices_.push(quad_vertex(p0.x, p0.y, 0.0, 0.0, color, color2, corner_radii, softness, hw, hh, border_width, border_color));
+  self.vertices_.push(quad_vertex(p1.x, p1.y, 1.0, 0.0, color, color2, corner_radii, softness, hw, hh, border_width, border_color));
+  self.vertices_.push(quad_vertex(p2.x, p2.y, 1.0, 1.0, color, color2, corner_radii, softness, hw, hh, border_width, border_color));
+  self.vertices_.push(quad_vertex(p3.x, p3.y, 0.0, 1.0, color, color2, corner_radii, softness, hw, hh, border_width, border_color));
+  self.push_quad_indices(base);
+}
+
+fn Renderer2D::flush_batch(var self&) {
+  var idx_offset: u32 = 0;
+  if (let prev& = self.batches_.last()) {
+    idx_offset = prev.index_offset + prev.index_count;
+  }
+
+  let total_indices = self.indices_.len() as u32;
+  if (total_indices <= idx_offset) {
+    return;
+  }
+
+  self.batches_.push(DrawBatch {
+    texture: self.current_texture_,
+    scissor: self.current_scissor_,
+    index_offset: idx_offset,
+    index_count: total_indices - idx_offset,
+    blur: self.batch_blur_,
+  });
+  self.draw_order_.push(DrawCommand { kind: DrawKind::Quad, batch_index: (self.batches_.len() - 1) as u32 });
+}
+
+fn Renderer2D::flush_text_batch(var self&) {
+  var idx_offset: u32 = 0;
+  if (let prev& = self.text_batches_.last()) {
+    idx_offset = prev.index_offset + prev.index_count;
+  }
+
+  let total_indices = self.text_indices_.len() as u32;
+  if (total_indices <= idx_offset) {
+    return;
+  }
+
+  self.text_batches_.push(DrawBatch {
+    texture: self.current_text_atlas_,
+    scissor: self.current_scissor_,
+    index_offset: idx_offset,
+    index_count: total_indices - idx_offset,
+  });
+  self.draw_order_.push(DrawCommand { kind: DrawKind::Text, batch_index: (self.text_batches_.len() - 1) as u32 });
+}
+
+fn Renderer2D::draw_text(var self&, pos: Vec2, run&: TextRun, color: Color, atlas_texture: TextureId) {
+  self.draw_glyphs(pos, run.glyphs(), run.ascent, color, atlas_texture);
+}
+
+// DrawText over a glyph range (DrawTextLayout's line runs share the run's
+// ascent and view a slice of its glyphs).
+fn Renderer2D::draw_glyphs(var self&, pos: Vec2, glyphs: &[Glyph], ascent: f32, color: Color, atlas_texture: TextureId) {
+  // Flush any pending quads first so the upcoming text renders on top of
+  // them (and below any later quads). See the symmetric guard in emit_quad.
+  var expected_quad_end: u32 = 0;
+  if (let prev& = self.batches_.last()) {
+    expected_quad_end = prev.index_offset + prev.index_count;
+  }
+  if (self.indices_.len() as u32 > expected_quad_end) {
+    self.flush_batch();
+  }
+
+  if (atlas_texture != self.current_text_atlas_) {
+    self.flush_text_batch();
+    self.current_text_atlas_ = atlas_texture;
+  }
+
+  let packed_color = pack_color(color.r, color.g, color.b, color.a);
+  var cursor_x = pos.x;
+  let baseline_y = pos.y + ascent;
+
+  // Snap glyph positions to physical pixels to prevent sub-pixel blur from
+  // bilinear filtering on fractional DPI.
+  let dpi = self.dpi();
+  let inv_dpi = 1.0 / dpi;
+
+  for (let g in glyphs) {
+    if (g.bmp_w <= 0.0 || g.bmp_h <= 0.0) {
+      cursor_x += g.x_advance;
+      continue;
+    }
+
+    // Snap glyph position and size to the physical pixel grid.
+    let x = @round((cursor_x + g.bearing_x + g.x_offset) * dpi) * inv_dpi;
+    let y = @round((baseline_y - g.bearing_y + g.y_offset) * dpi) * inv_dpi;
+    let w = @round(g.bmp_w * dpi) * inv_dpi;
+    let h = @round(g.bmp_h * dpi) * inv_dpi;
+
+    // Glyph quad corners, rotated through the active transform so text in a
+    // rotated subtree rotates rigidly with it.
+    var g0 = Vec2 { x, y };
+    var g1 = Vec2 { x: x + w, y };
+    var g2 = Vec2 { x: x + w, y: y + h };
+    var g3 = Vec2 { x, y: y + h };
+    if (!self.xform_.identity) {
+      g0 = self.xform_.apply(g0);
+      g1 = self.xform_.apply(g1);
+      g2 = self.xform_.apply(g2);
+      g3 = self.xform_.apply(g3);
+    }
+
+    let base = self.text_vertices_.len() as u32;
+    self.text_vertices_.push(quad_vertex(g0.x, g0.y, g.u0, g.v0, packed_color, packed_color, 0, 0.0, 0.0, 0.0, 0.0, 0));
+    self.text_vertices_.push(quad_vertex(g1.x, g1.y, g.u1, g.v0, packed_color, packed_color, 0, 0.0, 0.0, 0.0, 0.0, 0));
+    self.text_vertices_.push(quad_vertex(g2.x, g2.y, g.u1, g.v1, packed_color, packed_color, 0, 0.0, 0.0, 0.0, 0.0, 0));
+    self.text_vertices_.push(quad_vertex(g3.x, g3.y, g.u0, g.v1, packed_color, packed_color, 0, 0.0, 0.0, 0.0, 0.0, 0));
+
+    self.text_indices_.push(base + 0);
+    self.text_indices_.push(base + 1);
+    self.text_indices_.push(base + 2);
+    self.text_indices_.push(base + 0);
+    self.text_indices_.push(base + 2);
+    self.text_indices_.push(base + 3);
+
+    cursor_x += g.x_advance;
+  }
+}
+
+fn Renderer2D::draw_text_layout(var self&, pos: Vec2, run&: TextRun, layout&: TextLayout, color: Color, atlas_texture: TextureId,
+                                max_width: f32) {
+  if (layout.line_count() == 0) {
+    return;
+  }
+
+  let glyphs = run.glyphs();
+  for (let line in layout.lines) {
+    // The C++ computes a slack against max_width and discards it: lines are
+    // always drawn left-aligned (x_offset 0).
+    let x_offset: f32 = 0.0;
+    let start = line.glyph_start as usize;
+    self.draw_glyphs(Vec2 { x: pos.x + x_offset, y: pos.y + line.y_offset }, glyphs[start..start + line.glyph_count as usize],
+                     run.ascent, color, atlas_texture);
+  }
 }
