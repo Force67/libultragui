@@ -68,11 +68,11 @@ with ImageMagick `compare -metric AE`):
 | lottie_demo | t = 1.3 s | pixel-identical |
 | showcase | each of the 8 scenes from the command line, t = 2.0 s (neon, glass, terminal draw random numbers) | pixel-identical (8/8) |
 | showcase | dashboard: clicks on a nav item, Acknowledge All, the Auto Deploy toggle (Lua handlers, a wired change handler) | pixel-identical |
-| showcase | keys 6 then 7 (dashboard -> NERV render target -> cosmos, teardown), and NERV -> 1 | see the table in the final report / rerun |
+| showcase | keys 6 then 7 (dashboard -> NERV render target -> cosmos, teardown); NERV started from the command line, then 1 | pixel-identical (2/2) |
 | game_overlay | t = 2.0 s (cube, stars, HUD, the FPS line set from Lua) | pixel-identical |
-| game_overlay | clicks on an ability and an item (Lua handlers) | see below |
+| game_overlay | clicks on an ability and an item (Lua handlers set the notification) | pixel-identical |
 | video_demo | scene 1, keys 2 and 3 (multi-view, the textured cube), t = 2.0 s | pixel-identical (3/3) |
-| video_demo | Space, Right, L (pause, seek, loop) | see below |
+| video_demo | Space, Right, L (pause, seek +2 s, loop off: "0:04 / 0:20  [PAUSED]") | pixel-identical |
 | embed_gl | t = 2.0 s; a click on the button | pixel-identical |
 | embed_opengl3 | t = 2.0 s | pixel-identical |
 | embed_vulkan | t = 2.0 s | pixel-identical |
