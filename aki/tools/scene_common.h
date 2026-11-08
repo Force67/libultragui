@@ -1,5 +1,5 @@
 // Shared by rhi_scene.cc and draw_data_scene.cc: the geometry of the scene of
-// aki/ultragui_opengl/tests/support/scene.aki, built as Renderer2D builds it.
+// aki/ultragui_scenes/src/scene.aki, built as Renderer2D builds it.
 #ifndef AKI_TOOLS_SCENE_COMMON_H_
 #define AKI_TOOLS_SCENE_COMMON_H_
 

@@ -1,5 +1,5 @@
-// The scene of aki/ultragui_opengl/tests/support/scene.aki (and the copy in
-// ultragui_d3d11), drawn through the C++ RHI. Screenshots of this program and
+// The scene of aki/ultragui_scenes/src/scene.aki (shared by the OpenGL and
+// D3D11 tests), drawn through the C++ RHI. Screenshots of this program and
 // of the aki test are compared by tools/compare_shots.sh. Build against a
 // reference build of the library (-DULTRAGUI_BACKEND_OPENGL=ON or
 // -DULTRAGUI_BACKEND_D3D11=ON, VULKAN off):

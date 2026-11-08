@@ -1,4 +1,4 @@
-// The scene of aki/ultragui_opengl/tests/support/draw_data_scene.aki as draw
+// The scene of aki/ultragui_scenes/src/draw_data_scene.aki as draw
 // data through the C++ ugui_impl_opengl3 backend, on a host-owned GL context.
 // Compare its screenshot with the aki test's (tools/compare_shots.sh).
 //

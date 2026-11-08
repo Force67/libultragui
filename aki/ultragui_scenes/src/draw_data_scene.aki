@@ -1,4 +1,4 @@
-// The scene of support/scene.aki as draw data (ultragui::render::draw_data),
+// The scene of scene.aki as draw data (ultragui::render::draw_data),
 // for the draw-data renderers (ugui_impl_*): the same geometry, with the
 // textures as host TextureIds. tools/draw_data_scene.cc is the C++ twin.
 

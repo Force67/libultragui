@@ -1,5 +1,5 @@
 // OpenGlRhi against a real GL 3.3 core context (GLFW): the scene of
-// support/scene.aki, drawn for a few frames, with checks on what the RHI
+// aki/ultragui_scenes/src/scene.aki, drawn for a few frames, with checks on what the RHI
 // reports. It is also the program whose screenshot is compared with the C++
 // RHI's (tools/rhi_scene.cc): run it with a display, e.g.
 //   aki/tools/xshot.sh /tmp/gl_aki.png 4 aki/ultragui_opengl/build/tests/gl_rhi_scene_test

@@ -1,4 +1,4 @@
-// The scene of aki/ultragui_d3d11/tests/support/draw_data_scene.aki as draw
+// The scene of aki/ultragui_scenes/src/draw_data_scene.aki as draw
 // data through the C++ ugui_impl_dx11 backend, on a host-owned D3D11 device
 // (DXVK-native over Vulkan on Linux) with a GLFW window for its swap chain.
 // Compare its screenshot with the aki test's (tools/compare_shots.sh).

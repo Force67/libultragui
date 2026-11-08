@@ -1,5 +1,5 @@
 // Dx11Renderer (ugui_impl_dx11) on a host-owned D3D11 device: the draw data of
-// support/draw_data_scene.aki rendered into the swap chain's back buffer. Its
+// aki/ultragui_scenes/src/draw_data_scene.aki rendered into the swap chain's back buffer. Its
 // screenshot is compared with the C++ backend's (tools/draw_data_scene_dx11.cc):
 //   aki/tools/compare_shots.sh /tmp/aki.png /tmp/cpp.png
 // UGUI_SCENE_SECS keeps the window open and redrawing that long;

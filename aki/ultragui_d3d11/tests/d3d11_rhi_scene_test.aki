@@ -1,5 +1,5 @@
 // D3d11Rhi against a real D3D11 device (DXVK-native on a GLFW window): the scene of
-// support/scene.aki, drawn for a few frames, with checks on what the RHI
+// aki/ultragui_scenes/src/scene.aki, drawn for a few frames, with checks on what the RHI
 // reports. It is also the program whose screenshot is compared with the C++
 // RHI's (tools/rhi_scene.cc): run it with a display, e.g.
 //   aki/tools/xshot.sh /tmp/gl_aki.png 4 aki/ultragui_d3d11/build/tests/d3d11_rhi_scene_test

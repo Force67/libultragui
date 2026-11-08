@@ -7,7 +7,7 @@
 //
 // Needs a window and a Vulkan device (vkd3d runs D3D12 on it). Without a
 // display (GLFW fails to initialise, or the window or device cannot be made)
-// the test says so and passes; tools/test_xvfb.sh runs it for real under Xvfb
+// the test says so and passes; aki/tools/test_xvfb.sh ultragui_d3d12 runs it for real under Xvfb
 // on Mesa's software Vulkan.
 
 module rhi_test;

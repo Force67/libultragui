@@ -12,7 +12,7 @@
 //
 //   embed_scene <shader_dir> <font.ttf> [frames]
 //
-// Build: aki/ultragui_vulkan/examples/embed_scene/build_cpp.sh <ref-build-dir>
+// Build: aki/ultragui_vulkan/examples/build_cpp.sh embed_scene <ref-build-dir>
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>

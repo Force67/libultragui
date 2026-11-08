@@ -2,8 +2,8 @@
 // rounded rects with borders, a gradient, a shadow, textures (nearest, linear,
 // BGRA, one filled by update_texture), glyph quads from the TextEngine atlas,
 // scissor batches over shared vertex arrays (the dedup path) and an offscreen
-// render target drawn back as a texture. UIContext is not ported yet, so this
-// stands in for it; tools/rhi_scene.cc is the same scene against the C++ RHI,
+// render target drawn back as a texture. It drives the Rhi without a UIContext;
+// aki/tools/rhi_scene.cc is the same scene against the C++ RHI,
 // and the screenshots of the two are compared (see tools/compare_shots.sh).
 // The vertex building follows Renderer2D::EmitQuad and DrawText at dpi 1.
 // Generic over the Rhi, so the same file runs on every backend package.

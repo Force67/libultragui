@@ -11,7 +11,7 @@
 //
 // frames: exit after that many frames (0 or absent: run until closed).
 // validation: 1 turns on the Khronos validation layer.
-// Build: aki/ultragui_vulkan/examples/rhi_scene/build_cpp.sh <ref-build-dir>
+// Build: aki/ultragui_vulkan/examples/build_cpp.sh rhi_scene <ref-build-dir>
 
 #include <ugui/platform/platform.h>
 #include <ugui/render/texture_backend.h>
