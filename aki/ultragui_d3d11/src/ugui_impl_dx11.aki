@@ -1,0 +1,805 @@
+// ugui/backends/ugui_impl_dx11.{h,cc}: Direct3D 11 renderer backend for
+// ultragui's draw-data mode, modeled on Dear ImGui's imgui_impl_dx11.
+//
+// The HOST owns the device, the swap chain and presentation; this backend
+// renders ultragui::DrawData into whatever render target is bound when it is
+// called, with shaders and buffers of its own. It saves the pipeline state it
+// touches and puts it back, so it can run inside someone else's frame: a game's
+// Present hook, say.
+//
+//   r.init(device, context);
+//   ...
+//   r.update_font_atlas(...);   // when atlas_revision() changed
+//   r.render_draw_data(dd);     // into the bound render target
+//
+// The shaders blend in linear light. On an sRGB render target the hardware
+// encodes on write; on any other (the usual game back buffer) the backend
+// switches to shaders that encode themselves, so the UI looks the same on
+// both.
+//
+// Shape differences from the C++ (behavior is the same):
+//
+// * The C++ namespace ugui::dx11 holds one file-static `Backend g`; here the
+//   state is a Dx11Renderer value: Init/Shutdown/UpdateFontAtlas/
+//   RenderDrawData/CreateTexture/UpdateTexture/DestroyTexture are its methods.
+//   texture_backend() is the Dx11Renderer itself, which implements
+//   TextureBackend: lend it with DynTextureBackend::of(r).
+// * `Init` takes the device and context as `*var Device`/`*var DeviceContext`
+//   (sys::d3d11_vtbl): COM pointers, called through vtables as the C++ does
+//   with COBJMACROS.
+// * `UpdateFontAtlas(pixels, width, height)` takes the pixels as `bytes`; an
+//   empty slice is the C++ nullptr and fails.
+// * The pipeline state saved around a render (SavedState) keeps the C++'s
+//   fixed arrays: 16 scissor rects and viewports, 256 class instances.
+
+module ultragui_d3d11::ugui_impl_dx11;
+
+import {eprintln} from akikit::logging;
+import {HashMap} from akikit::containers::hash_map;
+import {DrawData, TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
+import {TextureBackend} from ultragui::render::texture_backend;
+import {Vertex2D} from ultragui::render::vertex;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {compile_hlsl} from ultragui_d3d11::d3d_shader_compiler;
+import {vertex_input_layout} from ultragui_d3d11::d3d11_rhi;
+import {quad_hlsl, text_hlsl} from ultragui_d3d11::hlsl_embedded;
+import {BlendDesc, BufferDesc, D3dRect, DepthStencilDesc, DepthStencilopDesc, Hresult, InputElementDesc, MappedSubresource,
+  RasterizerDesc, RenderTargetBlendDesc, RenderTargetViewDesc, SamplerDesc, ShaderResourceViewDesc, SubresourceData,
+  Texture2dDesc, Viewport, DxgiSampleDesc, kBindConstantBuffer, kBindIndexBuffer, kBindShaderResource, kBindVertexBuffer,
+  kBlendInvSrcAlpha, kBlendOne, kBlendOpAdd, kBlendSrcAlpha, kColorWriteEnableAll, kComparisonAlways, kComparisonNever,
+  kCpuAccessWrite, kCullNone, kDepthWriteMaskAll, kDxgiFormatB8G8R8A8Unorm, kDxgiFormatB8G8R8A8UnormSrgb,
+  kDxgiFormatB8G8R8X8UnormSrgb, kDxgiFormatR32Uint, kDxgiFormatR8G8B8A8Unorm, kDxgiFormatR8G8B8A8UnormSrgb, kDxgiFormatR8Unorm,
+  kDxgiFormatUnknown, kFillSolid, kFilterMinMagMipLinear, kFilterMinMagMipPoint, kFloat32Max, kMapWriteDiscard,
+  kPrimitiveTopologyTriangleList, kPrimitiveTopologyUndefined, kStencilOpKeep, kTextureAddressClamp, kUsageDefault,
+  kUsageDynamic, failed, kViewportAndScissorrectObjectCountPerPipeline, succeeded} from ultragui_d3d11::sys::d3d11;
+import {Device, DeviceContext, Unknown, add_ref, context_draw_indexed, context_ds_get_shader, context_ds_set_shader,
+  context_gs_set_shader, context_hs_get_shader, context_hs_set_shader, context_ia_get_index_buffer,
+  context_ia_get_input_layout, context_ia_get_primitive_topology, context_ia_get_vertex_buffers, context_ia_set_index_buffer,
+  context_ia_set_input_layout, context_ia_set_primitive_topology, context_ia_set_vertex_buffers, context_map,
+  context_om_get_blend_state, context_om_get_depth_stencil_state, context_om_get_render_targets, context_om_set_blend_state,
+  context_om_set_depth_stencil_state, context_ps_get_samplers, context_ps_get_shader, context_ps_get_shader_resources,
+  context_ps_set_samplers, context_ps_set_shader, context_ps_set_shader_resources, context_rs_get_scissor_rects,
+  context_rs_get_state, context_rs_get_viewports, context_rs_set_scissor_rects, context_rs_set_state,
+  context_rs_set_viewports, context_unmap, context_update_subresource, context_vs_get_constant_buffers,
+  context_vs_get_shader, context_vs_set_constant_buffers, context_vs_set_shader, context_gs_get_shader, device_create_blend_state,
+  device_create_buffer, device_create_depth_stencil_state, device_create_input_layout, device_create_pixel_shader,
+  device_create_rasterizer_state, device_create_sampler_state, device_create_shader_resource_view, device_create_texture2d,
+  device_create_vertex_shader, release, rtv_get_desc, RenderTargetView} from ultragui_d3d11::sys::d3d11_vtbl;
+
+extern fn memcpy(dst: *var u8, src: *const u8, n: usize): *var u8;
+
+// SafeRelease: releases and clears.
+fn safe_release(p: *var *var Unknown) {
+  unsafe {
+    if (*p != null) {
+      release(*p);
+      *p = null;
+    }
+  }
+}
+
+struct Texture : Copy {
+  pub var texture: *var Unknown = null
+  pub var srv: *var Unknown = null
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var pixel_size: u32 = 4
+  pub var filter: RhiFilter = RhiFilter::Linear
+}
+
+// The two pipelines' pixel shaders, for an sRGB target and for any other.
+struct PixelShaders : Copy {
+  pub var quad: *var Unknown = null
+  pub var text: *var Unknown = null
+}
+
+// One vertex and index buffer pair, grown as the UI needs.
+struct Geometry : Copy {
+  pub var vertices: *var Unknown = null
+  pub var vertex_capacity: u32 = 0
+  pub var indices: *var Unknown = null
+  pub var index_capacity: u32 = 0
+}
+
+struct Backend {
+  pub var device: *var Device = null
+  pub var context: *var DeviceContext = null
+  pub var quad_vs: *var Unknown = null
+  pub var text_vs: *var Unknown = null
+  pub var linear_target: PixelShaders = PixelShaders {}  // for an sRGB render target
+  pub var encoding: PixelShaders = PixelShaders {}       // for any other; compiled when first needed
+  pub var encoding_failed: bool = false
+  pub var layout: *var Unknown = null
+  pub var projection: *var Unknown = null
+  pub var blend: *var Unknown = null
+  pub var raster: *var Unknown = null
+  pub var depth: *var Unknown = null
+  pub var linear: *var Unknown = null
+  pub var nearest: *var Unknown = null
+  pub var white: Texture = Texture {}
+  pub var font: Texture = Texture {}
+  pub var quads: Geometry = Geometry {}
+  pub var text: Geometry = Geometry {}
+  pub var textures: HashMap<TextureId, Texture> = HashMap()
+  pub var next_texture: TextureId = 1
+}
+
+// Check(): false (after printing) when the call failed.
+fn check(hr: Hresult, what: str): bool {
+  if (succeeded(hr)) {
+    return true;
+  }
+  eprintln(f"ugui_impl_dx11: {what} failed: 0x{@bit_cast(u32, hr):08x}");
+  return false;
+}
+
+// FormatOf(): the DXGI format and pixel size of a byte format, none for the
+// rest.
+fn format_of(format: RhiFormat): (u32, u32)? => match (format) {
+  RhiFormat::Rgba8Unorm => (kDxgiFormatR8G8B8A8Unorm, 4),
+  RhiFormat::Bgra8Unorm => (kDxgiFormatB8G8R8A8Unorm, 4),
+  RhiFormat::R8Unorm => (kDxgiFormatR8Unorm, 1),
+  _ => none,
+};
+
+unsafe fn one(p: *var *var Unknown): *const *var Unknown => unsafe (p as *const *var Unknown);
+
+fn make_texture(g&: Backend, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): Texture? {
+  if (width == 0 || height == 0) {
+    return none;
+  }
+  let (dxgi, pixel_size) = format_of(format) else { return none; };
+  let desc = Texture2dDesc {
+    width,
+    height,
+    mip_levels: 1,
+    array_size: 1,
+    format: dxgi,
+    sample_desc: DxgiSampleDesc { count: 1, quality: 0 },
+    usage: kUsageDefault,
+    bind_flags: kBindShaderResource,
+    cpu_access_flags: 0,
+    misc_flags: 0,
+  };
+  let has_pixels = #pixels != 0;
+  let data = SubresourceData {
+    sys_mem: has_pixels ? unsafe @ptr(pixels) as *const u8 : null,
+    sys_mem_pitch: width * pixel_size,
+    sys_mem_slice_pitch: 0,
+  };
+  var made = Texture {};
+  if (!check(unsafe device_create_texture2d(g.device, &raw desc, has_pixels ? &raw data : null, &raw var made.texture),
+      "CreateTexture2D")) {
+    return none;
+  }
+  if (!check(unsafe device_create_shader_resource_view(g.device, made.texture, null, &raw var made.srv),
+      "CreateShaderResourceView")) {
+    safe_release(&raw var made.texture);
+    return none;
+  }
+  made.width = width;
+  made.height = height;
+  made.pixel_size = pixel_size;
+  made.filter = filter;
+  return made;
+}
+
+fn free_texture(t: Texture) {
+  var srv = t.srv;
+  var tex = t.texture;
+  safe_release(&raw var srv);
+  safe_release(&raw var tex);
+}
+
+// MakeVertexShader(source, out, with_layout): the layout, when asked for, goes
+// to `layout_out`.
+fn make_vertex_shader(g&: Backend, source: str, out: *var *var Unknown, layout_out: *var *var Unknown, with_layout: bool): bool {
+  let code = compile_hlsl(source, "VSMain", "vs_5_0") else { return false; };
+  if (!check(unsafe device_create_vertex_shader(g.device, @ptr(code.as_slice()) as *const u8, code.len(), null, out),
+      "CreateVertexShader")) {
+    return false;
+  }
+  if (!with_layout) {
+    return true;
+  }
+  // Vertex2D, as the quad and text shaders read it.
+  let layout = vertex_input_layout();
+  return check(unsafe device_create_input_layout(g.device, @ptr(layout[..]) as *const InputElementDesc, 9,
+    @ptr(code.as_slice()) as *const u8, code.len(), layout_out), "CreateInputLayout");
+}
+
+// MakePixelShaders: both pixel shaders, or none (nothing left behind).
+fn make_pixel_shaders(g&: Backend, encode: bool): PixelShaders? {
+  let defines = ["UGUI_ENCODE_SRGB"];
+  let use = encode ? defines[..] : [];
+  var out = PixelShaders {};
+  let quad_code = compile_hlsl(quad_hlsl(), "PSMain", "ps_5_0", use) else { return none; };
+  if (!check(unsafe device_create_pixel_shader(g.device, @ptr(quad_code.as_slice()) as *const u8, quad_code.len(), null,
+      &raw var out.quad), "CreatePixelShader")) {
+    return none;
+  }
+  let text_code = compile_hlsl(text_hlsl(), "PSMain", "ps_5_0", use);
+  if (text_code == none) {
+    safe_release(&raw var out.quad);
+    return none;
+  }
+  let tc = text_code!;
+  if (!check(unsafe device_create_pixel_shader(g.device, @ptr(tc.as_slice()) as *const u8, tc.len(), null, &raw var out.text),
+      "CreatePixelShader")) {
+    safe_release(&raw var out.quad);
+    return none;
+  }
+  return out;
+}
+
+fn make_states(var g&: Backend): bool {
+  let cb = BufferDesc {
+    byte_width: 16,  // scale.xy, translate.xy
+    usage: kUsageDynamic,
+    bind_flags: kBindConstantBuffer,
+    cpu_access_flags: kCpuAccessWrite,
+    misc_flags: 0,
+    structure_byte_stride: 0,
+  };
+  if (!check(unsafe device_create_buffer(g.device, &raw cb, null, &raw var g.projection), "CreateBuffer (projection)")) {
+    return false;
+  }
+
+  var bd = BlendDesc {
+    alpha_to_coverage_enable: 0,
+    independent_blend_enable: 0,
+    render_target: [RenderTargetBlendDesc {
+      blend_enable: 0,
+      src_blend: 0,
+      dest_blend: 0,
+      blend_op: 0,
+      src_blend_alpha: 0,
+      dest_blend_alpha: 0,
+      blend_op_alpha: 0,
+      render_target_write_mask: 0,
+    }; 8],
+  };
+  bd.render_target[0] = RenderTargetBlendDesc {
+    blend_enable: 1,
+    src_blend: kBlendSrcAlpha,
+    dest_blend: kBlendInvSrcAlpha,
+    blend_op: kBlendOpAdd,
+    src_blend_alpha: kBlendOne,
+    dest_blend_alpha: kBlendInvSrcAlpha,
+    blend_op_alpha: kBlendOpAdd,
+    render_target_write_mask: kColorWriteEnableAll,
+  };
+  if (!check(unsafe device_create_blend_state(g.device, &raw bd, &raw var g.blend), "CreateBlendState")) {
+    return false;
+  }
+
+  let rd = RasterizerDesc {
+    fill_mode: kFillSolid,
+    cull_mode: kCullNone,
+    front_counter_clockwise: 0,
+    depth_bias: 0,
+    depth_bias_clamp: 0.0,
+    slope_scaled_depth_bias: 0.0,
+    depth_clip_enable: 1,
+    scissor_enable: 1,
+    multisample_enable: 0,
+    antialiased_line_enable: 0,
+  };
+  if (!check(unsafe device_create_rasterizer_state(g.device, &raw rd, &raw var g.raster), "CreateRasterizerState")) {
+    return false;
+  }
+
+  // The host may leave a depth buffer bound; the UI ignores it.
+  let keep = DepthStencilopDesc {
+    stencil_fail_op: kStencilOpKeep,
+    stencil_depth_fail_op: kStencilOpKeep,
+    stencil_pass_op: kStencilOpKeep,
+    stencil_func: kComparisonAlways,
+  };
+  let dd = DepthStencilDesc {
+    depth_enable: 0,
+    depth_write_mask: kDepthWriteMaskAll,
+    depth_func: kComparisonAlways,
+    stencil_enable: 0,
+    stencil_read_mask: 0,
+    stencil_write_mask: 0,
+    front_face: keep,
+    back_face: keep,
+  };
+  if (!check(unsafe device_create_depth_stencil_state(g.device, &raw dd, &raw var g.depth), "CreateDepthStencilState")) {
+    return false;
+  }
+
+  var sd = SamplerDesc {
+    filter: kFilterMinMagMipLinear,
+    address_u: kTextureAddressClamp,
+    address_v: kTextureAddressClamp,
+    address_w: kTextureAddressClamp,
+    mip_lod_bias: 0.0,
+    max_anisotropy: 1,
+    comparison_func: kComparisonNever,
+    border_color: [0.0; 4],
+    min_lod: 0.0,
+    max_lod: kFloat32Max,
+  };
+  if (!check(unsafe device_create_sampler_state(g.device, &raw sd, &raw var g.linear), "CreateSamplerState (linear)")) {
+    return false;
+  }
+  sd.filter = kFilterMinMagMipPoint;
+  return check(unsafe device_create_sampler_state(g.device, &raw sd, &raw var g.nearest), "CreateSamplerState (nearest)");
+}
+
+// Makes room for `count` elements of `stride` bytes, doubling as it grows.
+fn reserve(device: *var Device, buffer: *var *var Unknown, capacity: *var u32, count: u32, stride: u32, bind: u32): bool {
+  unsafe {
+    if (*buffer != null && *capacity >= count) {
+      return true;
+    }
+    var grown: u32 = *capacity > 0 ? *capacity : 1024;
+    while (grown < count) {
+      grown *= 2;
+    }
+    safe_release(buffer);
+    *capacity = 0;
+    let desc = BufferDesc {
+      byte_width: grown * stride,
+      usage: kUsageDynamic,
+      bind_flags: bind,
+      cpu_access_flags: kCpuAccessWrite,
+      misc_flags: 0,
+      structure_byte_stride: 0,
+    };
+    if (!check(device_create_buffer(device, &raw desc, null, buffer), "CreateBuffer")) {
+      return false;
+    }
+    *capacity = grown;
+    return true;
+  }
+}
+
+fn upload(context: *var DeviceContext, buffer: *var Unknown, data: *const u8, bytes: u32): bool {
+  if (bytes == 0) {
+    return true;
+  }
+  var mapped = MappedSubresource { data: null, row_pitch: 0, depth_pitch: 0 };
+  if (!check(unsafe context_map(context, buffer, 0, kMapWriteDiscard, 0, &raw var mapped), "Map")) {
+    return false;
+  }
+  unsafe {
+    memcpy(mapped.data, data, bytes as usize);
+    context_unmap(context, buffer, 0);
+  }
+  return true;
+}
+
+fn Geometry::upload(var self&, device: *var Device, context: *var DeviceContext, vertices&: [Vertex2D], indices&: [u32]): bool {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return true;
+  }
+  unsafe {
+    return reserve(device, &raw var self.vertices, &raw var self.vertex_capacity, vertex_count, @size_of(Vertex2D) as u32,
+        kBindVertexBuffer)
+      && reserve(device, &raw var self.indices, &raw var self.index_capacity, index_count, 4, kBindIndexBuffer)
+      && upload(context, self.vertices, @ptr(vertices) as *const u8, vertex_count * @size_of(Vertex2D) as u32)
+      && upload(context, self.indices, @ptr(indices) as *const u8, index_count * 4);
+  }
+}
+
+// Whether the bound render target encodes sRGB on write. None when nothing
+// is bound, and then there is nowhere to draw.
+fn bound_target(context: *var DeviceContext): bool? {
+  var rtv: *var Unknown = null;
+  unsafe context_om_get_render_targets(context, 1, &raw var rtv, null);
+  if (rtv == null) {
+    return none;
+  }
+  var desc = RenderTargetViewDesc { format: 0, view_dimension: 0, mip_slice: 0, pad0: 0, pad1: 0 };
+  unsafe {
+    rtv_get_desc(rtv as *var RenderTargetView, &raw var desc);
+    release(rtv);
+  }
+  return desc.format == kDxgiFormatR8G8B8A8UnormSrgb || desc.format == kDxgiFormatB8G8R8A8UnormSrgb
+    || desc.format == kDxgiFormatB8G8R8X8UnormSrgb;
+}
+
+// Everything RenderDrawData changes, as the host had it.
+comptime let kMaxRects: usize = 16;  // D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE
+comptime let kMaxInstances: usize = 256;
+
+struct SavedState {
+  pub var scissor_count: u32 = 16
+  pub var viewport_count: u32 = 16
+  pub var scissors: [D3dRect; 16] = [D3dRect { left: 0, top: 0, right: 0, bottom: 0 }; 16]
+  pub var viewports: [Viewport; 16] = [Viewport { top_left_x: 0.0, top_left_y: 0.0, width: 0.0, height: 0.0, min_depth: 0.0,
+    max_depth: 0.0 }; 16]
+  pub var raster: *var Unknown = null
+  pub var blend: *var Unknown = null
+  pub var blend_factor: [f32; 4] = [0.0; 4]
+  pub var sample_mask: u32 = 0
+  pub var depth: *var Unknown = null
+  pub var stencil_ref: u32 = 0
+  pub var ps_srv: *var Unknown = null
+  pub var ps_samplers: [*var Unknown; 2] = [null, null]
+  pub var ps: *var Unknown = null
+  pub var vs: *var Unknown = null
+  pub var gs: *var Unknown = null
+  pub var hs: *var Unknown = null
+  pub var ds: *var Unknown = null
+  pub var ps_instances: [*var Unknown; 256] = [null; 256]
+  pub var vs_instances: [*var Unknown; 256] = [null; 256]
+  pub var gs_instances: [*var Unknown; 256] = [null; 256]
+  pub var ps_instance_count: u32 = 256
+  pub var vs_instance_count: u32 = 256
+  pub var gs_instance_count: u32 = 256
+  pub var vs_constants: *var Unknown = null
+  pub var topology: u32 = 0
+  pub var index_buffer: *var Unknown = null
+  pub var index_format: u32 = 0
+  pub var index_offset: u32 = 0
+  pub var vertex_buffer: *var Unknown = null
+  pub var vertex_stride: u32 = 0
+  pub var vertex_offset: u32 = 0
+  pub var layout: *var Unknown = null
+}
+
+fn save(c: *var DeviceContext, var s&: SavedState) {
+  unsafe {
+    context_rs_get_scissor_rects(c, &raw var s.scissor_count, @ptr(s.scissors[..]) as *var D3dRect);
+    context_rs_get_viewports(c, &raw var s.viewport_count, @ptr(s.viewports[..]) as *var Viewport);
+    context_rs_get_state(c, &raw var s.raster);
+    context_om_get_blend_state(c, &raw var s.blend, @ptr(s.blend_factor[..]) as *var f32, &raw var s.sample_mask);
+    context_om_get_depth_stencil_state(c, &raw var s.depth, &raw var s.stencil_ref);
+    context_ps_get_shader_resources(c, 0, 1, &raw var s.ps_srv);
+    context_ps_get_samplers(c, 0, 2, @ptr(s.ps_samplers[..]) as *var *var Unknown);
+    context_ps_get_shader(c, &raw var s.ps, @ptr(s.ps_instances[..]) as *var *var Unknown, &raw var s.ps_instance_count);
+    context_vs_get_shader(c, &raw var s.vs, @ptr(s.vs_instances[..]) as *var *var Unknown, &raw var s.vs_instance_count);
+    context_gs_get_shader(c, &raw var s.gs, @ptr(s.gs_instances[..]) as *var *var Unknown, &raw var s.gs_instance_count);
+    context_hs_get_shader(c, &raw var s.hs, null, null);
+    context_ds_get_shader(c, &raw var s.ds, null, null);
+    context_vs_get_constant_buffers(c, 0, 1, &raw var s.vs_constants);
+    context_ia_get_primitive_topology(c, &raw var s.topology);
+    context_ia_get_index_buffer(c, &raw var s.index_buffer, &raw var s.index_format, &raw var s.index_offset);
+    context_ia_get_vertex_buffers(c, 0, 1, &raw var s.vertex_buffer, &raw var s.vertex_stride, &raw var s.vertex_offset);
+    context_ia_get_input_layout(c, &raw var s.layout);
+  }
+}
+
+fn restore(c: *var DeviceContext, var s&: SavedState) {
+  unsafe {
+    context_rs_set_scissor_rects(c, s.scissor_count, @ptr(s.scissors[..]) as *const D3dRect);
+    context_rs_set_viewports(c, s.viewport_count, @ptr(s.viewports[..]) as *const Viewport);
+    context_rs_set_state(c, s.raster);
+    context_om_set_blend_state(c, s.blend, @ptr(s.blend_factor[..]) as *const f32, s.sample_mask);
+    context_om_set_depth_stencil_state(c, s.depth, s.stencil_ref);
+    context_ps_set_shader_resources(c, 0, 1, one(&raw var s.ps_srv));
+    context_ps_set_samplers(c, 0, 2, @ptr(s.ps_samplers[..]) as *const *var Unknown);
+    context_ps_set_shader(c, s.ps, @ptr(s.ps_instances[..]) as *const *var Unknown, s.ps_instance_count);
+    context_vs_set_shader(c, s.vs, @ptr(s.vs_instances[..]) as *const *var Unknown, s.vs_instance_count);
+    context_gs_set_shader(c, s.gs, @ptr(s.gs_instances[..]) as *const *var Unknown, s.gs_instance_count);
+    context_hs_set_shader(c, s.hs, null, 0);
+    context_ds_set_shader(c, s.ds, null, 0);
+    context_vs_set_constant_buffers(c, 0, 1, one(&raw var s.vs_constants));
+    context_ia_set_primitive_topology(c, s.topology);
+    context_ia_set_index_buffer(c, s.index_buffer, s.index_format, s.index_offset);
+    context_ia_set_vertex_buffers(c, 0, 1, one(&raw var s.vertex_buffer), &raw s.vertex_stride, &raw s.vertex_offset);
+    context_ia_set_input_layout(c, s.layout);
+  }
+
+  // The getters each took a reference.
+  safe_release(&raw var s.raster);
+  safe_release(&raw var s.blend);
+  safe_release(&raw var s.depth);
+  safe_release(&raw var s.ps_srv);
+  safe_release(&raw var s.ps_samplers[0]);
+  safe_release(&raw var s.ps_samplers[1]);
+  safe_release(&raw var s.ps);
+  safe_release(&raw var s.vs);
+  safe_release(&raw var s.gs);
+  safe_release(&raw var s.hs);
+  safe_release(&raw var s.ds);
+  for (let i in 0..s.ps_instance_count as usize) {
+    safe_release(&raw var s.ps_instances[i]);
+  }
+  for (let i in 0..s.vs_instance_count as usize) {
+    safe_release(&raw var s.vs_instances[i]);
+  }
+  for (let i in 0..s.gs_instance_count as usize) {
+    safe_release(&raw var s.gs_instances[i]);
+  }
+  safe_release(&raw var s.vs_constants);
+  safe_release(&raw var s.index_buffer);
+  safe_release(&raw var s.vertex_buffer);
+  safe_release(&raw var s.layout);
+}
+
+fn bind_geometry(context: *var DeviceContext, geometry: Geometry) {
+  let stride = @size_of(Vertex2D) as u32;
+  let offset: u32 = 0;
+  var vb = geometry.vertices;
+  unsafe {
+    context_ia_set_vertex_buffers(context, 0, 1, one(&raw var vb), &raw stride, &raw offset);
+    context_ia_set_index_buffer(context, geometry.indices, kDxgiFormatR32Uint, 0);
+  }
+}
+
+// TextureFor(): the texture a command draws with.
+fn texture_for(g&: Backend, command&: DrawCmd): Texture {
+  if (command.is_text || command.texture_id == kFontTextureId) {
+    return g.font.srv != null ? g.font : g.white;
+  }
+  if (command.texture_id == kNullTextureId) {
+    return g.white;
+  }
+  if (let t = g.textures.get(command.texture_id)) {
+    return t;
+  }
+  return g.white;
+}
+
+pub struct Dx11Renderer : TextureBackend {
+  var g: Backend
+
+  pub fn Dx11Renderer(): Dx11Renderer => Dx11Renderer { g: Backend {} };
+
+  // Compile shaders and create buffers, states and the white texture on
+  // `device`. Takes a reference on both; shutdown releases them.
+  pub fn init(var self&, device: *var Device, context: *var DeviceContext): bool;
+
+  // Release every object the backend created. Call before the device goes.
+  pub fn shutdown(var self&);
+
+  // (Re)upload the glyph atlas (R8, width*height bytes) as the font texture.
+  // Call after init and whenever TextEngine::atlas_revision() changed.
+  pub fn update_font_atlas(var self&, pixels: bytes, width: u32, height: u32): bool;
+
+  // Render `draw_data` into the render target bound on the context. Viewport
+  // and scissor come from the draw data; everything it changes is restored.
+  pub fn render_draw_data(var self&, dd&: DrawData);
+
+  // --- Host texture API (Image/SVG/Lottie/anim in draw-data mode) ---
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId;
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes);
+  pub fn destroy_texture(var self&, id: TextureId);
+}
+
+fn Dx11Renderer::init(var self&, device: *var Device, context: *var DeviceContext): bool {
+  if (self.g.device != null) {
+    self.shutdown();
+  }
+  if (device == null || context == null) {
+    return false;
+  }
+  self.g.device = device;
+  self.g.context = context;
+  unsafe {
+    add_ref(device);
+    add_ref(context);
+  }
+  let white_pixel = [255u8; 4];
+  var g& = self.g;
+  var ok = make_vertex_shader(g, quad_hlsl(), &raw var g.quad_vs, &raw var g.layout, true)
+    && make_vertex_shader(g, text_hlsl(), &raw var g.text_vs, &raw var g.layout, false);
+  if (ok) {
+    if (let ps = make_pixel_shaders(g, false)) {
+      g.linear_target = ps;
+    } else {
+      ok = false;
+    }
+  }
+  if (ok) {
+    ok = make_states(g);
+  }
+  if (ok) {
+    if (let w = make_texture(g, 1, 1, RhiFormat::Rgba8Unorm, white_pixel[..] as bytes, RhiFilter::Linear)) {
+      g.white = w;
+    } else {
+      ok = false;
+    }
+  }
+  if (!ok) {
+    self.shutdown();
+    return false;
+  }
+  return true;
+}
+
+fn Dx11Renderer::shutdown(var self&) {
+  var g& = self.g;
+  for (let (id, t) in g.textures) {
+    free_texture(t);
+  }
+  g.textures.clear();
+  free_texture(g.white);
+  free_texture(g.font);
+  safe_release(&raw var g.quads.vertices);
+  safe_release(&raw var g.quads.indices);
+  safe_release(&raw var g.text.vertices);
+  safe_release(&raw var g.text.indices);
+  safe_release(&raw var g.quad_vs);
+  safe_release(&raw var g.text_vs);
+  safe_release(&raw var g.linear_target.quad);
+  safe_release(&raw var g.linear_target.text);
+  safe_release(&raw var g.encoding.quad);
+  safe_release(&raw var g.encoding.text);
+  safe_release(&raw var g.layout);
+  safe_release(&raw var g.projection);
+  safe_release(&raw var g.blend);
+  safe_release(&raw var g.raster);
+  safe_release(&raw var g.depth);
+  safe_release(&raw var g.linear);
+  safe_release(&raw var g.nearest);
+  unsafe {
+    if (g.context != null) {
+      release(g.context);
+    }
+    if (g.device != null) {
+      release(g.device);
+    }
+  }
+  self.g = Backend {};
+}
+
+fn Dx11Renderer::update_font_atlas(var self&, pixels: bytes, width: u32, height: u32): bool {
+  if (self.g.device == null || #pixels == 0) {
+    return false;
+  }
+  var g& = self.g;
+  if (g.font.texture != null && g.font.width == width && g.font.height == height) {
+    unsafe context_update_subresource(g.context, g.font.texture, 0, null, @ptr(pixels) as *const u8, width, 0);
+    return true;
+  }
+  free_texture(g.font);
+  g.font = Texture {};
+  if (let f = make_texture(g, width, height, RhiFormat::R8Unorm, pixels, RhiFilter::Nearest)) {
+    g.font = f;
+    return true;
+  }
+  return false;
+}
+
+fn Dx11Renderer::render_draw_data(var self&, dd&: DrawData) {
+  var g& = self.g;
+  if (g.device == null || !dd.valid || dd.command_count() == 0) {
+    return;
+  }
+  if (dd.display_size.x <= 0.0 || dd.display_size.y <= 0.0) {
+    return;
+  }
+  let srgb = bound_target(g.context) else { return; };
+  if (!srgb && g.encoding.quad == null && !g.encoding_failed) {
+    if (let e = make_pixel_shaders(g, true)) {
+      g.encoding = e;
+    } else {
+      g.encoding_failed = true;
+    }
+  }
+  let ps = (srgb || g.encoding_failed) ? g.linear_target : g.encoding;
+
+  if (!g.quads.upload(g.device, g.context, dd.quad_vertices, dd.quad_indices)
+      || !g.text.upload(g.device, g.context, dd.text_vertices, dd.text_indices)) {
+    return;
+  }
+
+  // Display coordinates to clip space, y down.
+  let projection = [2.0 / dd.display_size.x, -2.0 / dd.display_size.y, -1.0, 1.0];
+  if (!upload(g.context, g.projection, unsafe @ptr(projection[..]) as *const u8, 16)) {
+    return;
+  }
+
+  var saved = SavedState {};
+  save(g.context, saved);
+
+  let sx = dd.framebuffer_scale.x > 0.0 ? dd.framebuffer_scale.x : 1.0;
+  let sy = dd.framebuffer_scale.y > 0.0 ? dd.framebuffer_scale.y : 1.0;
+  let viewport = Viewport {
+    top_left_x: 0.0,
+    top_left_y: 0.0,
+    width: dd.display_size.x * sx,
+    height: dd.display_size.y * sy,
+    min_depth: 0.0,
+    max_depth: 1.0,
+  };
+  let blend_factor = [0.0f32; 4];
+  var projection_cb = g.projection;
+  var samplers = [g.linear, g.nearest];
+  unsafe {
+    context_rs_set_viewports(g.context, 1, &raw viewport);
+    context_rs_set_state(g.context, g.raster);
+    context_om_set_blend_state(g.context, g.blend, @ptr(blend_factor[..]) as *const f32, 0xffffffff);
+    context_om_set_depth_stencil_state(g.context, g.depth, 0);
+    context_ia_set_input_layout(g.context, g.layout);
+    context_ia_set_primitive_topology(g.context, kPrimitiveTopologyTriangleList);
+    context_vs_set_constant_buffers(g.context, 0, 1, one(&raw var projection_cb));
+    context_gs_set_shader(g.context, null, null, 0);
+    context_hs_set_shader(g.context, null, null, 0);
+    context_ds_set_shader(g.context, null, null, 0);
+    // The quad shader samples s0, the text shader s1.
+    context_ps_set_samplers(g.context, 0, 2, @ptr(samplers[..]) as *const *var Unknown);
+  }
+
+  var bound: i32 = -1;  // 0 quads, 1 text
+  for (let i in 0..dd.command_count()) {
+    let c = dd.commands[i as usize];
+    if (c.elem_count == 0) {
+      continue;
+    }
+    // Backdrop blur wants a blurred copy of the scene, which this backend
+    // does not keep; the command is a stand-in quad, left out.
+    if (c.blur != 0.0) {
+      continue;
+    }
+
+    let kind: i32 = c.is_text ? 1 : 0;
+    if (kind != bound) {
+      bound = kind;
+      bind_geometry(g.context, kind != 0 ? g.text : g.quads);
+      unsafe {
+        context_vs_set_shader(g.context, kind != 0 ? g.text_vs : g.quad_vs, null, 0);
+        context_ps_set_shader(g.context, kind != 0 ? ps.text : ps.quad, null, 0);
+      }
+    }
+    let texture = texture_for(g, c);
+    var srv = texture.srv;
+    unsafe context_ps_set_shader_resources(g.context, 0, 1, one(&raw var srv));
+    if (!c.is_text) {
+      var sampler = texture.filter == RhiFilter::Nearest ? g.nearest : g.linear;
+      unsafe context_ps_set_samplers(g.context, 0, 1, one(&raw var sampler));
+    }
+
+    var scissor = D3dRect {
+      left: @saturating_cast(i32, c.clip_rect.x * sx),
+      top: @saturating_cast(i32, c.clip_rect.y * sy),
+      right: @saturating_cast(i32, (c.clip_rect.x + c.clip_rect.w) * sx),
+      bottom: @saturating_cast(i32, (c.clip_rect.y + c.clip_rect.h) * sy),
+    };
+    if (scissor.left < 0) {
+      scissor.left = 0;
+    }
+    if (scissor.top < 0) {
+      scissor.top = 0;
+    }
+    if (scissor.right <= scissor.left || scissor.bottom <= scissor.top) {
+      continue;
+    }
+    unsafe {
+      context_rs_set_scissor_rects(g.context, 1, &raw scissor);
+      context_draw_indexed(g.context, c.elem_count, c.index_offset, 0);
+    }
+  }
+
+  restore(g.context, saved);
+}
+
+fn Dx11Renderer::create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter):
+  TextureId {
+  var g& = self.g;
+  if (g.device == null) {
+    return kNullTextureId;
+  }
+  let texture = make_texture(g, width, height, format, pixels, filter) else { return kNullTextureId; };
+  var id = g.next_texture;
+  g.next_texture += 1;
+  if (id == kFontTextureId) {
+    id = g.next_texture;
+    g.next_texture += 1;
+  }
+  g.textures.insert(id, texture);
+  return id;
+}
+
+fn Dx11Renderer::update_texture(var self&, id: TextureId, pixels: bytes) {
+  var g& = self.g;
+  let t = g.textures.get(id) else { return; };
+  if (#pixels == 0) {
+    return;
+  }
+  unsafe context_update_subresource(g.context, t.texture, 0, null, @ptr(pixels) as *const u8, t.width * t.pixel_size, 0);
+}
+
+fn Dx11Renderer::destroy_texture(var self&, id: TextureId) {
+  var g& = self.g;
+  let t = g.textures.remove(id) else { return; };
+  free_texture(t);
+}
