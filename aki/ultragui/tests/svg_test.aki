@@ -1,0 +1,326 @@
+// tests/test_svg.cc ported test for test: the SVG loader's behavior checks
+// (shapes, paths, arcs, viewBox scaling, colors, opacity, strokes, groups,
+// gradients, style attributes, layering, target sizes, failures). The
+// byte-exact comparison with the C++ is svg_exact_test.aki.
+
+module svg_test;
+
+import {SvgImage, load_svg_memory} from ultragui::svg::svg;
+import {Expect} from support::expect;
+
+comptime let k_parse_simple_rect: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"10\" y=\"10\" width=\"80\" height=\"80\" fill=\"red\"/>\n        </svg>\n    ";
+comptime let k_parse_circle: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"blue\"/>\n        </svg>\n    ";
+comptime let k_parse_ellipse: str = "\n        <svg width=\"200\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <ellipse cx=\"100\" cy=\"50\" rx=\"80\" ry=\"30\" fill=\"green\"/>\n        </svg>\n    ";
+comptime let k_parse_polygon: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <polygon points=\"50,10 90,90 10,90\" fill=\"yellow\"/>\n        </svg>\n    ";
+comptime let k_parse_path_moveto_lineto: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <path d=\"M10,10 L90,10 L90,90 L10,90 Z\" fill=\"#ff8800\"/>\n        </svg>\n    ";
+comptime let k_parse_path_cubic_bezier: str = "\n        <svg width=\"200\" height=\"200\" xmlns=\"http://www.w3.org/2000/svg\">\n            <path d=\"M10,100 C10,10 190,10 190,100 L190,190 L10,190 Z\" fill=\"purple\"/>\n        </svg>\n    ";
+comptime let k_parse_path_arc: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <path d=\"M50,10 A40,40 0 1,1 50,90 A40,40 0 1,1 50,10 Z\" fill=\"cyan\"/>\n        </svg>\n    ";
+comptime let k_viewbox_scaling: str = "\n        <svg viewBox=\"0 0 10 10\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"2\" y=\"2\" width=\"6\" height=\"6\" fill=\"white\"/>\n        </svg>\n    ";
+comptime let k_hex_colors: str = "\n        <svg width=\"30\" height=\"10\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"0\"  y=\"0\" width=\"10\" height=\"10\" fill=\"#ff0000\"/>\n            <rect x=\"10\" y=\"0\" width=\"10\" height=\"10\" fill=\"#00ff00\"/>\n            <rect x=\"20\" y=\"0\" width=\"10\" height=\"10\" fill=\"#0000ff\"/>\n        </svg>\n    ";
+comptime let k_opacity: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"white\" opacity=\"0.5\"/>\n        </svg>\n    ";
+comptime let k_stroke_only: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"20\" y=\"20\" width=\"60\" height=\"60\" fill=\"none\" stroke=\"red\" stroke-width=\"4\"/>\n        </svg>\n    ";
+comptime let k_group_transform: str = "\n        <svg width=\"200\" height=\"200\" xmlns=\"http://www.w3.org/2000/svg\">\n            <g transform=\"translate(100,100)\">\n                <rect x=\"-20\" y=\"-20\" width=\"40\" height=\"40\" fill=\"orange\"/>\n            </g>\n        </svg>\n    ";
+comptime let k_linear_gradient: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <defs>\n                <linearGradient id=\"grad1\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\">\n                    <stop offset=\"0\" stop-color=\"red\"/>\n                    <stop offset=\"1\" stop-color=\"blue\"/>\n                </linearGradient>\n            </defs>\n            <rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"url(#grad1)\"/>\n        </svg>\n    ";
+comptime let k_style_attribute: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"10\" y=\"10\" width=\"80\" height=\"80\" style=\"fill:green;opacity:1\"/>\n        </svg>\n    ";
+comptime let k_multiple_shapes_layered: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"red\"/>\n            <circle cx=\"50\" cy=\"50\" r=\"30\" fill=\"blue\"/>\n        </svg>\n    ";
+comptime let k_rounded_rect: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"10\" y=\"10\" width=\"80\" height=\"80\" rx=\"15\" ry=\"15\" fill=\"white\"/>\n        </svg>\n    ";
+comptime let k_target_size_override: str = "\n        <svg width=\"50\" height=\"50\" xmlns=\"http://www.w3.org/2000/svg\">\n            <rect x=\"0\" y=\"0\" width=\"50\" height=\"50\" fill=\"white\"/>\n        </svg>\n    ";
+comptime let k_empty_svg_fails: str = "";
+comptime let k_invalid_svg_fails: str = "<html><body>Not SVG</body></html>";
+comptime let k_polyline_stroke: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <polyline points=\"10,10 90,10 90,90\" fill=\"none\" stroke=\"white\" stroke-width=\"4\"/>\n        </svg>\n    ";
+comptime let k_relative_path_commands: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <path d=\"m10,10 l80,0 l0,80 l-80,0 z\" fill=\"white\"/>\n        </svg>\n    ";
+comptime let k_line_element: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <line x1=\"10\" y1=\"50\" x2=\"90\" y2=\"50\" stroke=\"white\" stroke-width=\"6\"/>\n        </svg>\n    ";
+comptime let k_nested_groups: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <g transform=\"translate(50,50)\">\n                <g transform=\"scale(2)\">\n                    <rect x=\"-10\" y=\"-10\" width=\"20\" height=\"20\" fill=\"white\"/>\n                </g>\n            </g>\n        </svg>\n    ";
+comptime let k_fill_rule_evenodd: str = "\n        <svg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\">\n            <path d=\"M10,10 L90,10 L90,90 L10,90 Z M30,30 L70,30 L70,70 L30,70 Z\"\n                  fill=\"white\" fill-rule=\"evenodd\"/>\n        </svg>\n    ";
+comptime let k_complex_icon_svg: str = "\n        <svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\"\n             stroke=\"white\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n            <circle cx=\"12\" cy=\"12\" r=\"3\"/>\n            <path d=\"M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06\n                     a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09\n                     A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83\n                     l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09\n                     A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83\n                     l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09\n                     a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83\n                     l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09\n                     a1.65 1.65 0 0 0-1.51 1z\"/>\n        </svg>\n    ";
+
+// Helper: check if a pixel at (x,y) has non-zero alpha
+fn has_content(img&: SvgImage, x: u32, y: u32): bool {
+  if (x >= img.width || y >= img.height) {
+    return false;
+  }
+  return img.pixels[((y * img.width + x) * 4 + 3) as usize] > 0;
+}
+
+// Helper: get pixel color as (r, g, b, a)
+fn get_pixel(img&: SvgImage, x: u32, y: u32): (u8, u8, u8, u8) {
+  let idx = ((y * img.width + x) * 4) as usize;
+  return (img.pixels[idx], img.pixels[idx + 1], img.pixels[idx + 2], img.pixels[idx + 3]);
+}
+
+fn load(svg: str, w: u32 = 0, h: u32 = 0): SvgImage? => load_svg_memory(svg as bytes, w, h);
+
+fn parse_simple_rect(var t&: Expect) {
+  let img = load(k_parse_simple_rect);
+  t.that(img != none, "parse_simple_rect: ok");
+  let i& = img else { return; };
+  t.that(i.width == 100, "parse_simple_rect: width");
+  t.that(i.height == 100, "parse_simple_rect: height");
+  t.that(i.pixels.len() == 100 * 100 * 4, "parse_simple_rect: pixel count");
+  // Center should be filled (red)
+  t.that(has_content(i, 50, 50), "parse_simple_rect: center filled");
+  // Corner should be empty
+  t.that(!has_content(i, 0, 0), "parse_simple_rect: corner empty");
+}
+
+fn parse_circle(var t&: Expect) {
+  let img = load(k_parse_circle);
+  t.that(img != none, "parse_circle: ok");
+  let i& = img else { return; };
+  t.that(has_content(i, 50, 50), "parse_circle: center filled");
+  t.that(!has_content(i, 0, 0), "parse_circle: corner empty");
+  t.that(!has_content(i, 99, 0), "parse_circle: far corner empty");
+  // Check it's actually blue
+  let (r, g, b, a) = get_pixel(i, 50, 50);
+  t.that(r == 0 && g == 0 && b == 255 && a == 255, "parse_circle: blue");
+}
+
+fn parse_ellipse(var t&: Expect) {
+  let img = load(k_parse_ellipse);
+  t.that(img != none, "parse_ellipse: ok");
+  let i& = img else { return; };
+  t.that(i.width == 200 && i.height == 100, "parse_ellipse: size");
+  t.that(has_content(i, 100, 50), "parse_ellipse: center");
+  t.that(!has_content(i, 0, 0), "parse_ellipse: corner");
+}
+
+fn parse_polygon(var t&: Expect) {
+  let img = load(k_parse_polygon);
+  t.that(img != none, "parse_polygon: ok");
+  let i& = img else { return; };
+  // Center of triangle should be filled
+  t.that(has_content(i, 50, 60), "parse_polygon: triangle center");
+  // Top-left corner should be empty
+  t.that(!has_content(i, 5, 5), "parse_polygon: corner");
+}
+
+fn parse_path_moveto_lineto(var t&: Expect) {
+  let img = load(k_parse_path_moveto_lineto);
+  t.that(img != none, "parse_path_moveto_lineto: ok");
+  let i& = img else { return; };
+  t.that(has_content(i, 50, 50), "parse_path_moveto_lineto: center");
+  t.that(!has_content(i, 0, 0), "parse_path_moveto_lineto: corner");
+}
+
+fn parse_path_cubic_bezier(var t&: Expect) {
+  let img = load(k_parse_path_cubic_bezier);
+  t.that(img != none, "parse_path_cubic_bezier: ok");
+  let i& = img else { return; };
+  // Bottom center should be filled
+  t.that(has_content(i, 100, 150), "parse_path_cubic_bezier: bottom center");
+}
+
+fn parse_path_arc(var t&: Expect) {
+  let img = load(k_parse_path_arc);
+  t.that(img != none, "parse_path_arc: ok");
+  let i& = img else { return; };
+  t.that(has_content(i, 50, 50), "parse_path_arc: center");
+}
+
+fn viewbox_scaling(var t&: Expect) {
+  let img = load(k_viewbox_scaling, 100, 100);
+  t.that(img != none, "viewbox_scaling: ok");
+  let i& = img else { return; };
+  t.that(i.width == 100 && i.height == 100, "viewbox_scaling: size");
+  // Rect at 2,2 size 6x6 in viewBox 0-10 -> should be at 20,20 size 60x60 in 100x100
+  t.that(has_content(i, 50, 50), "viewbox_scaling: center");
+  t.that(!has_content(i, 5, 5), "viewbox_scaling: corner");
+}
+
+fn hex_colors(var t&: Expect) {
+  let img = load(k_hex_colors);
+  t.that(img != none, "hex_colors: ok");
+  let i& = img else { return; };
+  let (r, g, b, a) = get_pixel(i, 5, 5);
+  t.that(r == 255 && g == 0 && b == 0, "hex_colors: red");
+  let (r2, g2, b2, a2) = get_pixel(i, 15, 5);
+  t.that(r2 == 0 && g2 == 255 && b2 == 0, "hex_colors: green");
+  let (r3, g3, b3, a3) = get_pixel(i, 25, 5);
+  t.that(r3 == 0 && g3 == 0 && b3 == 255, "hex_colors: blue");
+}
+
+fn opacity(var t&: Expect) {
+  let img = load(k_opacity);
+  t.that(img != none, "opacity: ok");
+  let i& = img else { return; };
+  let (r, g, b, a) = get_pixel(i, 50, 50);
+  // White at 50% opacity -> alpha should be ~128
+  t.that(a > 100 && a < 155, "opacity: alpha near 128");
+}
+
+fn stroke_only(var t&: Expect) {
+  let img = load(k_stroke_only);
+  t.that(img != none, "stroke_only: ok");
+  let i& = img else { return; };
+  // Center should be empty (fill=none)
+  t.that(!has_content(i, 50, 50), "stroke_only: center empty");
+  // Border area should have content
+  t.that(has_content(i, 20, 20), "stroke_only: border");
+}
+
+fn group_transform(var t&: Expect) {
+  let img = load(k_group_transform);
+  t.that(img != none, "group_transform: ok");
+  let i& = img else { return; };
+  // Rect should be centered at (100,100)
+  t.that(has_content(i, 100, 100), "group_transform: center");
+  t.that(!has_content(i, 10, 10), "group_transform: corner");
+}
+
+fn linear_gradient(var t&: Expect) {
+  let img = load(k_linear_gradient);
+  t.that(img != none, "linear_gradient: ok");
+  let i& = img else { return; };
+  // Left side should be reddish
+  let (r, g, b, a) = get_pixel(i, 5, 50);
+  t.that(r > 200, "linear_gradient: left red");
+  t.that(b < 50, "linear_gradient: left not blue");
+  // Right side should be bluish
+  let (r2, g2, b2, a2) = get_pixel(i, 95, 50);
+  t.that(b2 > 200, "linear_gradient: right blue");
+  t.that(r2 < 50, "linear_gradient: right not red");
+}
+
+fn style_attribute(var t&: Expect) {
+  let img = load(k_style_attribute);
+  t.that(img != none, "style_attribute: ok");
+  let i& = img else { return; };
+  let (r, g, b, a) = get_pixel(i, 50, 50);
+  t.that(r == 0, "style_attribute: r");
+  t.that(g == 128, "style_attribute: g (CSS green is #008000)");
+  t.that(b == 0, "style_attribute: b");
+}
+
+fn multiple_shapes_layered(var t&: Expect) {
+  let img = load(k_multiple_shapes_layered);
+  t.that(img != none, "multiple_shapes_layered: ok");
+  let i& = img else { return; };
+  // Center should be Blue (circle on top)
+  let (r, g, b, a) = get_pixel(i, 50, 50);
+  t.that(r == 0 && b == 255, "multiple_shapes_layered: center blue");
+  // Corner should be Red (rect behind)
+  let (r2, g2, b2, a2) = get_pixel(i, 5, 5);
+  t.that(r2 == 255 && b2 == 0, "multiple_shapes_layered: corner red");
+}
+
+fn rounded_rect(var t&: Expect) {
+  let img = load(k_rounded_rect);
+  t.that(img != none, "rounded_rect: ok");
+  let i& = img else { return; };
+  // Center should be filled
+  t.that(has_content(i, 50, 50), "rounded_rect: center");
+  // Extreme corner of the rect should be empty (rounded off)
+  t.that(!has_content(i, 11, 11), "rounded_rect: corner rounded off");
+}
+
+fn target_size_override(var t&: Expect) {
+  let img = load(k_target_size_override, 200, 200);
+  t.that(img != none, "target_size_override: ok");
+  let i& = img else { return; };
+  t.that(i.width == 200 && i.height == 200, "target_size_override: size");
+  // Should still be filled at the larger size
+  t.that(has_content(i, 100, 100), "target_size_override: filled");
+}
+
+fn empty_svg_fails(var t&: Expect) {
+  t.that(load(k_empty_svg_fails) == none, "empty_svg_fails");
+}
+
+fn invalid_svg_fails(var t&: Expect) {
+  t.that(load(k_invalid_svg_fails) == none, "invalid_svg_fails");
+}
+
+fn polyline_stroke(var t&: Expect) {
+  let img = load(k_polyline_stroke);
+  t.that(img != none, "polyline_stroke: ok");
+  let i& = img else { return; };
+  // Top edge should have stroke content
+  t.that(has_content(i, 50, 10), "polyline_stroke: top edge");
+  // Center should be empty (no fill)
+  t.that(!has_content(i, 50, 50), "polyline_stroke: center empty");
+}
+
+fn relative_path_commands(var t&: Expect) {
+  let img = load(k_relative_path_commands);
+  t.that(img != none, "relative_path_commands: ok");
+  let i& = img else { return; };
+  t.that(has_content(i, 50, 50), "relative_path_commands: center");
+  t.that(!has_content(i, 0, 0), "relative_path_commands: corner");
+}
+
+fn line_element(var t&: Expect) {
+  let img = load(k_line_element);
+  t.that(img != none, "line_element: ok");
+  let i& = img else { return; };
+  // Middle of the line
+  t.that(has_content(i, 50, 50), "line_element: middle");
+  // Far from the line
+  t.that(!has_content(i, 50, 10), "line_element: far");
+}
+
+fn nested_groups(var t&: Expect) {
+  let img = load(k_nested_groups);
+  t.that(img != none, "nested_groups: ok");
+  let i& = img else { return; };
+  // Should be centered at 50,50, scaled 2x -> 40x40 px
+  t.that(has_content(i, 50, 50), "nested_groups: center");
+  t.that(!has_content(i, 5, 5), "nested_groups: corner");
+}
+
+fn fill_rule_evenodd(var t&: Expect) {
+  let img = load(k_fill_rule_evenodd);
+  t.that(img != none, "fill_rule_evenodd: ok");
+  let i& = img else { return; };
+  // Outer ring should be filled
+  t.that(has_content(i, 15, 15), "fill_rule_evenodd: outer ring");
+  // Inner rect should be empty (evenodd)
+  t.that(!has_content(i, 50, 50), "fill_rule_evenodd: inner empty");
+}
+
+fn complex_icon_svg(var t&: Expect) {
+  let img = load(k_complex_icon_svg, 64, 64);
+  t.that(img != none, "complex_icon_svg: ok");
+  let i& = img else { return; };
+  t.that(i.width == 64 && i.height == 64, "complex_icon_svg: size");
+  // fill=none so center is empty, but stroked circle at r=3 (scaled to ~8px
+  // radius). Check the stroke ring: pixel at ~8px from center (32,32)
+  var found = false;
+  for (let x in 20u32..44) {
+    for (let y in 20u32..44) {
+      if (has_content(i, x, y)) {
+        found = true;
+      }
+    }
+  }
+  t.that(found, "complex_icon_svg: stroke found");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  parse_simple_rect(t);
+  parse_circle(t);
+  parse_ellipse(t);
+  parse_polygon(t);
+  parse_path_moveto_lineto(t);
+  parse_path_cubic_bezier(t);
+  parse_path_arc(t);
+  viewbox_scaling(t);
+  hex_colors(t);
+  opacity(t);
+  stroke_only(t);
+  group_transform(t);
+  linear_gradient(t);
+  style_attribute(t);
+  multiple_shapes_layered(t);
+  rounded_rect(t);
+  target_size_override(t);
+  empty_svg_fails(t);
+  invalid_svg_fails(t);
+  polyline_stroke(t);
+  relative_path_commands(t);
+  line_element(t);
+  nested_groups(t);
+  fill_rule_evenodd(t);
+  complex_icon_svg(t);
+  return t.finish();
+}

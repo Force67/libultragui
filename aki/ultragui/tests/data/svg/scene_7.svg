@@ -1,0 +1,25 @@
+<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient id="g0" gradientTransform="" spreadMethod="pad" x1="0.6" y1="1.0" x2="0.577" y2="0.0"><stop offset="0.05" stop-color="#bb3b93"/><stop offset="0.39" stop-color="rgb(109,19,44)"/></linearGradient>
+<linearGradient id="g1" gradientTransform="skewX(14.432)" spreadMethod="pad" x1="0.92" y1="0.3" x2="0.7" y2="0.08"><stop offset="0.13" stop-color="rgb(60,157,92)"/><stop offset="0.56" stop-color="rgb(96,190,49)"/></linearGradient>
+<radialGradient id="g2" gradientTransform="" spreadMethod="repeat" cx="0.993" cy="0.285" r="0.81"><stop offset="0.34" stop-color="rgb(214,84,175)"/><stop offset="0.5" stop-color="peru"/><stop offset="0.5" stop-color="rgba(39,160,174,0.7)"/><stop offset="0.61" stop-color="rgb(233,35,47)" stop-opacity="0.47"/></radialGradient>
+</defs>
+<rect x="42.0" y="17.48" width="49.18" height="57.0" rx="16.6" fill="none" stroke="red" stroke-width="1.68" opacity="0.25" fill-rule="evenodd" transform="skewX(4.0) rotate(-25.01 70.64 68.272) scale(0.6)"/>
+<path d="M151.872,9.39 v-2.0 t29.586,-1.18 V17.29 Z M75.9,62.4" fill="rgba(200,203,204,0.39)" stroke="#227" stroke-width="6.896" opacity="0.34" fill-opacity="0.0" stroke-opacity="0.1" fill-rule="evenodd"/>
+<rect x="126.1" y="96.729" width="59.4" height="12.795" fill="none" opacity="0.54" fill-opacity="0.53" transform="skewY(-10.7) rotate(97.9)"/>
+<path d="M76.06,103.0 C158.7,56.8 67.31,0.492 73.0,92.4 S-10.711,104.1 101.422,82.65 S89.3,-9.0 85.1,50.5 T-10.6,30.2 h-14.438 S-4.31,117.269 142.8,65.0 q17.0,16.6 -19.659,7.0" fill="#0e4dc4" fill-opacity="0.61" transform="rotate(-151.0) scale(1.1)"/>
+<polyline points="101.6,87.753 81.566,61.1 118.25,120.9 145.3,47.996 69.0,84.646" fill="#c6c80e2b" opacity="0.19" fill-opacity="0.1" fill-rule="evenodd"/>
+<ellipse cx="14.75" cy="2.338" rx="23.0" ry="12.15" fill="url(#g2)" stroke="url(#g0)" stroke-width="6.59" opacity="0.88" stroke-opacity="0.95" fill-rule="evenodd" transform="scale(2.0) skewX(39.526) rotate(-28.34)"/>
+<circle cx="64.952" cy="84.0" r="11.9" fill="#39c778" stroke-opacity="0.27" fill-rule="evenodd" transform="rotate(92.08)"/>
+<polyline points="49.117,121.44 103.0,63.9 164.1,25.7" fill="#89b054" stroke-opacity="0.86" fill-rule="evenodd"/>
+<circle cx="6.0" cy="88.0" r="21.1" fill="url(#g1)" fill-opacity="0.45" fill-rule="evenodd"/>
+<path d="M-13.26,50.0 c22.23,5.93 -27.3,-20.548 -29.78,27.71 A2.34,9.5 -89.808 0,1 37.6,24.0" fill="none" stroke="salmon" stroke-width="3.912" stroke-opacity="0.23" fill-rule="evenodd" transform="skewX(39.0)"/>
+<polyline points="128.0,83.0 127.18,24.0 146.5,93.0" fill="url(#g0)" stroke="red" stroke-width="2.2" opacity="0.96" stroke-opacity="0.89" transform="rotate(-62.591 14.9 4.379) matrix(0.6 1.0 1.0 -1.0 -14.68 18.381) rotate(-18.0 62.8 49.0)"/>
+<rect x="104.25" y="74.5" width="2.0" height="30.0" rx="2.95" fill="url(#g2)"/>
+<path d="M119.0,59.696 L14.541,86.149 l13.631,-9.36 C145.0,34.73 145.0,123.3 120.9,24.0 c-7.0,-8.357 15.0,-13.0 20.08,8.1 A38.871,20.9 49.173 0,1 159.4,92.0" fill="rgba(250,148,146,0.46)" stroke="url(#g2)" stroke-width="2.0" fill-opacity="0.46" transform="rotate(-40.7) translate(3.3 9.9) rotate(-132.26)"/>
+<circle cx="129.5" cy="106.47" r="15.9" fill="none" stroke="#928" stroke-width="3.5" opacity="0.41" fill-opacity="0.26" transform="matrix(-0.784 0.172 -1.1 -1.274 2.015 16.25) skewX(-28.8) scale(0.45 0.84)"/>
+<path d="M-9.809,127.433 V46.983 q-15.0,-16.6 1.0,26.489" fill="#c08a58d7" stroke="#37495c5e" stroke-width="2.0" fill-rule="evenodd"/>
+<path d="M-2.5,43.9 L-13.99,131.48 h8.7 t1.6,-28.243 l-26.7,-0.101 V30.871 v-16.0" fill="url(#g0)" stroke="url(#g2)" stroke-width="6.46"/>
+<path d="M156.123,48.0 S161.0,18.7 64.0,14.511 h14.0 Q47.2,81.955 -9.876,108.83 q-20.0,-25.0 -9.0,3.7 c-8.6,19.32 -24.734,-18.257 -18.42,14.239 L105.3,104.903" fill="rgba(215,185,202,0.2)" stroke-opacity="0.97" fill-rule="evenodd" transform="scale(1.09 0.801)"/>
+<path d="M138.09,106.5 A13.78,19.0 2.139 0,0 62.0,57.36 Q172.0,130.25 103.9,1.885 q-19.6,-5.0 15.0,16.79 l-13.24,-7.62 T68.4,23.3 l23.1,-10.42" fill="url(#g0)" stroke="#839798" stroke-width="2.0" stroke-opacity="0.96" transform="matrix(0.65 1.27 -1.0 -1.4 -15.71 18.156) rotate(-89.623 81.5 92.8)"/>
+</svg>

@@ -1,0 +1,82 @@
+// ugui/svg/svg.{h,cc}: load an SVG file or buffer, rasterize it to RGBA8 and
+// optionally upload it through a TextureBackend.
+//
+// Differences in shape: the `bool F(..., SvgImage& out)` loaders return
+// `SvgImage?`; `LoadSvgMemory(data, length, ...)` takes `bytes`;
+// `TextureBackend*` is `(&var T)?` (none is the C++ nullptr, so LoadSvgTexture
+// returns kNullTextureId). The C++ computes `w * h * 4` in 32 bits; here it is
+// a `usize`, which differs only where the C++ overflows and writes out of
+// bounds.
+
+module ultragui::svg::svg;
+
+import {List, filled} from akikit::containers::list;
+import {read_bytes} from akikit::filesystem::file_util;
+import {eprintln} from akikit::logging;
+import {TextureId, kNullTextureId} from ultragui::render::draw_data;
+import {TextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {parse_svg} from ultragui::svg::svg_parser;
+import {rasterize} from ultragui::svg::svg_rasterizer;
+
+// CPU-side rasterized SVG image (RGBA8 pixels).
+pub struct SvgImage {
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var pixels: List<u8> = List()  // RGBA8, size = width * height * 4
+}
+
+// LoadSvg(path, out, target_width, target_height): load and rasterize an SVG
+// file to RGBA pixels. If target_width or target_height is 0, the size comes
+// from the SVG's viewBox/dimensions.
+pub fn load_svg(path: str, target_width: u32 = 0, target_height: u32 = 0): SvgImage? {
+  let data = read_bytes(path) else {
+    eprintln(f"ultragui: failed to open SVG file '{path}'");
+    return none;
+  };
+  if (data.len() == 0) {
+    return none;
+  }
+  return load_svg_memory(data.as_slice() as bytes, target_width, target_height);
+}
+
+// LoadSvgMemory(data, length, out, target_width, target_height).
+pub fn load_svg_memory(data: bytes, target_width: u32 = 0, target_height: u32 = 0): SvgImage? {
+  let doc = parse_svg(data) else {
+    return none;
+  };
+
+  var w = target_width;
+  var h = target_height;
+  if (w == 0) {
+    w = @saturating_cast(u32, doc.width);
+  }
+  if (h == 0) {
+    h = @saturating_cast(u32, doc.height);
+  }
+  if (w == 0 || h == 0) {
+    return none;
+  }
+
+  var out = SvgImage {};
+  out.width = w;
+  out.height = h;
+  out.pixels = filled(w as usize * h as usize * 4, 0u8);
+
+  rasterize(doc, out.pixels.as_slice_var(), w, h);
+  return out;
+}
+
+// LoadSvgTexture(backend, path, target_width, target_height): load, rasterize
+// and upload through `backend`; kNullTextureId on failure or without one.
+pub fn load_svg_texture<T: TextureBackend>(backend: (&var T)?, path: str, target_width: u32 = 0, target_height: u32 = 0): TextureId {
+  var b& = backend else {
+    return kNullTextureId;
+  };
+
+  let img = load_svg(path, target_width, target_height) else {
+    return kNullTextureId;
+  };
+
+  return b.create_texture(img.width, img.height, RhiFormat::Rgba8Unorm, img.pixels.as_slice() as bytes, RhiFilter::Linear);
+}
