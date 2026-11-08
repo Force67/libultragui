@@ -1,0 +1,161 @@
+// The seams: AudioBackend (Dyn/Box over a recording backend, the null
+// default), TextureBackend over an RHI (the +1 handle bias), ScriptRuntime's
+// NoScript, Platform through DynPlatform over HostPlatform, and a host
+// component next to the built-in ones. These are the PORTING.md examples,
+// compiled.
+
+module seams_test;
+
+import {List} from akikit::containers::list;
+import {String, from_str} from akikit::strings::string;
+import {AudioBackend, AudioBackendBox, DynAudioBackend, NullAudioBackend, SoundHandle, kInvalidSound} from ultragui::audio::audio_backend;
+import {Vec2} from ultragui::core::math;
+import {kNullWidget} from ultragui::core::handle;
+import {MouseButton} from ultragui::input::input_queue;
+import {DynPlatform, WindowConfig} from ultragui::platform::platform;
+import {HostPlatform} from ultragui::platform::platform_host;
+import {TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
+import {DynTextureBackend, TextureBackend, TextureBackendBox, rhi_handle_from_texture_id, texture_id_from_rhi_handle} from ultragui::render::texture_backend;
+import {NullRhi} from ultragui::rhi::null_rhi;
+import {RhiTextureBackend} from ultragui::rhi::rhi_texture_backend;
+import {RhiFilter, RhiFormat, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {NoScript, kDefaultChunkName} from ultragui::scripting::script_runtime;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {Expect} from support::expect;
+
+// A host audio backend that remembers what it was asked.
+struct RecordingAudio : AudioBackend {
+  pub var played: List<String> = List()
+  pub var volume: f32 = 1.0
+  pub var next: SoundHandle = 1
+
+  pub fn init(var self&): bool => true;
+  pub fn shutdown(var self&) {}
+  pub fn is_initialized(self&): bool => true;
+  pub fn play(var self&, path: str, volume: f32, looping: bool): SoundHandle {
+    self.played.push(from_str(path));
+    self.next += 1;
+    return self.next;
+  }
+  pub fn load(var self&, path: str): SoundHandle => 100;
+  pub fn play_loaded(var self&, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle => preloaded + 1;
+  pub fn stop(var self&, handle: SoundHandle) {}
+  pub fn is_playing(self&, handle: SoundHandle): bool => handle > 1;
+  pub fn set_volume(var self&, handle: SoundHandle, volume: f32) {}
+  pub fn set_pan(var self&, handle: SoundHandle, pan: f32) {}
+  pub fn set_pitch(var self&, handle: SoundHandle, pitch: f32) {}
+  pub fn seek(var self&, handle: SoundHandle, seconds: f32) {}
+  pub fn set_master_volume(var self&, volume: f32) {
+    self.volume = volume;
+  }
+  pub fn master_volume(self&): f32 => self.volume;
+  pub fn stop_all(var self&) {}
+  pub fn pause_all(var self&) {}
+  pub fn resume_all(var self&) {}
+}
+
+// Code that takes "an AudioBackend*": any backend, borrowed.
+fn click_sound(var audio&: DynAudioBackend): SoundHandle => audio.play("click.wav", 1.0, false);
+
+// A host texture backend minting its own ids.
+struct HostTextures : TextureBackend {
+  pub var live: u32 = 0
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+    self.live += 1;
+    return 0x1000 + self.live as u64;
+  }
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {}
+  pub fn destroy_texture(var self&, id: TextureId) {
+    self.live -= 1;
+  }
+}
+
+fn upload(var tex&: DynTextureBackend): TextureId {
+  let pixels: [u8; 4] = [0, 0, 0, 0];
+  return tex.create_texture(1, 1, RhiFormat::Rgba8Unorm, pixels[..] as bytes, RhiFilter::Linear);
+}
+
+fn check_audio(var t&: Expect) {
+  var rec = RecordingAudio {};
+  {
+    var dyn = DynAudioBackend::of(rec);
+    t.that(click_sound(dyn) == 2, "dyn forwards play");
+    dyn.set_master_volume(0.5);
+    t.that(dyn.master_volume() == 0.5 && dyn.is_playing(2), "dyn forwards reads");
+  }
+  t.that(rec.played.len() == 1 && rec.played[0] == "click.wav", "the borrowed backend saw the call");
+
+  var boxed = AudioBackendBox::silent();
+  t.that(boxed.init() && !boxed.is_initialized(), "null backend: init true, never initialized");
+  t.that(boxed.play("x.wav", 1.0, true) == kInvalidSound && boxed.master_volume() == 1.0, "null backend is silent");
+  boxed = AudioBackendBox::of(RecordingAudio {});
+  // A Dyn lent to a `var` view parameter is bound first: a temporary is not
+  // a mutable place.
+  var lent = boxed.as_dyn();
+  t.that(click_sound(lent) == 2, "box lends a dyn");
+  t.that(boxed.play_loaded(boxed.load("a.wav"), 1.0, false) == 101, "box forwards");
+  var null_backend = NullAudioBackend();
+  t.that(null_backend.load("a") == kInvalidSound, "NullAudioBackend directly");
+}
+
+fn check_textures(var t&: Expect) {
+  t.that(texture_id_from_rhi_handle(0) == 1 && texture_id_from_rhi_handle(kInvalidTexture) == kNullTextureId, "rhi -> texture id");
+  t.that(rhi_handle_from_texture_id(1) == 0 && rhi_handle_from_texture_id(kFontTextureId) == kInvalidTexture, "texture id -> rhi");
+
+  var host = HostTextures {};
+  var dyn = DynTextureBackend::of(host);
+  t.that(upload(dyn) == 0x1001, "dyn over a host backend");
+  var boxed = TextureBackendBox::of(HostTextures {});
+  var lent = boxed.as_dyn();
+  t.that(upload(lent) == 0x1001, "box over a host backend");
+
+  var rhi = NullRhi();
+  var adapter = RhiTextureBackend(rhi);
+  var via_rhi = DynTextureBackend::of(adapter);
+  t.that(upload(via_rhi) == kNullTextureId, "NullRhi makes no textures");
+}
+
+fn check_script(var t&: Expect) {
+  var world = World();
+  var ctx = WidgetContext::detached();
+  var s = NoScript();
+  t.that(s.init(), "NoScript init");
+  t.that(!s.exec(world, ctx, "print(1)", kDefaultChunkName) && !s.exec_file(world, ctx, "x.lua"), "NoScript runs nothing");
+  let e = world.create();
+  s.register_widget(world, e);
+  t.that(s.find_registered_widget("x") == kNullWidget, "NoScript finds nothing");
+  t.that(!s.call_handler(world, ctx, "on_click", e), "NoScript has no handlers");
+  s.update_timers(world, ctx, 1.0);
+  s.shutdown();
+}
+
+// Code that is not generic over the platform takes a DynPlatform.
+fn mouse_x(var p&: DynPlatform): f32 {
+  p.poll_events();
+  return p.input_queue().mouse_pos.x;
+}
+
+fn check_platform(var t&: Expect) {
+  var host = HostPlatform();
+  t.that(host.init(WindowConfig {}), "host init");
+  let feed = host.feed();
+  feed.set_viewport(Vec2::new(800.0, 600.0), Vec2::new(1600.0, 1200.0));
+  feed.push_mouse_move(Vec2::new(12.0, 34.0));
+  feed.push_mouse_button(MouseButton::Left, true);
+  var p = DynPlatform::of(host);
+  t.that(mouse_x(p) == 12.0, "events reach the queue through DynPlatform");
+  t.that(p.window_size().x == 800.0 && p.dpi_scale() == 2.0, "viewport and dpi");
+  p.set_clipboard_text("copied");
+  t.that(p.clipboard_text() == "copied", "clipboard");
+  t.that(host.input_queue().button_count == 1, "button event");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  check_audio(t);
+  check_textures(t);
+  check_script(t);
+  check_platform(t);
+  return t.finish();
+}
