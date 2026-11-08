@@ -1,0 +1,558 @@
+// embed_scene (aki): a host that owns its Vulkan device, swapchain, render
+// pass, command buffers and presentation (the examples/embed_vulkan
+// approach) records ultragui draw data through VulkanBackend
+// (ugui_impl_vulkan). With no UIContext ported yet, the DrawData is built by
+// hand: quads (radii, border, shadow, gradient), user textures through the
+// TextureBackend seam (RGBA linear, BGRA nearest, one updated each frame, one
+// destroyed), text with the glyph atlas uploaded by update_font_atlas, the
+// atlas sampled as an image (kFontTextureId), an unknown id (white
+// fallback), clip rects, and a blur command the backend skips.
+// embed_scene.cc is the C++ reference; it builds the same draw data, and
+// under aki/tools/xshot.sh the two screenshots should be equal.
+//
+//   embed_scene <shader_dir> <font.ttf> [frames]
+
+module embed_scene;
+
+import {List, filled} from akikit::containers::list;
+import {eprintln} from akikit::logging;
+import {arguments} from akikit::process::command_line;  // the arguments after the program path
+import {exit} from akikit::process::process;
+import {from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {DrawCmd, DrawData, TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
+import {DynTextureBackend} from ultragui::render::texture_backend;
+import {Vertex2D, pack_color, pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {TextEngine, TextRun} from ultragui::text::text_engine;
+import {GlfwWindow, glfw_create_window, glfw_destroy_window, glfw_get_framebuffer_size, glfw_init, glfw_poll_events,
+  glfw_terminate, glfw_window_hint, glfw_window_should_close, kGlfwClientApi, kGlfwFalse, kGlfwNoApi,
+  kGlfwResizable} from ultragui_glfw::sys::glfw;
+import {InitInfo, VulkanBackend} from ultragui_vulkan::ugui_impl_vulkan;
+import * from ultragui_vulkan::sys::vulkan;
+
+comptime let kFramesInFlight: u32 = 2;
+
+fn die(msg: str) {
+  eprintln(f"embed_scene: {msg}");
+  exit(1);
+}
+
+fn vkcheck(r: VkResult, what: str) {
+  if (r != kVkSuccess) {
+    die(what);
+  }
+}
+
+struct Mesh {
+  pub var v: List<Vertex2D> = List()
+  pub var i: List<u32> = List()
+}
+
+fn color(r: f32, g: f32, b: f32, a: f32): Color => Color { r, g, b, a };
+
+// Renderer2D::EmitQuad at dpi 1 with no transform.
+fn quad(var m&: Mesh, r: Rect, c: Color, c2: Color, radii: u32, softness: f32, border_width: f32, border: Color) {
+  let col = pack_color(c.r, c.g, c.b, c.a);
+  let col2 = pack_color(c2.r, c2.g, c2.b, c2.a);
+  let bc = pack_color(border.r, border.g, border.b, border.a);
+  let hw = r.w * 0.5;
+  let hh = r.h * 0.5;
+  let base = m.v.len() as u32;
+  let corners = [(r.x, r.y, 0.0f32, 0.0f32), (r.x + r.w, r.y, 1.0, 0.0), (r.x + r.w, r.y + r.h, 1.0, 1.0), (r.x, r.y + r.h, 0.0, 1.0)];
+  for (let (x, y, u, v) in corners) {
+    m.v.push(Vertex2D {
+      pos: [x, y], uv: [u, v], color: col, color2: col2, corner_radii: radii, softness,
+      half_size: [hw, hh], border_width, border_color: bc,
+    });
+  }
+  for (let k in [0u32, 1, 2, 0, 2, 3]) {
+    m.i.push(base + k);
+  }
+}
+
+fn solid(var m&: Mesh, r: Rect, c: Color, radii: u32) {
+  quad(m, r, c, c, radii, 0.0, 0.0, color(0.0, 0.0, 0.0, 0.0));
+}
+
+// Renderer2D::DrawText at dpi 1 with no transform.
+fn text(var m&: Mesh, pos: Vec2, run&: TextRun, c: Color) {
+  let packed = pack_color(c.r, c.g, c.b, c.a);
+  var cursor_x = pos.x;
+  let baseline_y = pos.y + run.ascent;
+  for (let g in run.glyphs()) {
+    if (g.bmp_w <= 0.0 || g.bmp_h <= 0.0) {
+      cursor_x += g.x_advance;
+      continue;
+    }
+    let x = @round(cursor_x + g.bearing_x + g.x_offset);
+    let y = @round(baseline_y - g.bearing_y + g.y_offset);
+    let w = @round(g.bmp_w);
+    let h = @round(g.bmp_h);
+    let base = m.v.len() as u32;
+    let corners = [(x, y, g.u0, g.v0), (x + w, y, g.u1, g.v0), (x + w, y + h, g.u1, g.v1), (x, y + h, g.u0, g.v1)];
+    for (let (px, py, u, v) in corners) {
+      m.v.push(Vertex2D {
+        pos: [px, py], uv: [u, v], color: packed, color2: packed, corner_radii: 0, softness: 0.0,
+        half_size: [0.0, 0.0], border_width: 0.0, border_color: 0,
+      });
+    }
+    for (let k in [0u32, 1, 2, 0, 2, 3]) {
+      m.i.push(base + k);
+    }
+    cursor_x += g.x_advance;
+  }
+}
+
+fn cmd(clip: Rect, tex: TextureId, first: u32, count: u32, is_text: bool, blur: f32 = 0.0): DrawCmd =>
+  DrawCmd { clip_rect: clip, texture_id: tex, index_offset: first, elem_count: count, is_text, blur };
+
+// The host's Vulkan state (embed_vulkan's `Vk`).
+struct Host {
+  pub unowned var instance: VkInstance = null
+  pub var surface: VkSurfaceKHR = 0
+  pub unowned var phys: VkPhysicalDevice = null
+  pub var qfam: u32 = 0
+  pub unowned var device: VkDevice = null
+  pub unowned var queue: VkQueue = null
+  pub var format: VkSurfaceFormatKHR = VkSurfaceFormatKHR {}
+  pub var render_pass: VkRenderPass = 0
+  pub var cmd_pool: VkCommandPool = 0
+  pub var desc_pool: VkDescriptorPool = 0
+  pub var swapchain: VkSwapchainKHR = 0
+  pub var extent: VkExtent2D = VkExtent2D {}
+  pub var views: List<VkImageView> = List()
+  pub var framebuffers: List<VkFramebuffer> = List()
+  pub var render_finished: List<VkSemaphore> = List()
+  pub var cmd: [VkCommandBuffer; 2] = [null; 2]
+  pub var image_available: [VkSemaphore; 2] = [0; 2]
+  pub var in_flight: [VkFence; 2] = [0; 2]
+  pub var frame: u32 = 0
+}
+
+fn Host::create_swapchain(var self&, win: *var GlfwWindow) {
+  var caps = VkSurfaceCapabilitiesKHR {};
+  let _ = unsafe vk_get_physical_device_surface_capabilities_khr(self.phys, self.surface, &raw var caps);
+  self.extent = caps.current_extent;
+  if (self.extent.width == 0xFFFF_FFFF) {
+    var w: i32 = 0;
+    var h: i32 = 0;
+    unsafe glfw_get_framebuffer_size(win, &raw var w, &raw var h);
+    self.extent = VkExtent2D { width: w as u32, height: h as u32 };
+  }
+  var img_count = caps.min_image_count + 1;
+  if (caps.max_image_count > 0 && img_count > caps.max_image_count) {
+    img_count = caps.max_image_count;
+  }
+
+  let ci = VkSwapchainCreateInfoKHR {
+    surface: self.surface,
+    min_image_count: img_count,
+    image_format: self.format.format,
+    image_color_space: self.format.color_space,
+    image_extent: self.extent,
+    image_array_layers: 1,
+    image_usage: kVkImageUsageColorAttachmentBit,
+    image_sharing_mode: kVkSharingModeExclusive,
+    pre_transform: caps.current_transform,
+    composite_alpha: kVkCompositeAlphaOpaqueBitKhr,
+    present_mode: kVkPresentModeFifoKhr,
+    clipped: kVkTrue,
+  };
+  vkcheck(unsafe vk_create_swapchain_khr(self.device, &raw ci, null, &raw var self.swapchain), "vkCreateSwapchainKHR");
+
+  var n: u32 = 0;
+  let _ = unsafe vk_get_swapchain_images_khr(self.device, self.swapchain, &raw var n, null);
+  var images: List<VkImage> = filled(n as usize, 0);
+  let _ = unsafe vk_get_swapchain_images_khr(self.device, self.swapchain, &raw var n, @ptr(images.as_slice_var()));
+  for (let i in 0..n as usize) {
+    let vci = VkImageViewCreateInfo {
+      image: images[i],
+      view_type: kVkImageViewType2d,
+      format: self.format.format,
+      subresource_range: VkImageSubresourceRange { aspect_mask: kVkImageAspectColorBit, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 },
+    };
+    var view: VkImageView = 0;
+    vkcheck(unsafe vk_create_image_view(self.device, &raw vci, null, &raw var view), "vkCreateImageView");
+    self.views.push(view);
+    let fci = VkFramebufferCreateInfo {
+      render_pass: self.render_pass,
+      attachment_count: 1,
+      attachments: unsafe (&raw view),
+      width: self.extent.width,
+      height: self.extent.height,
+      layers: 1,
+    };
+    var fb: VkFramebuffer = 0;
+    vkcheck(unsafe vk_create_framebuffer(self.device, &raw fci, null, &raw var fb), "vkCreateFramebuffer");
+    self.framebuffers.push(fb);
+    let sci = VkSemaphoreCreateInfo {};
+    var sem: VkSemaphore = 0;
+    vkcheck(unsafe vk_create_semaphore(self.device, &raw sci, null, &raw var sem), "vkCreateSemaphore");
+    self.render_finished.push(sem);
+  }
+}
+
+fn Host::destroy_swapchain(var self&) {
+  unsafe {
+    for (let fb in self.framebuffers) {
+      vk_destroy_framebuffer(self.device, fb, null);
+    }
+    for (let v in self.views) {
+      vk_destroy_image_view(self.device, v, null);
+    }
+    for (let s in self.render_finished) {
+      vk_destroy_semaphore(self.device, s, null);
+    }
+  }
+  self.framebuffers.clear();
+  self.views.clear();
+  self.render_finished.clear();
+  if (self.swapchain != 0) {
+    unsafe vk_destroy_swapchain_khr(self.device, self.swapchain, null);
+  }
+  self.swapchain = 0;
+}
+
+fn Host::init(var self&, win: *var GlfwWindow) {
+  var ext_count: u32 = 0;
+  let exts = unsafe glfw_get_required_instance_extensions(&raw var ext_count);
+  let app = VkApplicationInfo { application_name: c"embed_scene", api_version: kVkApiVersion11 };
+  let ici = VkInstanceCreateInfo {
+    application_info: unsafe (&raw app),
+    enabled_extension_count: ext_count,
+    enabled_extension_names: unsafe (exts as *const *const c_char),
+  };
+  vkcheck(unsafe vk_create_instance(&raw ici, null, &raw var self.instance), "vkCreateInstance");
+  vkcheck(unsafe glfw_create_window_surface(self.instance, win, null, &raw var self.surface), "glfwCreateWindowSurface");
+
+  var dev_count: u32 = 0;
+  let _ = unsafe vk_enumerate_physical_devices(self.instance, &raw var dev_count, null);
+  var devs: List<VkPhysicalDevice> = filled(dev_count as usize, null);
+  let _ = unsafe vk_enumerate_physical_devices(self.instance, &raw var dev_count, @ptr(devs.as_slice_var()));
+  for (let d in devs) {
+    var qn: u32 = 0;
+    unsafe vk_get_physical_device_queue_family_properties(d, &raw var qn, null);
+    var qprops: List<VkQueueFamilyProperties> = filled(qn as usize, VkQueueFamilyProperties {});
+    unsafe vk_get_physical_device_queue_family_properties(d, &raw var qn, @ptr(qprops.as_slice_var()));
+    for (let i in 0..qn) {
+      var present: u32 = kVkFalse;
+      let _ = unsafe vk_get_physical_device_surface_support_khr(d, i, self.surface, &raw var present);
+      if ((qprops[i as usize].queue_flags & kVkQueueGraphicsBit) != 0 && present != 0) {
+        self.phys = d;
+        self.qfam = i;
+        break;
+      }
+    }
+    if (self.phys != null) {
+      break;
+    }
+  }
+  if (self.phys == null) {
+    die("no suitable GPU");
+  }
+
+  let prio: f32 = 1.0;
+  let qci = VkDeviceQueueCreateInfo { queue_family_index: self.qfam, queue_count: 1, queue_priorities: unsafe (&raw prio) };
+  let dev_exts = [c"VK_KHR_swapchain"];
+  let dci = VkDeviceCreateInfo {
+    queue_create_info_count: 1,
+    queue_create_infos: unsafe (&raw qci),
+    enabled_extension_count: 1,
+    enabled_extension_names: @ptr(dev_exts[..]),
+  };
+  vkcheck(unsafe vk_create_device(self.phys, &raw dci, null, &raw var self.device), "vkCreateDevice");
+  unsafe vk_get_device_queue(self.device, self.qfam, 0, &raw var self.queue);
+
+  var fmt_count: u32 = 0;
+  let _ = unsafe vk_get_physical_device_surface_formats_khr(self.phys, self.surface, &raw var fmt_count, null);
+  var formats: List<VkSurfaceFormatKHR> = filled(fmt_count as usize, VkSurfaceFormatKHR {});
+  let _ = unsafe vk_get_physical_device_surface_formats_khr(self.phys, self.surface, &raw var fmt_count, @ptr(formats.as_slice_var()));
+  self.format = formats[0];
+  for (let f in formats) {
+    if (f.format == kVkFormatB8g8r8a8Srgb && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
+      self.format = f;
+      break;
+    }
+  }
+
+  let color_att = VkAttachmentDescription {
+    format: self.format.format,
+    samples: kVkSampleCount1Bit,
+    load_op: kVkAttachmentLoadOpClear,
+    store_op: kVkAttachmentStoreOpStore,
+    stencil_load_op: kVkAttachmentLoadOpDontCare,
+    stencil_store_op: kVkAttachmentStoreOpDontCare,
+    initial_layout: kVkImageLayoutUndefined,
+    final_layout: kVkImageLayoutPresentSrcKhr,
+  };
+  let color_ref = VkAttachmentReference { attachment: 0, layout: kVkImageLayoutColorAttachmentOptimal };
+  let subpass = VkSubpassDescription {
+    pipeline_bind_point: kVkPipelineBindPointGraphics,
+    color_attachment_count: 1,
+    color_attachments: unsafe (&raw color_ref),
+  };
+  let dep = VkSubpassDependency {
+    src_subpass: kVkSubpassExternal,
+    dst_subpass: 0,
+    src_stage_mask: kVkPipelineStageColorAttachmentOutputBit,
+    dst_stage_mask: kVkPipelineStageColorAttachmentOutputBit,
+    dst_access_mask: kVkAccessColorAttachmentWriteBit,
+  };
+  let rpci = VkRenderPassCreateInfo {
+    attachment_count: 1,
+    attachments: unsafe (&raw color_att),
+    subpass_count: 1,
+    subpasses: unsafe (&raw subpass),
+    dependency_count: 1,
+    dependencies: unsafe (&raw dep),
+  };
+  vkcheck(unsafe vk_create_render_pass(self.device, &raw rpci, null, &raw var self.render_pass), "vkCreateRenderPass");
+
+  let pci = VkCommandPoolCreateInfo { flags: kVkCommandPoolCreateResetCommandBufferBit, queue_family_index: self.qfam };
+  vkcheck(unsafe vk_create_command_pool(self.device, &raw pci, null, &raw var self.cmd_pool), "vkCreateCommandPool");
+  let cbi = VkCommandBufferAllocateInfo { command_pool: self.cmd_pool, level: kVkCommandBufferLevelPrimary, command_buffer_count: kFramesInFlight };
+  vkcheck(unsafe vk_allocate_command_buffers(self.device, &raw cbi, @ptr(self.cmd[..])), "vkAllocateCommandBuffers");
+  for (let i in 0..kFramesInFlight as usize) {
+    let sci = VkSemaphoreCreateInfo {};
+    vkcheck(unsafe vk_create_semaphore(self.device, &raw sci, null, &raw var self.image_available[i]), "vkCreateSemaphore");
+    let fci = VkFenceCreateInfo { flags: kVkFenceCreateSignaledBit };
+    vkcheck(unsafe vk_create_fence(self.device, &raw fci, null, &raw var self.in_flight[i]), "vkCreateFence");
+  }
+
+  let ps = VkDescriptorPoolSize { type_: kVkDescriptorTypeCombinedImageSampler, descriptor_count: 16 };
+  let dpci = VkDescriptorPoolCreateInfo { pool_size_count: 1, pool_sizes: unsafe (&raw ps), max_sets: 16 };
+  vkcheck(unsafe vk_create_descriptor_pool(self.device, &raw dpci, null, &raw var self.desc_pool), "vkCreateDescriptorPool");
+
+  self.create_swapchain(win);
+}
+
+fn Host::shutdown(var self&) {
+  self.destroy_swapchain();
+  unsafe {
+    vk_destroy_descriptor_pool(self.device, self.desc_pool, null);
+    for (let i in 0..kFramesInFlight as usize) {
+      vk_destroy_semaphore(self.device, self.image_available[i], null);
+      vk_destroy_fence(self.device, self.in_flight[i], null);
+    }
+    vk_destroy_command_pool(self.device, self.cmd_pool, null);
+    vk_destroy_render_pass(self.device, self.render_pass, null);
+    vk_destroy_device(self.device, null);
+    vk_destroy_surface_khr(self.instance, self.surface, null);
+    vk_destroy_instance(self.instance, null);
+  }
+}
+
+pub fn main(): i32 {
+  let args = arguments();
+  if (args.len() < 2) {
+    eprintln("usage: embed_scene <shader_dir> <font.ttf> [frames]");
+    return 2;
+  }
+  var frames: u32 = 0;
+  if (args.len() > 2) {
+    for (let c in args[2]) {
+      frames = frames * 10 + (c as u32 - '0' as u32);
+    }
+  }
+
+  if (unsafe glfw_init() == 0) {
+    die("glfwInit failed");
+  }
+  unsafe {
+    glfw_window_hint(kGlfwClientApi, kGlfwNoApi);
+    glfw_window_hint(kGlfwResizable, kGlfwFalse);
+  }
+  let win = unsafe glfw_create_window(640, 480, c"embed_scene", null, null);
+  if (win == null) {
+    die("window creation failed");
+  }
+  var host = Host {};
+  host.init(win);
+
+  // ultragui's text engine in draw-data mode (no RHI).
+  var te = TextEngine();
+  te.init();
+  let font = te.load_font(args[1]);
+
+  var backend = VulkanBackend();
+  let bi = InitInfo {
+    instance: host.instance,
+    physical_device: host.phys,
+    device: host.device,
+    queue_family: host.qfam,
+    queue: host.queue,
+    descriptor_pool: host.desc_pool,
+    render_pass: host.render_pass,
+    frames_in_flight: kFramesInFlight,
+    shader_dir: from_str(args[0]),
+  };
+  if (!backend.init(bi)) {
+    die("VulkanBackend::init failed");
+  }
+
+  var checker = [0u8; 256];
+  for (let y in 0usize..8) {
+    for (let x in 0usize..8) {
+      let p = (y * 8 + x) * 4;
+      let on = ((x + y) & 1) != 0;
+      checker[p] = on ? 240 : 40;
+      checker[p + 1] = on ? 200 : 60;
+      checker[p + 2] = on ? 80 : 160;
+      checker[p + 3] = 255;
+    }
+  }
+  let bgra: [u8; 16] = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128];
+  // Through the TextureBackend seam, as UIContext::set_texture_backend uses it.
+  var checker_tex: TextureId = 0;
+  var bgra_tex: TextureId = 0;
+  var doomed: TextureId = 0;
+  {
+    var tb = DynTextureBackend::of(backend);
+    checker_tex = tb.create_texture(8, 8, RhiFormat::Rgba8Unorm, checker[..] as bytes, RhiFilter::Linear);
+    bgra_tex = tb.create_texture(2, 2, RhiFormat::Bgra8Unorm, bgra[..] as bytes, RhiFilter::Nearest);
+    doomed = tb.create_texture(2, 2, RhiFormat::Bgra8Unorm, bgra[..] as bytes, RhiFilter::Nearest);
+    tb.destroy_texture(doomed);  // its id now falls back to white
+  }
+
+  var font_rev: u32 = 0xFFFF_FFFF;
+  let transparent = color(0.0, 0.0, 0.0, 0.0);
+  let full = Rect::new(0.0, 0.0, 640.0, 480.0);
+  let clip = Rect::new(200.0, 280.0, 180.0, 120.0);
+  var frame: u32 = 0;
+  while (frames == 0 || frame < frames) {
+    frame += 1;
+    unsafe glfw_poll_events();
+    if (unsafe glfw_window_should_close(win) != 0) {
+      break;
+    }
+
+    te.begin_frame();
+    let hello = te.shape(font, "Hello, ultragui!", 28.0);
+    let clipped = te.shape(font, "Scissored text is clipped here", 22.0);
+    if (te.atlas_revision() != font_rev) {
+      let size = te.atlas_size();
+      let _ = backend.update_font_atlas(te.atlas_pixels(), size.x as u32, size.y as u32);
+      font_rev = te.atlas_revision();
+    }
+    backend.update_texture(checker_tex, checker[..] as bytes);
+
+    var q = Mesh {};
+    var t = Mesh {};
+    solid(q, Rect::new(20.0, 20.0, 180.0, 100.0), color(0.23, 0.51, 0.96, 1.0), pack_radii_uniform(12.0));  // 0
+    quad(q, Rect::new(220.0, 20.0, 180.0, 100.0), color(0.9, 0.3, 0.3, 1.0), color(0.9, 0.3, 0.3, 1.0), pack_radii(0.0, 20.0, 40.0, 8.0),
+      0.0, 3.0, color(1.0, 1.0, 1.0, 0.9));  // 1
+    quad(q, Rect::new(410.0, 16.0, 220.0, 120.0), color(0.0, 0.0, 0.0, 0.6), color(0.0, 0.0, 0.0, 0.6), pack_radii_uniform(16.0), 10.0,
+      0.0, transparent);  // 2
+    solid(q, Rect::new(420.0, 20.0, 200.0, 100.0), color(0.95, 0.95, 0.97, 1.0), pack_radii_uniform(16.0));  // 3
+    quad(q, Rect::new(20.0, 140.0, 280.0, 80.0), color(1.0, 0.6, 0.1, 1.0), color(0.6, 0.1, 0.9, 1.0), pack_radii_uniform(10.0), 0.0,
+      0.0, transparent);  // 4
+    quad(q, Rect::new(20.0, 240.0, 120.0, 60.0), color(0.2, 0.8, 0.5, 1.0), color(0.2, 0.8, 0.5, 1.0), pack_radii_uniform(12.0), -4.0,
+      0.0, transparent);  // 5
+    solid(q, Rect::new(320.0, 140.0, 128.0, 128.0), color(1.0, 1.0, 1.0, 1.0), pack_radii_uniform(20.0));  // 6
+    solid(q, Rect::new(470.0, 140.0, 150.0, 150.0), color(1.0, 1.0, 1.0, 1.0), 0);  // 7 atlas
+    solid(q, Rect::new(20.0, 320.0, 64.0, 64.0), color(1.0, 1.0, 1.0, 1.0), 0);  // 8
+    quad(q, Rect::new(160.0, 240.0, 300.0, 200.0), color(0.3, 0.3, 0.6, 1.0), color(0.3, 0.3, 0.6, 1.0), pack_radii_uniform(30.0), 0.0,
+      4.0, color(1.0, 0.8, 0.2, 1.0));  // 9
+    solid(q, Rect::new(520.0, 320.0, 100.0, 100.0), color(0.5, 0.9, 0.9, 1.0), pack_radii_uniform(8.0));  // 10 doomed id
+    solid(q, Rect::new(500.0, 300.0, 40.0, 40.0), color(1.0, 0.0, 0.0, 1.0), 0);  // 11 blur, skipped
+    text(t, Vec2 { x: 20.0, y: 420.0 }, hello, color(1.0, 1.0, 1.0, 1.0));
+    let hello_indices = t.i.len() as u32;
+    text(t, Vec2 { x: 170.0, y: 300.0 }, clipped, color(1.0, 0.95, 0.4, 1.0));
+
+    var cmds: List<DrawCmd> = List();
+    cmds.push(cmd(full, kNullTextureId, 0, 36, false));
+    cmds.push(cmd(full, checker_tex, 36, 6, false));
+    cmds.push(cmd(full, kFontTextureId, 42, 6, false));
+    cmds.push(cmd(full, bgra_tex, 48, 6, false));
+    cmds.push(cmd(full, 0, 0, hello_indices, true));
+    cmds.push(cmd(clip, kNullTextureId, 54, 6, false));
+    cmds.push(cmd(clip, 0, hello_indices, t.i.len() as u32 - hello_indices, true));
+    cmds.push(cmd(full, doomed, 60, 6, false));
+    cmds.push(cmd(full, kNullTextureId, 66, 6, false, 8.0));
+    cmds.push(cmd(Rect::new(-50.0, -50.0, 0.0, 0.0), kNullTextureId, 0, 0, false));
+
+    let dd = DrawData {
+      quad_vertices: q.v.as_slice(),
+      quad_indices: q.i.as_slice(),
+      text_vertices: t.v.as_slice(),
+      text_indices: t.i.as_slice(),
+      commands: cmds.as_slice(),
+      display_size: Vec2 { x: 640.0, y: 480.0 },
+      framebuffer_scale: Vec2 { x: 1.0, y: 1.0 },
+      valid: true,
+    };
+
+    backend.new_frame();
+    let fi = host.frame as usize;
+    let fence = host.in_flight[fi];
+    let _ = unsafe vk_wait_for_fences(host.device, 1, &raw fence, kVkTrue, 0xFFFF_FFFF_FFFF_FFFF);
+    var image_index: u32 = 0;
+    let acq = unsafe vk_acquire_next_image_khr(host.device, host.swapchain, 0xFFFF_FFFF_FFFF_FFFF, host.image_available[fi], 0,
+      &raw var image_index);
+    if (acq == kVkErrorOutOfDateKhr) {
+      continue;
+    }
+    let _ = unsafe vk_reset_fences(host.device, 1, &raw fence);
+
+    let cb = host.cmd[fi];
+    let cbbi = VkCommandBufferBeginInfo {};
+    unsafe {
+      let _ = vk_reset_command_buffer(cb, 0);
+      let _ = vk_begin_command_buffer(cb, &raw cbbi);
+    }
+
+    let clear = VkClearValue { float32: [0.08, 0.09, 0.12, 1.0] };
+    let rbi = VkRenderPassBeginInfo {
+      render_pass: host.render_pass,
+      framebuffer: host.framebuffers[image_index as usize],
+      render_area: VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: host.extent },
+      clear_value_count: 1,
+      clear_values: unsafe (&raw clear),
+    };
+    unsafe vk_cmd_begin_render_pass(cb, &raw rbi, kVkSubpassContentsInline);
+    backend.render_draw_data(dd, cb);
+    unsafe {
+      vk_cmd_end_render_pass(cb);
+      let _ = vk_end_command_buffer(cb);
+    }
+
+    let wait_stage: u32 = kVkPipelineStageColorAttachmentOutputBit;
+    let wait_sem = host.image_available[fi];
+    let signal_sem = host.render_finished[image_index as usize];
+    let si = VkSubmitInfo {
+      wait_semaphore_count: 1,
+      wait_semaphores: unsafe (&raw wait_sem),
+      wait_dst_stage_mask: unsafe (&raw wait_stage),
+      command_buffer_count: 1,
+      command_buffers: unsafe (&raw cb),
+      signal_semaphore_count: 1,
+      signal_semaphores: unsafe (&raw signal_sem),
+    };
+    vkcheck(unsafe vk_queue_submit(host.queue, 1, &raw si, fence), "vkQueueSubmit");
+
+    let swapchain = host.swapchain;
+    let present = VkPresentInfoKHR {
+      wait_semaphore_count: 1,
+      wait_semaphores: unsafe (&raw signal_sem),
+      swapchain_count: 1,
+      swapchains: unsafe (&raw swapchain),
+      image_indices: unsafe (&raw image_index),
+    };
+    let _ = unsafe vk_queue_present_khr(host.queue, &raw present);
+
+    host.frame = (host.frame + 1) % kFramesInFlight;
+  }
+
+  let _ = unsafe vk_device_wait_idle(host.device);
+  backend.shutdown();
+  te.shutdown();
+  host.shutdown();
+  unsafe {
+    glfw_destroy_window(win);
+    glfw_terminate();
+  }
+  return 0;
+}
