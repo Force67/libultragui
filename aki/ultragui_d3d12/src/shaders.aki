@@ -1,0 +1,16 @@
+// shaders/hlsl/{quad,text,video}.hlsl compiled to DXIL by dxc, as the C++
+// build does (CMakeLists.txt compiles them to .cso files next to the library
+// and d3d12_rhi.cc loads them from ULTRAGUI_HLSL_SHADER_DIR). The package
+// carries the compiled blobs (shaders/*.cso, tools/build_shaders.sh rebuilds
+// them) so it works without a shader directory; D3d12Rhi uses these when
+// RhiConfig::shader_dir is empty and loads the files from that directory
+// otherwise.
+
+module ultragui_d3d12::shaders;
+
+pub static let kQuadVs: bytes = @embed("../shaders/quad_vs.cso");
+pub static let kQuadPs: bytes = @embed("../shaders/quad_ps.cso");
+pub static let kTextVs: bytes = @embed("../shaders/text_vs.cso");
+pub static let kTextPs: bytes = @embed("../shaders/text_ps.cso");
+pub static let kVideoVs: bytes = @embed("../shaders/video_vs.cso");
+pub static let kVideoPs: bytes = @embed("../shaders/video_ps.cso");
