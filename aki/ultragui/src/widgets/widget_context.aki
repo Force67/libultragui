@@ -24,6 +24,7 @@ module ultragui::widgets::widget_context;
 
 import {Animator} from ultragui::animation::animator;
 import {DynPlatform} from ultragui::platform::platform;
+import {ScriptHost} from ultragui::scripting::script_host;
 import {FontHandle, TextEngine, kInvalidFont} from ultragui::text::text_engine;
 
 pub struct WidgetContext<'a> {
@@ -33,6 +34,10 @@ pub struct WidgetContext<'a> {
   pub var current_time: f64? = none
   pub var platform: DynPlatform<'a>? = none
   pub var ui_scale: f32 = 1.0  // Viewport scale factor (1.0 = design resolution)
+  // UIContext's services for script natives (scripting::script_host), lent
+  // only for calls that can run a script; none elsewhere and outside a
+  // UIContext. No C++ counterpart: the C++ natives capture UIContext.
+  pub var host: ScriptHost<'a>? = none
 
   // A context with no subsystems, for driving widgets outside a UIContext.
   pub fn detached(): WidgetContext<'static> => WidgetContext::<'static> {};

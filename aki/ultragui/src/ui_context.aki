@@ -45,7 +45,8 @@ module ultragui::ui_context;
 import {swap} from akikit::algorithm;
 import {List} from akikit::containers::list;
 import {Atomic} from akikit::threading::atomic;
-import {HashMap, get_str} from akikit::containers::hash_map;
+import {Mutex} from akikit::threading::mutex;
+import {Arc} from akikit::memory::arc;
 import {String, from_str} from akikit::strings::string;
 import {eprintln} from akikit::logging;
 import {Animator} from ultragui::animation::animator;
@@ -53,13 +54,13 @@ import {AudioBackendBox} from ultragui::audio::audio_backend;
 import {VectorAnimation} from ultragui::anim::vector_animation;
 import {Color} from ultragui::core::color;
 import {ComponentKey} from ultragui::core::component_store;
-import {ErasedBox} from ultragui::core::erased;
 import {WidgetId, kNullWidget} from ultragui::core::handle;
 import {Vec2} from ultragui::core::math;
 import {Rect} from ultragui::core::rect;
 import {UguiBuilder} from ultragui::idl::builder;
 import {ParseError, UguiDocument, parse_ugui, parse_ugui_file} from ultragui::idl::parser;
 import {InputRouter} from ultragui::input::input;
+import {MouseButton} from ultragui::input::input_queue;
 import {LayoutEngine, LayoutViewport} from ultragui::layout::layout;
 import {compute_widget_layout} from ultragui::layout::layout_tree;
 import {DynPlatform, Platform, WindowConfig} from ultragui::platform::platform;
@@ -73,6 +74,7 @@ import {NullRhi} from ultragui::rhi::null_rhi;
 import {DynRhi, Rhi, RhiConfig} from ultragui::rhi::rhi;
 import {RhiTextureBackend} from ultragui::rhi::rhi_texture_backend;
 import {RhiTextureHandle} from ultragui::rhi::rhi_types;
+import {AnimId, FrameEnv, ScriptHost, UiExtension, UiExtensionBox, WidgetCache} from ultragui::scripting::script_host;
 import {NoScript, ScriptRuntime} from ultragui::scripting::script_runtime;
 import {ViewportScaleMode} from ultragui::style::enums;
 import {Style} from ultragui::style::style;
@@ -142,9 +144,6 @@ pub struct FrameStats : Copy {
   pub var reused: bool = false  // the previous draw list was handed back unchanged
 }
 
-// LoadAnim's result: the index of an animation UIContext owns.
-pub type AnimId = u32;
-
 // What UIContext::PaintCallback is lent: the renderer and the Rhi.
 pub struct PaintEnv<'a, R: Rhi> {
   pub var renderer: &'a var Renderer2D
@@ -154,60 +153,6 @@ pub struct PaintEnv<'a, R: Rhi> {
 // UIContext::PaintCallback (Function<void(Renderer2D&, RHI*)>): replaces
 // layout + paint of the root in the swapchain pass.
 pub type PaintCallback<R: Rhi> = own fn(&var PaintEnv<R>): ();
-
-// ---------------------------------------------------------------------------
-// Frame extensions (LoadLottie / LoadVideo's players)
-// ---------------------------------------------------------------------------
-
-// What an extension gets each time UIContext calls it: the Rhi, the texture
-// sink the C++ texture_backend_ is (none in draw-data mode until the host
-// sets one), the audio backend, and the frame's dt.
-pub struct FrameEnv<'a> {
-  pub var rhi: DynRhi<'a>
-  pub var dt: f64 = 0.0
-  pub var host_textures: (&'a var TextureBackendBox)?  // see with_textures
-  pub var rhi_textures: bool
-  pub var audio: &'a var AudioBackendBox
-
-  // The texture sink, lent: the host's backend, or (legacy mode) an adapter
-  // over the Rhi; none where the C++ texture_backend_ is null.
-  pub fn with_textures(var self&, f: fn((&var DynTextureBackend)?): ());
-}
-
-fn FrameEnv::with_textures(var self&, f: fn((&var DynTextureBackend)?): ()) {
-  if (var b& = self.host_textures) {
-    var d = b.as_dyn();
-    f(d);
-    return;
-  }
-  if (self.rhi_textures) {
-    var adapter = RhiTextureBackend::<DynRhi>(self.rhi);
-    var d = DynTextureBackend::of(adapter);
-    f(d);
-    return;
-  }
-  f(none);
-}
-
-// A subsystem UIContext owns and drives each frame, for the optional
-// packages' players (ultragui_lottie's LottieAnimation, ultragui_video's
-// VideoPlayer). UIContext::update calls `update` on every extension after the
-// vector animations, in the order they were added; then, if any
-// `needs_convert` and the Rhi acquires a frame, `convert` on those that need
-// it; `shutdown` runs from UIContext::shutdown in order. An extension holds
-// its players and hands out ids for them, as LoadAnim does.
-//
-// An extension type declares a ComponentKey as its identity (as a component
-// does): `add_extension(kMyPlayers, MyPlayers {})`, then
-// `extension_var(kMyPlayers, index)` gets it back.
-pub capability UiExtension {
-  fn update(var self&, var env&: FrameEnv);
-  fn needs_convert(self&): bool {
-    return false;
-  }
-  fn convert(var self&, var env&: FrameEnv) {}
-  fn shutdown(var self&, var env&: FrameEnv) {}
-}
 
 // ---------------------------------------------------------------------------
 // UIContext
@@ -225,70 +170,6 @@ struct OffscreenPass : Copy {
 struct AnimStep {
   pub var widget_id: u32
   pub var style: Style?
-}
-
-// Widget name/id -> entity caches (O(1) lookup, rebuilt lazily together).
-pub struct WidgetCache {
-  var by_name: HashMap<String, WidgetId> = HashMap()
-  var by_id: HashMap<u32, WidgetId> = HashMap()
-  var dirty: bool = true
-
-  pub fn WidgetCache(): WidgetCache => WidgetCache {};
-  pub fn invalidate(var self&) {
-    self.dirty = true;
-  }
-  // FindWidgetEntity
-  pub fn find(var self&, world&: World, root: WidgetId, name: str): WidgetId;
-  // WidgetById
-  pub fn by_id(var self&, world&: World, root: WidgetId, id: u32): WidgetId;
-}
-
-fn cache_widget_tree(world&: World, w: WidgetId, var cache&: HashMap<String, WidgetId>, var by_id&: HashMap<u32, WidgetId>) {
-  if (!w.valid()) {
-    return;
-  }
-  if (let n& = world.get(kWidgetNode, w)) {
-    if (n.name.len() > 0) {
-      cache.insert(n.name.clone(), w);
-    }
-    by_id.insert(n.id, w);
-  }
-  var children = List::<WidgetId>();
-  if (let h& = world.get(kHierarchy, w)) {
-    for (let c in h.children.iter()) {
-      children.push(c);
-    }
-  }
-  for (let child in children.iter()) {
-    cache_widget_tree(world, child, cache, by_id);
-  }
-}
-
-fn WidgetCache::rebuild(var self&, world&: World, root: WidgetId) {
-  self.by_name.clear();
-  self.by_id.clear();
-  cache_widget_tree(world, root, self.by_name, self.by_id);
-  self.dirty = false;
-}
-
-fn WidgetCache::find(var self&, world&: World, root: WidgetId, name: str): WidgetId {
-  if (self.dirty) {
-    self.rebuild(world, root);
-  }
-  if (let hit = get_str(self.by_name, name)) {
-    return hit;
-  }
-  return kNullWidget;
-}
-
-fn WidgetCache::by_id(var self&, world&: World, root: WidgetId, id: u32): WidgetId {
-  if (self.dirty) {
-    self.rebuild(world, root);
-  }
-  if (let hit = self.by_id.get(id)) {
-    return hit;
-  }
-  return kNullWidget;
 }
 
 fn compute_viewport_scale(cfg&: UIConfig, display: Vec2, override_scale: f32): f32 {
@@ -449,6 +330,8 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
   var offscreen_queue: List<OffscreenPass> = List()
   var on_paint_cb: PaintCallback<R>? = none
 
+  var script_clicks: Arc<Mutex<List<WidgetId>>>? = none  // set_script_click_dispatch
+
   var tooltip_target: WidgetId = kNullWidget
   var tooltip_visible: bool = false
   var tooltip_hover_start: f64 = 0.0
@@ -543,6 +426,18 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
   // range or of another type.
   pub fn extension_var<T: UiExtension>(var self&, key&: ComponentKey<T>, index: u32): (&var T)?;
 
+  // ScriptRuntime::CallHandler with UIContext's World and context (and the
+  // script host): the examples' `on_<name>` click dispatch, run after
+  // pump_input (see set_script_click_dispatch).
+  pub fn call_handler(var self&, func_name: str, widget: WidgetId): bool;
+
+  // The examples' click wiring (showcase, game_overlay): a left click on a
+  // named widget calls the script's `on_<name>(widget)`. Installs the input
+  // router's on_click (replacing any); the handlers run at the end of
+  // pump_input, after the router has processed the frame's input, where the
+  // C++ lambda runs inside it (router handlers get no World here).
+  pub fn set_script_click_dispatch(var self&);
+
   // Create an offscreen render target (delegates to the Rhi).
   pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle => self.rhi.create_render_target(width, height);
   // Render a widget tree into `target` during the next update().
@@ -577,57 +472,6 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
   pub fn tooltip_visible(self&): bool => self.tooltip_visible;
 }
 
-// ---------------------------------------------------------------------------
-// The erased extension box
-// ---------------------------------------------------------------------------
-
-
-struct UiExtensionFns : Copy {
-  pub let update: static fn(*var u8, &var FrameEnv): ()
-  pub let needs_convert: static fn(*var u8): bool
-  pub let convert: static fn(*var u8, &var FrameEnv): ()
-  pub let shutdown: static fn(*var u8, &var FrameEnv): ()
-}
-
-fn ext_update<T: UiExtension>(p: *var u8, env: &var FrameEnv) {
-  var t& = unsafe *(p as *var T);
-  t.update(env);
-}
-fn ext_needs_convert<T: UiExtension>(p: *var u8): bool {
-  let t& = unsafe *(p as *var T);
-  return t.needs_convert();
-}
-fn ext_convert<T: UiExtension>(p: *var u8, env: &var FrameEnv) {
-  var t& = unsafe *(p as *var T);
-  t.convert(env);
-}
-fn ext_shutdown<T: UiExtension>(p: *var u8, env: &var FrameEnv) {
-  var t& = unsafe *(p as *var T);
-  t.shutdown(env);
-}
-
-struct UiExtensionBox {
-  var object: ErasedBox
-  pub var fns: UiExtensionFns
-  var type_index: u32
-
-  pub fn of<T: UiExtension>(key&: ComponentKey<T>, value: T): UiExtensionBox => UiExtensionBox {
-    object: ErasedBox::of(value),
-    fns: UiExtensionFns {
-      update: ext_update::<T>, needs_convert: ext_needs_convert::<T>, convert: ext_convert::<T>, shutdown: ext_shutdown::<T>,
-    },
-    type_index: key.index(),
-  };
-
-  pub fn ptr(var self&): *var u8 => self.object.ptr();
-
-  pub fn downcast<T: UiExtension>(var self&, key&: ComponentKey<T>): (&var T)? {
-    if (self.type_index != key.index()) {
-      return none;
-    }
-    return unsafe *(self.object.ptr() as *var T);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // UIContext's methods
@@ -843,18 +687,28 @@ fn UIContext<P, R, S>::install_document(var self&, doc&: UguiDocument): WidgetId
 
 fn UIContext<P, R, S>::load_script(var self&, path: str): bool {
   self.script.sync_timer_clock(self.platform.time());
+  var adapter = RhiTextureBackend::<R>(self.rhi);
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    },
   };
   return self.script.exec_file(self.world, ctx, path);
 }
 
 fn UIContext<P, R, S>::exec_script(var self&, script: str, name: str): bool {
   self.script.sync_timer_clock(self.platform.time());
+  var adapter = RhiTextureBackend::<R>(self.rhi);
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    },
   };
   return self.script.exec(self.world, ctx, script, name);
 }
@@ -917,9 +771,14 @@ fn UIContext<P, R, S>::pump_input(var self&) {
   if (self.overlays.entries.len() > 0) {
     var queue = self.platform.input_queue();
     {
+      var adapter = RhiTextureBackend::<R>(self.rhi);
       var ctx = WidgetContext {
         text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
         current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+        host: ScriptHost {
+          anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+          widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+        },
       };
       var i = 0u32;
       while (i < queue.button_count) {
@@ -973,12 +832,18 @@ fn UIContext<P, R, S>::pump_input(var self&) {
   }
 
   if (self.root_.valid()) {
+    var adapter = RhiTextureBackend::<R>(self.rhi);
     var ctx = WidgetContext {
       text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
       current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+      host: ScriptHost {
+        anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+        widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+      },
     };
     let _ = self.input.process(self.world, ctx, self.root_);
   }
+  self.dispatch_script_clicks();
 
   // Kept aside rather than written into stats: an application that pumps
   // early does so before the frame's stats are reset.
@@ -1028,9 +893,14 @@ fn UIContext<P, R, S>::step_animator(var self&, now: f64) {
 }
 
 fn UIContext<P, R, S>::update_timers(var self&, now: f64) {
+  var adapter = RhiTextureBackend::<R>(self.rhi);
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    },
   };
   self.script.update_timers(self.world, ctx, now);
 }
@@ -1562,26 +1432,74 @@ fn UIContext<P, R, S>::load_svg(var self&, path: str, width: u32, height: u32): 
   return load_svg_texture::<TextureBackendBox>(none, path, width, height);
 }
 
-fn UIContext<P, R, S>::load_anim(var self&, path: str, width: u32, height: u32): AnimId? =>
-  load_anim_into(self.vector_anims, self.renderer, self.rhi, self.rhi_textures, path, width, height);
+fn UIContext<P, R, S>::load_anim(var self&, path: str, width: u32, height: u32): AnimId? {
+  var adapter = RhiTextureBackend::<R>(self.rhi);
+  var host = ScriptHost {
+    anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+    widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+  };
+  return host.load_anim(path, width, height);
+}
 
-fn load_anim_into<R: Rhi>(var anims&: List<VectorAnimation>, var renderer&: Renderer2D, var rhi&: R, rhi_textures: bool,
-                          path: str, width: u32, height: u32): AnimId? {
-  var anim = VectorAnimation();
-  var ok = false;
+// texture_backend_: the host's backend (draw-data mode), the RHI adapter
+// (legacy mode), or none.
+fn textures_of<'a, R: Rhi>(renderer: &'a var Renderer2D, adapter: &'a var RhiTextureBackend<'a, R>, rhi_textures: bool): DynTextureBackend<'a>? {
   if (var b& = renderer.texture_backend()) {
-    ok = anim.load(b, path, width, height);
-  } else if (rhi_textures) {
-    var adapter = RhiTextureBackend::<R>(rhi);
-    ok = anim.load(adapter, path, width, height);
-  } else {
-    ok = anim.load::<TextureBackendBox>(none, path, width, height);
+    return b.as_dyn();
   }
-  if (!ok) {
-    return none;
+  if (rhi_textures) {
+    return DynTextureBackend::of(adapter);
   }
-  anims.push(anim);
-  return (anims.len() - 1) as u32;
+  return none;
+}
+
+fn UIContext<P, R, S>::set_script_click_dispatch(var self&) {
+  let queue = Arc::<Mutex<List<WidgetId>>>(Mutex::<List<WidgetId>>(List::<WidgetId>()));
+  let shared = queue.share();
+  self.input.set_on_click(own fn(w: WidgetId, b: MouseButton) {
+    if (b != MouseButton::Left) {
+      return;
+    }
+    shared.get().with(fn(l: &var List<WidgetId>) {
+      l.push(w);
+    });
+  });
+  self.script_clicks = queue;
+}
+
+fn UIContext<P, R, S>::dispatch_script_clicks(var self&) {
+  var clicked = List::<WidgetId>();
+  if (let q& = self.script_clicks) {
+    q.get().with(fn(l: &var List<WidgetId>) {
+      swap(l, clicked);
+    });
+  }
+  for (let w in clicked.iter()) {
+    var handler = String();
+    if (let n& = self.world.get(kWidgetNode, w)) {
+      if (n.name.len() == 0) {
+        continue;
+      }
+      handler = from_str("on_");
+      handler.push_str(n.name.as_str());
+    } else {
+      continue;
+    }
+    let _ = self.call_handler(handler.as_str(), w);
+  }
+}
+
+fn UIContext<P, R, S>::call_handler(var self&, func_name: str, widget: WidgetId): bool {
+  var adapter = RhiTextureBackend::<R>(self.rhi);
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
+      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    },
+  };
+  return self.script.call_handler(self.world, ctx, func_name, widget);
 }
 
 fn UIContext<P, R, S>::add_extension<T: UiExtension>(var self&, key&: ComponentKey<T>, extension: T): u32 {
