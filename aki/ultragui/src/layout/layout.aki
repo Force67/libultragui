@@ -1,0 +1,579 @@
+// ugui/layout/layout.{h,cc}: runs the Yoga layout algorithm on a tree of
+// LayoutNodes, retaining the Yoga tree between calls.
+//
+// Differences in shape:
+// * `Compute(LayoutNode* nodes, u32 count, vp)` takes a slice. Because a
+//   NodeStore lives inside the engine, `compute(store_for(id).nodes, ...)`
+//   would lend the engine twice; `compute_store(root_id, vp)` runs Compute on
+//   the store for `root_id` (what ComputeWidgetLayout does).
+// * The C++ `Retained*` (created on first use, deleted by Reset) is the
+//   engine's own fields: the config (null until first compute), the retained
+//   Yoga trees and the node stores. reset() frees and empties them all.
+// * apply_style's setter function pointers are an axis enum dispatched by
+//   match (set_px / set_pct / set_auto below).
+
+module ultragui::layout::layout;
+
+import {HashMap} from akikit::containers::hash_map;
+import {List} from akikit::containers::list;
+import {max_f32} from ultragui::core::algorithm;
+import {Vec2} from ultragui::core::math;
+import {EdgeInsets, Rect} from ultragui::core::rect;
+import {AlignContent, AlignItems, AlignSelf, FlexDirection, FlexWrap, JustifyContent, Overflow, Position, Visibility} from ultragui::style::enums;
+import {Length, LengthUnit} from ultragui::style::property_types;
+import {Style} from ultragui::style::style;
+import {
+  YgConfigRef, YgNodeConstRef, YgNodeRef, YgSize, kYgAlignAuto, kYgAlignBaseline, kYgAlignCenter, kYgAlignFlexEnd,
+  kYgAlignFlexStart, kYgAlignSpaceAround, kYgAlignSpaceBetween, kYgAlignSpaceEvenly, kYgAlignStretch, kYgDirectionLtr,
+  kYgDisplayFlex, kYgDisplayNone, kYgEdgeBottom, kYgEdgeLeft, kYgEdgeRight, kYgEdgeTop, kYgFlexDirectionColumn,
+  kYgFlexDirectionColumnReverse, kYgFlexDirectionRow, kYgFlexDirectionRowReverse, kYgGutterAll, kYgGutterColumn, kYgGutterRow,
+  kYgJustifyCenter, kYgJustifyFlexEnd, kYgJustifyFlexStart, kYgJustifySpaceAround, kYgJustifySpaceBetween,
+  kYgJustifySpaceEvenly, kYgOverflowHidden, kYgOverflowScroll, kYgOverflowVisible, kYgPositionTypeAbsolute,
+  kYgPositionTypeRelative, kYgUndefined, kYgWrapNoWrap, kYgWrapWrap, kYgWrapWrapReverse, yg_config_free, yg_config_new,
+  yg_node_calculate_layout, yg_node_free_recursive, yg_node_get_child, yg_node_get_context, yg_node_insert_child,
+  yg_node_layout_get_height, yg_node_layout_get_left, yg_node_layout_get_margin, yg_node_layout_get_padding,
+  yg_node_layout_get_top, yg_node_layout_get_width, yg_node_mark_dirty, yg_node_new_with_config, yg_node_set_context,
+  yg_node_set_measure_func, yg_node_style_set_align_content, yg_node_style_set_align_items, yg_node_style_set_align_self,
+  yg_node_style_set_aspect_ratio, yg_node_style_set_display, yg_node_style_set_flex_basis, yg_node_style_set_flex_basis_auto,
+  yg_node_style_set_flex_basis_percent, yg_node_style_set_flex_direction, yg_node_style_set_flex_grow,
+  yg_node_style_set_flex_shrink, yg_node_style_set_flex_wrap, yg_node_style_set_gap, yg_node_style_set_height,
+  yg_node_style_set_height_auto, yg_node_style_set_height_percent, yg_node_style_set_justify_content,
+  yg_node_style_set_margin, yg_node_style_set_max_height, yg_node_style_set_max_height_percent, yg_node_style_set_max_width,
+  yg_node_style_set_max_width_percent, yg_node_style_set_min_height, yg_node_style_set_min_height_percent,
+  yg_node_style_set_min_width, yg_node_style_set_min_width_percent, yg_node_style_set_overflow, yg_node_style_set_padding,
+  yg_node_style_set_position, yg_node_style_set_position_type, yg_node_style_set_width, yg_node_style_set_width_auto,
+  yg_node_style_set_width_percent,
+} from ultragui::sys::yoga;
+
+// ~0u: no node (parent / first_child / next_sibling).
+pub comptime let kNoNode: u32 = 0xFFFF_FFFF;
+
+// A node in the layout tree. Each node has a Style and produces a computed
+// Rect. This is the input/output structure for the layout algorithm.
+pub struct LayoutNode : Copy {
+  // Input
+  pub var style: Style = Style {}
+  pub var id: u32 = 0  // Widget ID for mapping back
+
+  // Intrinsic content size (e.g. text bounding box, image size)
+  pub var intrinsic_width: f32 = 0.0
+  pub var intrinsic_height: f32 = 0.0
+
+  // Tree structure (indices into the node array)
+  pub var parent: u32 = kNoNode
+  pub var first_child: u32 = kNoNode
+  pub var next_sibling: u32 = kNoNode
+  pub var child_count: u32 = 0
+
+  // Output (computed by layout)
+  pub var computed_rect: Rect = Rect {}          // Final position + size in absolute coords
+  pub var content_rect: Rect = Rect {}           // Inner rect (after padding + border)
+  pub var computed_margin: EdgeInsets = EdgeInsets {}   // Resolved margins
+  pub var computed_padding: EdgeInsets = EdgeInsets {}  // Resolved padding
+
+  // Dirty tracking
+  pub var layout_dirty: bool = true
+  // Refreshed from the widget this frame, rather than carried over from the
+  // last one. Only a node whose inputs moved needs its style re-applied.
+  pub var dirty: bool = true
+}
+
+// Viewport info needed for resolving vw/vh/frac units
+pub struct LayoutViewport : Copy {
+  pub var width: f32 = 1280.0
+  pub var height: f32 = 720.0
+  pub var scale: f32 = 1.0  // Viewport scale factor applied to all px values
+}
+
+// The retained node array for a root. Kept across frames so a frame only has
+// to refresh the entries whose widgets changed; `widget_keys` is the widget id
+// per index, to spot a changed tree.
+pub struct NodeStore {
+  pub var nodes: List<LayoutNode> = List()
+  pub var widget_keys: List<u32> = List()
+}
+
+// --- Helpers: map ugui Style -> Yoga node style ---------------------------------
+
+// The length properties set_yoga_length_{w,h} write (the C++ passes the
+// setter function pointers).
+enum LengthProp as u8 { Width, Height, MinWidth, MinHeight, MaxWidth, MaxHeight }
+
+fn set_px(yg: YgNodeRef, prop: LengthProp, v: f32) {
+  unsafe {
+    match (prop) {
+      LengthProp::Width => yg_node_style_set_width(yg, v),
+      LengthProp::Height => yg_node_style_set_height(yg, v),
+      LengthProp::MinWidth => yg_node_style_set_min_width(yg, v),
+      LengthProp::MinHeight => yg_node_style_set_min_height(yg, v),
+      LengthProp::MaxWidth => yg_node_style_set_max_width(yg, v),
+      LengthProp::MaxHeight => yg_node_style_set_max_height(yg, v),
+    };
+  }
+}
+
+fn set_pct(yg: YgNodeRef, prop: LengthProp, v: f32) {
+  unsafe {
+    match (prop) {
+      LengthProp::Width => yg_node_style_set_width_percent(yg, v),
+      LengthProp::Height => yg_node_style_set_height_percent(yg, v),
+      LengthProp::MinWidth => yg_node_style_set_min_width_percent(yg, v),
+      LengthProp::MinHeight => yg_node_style_set_min_height_percent(yg, v),
+      LengthProp::MaxWidth => yg_node_style_set_max_width_percent(yg, v),
+      LengthProp::MaxHeight => yg_node_style_set_max_height_percent(yg, v),
+    };
+  }
+}
+
+// Only width and height have an auto setter (the C++ passes nullptr for the
+// min/max ones).
+fn set_auto(yg: YgNodeRef, prop: LengthProp) {
+  unsafe {
+    match (prop) {
+      LengthProp::Width => yg_node_style_set_width_auto(yg),
+      LengthProp::Height => yg_node_style_set_height_auto(yg),
+      _ => {},
+    };
+  }
+}
+
+// set_yoga_length_w / set_yoga_length_h: `height_axis` picks which viewport
+// side a frac resolves against.
+fn set_yoga_length(yg: YgNodeRef, len&: Length, vw: f32, vh: f32, scale: f32, prop: LengthProp, height_axis: bool) {
+  match (len.unit) {
+    LengthUnit::Px => set_px(yg, prop, len.value * scale),
+    LengthUnit::Percent => set_pct(yg, prop, len.value),
+    LengthUnit::Vw => set_px(yg, prop, len.value * 0.01 * vw),
+    LengthUnit::Vh => set_px(yg, prop, len.value * 0.01 * vh),
+    LengthUnit::Frac => set_px(yg, prop, len.value * (height_axis ? vh : vw)),
+    LengthUnit::Auto => set_auto(yg, prop),
+  };
+}
+
+fn map_flex_direction(d: FlexDirection): i32 => match (d) {
+  FlexDirection::Row => kYgFlexDirectionRow,
+  FlexDirection::Column => kYgFlexDirectionColumn,
+  FlexDirection::RowReverse => kYgFlexDirectionRowReverse,
+  FlexDirection::ColumnReverse => kYgFlexDirectionColumnReverse,
+};
+
+fn map_justify(j: JustifyContent): i32 => match (j) {
+  JustifyContent::Start => kYgJustifyFlexStart,
+  JustifyContent::End => kYgJustifyFlexEnd,
+  JustifyContent::Center => kYgJustifyCenter,
+  JustifyContent::SpaceBetween => kYgJustifySpaceBetween,
+  JustifyContent::SpaceAround => kYgJustifySpaceAround,
+  JustifyContent::SpaceEvenly => kYgJustifySpaceEvenly,
+};
+
+fn map_align_items(a: AlignItems): i32 => match (a) {
+  AlignItems::Start => kYgAlignFlexStart,
+  AlignItems::End => kYgAlignFlexEnd,
+  AlignItems::Center => kYgAlignCenter,
+  AlignItems::Stretch => kYgAlignStretch,
+  AlignItems::Baseline => kYgAlignBaseline,
+};
+
+fn map_align_self(a: AlignSelf): i32 => match (a) {
+  AlignSelf::Auto => kYgAlignAuto,
+  AlignSelf::Start => kYgAlignFlexStart,
+  AlignSelf::End => kYgAlignFlexEnd,
+  AlignSelf::Center => kYgAlignCenter,
+  AlignSelf::Stretch => kYgAlignStretch,
+};
+
+fn map_align_content(a: AlignContent): i32 => match (a) {
+  AlignContent::Start => kYgAlignFlexStart,
+  AlignContent::End => kYgAlignFlexEnd,
+  AlignContent::Center => kYgAlignCenter,
+  AlignContent::Stretch => kYgAlignStretch,
+  AlignContent::SpaceBetween => kYgAlignSpaceBetween,
+  AlignContent::SpaceAround => kYgAlignSpaceAround,
+  AlignContent::SpaceEvenly => kYgAlignSpaceEvenly,
+};
+
+fn map_wrap(w: FlexWrap): i32 => match (w) {
+  FlexWrap::NoWrap => kYgWrapNoWrap,
+  FlexWrap::Wrap => kYgWrapWrap,
+  FlexWrap::WrapReverse => kYgWrapWrapReverse,
+};
+
+fn map_overflow(o: Overflow): i32 => match (o) {
+  Overflow::Visible => kYgOverflowVisible,
+  Overflow::Hidden => kYgOverflowHidden,
+  Overflow::Scroll => kYgOverflowScroll,
+};
+
+// Sticky participates in normal flow like relative; the clamping to the
+// scroll parent's visible area is handled after layout in layout_tree's
+// apply_layout_results.
+fn map_position(p: Position): i32 => match (p) {
+  Position::Relative => kYgPositionTypeRelative,
+  Position::Absolute => kYgPositionTypeAbsolute,
+  Position::Sticky => kYgPositionTypeRelative,
+};
+
+// The node's context is its LayoutNode, re-pointed on every compute.
+extern fn yoga_measure_func(node: YgNodeConstRef, width: f32, width_mode: i32, height: f32, height_mode: i32): YgSize {
+  unsafe {
+    let ln = yg_node_get_context(node) as *const LayoutNode;
+    return YgSize { width: (*ln).intrinsic_width, height: (*ln).intrinsic_height };
+  }
+}
+
+// Write a Style onto a Yoga node.
+//
+// Every property is written on every pass, including the ones the style does
+// not constrain (cleared to YGUndefined instead of being left alone). The
+// nodes are retained between frames, so a property only written under a
+// condition keeps whatever the last frame that met the condition put there.
+// Yoga's setters compare before they mark a node dirty.
+fn apply_style(yg: YgNodeRef, s&: Style, vp&: LayoutViewport) {
+  let vw = vp.width;
+  let vh = vp.height;
+  let sc = vp.scale;
+
+  unsafe {
+    yg_node_style_set_flex_direction(yg, map_flex_direction(s.flex_direction));
+    yg_node_style_set_justify_content(yg, map_justify(s.justify_content));
+    yg_node_style_set_align_items(yg, map_align_items(s.align_items));
+    yg_node_style_set_align_self(yg, map_align_self(s.align_self));
+    yg_node_style_set_align_content(yg, map_align_content(s.align_content));
+    yg_node_style_set_flex_wrap(yg, map_wrap(s.flex_wrap));
+    yg_node_style_set_overflow(yg, map_overflow(s.overflow));
+    yg_node_style_set_position_type(yg, map_position(s.position));
+
+    yg_node_style_set_display(yg, s.visibility == Visibility::Collapsed ? kYgDisplayNone : kYgDisplayFlex);
+
+    // Flex
+    yg_node_style_set_flex_grow(yg, s.flex_grow);
+    yg_node_style_set_flex_shrink(yg, s.flex_shrink);
+    match (s.flex_basis.unit) {
+      LengthUnit::Auto => yg_node_style_set_flex_basis_auto(yg),
+      LengthUnit::Percent => yg_node_style_set_flex_basis_percent(yg, s.flex_basis.value),
+      // px/vw/vh/fr resolve to pixels along the main axis
+      _ => yg_node_style_set_flex_basis(
+        yg,
+        s.flex_basis.resolve(0.0, vw, vh, s.flex_direction == FlexDirection::Column || s.flex_direction == FlexDirection::ColumnReverse) *
+          sc),
+    };
+  }
+
+  // Sizing
+  set_yoga_length(yg, s.width, vw, vh, sc, LengthProp::Width, false);
+  set_yoga_length(yg, s.height, vw, vh, sc, LengthProp::Height, true);
+
+  // Min/max: the defaults (min 0, max 1e6) mean "unconstrained", which is
+  // YGUndefined rather than a number Yoga would have to honour.
+  if (s.min_width.value > 0.0) {
+    set_yoga_length(yg, s.min_width, vw, vh, sc, LengthProp::MinWidth, false);
+  } else {
+    unsafe yg_node_style_set_min_width(yg, kYgUndefined);
+  }
+  if (s.min_height.value > 0.0) {
+    set_yoga_length(yg, s.min_height, vw, vh, sc, LengthProp::MinHeight, true);
+  } else {
+    unsafe yg_node_style_set_min_height(yg, kYgUndefined);
+  }
+  if (s.max_width.value < 1e5) {
+    set_yoga_length(yg, s.max_width, vw, vh, sc, LengthProp::MaxWidth, false);
+  } else {
+    unsafe yg_node_style_set_max_width(yg, kYgUndefined);
+  }
+  if (s.max_height.value < 1e5) {
+    set_yoga_length(yg, s.max_height, vw, vh, sc, LengthProp::MaxHeight, true);
+  } else {
+    unsafe yg_node_style_set_max_height(yg, kYgUndefined);
+  }
+
+  unsafe {
+    // Margin (pixel values: scale them)
+    yg_node_style_set_margin(yg, kYgEdgeTop, s.margin.top * sc);
+    yg_node_style_set_margin(yg, kYgEdgeRight, s.margin.right * sc);
+    yg_node_style_set_margin(yg, kYgEdgeBottom, s.margin.bottom * sc);
+    yg_node_style_set_margin(yg, kYgEdgeLeft, s.margin.left * sc);
+
+    // Padding (pixel values: scale them)
+    yg_node_style_set_padding(yg, kYgEdgeTop, s.padding.top * sc);
+    yg_node_style_set_padding(yg, kYgEdgeRight, s.padding.right * sc);
+    yg_node_style_set_padding(yg, kYgEdgeBottom, s.padding.bottom * sc);
+    yg_node_style_set_padding(yg, kYgEdgeLeft, s.padding.left * sc);
+
+    // Gap: uniform, with optional per-axis overrides. A negative per-axis
+    // value means "defer to the uniform gap" (undefined to Yoga).
+    yg_node_style_set_gap(yg, kYgGutterAll, s.gap > 0.0 ? s.gap * sc : kYgUndefined);
+    yg_node_style_set_gap(yg, kYgGutterRow, s.row_gap >= 0.0 ? s.row_gap * sc : kYgUndefined);
+    yg_node_style_set_gap(yg, kYgGutterColumn, s.column_gap >= 0.0 ? s.column_gap * sc : kYgUndefined);
+
+    // Aspect ratio
+    yg_node_style_set_aspect_ratio(yg, s.aspect_ratio > 0.0 ? s.aspect_ratio : kYgUndefined);
+
+    // Position offsets (resolve, then scale the px result)
+    if (!s.top.is_auto()) {
+      yg_node_style_set_position(yg, kYgEdgeTop, s.top.resolve(0.0, vw, vh, true) * sc);
+    } else {
+      yg_node_style_set_position(yg, kYgEdgeTop, kYgUndefined);
+    }
+    if (!s.right_offset.is_auto()) {
+      yg_node_style_set_position(yg, kYgEdgeRight, s.right_offset.resolve(0.0, vw, vh, false) * sc);
+    } else {
+      yg_node_style_set_position(yg, kYgEdgeRight, kYgUndefined);
+    }
+    if (!s.bottom.is_auto()) {
+      yg_node_style_set_position(yg, kYgEdgeBottom, s.bottom.resolve(0.0, vw, vh, true) * sc);
+    } else {
+      yg_node_style_set_position(yg, kYgEdgeBottom, kYgUndefined);
+    }
+    if (!s.left_offset.is_auto()) {
+      yg_node_style_set_position(yg, kYgEdgeLeft, s.left_offset.resolve(0.0, vw, vh, false) * sc);
+    } else {
+      yg_node_style_set_position(yg, kYgEdgeLeft, kYgUndefined);
+    }
+  }
+}
+
+// --- Readback: Yoga results -> LayoutNode -------------------------------------------
+
+fn readback_results(yg: YgNodeRef, var nodes&: [LayoutNode], node_index: u32, offset_x: f32, offset_y: f32) {
+  let ygc = unsafe (yg as YgNodeConstRef);
+  let x = unsafe yg_node_layout_get_left(ygc) + offset_x;
+  let y = unsafe yg_node_layout_get_top(ygc) + offset_y;
+  let w = unsafe yg_node_layout_get_width(ygc);
+  let h = unsafe yg_node_layout_get_height(ygc);
+
+  var node& = nodes[node_index as usize];
+  node.computed_rect = Rect { x, y, w, h };
+
+  unsafe {
+    node.computed_padding = EdgeInsets {
+      top: yg_node_layout_get_padding(ygc, kYgEdgeTop),
+      right: yg_node_layout_get_padding(ygc, kYgEdgeRight),
+      bottom: yg_node_layout_get_padding(ygc, kYgEdgeBottom),
+      left: yg_node_layout_get_padding(ygc, kYgEdgeLeft),
+    };
+
+    node.computed_margin = EdgeInsets {
+      top: yg_node_layout_get_margin(ygc, kYgEdgeTop),
+      right: yg_node_layout_get_margin(ygc, kYgEdgeRight),
+      bottom: yg_node_layout_get_margin(ygc, kYgEdgeBottom),
+      left: yg_node_layout_get_margin(ygc, kYgEdgeLeft),
+    };
+  }
+
+  node.content_rect = Rect {
+    x: x + node.computed_padding.left,
+    y: y + node.computed_padding.top,
+    w: max_f32(w - node.computed_padding.horizontal(), 0.0),
+    h: max_f32(h - node.computed_padding.vertical(), 0.0),
+  };
+
+  node.layout_dirty = false;
+
+  // Recurse children: Yoga positions are relative to the parent's border box
+  // (padding is already in the child's position), so pass only the parent's
+  // absolute origin.
+  var child_idx = node.first_child;
+  var yg_child_i: usize = 0;
+  while (child_idx != kNoNode) {
+    let child_yg = unsafe yg_node_get_child(yg, yg_child_i);
+    readback_results(child_yg, nodes, child_idx, x, y);
+    child_idx = nodes[child_idx as usize].next_sibling;
+    yg_child_i += 1;
+  }
+}
+
+// --- Main entry point ---------------------------------------------------------------
+
+// What the retained tree was built for. compute rebuilds when any of this
+// stops matching: the Yoga nodes are addressed by index, so a tree of a
+// different shape would pair widgets with someone else's node.
+struct RetainedShape : Copy, Equal {
+  pub var id: u32 = 0
+  pub var parent: u32 = kNoNode
+  pub var first_child: u32 = kNoNode
+  pub var next_sibling: u32 = kNoNode
+  pub var measured: bool = false
+}
+
+fn shape_of(n&: LayoutNode): RetainedShape => RetainedShape {
+  id: n.id,
+  parent: n.parent,
+  first_child: n.first_child,
+  next_sibling: n.next_sibling,
+  // A leaf with intrinsic content measures itself through the context.
+  measured: n.first_child == kNoNode && (n.intrinsic_width > 0.0 || n.intrinsic_height > 0.0),
+};
+
+// One retained Yoga tree.
+struct RetainedTree {
+  pub var nodes: List<YgNodeRef> = List()
+  pub var shape: List<RetainedShape> = List()
+  // The style last written to each node. apply_style is a pure function of
+  // (style, viewport), so a node whose style has not moved can skip it.
+  pub var applied: List<Style> = List()
+  pub var applied_viewport: LayoutViewport = LayoutViewport { width: 0.0, height: 0.0, scale: 0.0 }
+  // Last intrinsic size handed to each measured node. Yoga caches what a
+  // measure function returned, so a re-shaped node is marked dirty by hand.
+  pub var intrinsic: List<Vec2> = List()
+}
+
+// Runs the Yoga layout algorithm on a tree of LayoutNodes.
+//
+// The Yoga tree is retained between calls, so Yoga re-solves only the
+// subtrees that changed. compute notices when the shape it is handed no
+// longer matches the tree it holds and rebuilds. One engine serves several
+// trees (the main root, each overlay, each offscreen pass), keyed by root
+// widget id so they do not evict one another.
+pub struct LayoutEngine {
+  var config: YgConfigRef? = none
+  var trees: HashMap<u32, RetainedTree> = HashMap()
+  var stores: HashMap<u32, NodeStore> = HashMap()
+
+  pub fn LayoutEngine(): LayoutEngine => LayoutEngine {};
+
+  // StoreFor: the retained node array for a root.
+  pub fn store_for(var self&, root_id: u32): &var NodeStore => self.stores.get_or_insert(root_id, NodeStore {});
+
+  // Compute layout for all nodes. The root node fills the viewport.
+  pub fn compute(var self&, var nodes&: [LayoutNode], viewport&: LayoutViewport);
+
+  // Compute on store_for(root_id).nodes.
+  pub fn compute_store(var self&, root_id: u32, viewport&: LayoutViewport);
+
+  // Drop the retained trees (and stores). Only needed to release the memory
+  // early; a changed tree is detected and rebuilt by compute on its own.
+  pub fn reset(var self&);
+
+  fn ~LayoutEngine();
+}
+
+fn free_trees(var trees&: HashMap<u32, RetainedTree>) {
+  // Each tree frees independently, so the map's order does not matter.
+  for (let (root_id, tree) in trees.iter()) {
+    if (let first = tree.nodes.first()) {
+      unsafe yg_node_free_recursive(first);
+    }
+  }
+}
+
+fn LayoutEngine::~LayoutEngine() {
+  free_trees(self.trees);
+  if (let c = self.config) {
+    unsafe yg_config_free(c);
+  }
+}
+
+fn LayoutEngine::reset(var self&) {
+  free_trees(self.trees);
+  if (let c = self.config) {
+    unsafe yg_config_free(c);
+  }
+  self.config = none;
+  self.trees = HashMap();
+  self.stores = HashMap();
+}
+
+fn LayoutEngine::compute_store(var self&, root_id: u32, viewport&: LayoutViewport) {
+  var store& = self.stores.get_or_insert(root_id, NodeStore {});
+  if (store.nodes.len() == 0) {
+    return;
+  }
+  if (self.config == none) {
+    self.config = unsafe yg_config_new();
+  }
+  compute_tree(self.trees, self.config!, store.nodes.as_slice_var(), viewport);
+}
+
+fn LayoutEngine::compute(var self&, var nodes&: [LayoutNode], viewport&: LayoutViewport) {
+  if (#nodes == 0) {
+    return;
+  }
+  if (self.config == none) {
+    self.config = unsafe yg_config_new();
+  }
+  compute_tree(self.trees, self.config!, nodes, viewport);
+}
+
+fn compute_tree(var trees&: HashMap<u32, RetainedTree>, config: YgConfigRef, var nodes&: [LayoutNode], viewport&: LayoutViewport) {
+  let node_count = #nodes;
+  if (node_count == 0) {
+    return;
+  }
+  var r& = trees.get_or_insert(nodes[0].id, RetainedTree {});
+
+  var same_tree = r.shape.len() == node_count;
+  if (same_tree) {
+    for (let i in 0..node_count) {
+      if (!(r.shape[i] == shape_of(nodes[i]))) {
+        same_tree = false;
+        break;
+      }
+    }
+  }
+
+  if (!same_tree) {
+    if (let first = r.nodes.first()) {
+      unsafe yg_node_free_recursive(first);
+    }
+    r.nodes.clear();
+    r.shape.clear();
+    r.intrinsic.clear();
+    r.applied.clear();
+    r.applied_viewport = LayoutViewport { width: 0.0, height: 0.0, scale: 0.0 };  // force the first write
+    for (let i in 0..node_count) {
+      let yg = unsafe yg_node_new_with_config(config);
+      let shape = shape_of(nodes[i]);
+      r.nodes.push(yg);
+      r.shape.push(shape);
+      r.intrinsic.push(Vec2 {});
+      r.applied.push(Style {});
+      if (shape.measured) {
+        unsafe yg_node_set_measure_func(yg, @c_fn(yoga_measure_func));
+      }
+    }
+    for (let i in 0..node_count) {
+      var child_idx = nodes[i].first_child;
+      var insert_pos: usize = 0;
+      while (child_idx != kNoNode) {
+        unsafe yg_node_insert_child(r.nodes[i], r.nodes[child_idx as usize], insert_pos);
+        child_idx = nodes[child_idx as usize].next_sibling;
+        insert_pos += 1;
+      }
+    }
+  }
+
+  // A resize changes what every vw/vh/scaled px resolves to, so nothing can be
+  // skipped on the pass that first sees a new viewport.
+  let viewport_moved = !(r.applied_viewport.width == viewport.width && r.applied_viewport.height == viewport.height &&
+                         r.applied_viewport.scale == viewport.scale);
+  r.applied_viewport = viewport;
+
+  for (let i in 0..node_count) {
+    // The node array is the caller's scratch and moves between frames, so
+    // the context is re-pointed even when the tree was reused.
+    var n& = nodes[i];
+    let p = unsafe (&raw var n as *var u8);
+    unsafe yg_node_set_context(r.nodes[i], p);
+    // A node the caller did not refresh still holds last frame's style;
+    // a resize re-applies everything.
+    if (viewport_moved || (nodes[i].dirty && !(r.applied[i] == nodes[i].style))) {
+      apply_style(r.nodes[i], nodes[i].style, viewport);
+      r.applied[i] = nodes[i].style;
+    }
+
+    if (r.shape[i].measured) {
+      let intrinsic = Vec2 { x: nodes[i].intrinsic_width, y: nodes[i].intrinsic_height };
+      if (intrinsic.x != r.intrinsic[i].x || intrinsic.y != r.intrinsic[i].y) {
+        r.intrinsic[i] = intrinsic;
+        unsafe yg_node_mark_dirty(r.nodes[i]);
+      }
+    }
+  }
+
+  // Clean nodes whose available size is unchanged come straight out of
+  // Yoga's layout cache.
+  unsafe yg_node_calculate_layout(r.nodes[0], viewport.width, viewport.height, kYgDirectionLtr);
+
+  // Read back results into LayoutNodes (parent-relative -> absolute)
+  readback_results(r.nodes[0], nodes, 0, 0.0, 0.0);
+}
