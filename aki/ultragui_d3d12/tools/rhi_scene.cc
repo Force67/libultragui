@@ -17,11 +17,18 @@
 //     $(pkg-config --libs glfw3 freetype2 harfbuzz libvkd3d libvkd3d-utils vulkan) -ldl -lpthread \
 //     -o /tmp/d3d12_scene_cc
 //   aki/tools/xshot.sh /tmp/scene_cc.png 12 /tmp/d3d12_scene_cc
+//
+// SCENE_MODE=stress adds what the plain scene does not reach: a batch of
+// 24000 vertices / 36000 indices (the upload buffers grow), UpdateTexture on
+// the checker, and creating and destroying a texture and a render target
+// mid-run. SCENE_SHADER_DIR is the aki program's shader directory (the C++
+// backend always loads the build's, ULTRAGUI_HLSL_SHADER_DIR).
 #include <ugui/platform/platform.h>
 #include <ugui/rhi/rhi.h>
 #include <ugui/text/text_engine.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -78,6 +85,7 @@ int main() {
     fprintf(stderr, "platform init failed\n");
     return 1;
   }
+  bool stress = getenv("SCENE_MODE") && strcmp(getenv("SCENE_MODE"), "stress") == 0;
   RHI rhi;
   RHIConfig rc;
   rc.platform = &platform;
@@ -157,9 +165,41 @@ int main() {
   Quad(inner, 14, 14, 100, 100, 0, Vertex2D::PackColor(1, 0.9f, 0.2f, 1), Vertex2D::PackColor(1, 0.9f, 0.2f, 1),
        Vertex2D::PackRadii(50), 0.0f, 4.0f, Vertex2D::PackColor(0, 0, 0, 1), true);
 
+  // Stress mode: 100 x 60 small quads behind everything (24000 vertices).
+  Batch grid;
+  if (stress) {
+    for (u32 row = 0; row < 60; ++row)
+      for (u32 col = 0; col < 100; ++col) {
+        u32 c = Vertex2D::PackColor(col / 100.0f, row / 60.0f, 0.5f, 1.0f);
+        Quad(grid, static_cast<f32>(col * 8), static_cast<f32>(row * 8 + 100), 6.0f, 6.0f, 0.0f, c, c, 0, 0.0f, 0.0f, 0,
+             false);
+      }
+  }
+
   for (int frame = 0;; ++frame) {
     platform.PollEvents();
     if (platform.ShouldClose()) break;
+    if (stress && frame == 3) {
+      // UpdateTexture, DestroyTexture, DestroyRenderTarget mid-run.
+      u32 inverted[8 * 8];
+      for (u32 i = 0; i < 64; ++i) inverted[i] = checker_px[63 - i];
+      rhi.UpdateTexture(checker, inverted);
+      RHITextureHandle temp = rhi.CreateTexture(8, 8, RHIFormat::kRgba8Unorm, inverted, RHIFilter::kNearest);
+      RHITextureHandle temp_rt = rhi.CreateRenderTarget(32, 32);
+      rhi.DestroyTexture(temp);
+      rhi.DestroyTexture(temp_rt);
+      printf("scene: stress updates done (%u, %u)\n", temp, temp_rt);
+    }
+    if (stress && frame < 2) {
+      // Grow both ring slots' upload buffers before any other draw of a frame:
+      // the C++ backend frees the old buffer when one grows, so growing
+      // mid-frame leaves the earlier draws of that frame pointing at it.
+      if (!rhi.BeginFrame(Color{0.0f, 0.0f, 0.0f, 1.0f})) continue;
+      rhi.DrawTriangles(grid.v.data(), static_cast<u32>(grid.v.size()), grid.i.data(), static_cast<u32>(grid.i.size()),
+                        kInvalidTexture);
+      rhi.EndFrame();
+      continue;
+    }
     if (!rhi.AcquireFrame()) continue;
 
     // Outside any pass: video conversion and the offscreen target.
@@ -171,6 +211,10 @@ int main() {
     }
 
     if (!rhi.BeginFrame(Color{0.10f, 0.11f, 0.14f, 1.0f})) continue;
+
+    if (stress)
+      rhi.DrawTriangles(grid.v.data(), static_cast<u32>(grid.v.size()), grid.i.data(), static_cast<u32>(grid.i.size()),
+                        kInvalidTexture);
 
     // The same vertex array twice: the second call takes the dedup path.
     rhi.DrawTriangles(shapes.v.data(), static_cast<u32>(shapes.v.size()), shapes.i.data(), 12, kInvalidTexture);

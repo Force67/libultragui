@@ -11,6 +11,8 @@ module rhi_scene;
 import {List} from akikit::containers::list;
 import {eprintln, println} from akikit::logging;
 import {sleep, milliseconds} from akikit::time::time;
+import {String} from akikit::strings::string;
+import {get_environment_variable} from akikit::process::environment_variables;
 import {Color} from ultragui::core::color;
 import {Rect} from ultragui::core::rect;
 import {Vertex2D, pack_color, pack_radii, pack_radii_uniform} from ultragui::render::vertex;
@@ -91,9 +93,13 @@ pub fn main(): i32 {
     return 1;
   }
 
+  let stress = (get_environment_variable("SCENE_MODE") ?? String()) == "stress";
   var rhi = D3d12Rhi();
   var rc = RhiConfig {};
   rc.native_window = unsafe (window as *var u8);
+  if (let dir = get_environment_variable("SCENE_SHADER_DIR")) {
+    rc.shader_dir = dir;
+  }
   if (!rhi.init(rc)) {
     eprintln("rhi init failed");
     return 2;
@@ -171,6 +177,17 @@ pub fn main(): i32 {
   quad_full(inner, 14.0, 14.0, 100.0, 100.0, 0.0, pack_color(1.0, 0.9, 0.2, 1.0), pack_color(1.0, 0.9, 0.2, 1.0),
     pack_radii_uniform(50.0), 0.0, 4.0, pack_color(0.0, 0.0, 0.0, 1.0), true);
 
+  // Stress mode: 100 x 60 small quads behind everything (24000 vertices).
+  var grid = Batch {};
+  if (stress) {
+    for (let row in 0..60u32) {
+      for (let col in 0..100u32) {
+        let c = pack_color(col as f32 / 100.0, row as f32 / 60.0, 0.5, 1.0);
+        quad_full(grid, (col * 8) as f32, (row * 8 + 100) as f32, 6.0, 6.0, 0.0, c, c, 0, 0.0, 0.0, 0, false);
+      }
+    }
+  }
+
   let atlas = rhi_handle_from_texture_id(te.atlas_texture());
 
   var frame: u32 = 0;
@@ -178,6 +195,33 @@ pub fn main(): i32 {
     unsafe { glfw_poll_events(); }
     if (unsafe glfw_window_should_close(window) != 0) {
       break;
+    }
+    if (stress && frame == 3) {
+      // UpdateTexture, DestroyTexture, DestroyRenderTarget mid-run.
+      var inverted = List::<u8>();
+      for (let i in 0..64usize) {
+        let k = (63 - i) * 4;
+        for (let b in 0..4usize) {
+          inverted.push(checker_px[k + b]);
+        }
+      }
+      rhi.update_texture(checker, inverted.as_slice() as bytes);
+      let temp = rhi.create_texture(8, 8, RhiFormat::Rgba8Unorm, inverted.as_slice() as bytes, RhiFilter::Nearest);
+      let temp_rt = rhi.create_render_target(32, 32);
+      rhi.destroy_texture(temp);
+      rhi.destroy_texture(temp_rt);
+      println(f"scene: stress updates done ({temp}, {temp_rt})");
+    }
+    if (stress && frame < 2) {
+      // Grow both ring slots' upload buffers before any other draw of a frame:
+      // the C++ backend frees the old buffer when one grows, so growing
+      // mid-frame leaves the earlier draws of that frame pointing at it.
+      if (rhi.begin_frame(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })) {
+        rhi.draw_triangles(grid.v.as_slice(), grid.i.as_slice(), kInvalidTexture);
+        rhi.end_frame();
+      }
+      frame += 1;
+      continue;
     }
     if (!rhi.acquire_frame()) {
       continue;
@@ -192,6 +236,10 @@ pub fn main(): i32 {
 
     if (!rhi.begin_frame(Color { r: 0.10, g: 0.11, b: 0.14, a: 1.0 })) {
       continue;
+    }
+
+    if (stress) {
+      rhi.draw_triangles(grid.v.as_slice(), grid.i.as_slice(), kInvalidTexture);
     }
 
     // The same vertex array twice: the second call takes the dedup path.
