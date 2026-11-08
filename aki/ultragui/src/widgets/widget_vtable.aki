@@ -38,6 +38,7 @@ import {radio_click, radio_draw, radio_measure} from ultragui::widgets::radio;
 import {
   scroll_view_draw, scroll_view_hit_test, scroll_view_layout, scroll_view_scroll, scroll_view_update,
 } from ultragui::widgets::scroll_view;
+import {slider_click, slider_draw, slider_measure, slider_update} from ultragui::widgets::slider;
 import {text_draw, text_measure} from ultragui::widgets::text;
 import {toggle_click, toggle_draw, toggle_measure, toggle_update} from ultragui::widgets::toggle;
 
@@ -46,6 +47,7 @@ import {toggle_click, toggle_draw, toggle_measure, toggle_update} from ultragui:
 // toggle, scroll view).
 pub fn custom_paint(kind: WidgetKind): bool => match (kind) {
   WidgetKind::Toggle => true,
+  WidgetKind::Slider => true,
   WidgetKind::ScrollView => true,
   _ => false,
 };
@@ -77,6 +79,10 @@ pub fn vt_draw(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: 
       toggle_draw(world, ctx, e, renderer);
       true
     },
+    WidgetKind::Slider => {
+      slider_draw(world, ctx, e, renderer);
+      true
+    },
     WidgetKind::ScrollView => {
       scroll_view_draw(world, ctx, e, renderer);
       true
@@ -92,6 +98,7 @@ pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, 
   WidgetKind::Checkbox => checkbox_measure(world, ctx, e),
   WidgetKind::Radio => radio_measure(world, ctx, e),
   WidgetKind::Toggle => toggle_measure(world, ctx, e),
+  WidgetKind::Slider => slider_measure(world, ctx, e),
   _ => none,
 };
 
@@ -109,6 +116,7 @@ pub fn vt_on_click(kind: WidgetKind, var world&: World, var ctx&: WidgetContext,
   WidgetKind::Checkbox => checkbox_click(world, ctx, e),
   WidgetKind::Radio => radio_click(world, ctx, e),
   WidgetKind::Toggle => toggle_click(world, ctx, e),
+  WidgetKind::Slider => slider_click(world, ctx, e),
   _ => none,
 };
 
@@ -117,6 +125,10 @@ pub fn vt_on_update(kind: WidgetKind, var world&: World, var ctx&: WidgetContext
   match (kind) {
     WidgetKind::Toggle => {
       toggle_update(world, ctx, e, dt);
+      true
+    },
+    WidgetKind::Slider => {
+      slider_update(world, ctx, e, dt);
       true
     },
     WidgetKind::ScrollView => {

@@ -1,0 +1,214 @@
+// ugui/widgets/slider.{h,cc}: a horizontal slider (WidgetKind::Slider), a
+// generic widget carrying a SliderContent (value, range, on_change, the
+// transient `dragging` flag). Behaviour: the Slider arms in
+// widgets::widget_vtable (custom paint: draw + measure + click + update).
+//
+// Shape differences: the World comes first; reading the mouse goes through
+// the context's platform, as the C++ went through the widget's context.
+
+module ultragui::widgets::slider;
+
+import {swap} from akikit::algorithm;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {clamp} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii_uniform} from ultragui::render::vertex;
+import {WidgetState, has_state} from ultragui::style::enums;
+import {CallbackEnv, F32Handler} from ultragui::widgets::callbacks;
+import {
+  WidgetKind, computed_style, input_to_layout_point, kStyleC, kTransform, kWidgetNode, mark_paint_dirty, ui_scale,
+  widget_context_of, widget_state_of,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// Data for a slider widget.
+pub struct SliderContent {
+  pub var value: f32 = 0.0
+  pub var min: f32 = 0.0
+  pub var max: f32 = 1.0
+  pub var dragging: bool = false
+  pub var on_change: F32Handler? = none
+}
+
+pub static let kSliderContent: ComponentKey<SliderContent> = ComponentKey();
+
+// UpdateValueFromMouse: map the mouse onto the track and, if the value
+// changed, store it and fire on_change.
+fn update_value_from_mouse(var world&: World, var ctx&: WidgetContext, e: WidgetId) {
+  let wc& = widget_context_of(world, ctx, e) else {
+    return;
+  };
+  var p& = wc.platform else {
+    return;
+  };
+  let mouse = p.input_queue().mouse_pos;
+  let mouse_x = input_to_layout_point(world, e, mouse).x;
+  let content = world.get(kTransform, e)!.content_rect;
+  let track_x = content.x;
+  let track_w = content.w;
+  if (track_w <= 0.0) {
+    return;
+  }
+
+  let c& = world.get_var(kSliderContent, e) else {
+    return;
+  };
+  let t = clamp((mouse_x - track_x) / track_w, 0.0, 1.0);
+  let new_value = c.min + t * (c.max - c.min);
+  if (new_value == c.value) {
+    return;
+  }
+  c.value = new_value;
+  let value = c.value;
+  mark_paint_dirty(world, e);
+  var slot: F32Handler? = none;
+  if (var c1& = world.get_var(kSliderContent, e)) {
+    swap(c1.on_change, slot);
+  }
+  if (let handler = slot) {
+    {
+      var env = CallbackEnv { world, ctx };
+      handler(env, value);
+    }
+    if (var c2& = world.get_var(kSliderContent, e)) {
+      if (c2.on_change == none) {
+        c2.on_change = handler;
+      }
+    }
+  }
+}
+
+// SliderMeasure: 200x24 plus padding.
+pub fn slider_measure(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  let st& = world.get(kStyleC, e)!.style;
+  return (200.0 + st.padding.horizontal(), 24.0 + st.padding.vertical());
+}
+
+comptime let kTrackHeight: f32 = 4.0;
+comptime let kTrackRadius: f32 = 2.0;
+comptime let kThumbSize: f32 = 16.0;
+comptime let kThumbRadius: f32 = 8.0;
+
+// SliderDraw: the whole widget (custom paint). border_color drives the
+// track, background the fill, text_color the thumb.
+pub fn slider_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  let c& = world.get(kSliderContent, e) else {
+    return;
+  };
+
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+  let alpha = s.opacity;
+
+  let range = c.max - c.min;
+  let normalized = range > 0.0 ? clamp((c.value - c.min) / range, 0.0, 1.0) : 0.0;
+
+  let content = world.get(kTransform, e)!.content_rect;
+  let track_x = content.x;
+  let track_w = content.w;
+  let track_y = content.y + (content.h - kTrackHeight) * 0.5;
+  let track_radii = pack_radii_uniform(kTrackRadius);
+
+  let track_color = s.border_color.a > 0.0 ?
+    s.border_color.with_alpha(s.border_color.a * alpha) : Color::rgba(0.16, 0.16, 0.16, alpha);
+  let fill_color = s.background.a > 0.0 ?
+    s.background.with_alpha(s.background.a * alpha) : Color::rgba(0.29, 0.48, 1.0, alpha);
+  let thumb_color = s.text_color.with_alpha(s.text_color.a * alpha);
+
+  renderer.draw_rect(Rect { x: track_x, y: track_y, w: track_w, h: kTrackHeight }, track_color, track_radii);
+
+  let fill_w = normalized * track_w;
+  if (fill_w > 0.0) {
+    renderer.draw_rect(Rect { x: track_x, y: track_y, w: fill_w, h: kTrackHeight }, fill_color, track_radii);
+  }
+
+  let thumb_x = track_x + fill_w - kThumbSize * 0.5;
+  let thumb_y = content.y + (content.h - kThumbSize) * 0.5;
+  let thumb_radii = pack_radii_uniform(kThumbRadius);
+  renderer.draw_rect(Rect { x: thumb_x, y: thumb_y, w: kThumbSize, h: kThumbSize }, thumb_color, thumb_radii);
+}
+
+// SliderClick: start dragging and jump to the pointer.
+pub fn slider_click(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool {
+  let c& = world.get_var(kSliderContent, e) else {
+    return true;
+  };
+  c.dragging = true;
+  update_value_from_mouse(world, ctx, e);
+  return true;
+}
+
+// SliderUpdate: follow the pointer while pressed, else end the drag.
+pub fn slider_update(var world&: World, var ctx&: WidgetContext, e: WidgetId, dt: f64) {
+  if (!world.has(kSliderContent, e)) {
+    return;
+  }
+  var has_platform = false;
+  if (let wc& = widget_context_of(world, ctx, e)) {
+    has_platform = wc.platform != none;
+  }
+  if (has_state(widget_state_of(world, e), WidgetState::Pressed) && has_platform) {
+    update_value_from_mouse(world, ctx, e);
+  } else {
+    var c& = world.get_var(kSliderContent, e)!;
+    if (c.dragging) {
+      c.dragging = false;
+    }
+  }
+}
+
+// CreateSlider: a widget tagged Slider with a SliderContent.
+pub fn create_slider(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::Slider;
+  world.add(kSliderContent, e, SliderContent {});
+  return e;
+}
+
+// SetSliderValue: clamped to [min, max]. Does not fire on_change.
+pub fn set_slider_value(var world&: World, e: WidgetId, value: f32) {
+  var c& = world.get_or_add(kSliderContent, e, SliderContent {});
+  c.value = clamp(value, c.min, c.max);
+  mark_paint_dirty(world, e);
+}
+
+// SliderValue: 0 if `e` is not a slider.
+pub fn slider_value(world&: World, e: WidgetId): f32 {
+  if (let c& = world.get(kSliderContent, e)) {
+    return c.value;
+  }
+  return 0.0;
+}
+
+// SliderMin: 0 if `e` is not a slider.
+pub fn slider_min(world&: World, e: WidgetId): f32 {
+  if (let c& = world.get(kSliderContent, e)) {
+    return c.min;
+  }
+  return 0.0;
+}
+
+// SliderMax: 0 if `e` is not a slider.
+pub fn slider_max(world&: World, e: WidgetId): f32 {
+  if (let c& = world.get(kSliderContent, e)) {
+    return c.max;
+  }
+  return 0.0;
+}
+
+pub fn set_slider_min(var world&: World, e: WidgetId, min: f32) {
+  world.get_or_add(kSliderContent, e, SliderContent {}).min = min;
+}
+
+pub fn set_slider_max(var world&: World, e: WidgetId, max: f32) {
+  world.get_or_add(kSliderContent, e, SliderContent {}).max = max;
+}
+
+// SetSliderChange: run with the new value when the user drags the slider.
+pub fn set_slider_change(var world&: World, e: WidgetId, handler: F32Handler) {
+  world.get_or_add(kSliderContent, e, SliderContent {}).on_change = handler;
+}
