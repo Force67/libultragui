@@ -1,0 +1,19 @@
+// cmake/EmbedHlsl.cmake: shaders/hlsl/{quad,text,video}.hlsl as constants.
+//
+// The C++ wraps the files into a generated header of raw string literals so
+// the D3D11 path needs no shader files at run time; `@embed` does the same
+// here, straight from shaders/hlsl, which stays the one place the shaders are
+// written (D3D12 compiles the same files with dxc).
+
+module ultragui_d3d11::hlsl_embedded;
+
+static let kQuadBytes: bytes = @embed("../../../shaders/hlsl/quad.hlsl");
+static let kTextBytes: bytes = @embed("../../../shaders/hlsl/text.hlsl");
+static let kVideoBytes: bytes = @embed("../../../shaders/hlsl/video.hlsl");
+
+fn text_of(b: bytes): str => unsafe @str(@ptr(b) as *const c8, #b);
+
+// kQuadHlsl, kTextHlsl, kVideoHlsl
+pub fn quad_hlsl(): str => text_of(kQuadBytes);
+pub fn text_hlsl(): str => text_of(kTextBytes);
+pub fn video_hlsl(): str => text_of(kVideoBytes);
