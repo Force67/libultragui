@@ -44,14 +44,14 @@ import {compile_hlsl} from ultragui_d3d11::d3d_shader_compiler;
 import {vertex_input_layout} from ultragui_d3d11::d3d11_rhi;
 import {quad_hlsl, text_hlsl} from ultragui_d3d11::hlsl_embedded;
 import {BlendDesc, BufferDesc, D3dRect, DepthStencilDesc, DepthStencilopDesc, Hresult, InputElementDesc, MappedSubresource,
-  RasterizerDesc, RenderTargetBlendDesc, RenderTargetViewDesc, SamplerDesc, ShaderResourceViewDesc, SubresourceData,
+  RasterizerDesc, RenderTargetBlendDesc, RenderTargetViewDesc, SamplerDesc, SubresourceData,
   Texture2dDesc, Viewport, DxgiSampleDesc, kBindConstantBuffer, kBindIndexBuffer, kBindShaderResource, kBindVertexBuffer,
   kBlendInvSrcAlpha, kBlendOne, kBlendOpAdd, kBlendSrcAlpha, kColorWriteEnableAll, kComparisonAlways, kComparisonNever,
   kCpuAccessWrite, kCullNone, kDepthWriteMaskAll, kDxgiFormatB8G8R8A8Unorm, kDxgiFormatB8G8R8A8UnormSrgb,
   kDxgiFormatB8G8R8X8UnormSrgb, kDxgiFormatR32Uint, kDxgiFormatR8G8B8A8Unorm, kDxgiFormatR8G8B8A8UnormSrgb, kDxgiFormatR8Unorm,
-  kDxgiFormatUnknown, kFillSolid, kFilterMinMagMipLinear, kFilterMinMagMipPoint, kFloat32Max, kMapWriteDiscard,
-  kPrimitiveTopologyTriangleList, kPrimitiveTopologyUndefined, kStencilOpKeep, kTextureAddressClamp, kUsageDefault,
-  kUsageDynamic, failed, kViewportAndScissorrectObjectCountPerPipeline, succeeded} from ultragui_d3d11::sys::d3d11;
+  kFillSolid, kFilterMinMagMipLinear, kFilterMinMagMipPoint, kFloat32Max, kMapWriteDiscard,
+  kPrimitiveTopologyTriangleList, kStencilOpKeep, kTextureAddressClamp, kUsageDefault,
+  kUsageDynamic, succeeded} from ultragui_d3d11::sys::d3d11;
 import {Device, DeviceContext, Unknown, add_ref, context_draw_indexed, context_ds_get_shader, context_ds_set_shader,
   context_gs_set_shader, context_hs_get_shader, context_hs_set_shader, context_ia_get_index_buffer,
   context_ia_get_input_layout, context_ia_get_primitive_topology, context_ia_get_vertex_buffers, context_ia_set_index_buffer,

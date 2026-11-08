@@ -1,0 +1,171 @@
+// Dx11Renderer (ugui_impl_dx11) on a host-owned D3D11 device: the draw data of
+// support/draw_data_scene.aki rendered into the swap chain's back buffer. Its
+// screenshot is compared with the C++ backend's (tools/draw_data_scene_dx11.cc):
+//   aki/tools/compare_shots.sh /tmp/aki.png /tmp/cpp.png
+// UGUI_SCENE_SECS keeps the window open and redrawing that long;
+// UGUI_SCENE_UNORM=1 gives the host a non-sRGB back buffer, which the backend
+// meets with its self-encoding shaders. Without a display or a D3D11 device it
+// says so and passes.
+
+module d3d11_draw_data_test;
+
+import {println} from akikit::logging;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {from_str} from akikit::strings::string;
+import {kNullTextureId} from ultragui::render::draw_data;
+import {DynTextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {WindowConfig} from ultragui::platform::platform;
+import {TextEngine} from ultragui::text::text_engine;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {glfw_get_framebuffer_size} from ultragui_glfw::sys::glfw;
+import {DxgiModeDesc, DxgiRational, DxgiSampleDesc, DxgiSwapChainDesc, failed, kD3dDriverTypeHardware, kD3dFeatureLevel11_0,
+  kD3dFeatureLevel11_1, kD3d11SdkVersion, kDxgiFormatR8G8B8A8Unorm, kDxgiFormatR8G8B8A8UnormSrgb, kDxgiSwapEffectDiscard,
+  kDxgiUsageRenderTargetOutput, kIidDxgiDevice, kIidDxgiFactory, kIidTexture2d} from ultragui_d3d11::sys::d3d11;
+import {Device, DeviceContext, DxgiAdapter, DxgiDevice, DxgiFactory, SwapChain, Unknown, context_clear_render_target_view,
+  context_om_set_render_targets, d3d11_create_device, device_create_render_target_view, device_query_interface,
+  dxgi_adapter_get_parent, dxgi_device_get_adapter, dxgi_factory_create_swap_chain, release, swap_chain_get_buffer,
+  swap_chain_present} from ultragui_d3d11::sys::d3d11_vtbl;
+import {Dx11Renderer} from ultragui_d3d11::ugui_impl_dx11;
+import {Expect} from support::expect;
+import {big_pixels, build_frame, checker_pixels, ramp_pixels} from support::draw_data_scene;
+import {kFontPath, kSceneHeight, kSceneWidth} from support::scene;
+
+fn hold_seconds(): f64 {
+  let v = get_environment_variable("UGUI_SCENE_SECS") else { return 0.0; };
+  var secs = 0.0;
+  for (let c in v.as_str()) {
+    if (c >= '0' && c <= '9') {
+      secs = secs * 10.0 + (c as u32 - '0' as u32) as f64;
+    }
+  }
+  return secs;
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var platform = GlfwPlatform();
+  let wc = WindowConfig { width: kSceneWidth, height: kSceneHeight, title: from_str("d3d11_draw_data_test"), resizable: false,
+    opengl: false };
+  if (!platform.init(wc)) {
+    println("d3d11_draw_data_test: no display, skipped");
+    return 0;
+  }
+  let unorm = get_environment_variable("UGUI_SCENE_UNORM") != none;
+
+  // The host's own device and swap chain, as an application would have them.
+  var fb_w: i32 = 0;
+  var fb_h: i32 = 0;
+  unsafe glfw_get_framebuffer_size(platform.window(), &raw var fb_w, &raw var fb_h);
+  let sc_desc = DxgiSwapChainDesc {
+    buffer_desc: DxgiModeDesc {
+      width: fb_w as u32,
+      height: fb_h as u32,
+      refresh_rate: DxgiRational { numerator: 0, denominator: 1 },
+      format: unorm ? kDxgiFormatR8G8B8A8Unorm : kDxgiFormatR8G8B8A8UnormSrgb,
+      scanline_ordering: 0,
+      scaling: 0,
+    },
+    sample_desc: DxgiSampleDesc { count: 1, quality: 0 },
+    buffer_usage: kDxgiUsageRenderTargetOutput,
+    buffer_count: 2,
+    output_window: unsafe (platform.window() as *var u8),  // DXVK-native: the GLFWwindow* stands for the HWND
+    windowed: 1,
+    swap_effect: kDxgiSwapEffectDiscard,
+    flags: 0,
+  };
+  let levels = [kD3dFeatureLevel11_1, kD3dFeatureLevel11_0];
+  var achieved = kD3dFeatureLevel11_0;
+  var device: *var Device = null;
+  var context: *var DeviceContext = null;
+  let hr = unsafe d3d11_create_device(null, kD3dDriverTypeHardware, null, 0, @ptr(levels[..]) as *const u32, 2, kD3d11SdkVersion,
+    &raw var device, &raw var achieved, &raw var context);
+  if (failed(hr)) {
+    println("d3d11_draw_data_test: no Direct3D 11 device (DXVK-native over Vulkan), skipped");
+    platform.shutdown();
+    return 0;
+  }
+  var dxgi_device: *var Unknown = null;
+  var adapter: *var Unknown = null;
+  var factory: *var Unknown = null;
+  var swapchain: *var Unknown = null;
+  var back: *var Unknown = null;
+  var rtv: *var Unknown = null;
+  unsafe {
+    t.that(!failed(device_query_interface(device, &raw kIidDxgiDevice, &raw var dxgi_device)), "IDXGIDevice");
+    t.that(!failed(dxgi_device_get_adapter(dxgi_device as *var DxgiDevice, &raw var adapter)), "GetAdapter");
+    t.that(!failed(dxgi_adapter_get_parent(adapter as *var DxgiAdapter, &raw kIidDxgiFactory, &raw var factory)), "factory");
+    t.that(!failed(dxgi_factory_create_swap_chain(factory as *var DxgiFactory, device as *var Unknown, &raw sc_desc,
+      &raw var swapchain)), "CreateSwapChain");
+    release(factory);
+    release(adapter);
+    release(dxgi_device);
+    t.that(!failed(swap_chain_get_buffer(swapchain as *var SwapChain, 0, &raw kIidTexture2d, &raw var back)), "GetBuffer");
+    t.that(!failed(device_create_render_target_view(device, back, null, &raw var rtv)), "CreateRenderTargetView");
+    release(back);
+  }
+
+  var dx = Dx11Renderer();
+  t.that(!dx.init(null, context), "init without a device fails");
+  t.that(dx.init(device, context), "Dx11Renderer init");
+
+  var te = TextEngine();
+  t.that(te.init(), "text engine init");
+  let font = te.load_font(kFontPath);
+
+  let checker = checker_pixels();
+  let ramp = ramp_pixels();
+  let big = big_pixels();
+  let c = dx.create_texture(8, 8, RhiFormat::Rgba8Unorm, checker[..] as bytes, RhiFilter::Nearest);
+  let r = dx.create_texture(4, 4, RhiFormat::Bgra8Unorm, ramp[..] as bytes, RhiFilter::Linear);
+  let b = dx.create_texture(32, 24, RhiFormat::Rgba8Unorm, big[..] as bytes, RhiFilter::Linear);
+  t.that(c != kNullTextureId && r != kNullTextureId && b != kNullTextureId && c != r && r != b, "host textures");
+  t.that(dx.create_texture(0, 4, RhiFormat::Rgba8Unorm, ramp[..] as bytes, RhiFilter::Linear) == kNullTextureId, "empty texture");
+  t.that(dx.create_texture(4, 4, RhiFormat::Rgba32Float, ramp[..] as bytes, RhiFilter::Linear) == kNullTextureId, "float refused");
+  {
+    // The texture sink the UI would be handed.
+    var lent = DynTextureBackend::of(dx);
+    let extra = lent.create_texture(4, 4, RhiFormat::Bgra8Unorm, ramp[..] as bytes, RhiFilter::Nearest);
+    t.that(extra != kNullTextureId, "created through the sink");
+    lent.update_texture(extra, ramp[..] as bytes);
+    lent.destroy_texture(extra);
+  }
+
+  let clear = [0.07f32, 0.08f32, 0.12f32, 1.0f32];
+  var frames: i32 = 0;
+  let start = platform.time();
+  let hold = hold_seconds();
+  while (true) {
+    platform.poll_events();
+    te.begin_frame();
+    let frame = build_frame(te, font, c, r, b);
+    let atlas = te.atlas_pixels();
+    let size = te.atlas_size();
+    t.that(dx.update_font_atlas(atlas as bytes, size.x as u32, size.y as u32), "update_font_atlas");
+    var target = rtv;
+    unsafe {
+      context_om_set_render_targets(context, 1, &raw target as *const *var Unknown, null);
+      context_clear_render_target_view(context, rtv, @ptr(clear[..]) as *const f32);
+    }
+    dx.render_draw_data(frame.data());
+    unsafe swap_chain_present(swapchain as *var SwapChain, 1, 0);
+    frames += 1;
+    if (frames >= 3 && platform.time() - start >= hold) {
+      break;
+    }
+    if (platform.should_close()) {
+      break;
+    }
+  }
+
+  dx.shutdown();
+  te.shutdown();
+  unsafe {
+    release(rtv);
+    release(swapchain);
+    release(context);
+    release(device);
+  }
+  platform.shutdown();
+  return t.finish();
+}
