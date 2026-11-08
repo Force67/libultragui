@@ -1,0 +1,401 @@
+// ugui/lottie/lottie.{h,cc}: a Lottie animation backed by rlottie. Renders
+// frames on demand to a GPU texture each update().
+//
+//   var anim = LottieAnimation();
+//   anim.load(some(tex), "spinner.json", 64, 64);   // tex: a DynTextureBackend
+//   anim.play();
+//   // each frame:
+//   anim.update(dt, some(tex));
+//   // use anim.texture() on an Image widget
+//   anim.unload(some(tex));                          // before drop
+//
+// Shape differences (not behavior):
+// * The C++ keeps the `TextureBackend*` it was loaded with. A stored borrow
+//   cannot sit in a struct whose owner also owns the backend (UIContext), so
+//   every method that can render or free the texture takes the backend as an
+//   argument (`(&var DynTextureBackend)?`, `none` for the C++ nullptr: the
+//   animation then loads and plays but renders nothing). Pass the backend the
+//   animation was loaded with.
+// * The destructor cannot take that argument: `unload(backend)` releases the
+//   texture; a LottieAnimation dropped without it frees its CPU resources and
+//   leaks the texture, which the backend's own teardown still owns.
+// * `loadFromData(std::string(json), std::string(key))` is `load_data`; the
+//   C++ `Load(backend, path, w, h)` is `load`.
+// * `frameAtPos` is computed here from rlottie's own formula
+//   (`size_t(round(clamp(pos) * (totalFrame - 1)))`) rather than through the C
+//   API, whose `lottie_animation_get_frame_at_pos` narrows `pos` to float and
+//   can pick another frame than the C++'s double call.
+
+module ultragui_lottie::lottie;
+
+import {List} from akikit::containers::list;
+import {eprintln} from akikit::logging;
+import {clamp_min_max, min_f32} from ultragui::core::algorithm;
+import {TextureId, kNullTextureId} from ultragui::render::draw_data;
+import {DynTextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {RlottieAnimation} from ultragui_lottie::sys::rlottie;
+
+pub type LottieHandle = u32;
+pub comptime let kInvalidLottie: LottieHandle = 0;
+
+struct Impl {
+  pub var anim: RlottieAnimation  // rlottie's own type
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+
+  pub var pixel_buf: List<u32>  // ARGB32 premultiplied (rlottie native format)
+  pub var rgba_buf: List<u8>    // RGBA8 straight alpha (for GPU upload)
+  pub var texture: TextureId = kNullTextureId
+
+  // Playback state
+  pub var playing: bool = false
+  pub var looping: bool = true
+  pub var speed: f32 = 1.0
+  pub var current_time: f64 = 0.0
+  pub var last_rendered_frame: u32 = 0xFFFF_FFFF  // ~0u
+
+  // Animation info (cached from rlottie)
+  pub var total_frames: usize = 0
+  pub var frame_rate: f64 = 0.0
+  pub var duration: f64 = 0.0
+}
+
+// rlottie's frameAtPos for a double position.
+fn Impl::frame_at_pos(self&, pos_in: f64): usize {
+  var pos = pos_in;
+  if (pos < 0.0) {
+    pos = 0.0;
+  }
+  if (pos > 1.0) {
+    pos = 1.0;
+  }
+  let frame_duration = (self.total_frames as i64 - 1) as f64;  // long frameDuration()
+  return @saturating_cast(usize, @round(pos * frame_duration));
+}
+
+fn Impl::render_frame(var self&, frame_no: u32, backend: (&var DynTextureBackend)?) {
+  if (frame_no == self.last_rendered_frame) {
+    return;
+  }
+  var tex& = backend else {
+    return;
+  };
+  let width = self.width;
+  let height = self.height;
+
+  // Clear buffer to transparent
+  for (var p& in self.pixel_buf) {
+    p = 0;
+  }
+  self.anim.render_sync(frame_no as usize, self.pixel_buf.as_slice_var(), width as usize, height as usize);
+
+  // Convert ARGB32 premultiplied -> RGBA8 straight alpha
+  for (let i in 0..width * height) {
+    let argb = self.pixel_buf[i as usize];
+    var a = ((argb >> 24) & 0xFF) as u8;
+    var r = ((argb >> 16) & 0xFF) as u8;
+    var g = ((argb >> 8) & 0xFF) as u8;
+    var b = (argb & 0xFF) as u8;
+
+    // Un-premultiply
+    if (a > 0 && a < 255) {
+      let inv_a = 255.0 / (a as f32);
+      r = @saturating_cast(u8, min_f32(255.0, (r as f32) * inv_a));
+      g = @saturating_cast(u8, min_f32(255.0, (g as f32) * inv_a));
+      b = @saturating_cast(u8, min_f32(255.0, (b as f32) * inv_a));
+    }
+
+    let idx = (i * 4) as usize;
+    self.rgba_buf[idx + 0] = r;
+    self.rgba_buf[idx + 1] = g;
+    self.rgba_buf[idx + 2] = b;
+    self.rgba_buf[idx + 3] = a;
+  }
+
+  // Upload to GPU
+  if (self.texture == kNullTextureId) {
+    self.texture = tex.create_texture(width, height, RhiFormat::Rgba8Unorm, self.rgba_buf.as_slice() as bytes, RhiFilter::Linear);
+  } else {
+    tex.update_texture(self.texture, self.rgba_buf.as_slice() as bytes);
+  }
+
+  self.last_rendered_frame = frame_no;
+}
+
+fn Impl::from_animation(anim: RlottieAnimation, w: u32, h: u32): Impl {
+  var pixel_buf: List<u32> = List();
+  var rgba_buf: List<u8> = List();
+  for (let i in 0..w * h) {
+    pixel_buf.push(0);
+  }
+  for (let i in 0..w * h * 4) {
+    rgba_buf.push(0);
+  }
+  let total_frames = anim.total_frame();
+  let frame_rate = anim.frame_rate();
+  let duration = anim.duration();
+  return Impl { anim, width: w, height: h, pixel_buf, rgba_buf, total_frames, frame_rate, duration };
+}
+
+pub struct LottieAnimation {
+  var impl_: Impl?
+
+  pub fn LottieAnimation(): LottieAnimation => LottieAnimation { impl_: none };
+
+  // Load a Lottie JSON file and create a texture through `backend`.
+  pub fn load(var self&, backend: (&var DynTextureBackend)?, path: str, w: u32, h: u32): bool;
+
+  // Load from a JSON string in memory.
+  pub fn load_data(var self&, backend: (&var DynTextureBackend)?, json_data: str, key: str, w: u32, h: u32): bool;
+
+  // Advance the animation by dt seconds and re-render if the frame changed.
+  pub fn update(var self&, dt: f64, backend: (&var DynTextureBackend)?);
+
+  // Returns true if successfully loaded.
+  pub fn is_loaded(self&): bool => self.impl_ != none;
+
+  // The GPU texture containing the current frame. Updated by update().
+  pub fn texture(self&): TextureId;
+
+  // Rasterized dimensions.
+  pub fn width(self&): u32;
+  pub fn height(self&): u32;
+
+  // ----- Playback control -----
+  pub fn play(var self&);
+  pub fn pause(var self&);
+  pub fn stop(var self&, backend: (&var DynTextureBackend)?);  // resets to frame 0
+  pub fn set_loop(var self&, looping: bool);
+  pub fn set_speed(var self&, speed: f32);  // 1.0 = normal, 2.0 = double speed
+  pub fn seek(var self&, progress: f32, backend: (&var DynTextureBackend)?);  // 0.0: 1.0
+
+  pub fn is_playing(self&): bool;
+  pub fn is_looping(self&): bool;
+  pub fn speed(self&): f32;
+
+  // Total duration in seconds at speed=1.
+  pub fn duration(self&): f64;
+
+  // Current playback position (0.0: 1.0).
+  pub fn progress(self&): f32;
+
+  // Total frame count and current frame.
+  pub fn total_frames(self&): u32;
+  pub fn current_frame(self&): u32;
+  pub fn frame_rate(self&): f64;
+
+  // Release GPU and CPU resources: the texture goes back to `backend`.
+  pub fn unload(var self&, backend: (&var DynTextureBackend)?);
+}
+
+fn LottieAnimation::load(var self&, backend: (&var DynTextureBackend)?, path: str, w: u32, h: u32): bool {
+  self.unload(backend);
+
+  let anim = RlottieAnimation::from_file(path) else {
+    eprintln(f"ugui/lottie: failed to load '{path}'");
+    return false;
+  };
+  var impl = Impl::from_animation(anim, w, h);
+  // Render first frame immediately
+  impl.render_frame(0, backend);
+  self.impl_ = impl;
+  return true;
+}
+
+fn LottieAnimation::load_data(var self&, backend: (&var DynTextureBackend)?, json_data: str, key: str, w: u32, h: u32): bool {
+  self.unload(backend);
+
+  let anim = RlottieAnimation::from_data(json_data, key) else {
+    eprintln("ugui/lottie: failed to parse lottie data");
+    return false;
+  };
+  var impl = Impl::from_animation(anim, w, h);
+  impl.render_frame(0, backend);
+  self.impl_ = impl;
+  return true;
+}
+
+fn LottieAnimation::update(var self&, dt: f64, backend: (&var DynTextureBackend)?) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  if (!impl.playing || impl.total_frames == 0) {
+    return;
+  }
+
+  impl.current_time += dt * (impl.speed as f64);
+
+  let dur = impl.duration;
+  if (dur <= 0.0) {
+    return;
+  }
+
+  if (impl.looping) {
+    // Wrap time
+    while (impl.current_time >= dur) {
+      impl.current_time -= dur;
+    }
+    while (impl.current_time < 0.0) {
+      impl.current_time += dur;
+    }
+  } else {
+    if (impl.current_time >= dur) {
+      impl.current_time = dur;
+      impl.playing = false;
+    }
+    if (impl.current_time < 0.0) {
+      impl.current_time = 0.0;
+      impl.playing = false;
+    }
+  }
+
+  // Map time to frame
+  var pos = impl.current_time / dur;
+  pos = clamp_min_max(pos, 0.0, 1.0);
+  let frame = impl.frame_at_pos(pos);
+  impl.render_frame(frame as u32, backend);
+}
+
+fn LottieAnimation::texture(self&): TextureId {
+  let impl& = self.impl_ else {
+    return kNullTextureId;
+  };
+  return impl.texture;
+}
+
+fn LottieAnimation::width(self&): u32 {
+  let impl& = self.impl_ else {
+    return 0;
+  };
+  return impl.width;
+}
+
+fn LottieAnimation::height(self&): u32 {
+  let impl& = self.impl_ else {
+    return 0;
+  };
+  return impl.height;
+}
+
+fn LottieAnimation::play(var self&) {
+  if (var impl& = self.impl_) {
+    impl.playing = true;
+  }
+}
+
+fn LottieAnimation::pause(var self&) {
+  if (var impl& = self.impl_) {
+    impl.playing = false;
+  }
+}
+
+fn LottieAnimation::stop(var self&, backend: (&var DynTextureBackend)?) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  impl.playing = false;
+  impl.current_time = 0.0;
+  impl.render_frame(0, backend);
+}
+
+fn LottieAnimation::set_loop(var self&, looping: bool) {
+  if (var impl& = self.impl_) {
+    impl.looping = looping;
+  }
+}
+
+fn LottieAnimation::set_speed(var self&, speed: f32) {
+  if (var impl& = self.impl_) {
+    impl.speed = speed;
+  }
+}
+
+fn LottieAnimation::seek(var self&, progress: f32, backend: (&var DynTextureBackend)?) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  if (impl.total_frames == 0) {
+    return;
+  }
+  let prog = clamp_min_max(progress, 0.0, 1.0);
+  impl.current_time = (prog as f64) * impl.duration;
+  let frame = impl.frame_at_pos(prog as f64);
+  impl.render_frame(frame as u32, backend);
+}
+
+fn LottieAnimation::is_playing(self&): bool {
+  let impl& = self.impl_ else {
+    return false;
+  };
+  return impl.playing;
+}
+
+fn LottieAnimation::is_looping(self&): bool {
+  let impl& = self.impl_ else {
+    return false;
+  };
+  return impl.looping;
+}
+
+fn LottieAnimation::speed(self&): f32 {
+  let impl& = self.impl_ else {
+    return 1.0;
+  };
+  return impl.speed;
+}
+
+fn LottieAnimation::duration(self&): f64 {
+  let impl& = self.impl_ else {
+    return 0.0;
+  };
+  return impl.duration;
+}
+
+fn LottieAnimation::progress(self&): f32 {
+  let impl& = self.impl_ else {
+    return 0.0;
+  };
+  if (impl.duration <= 0.0) {
+    return 0.0;
+  }
+  return (impl.current_time / impl.duration) as f32;
+}
+
+fn LottieAnimation::total_frames(self&): u32 {
+  let impl& = self.impl_ else {
+    return 0;
+  };
+  return impl.total_frames as u32;
+}
+
+fn LottieAnimation::current_frame(self&): u32 {
+  let impl& = self.impl_ else {
+    return 0;
+  };
+  if (impl.total_frames == 0) {
+    return 0;
+  }
+  var pos = impl.duration > 0.0 ? impl.current_time / impl.duration : 0.0;
+  pos = clamp_min_max(pos, 0.0, 1.0);
+  return impl.frame_at_pos(pos) as u32;
+}
+
+fn LottieAnimation::frame_rate(self&): f64 {
+  let impl& = self.impl_ else {
+    return 0.0;
+  };
+  return impl.frame_rate;
+}
+
+fn LottieAnimation::unload(var self&, backend: (&var DynTextureBackend)?) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  if (impl.texture != kNullTextureId) {
+    if (var tex& = backend) {
+      tex.destroy_texture(impl.texture);
+    }
+  }
+  self.impl_ = none;
+}
