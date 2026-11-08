@@ -1,0 +1,429 @@
+// examples/game_overlay/main.cc: a game HUD overlay. A "game" (a spinning 3D
+// cube and twinkling stars, drawn straight through the Rhi) renders first;
+// the HUD (.ugui + Lua) is laid out and painted on top in the same paint
+// callback.
+//
+//   ultragui_game_overlay [font_path]
+//
+// Shape differences (not behavior):
+// * The C++ bakes ULTRAGUI_SHADER_DIR and ULTRAGUI_GAME_OVERLAY_DIR; here
+//   both are found from this package's directory.
+// * The C++ UIContext has the Lua runtime and the bindings of its default
+//   build (audio, Lottie, anim, video): ultragui_lua::lua_ui_context with
+//   add_lottie_lua and add_video_lua here.
+// * The paint lambda captures `&ui`; here it gets what it reads from the
+//   PaintEnv (the Rhi, `ui.time()`, `ui.root()`, the World and widget context
+//   PaintWidgetTree uses). Its own LayoutEngine is captured in a Mutex (an
+//   `own fn` keeps read-only captures).
+// * The click lambda is UIContext::set_script_click_dispatch (handlers run
+//   after the input router instead of inside it); `ui.script().Exec(..)` is
+//   UIContext::script_exec.
+// * std::sort of the six faces is intro_sort (libstdc++'s algorithm).
+
+module ultragui_game_overlay;
+
+import {List} from akikit::containers::list;
+import {eprintln, println} from akikit::logging;
+import {arguments} from akikit::process::command_line;
+import {Command} from akikit::process::child;
+import {output} from akikit::process::capture;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {path_exists} from akikit::filesystem::file_util;
+import {Mutex} from akikit::threading::mutex;
+import {String, from_str} from akikit::strings::string;
+import {intro_sort} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {LayoutEngine, LayoutViewport} from ultragui::layout::layout;
+import {compute_widget_layout} from ultragui::layout::layout_tree;
+import {paint_widget_tree} from ultragui::render::paint;
+import {Vertex2D, pack_color} from ultragui::render::vertex;
+import {Rhi} from ultragui::rhi::rhi;
+import {kInvalidTexture} from ultragui::rhi::rhi_types;
+import {kInvalidFont} from ultragui::text::text_engine;
+import {PaintEnv, UIConfig} from ultragui::ui_context;
+import {set_text} from ultragui::widgets::text;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {VulkanRhi} from ultragui_vulkan::vulkan_rhi;
+import {LuaBindings, lua_ui_context} from ultragui_lua::lua_ui_context;
+import {add_lottie_lua} from ultragui_lua_lottie::lua_lottie;
+import {add_video_lua} from ultragui_lua_video::lua_video;
+
+extern("fmodf") fn c_fmodf(x: f32, y: f32): f32;
+extern("sqrtf") fn c_sqrtf(x: f32): f32;
+
+// std::fmod / std::sqrt on floats (libm's fmodf, sqrtf).
+fn fmodf(x: f32, y: f32): f32 => unsafe c_fmodf(x, y);
+fn sqrtf(x: f32): f32 => unsafe c_sqrtf(x);
+
+// ---------------------------------------------------------------------------
+// Font discovery
+// ---------------------------------------------------------------------------
+
+fn find_font(): String? {
+  if (let env = get_environment_variable("ULTRAGUI_FONT")) {
+    if (path_exists(env.as_str())) {
+      return env;
+    }
+  }
+  var cmd = Command("sh");
+  cmd.arg("-c");
+  cmd.arg("fc-match -f '%{file}' 'sans:style=Regular' 2>/dev/null");
+  if (let out = output(cmd)) {
+    var n: usize = 0;
+    while (n < out.stdout.len() && n < 1023) {
+      n += 1;
+      if (out.stdout[n - 1] == 0x0A) {
+        break;
+      }
+    }
+    while (n > 0 && (out.stdout[n - 1] == 0x0A || out.stdout[n - 1] == 0x0D)) {
+      n -= 1;
+    }
+    var path = String();
+    if (n > 0 && path.push_utf8(out.stdout.as_slice()[..n] as bytes) && path_exists(path.as_str())) {
+      return path;
+    }
+  }
+  let candidates = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+  ];
+  for (let c in candidates) {
+    if (path_exists(c)) {
+      return from_str(c);
+    }
+  }
+  return none;
+}
+
+// ---------------------------------------------------------------------------
+// 3D math (minimal)
+// ---------------------------------------------------------------------------
+
+struct Vec3 : Copy {
+  pub var x: f32
+  pub var y: f32
+  pub var z: f32
+}
+
+fn rotate_y(v: Vec3, a: f32): Vec3 {
+  let c = @cos(a);
+  let s = @sin(a);
+  return Vec3 { x: v.x * c + v.z * s, y: v.y, z: -v.x * s + v.z * c };
+}
+
+fn rotate_x(v: Vec3, a: f32): Vec3 {
+  let c = @cos(a);
+  let s = @sin(a);
+  return Vec3 { x: v.x, y: v.y * c - v.z * s, z: v.y * s + v.z * c };
+}
+
+fn project(v: Vec3, screen_cx: f32, screen_cy: f32, focal: f32): (f32, f32) {
+  let s = focal / (focal + v.z);
+  return (screen_cx + v.x * s, screen_cy + v.y * s);
+}
+
+fn cross_product(a: Vec3, b: Vec3): Vec3 =>
+  Vec3 { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+
+fn dot(a: Vec3, b: Vec3): f32 => a.x * b.x + a.y * b.y + a.z * b.z;
+
+fn normalize(v0: Vec3): Vec3 {
+  var v = v0;
+  let len = sqrtf(dot(v, v));
+  if (len > 0.0) {
+    v.x /= len;
+    v.y /= len;
+    v.z /= len;
+  }
+  return v;
+}
+
+// ---------------------------------------------------------------------------
+// Cube geometry
+// ---------------------------------------------------------------------------
+
+static let kCubeVerts: [Vec3; 8] = [
+  Vec3 { x: -1.0, y: -1.0, z: -1.0 }, Vec3 { x: 1.0, y: -1.0, z: -1.0 }, Vec3 { x: 1.0, y: 1.0, z: -1.0 }, Vec3 { x: -1.0, y: 1.0, z: -1.0 },
+  Vec3 { x: -1.0, y: -1.0, z: 1.0 }, Vec3 { x: 1.0, y: -1.0, z: 1.0 }, Vec3 { x: 1.0, y: 1.0, z: 1.0 }, Vec3 { x: -1.0, y: 1.0, z: 1.0 },
+];
+
+struct CubeFace : Copy {
+  pub let idx: [usize; 4]
+  pub let base_r: f32
+  pub let base_g: f32
+  pub let base_b: f32
+}
+
+static let kCubeFaces: [CubeFace; 6] = [
+  CubeFace { idx: [0, 1, 2, 3], base_r: 0.90, base_g: 0.25, base_b: 0.30 },  // front : red
+  CubeFace { idx: [5, 4, 7, 6], base_r: 0.20, base_g: 0.60, base_b: 0.95 },  // back  : blue
+  CubeFace { idx: [4, 0, 3, 7], base_r: 0.30, base_g: 0.85, base_b: 0.45 },  // left  : green
+  CubeFace { idx: [1, 5, 6, 2], base_r: 0.95, base_g: 0.75, base_b: 0.20 },  // right : yellow
+  CubeFace { idx: [3, 2, 6, 7], base_r: 0.85, base_g: 0.40, base_b: 0.90 },  // top   : purple
+  CubeFace { idx: [4, 5, 1, 0], base_r: 0.20, base_g: 0.90, base_b: 0.85 },  // bottom: cyan
+];
+
+static let kCubeEdges: [[usize; 2]; 12] = [
+  [0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6],
+  [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7],
+];
+
+struct FaceDraw : Copy {
+  pub var face_idx: usize
+  pub var avg_z: f32
+}
+
+// A vertex with only a position and a flat color (Vertex2D `{}` + fields).
+fn flat_vertex(x: f32, y: f32, u: f32, v: f32, col: u32): Vertex2D =>
+  Vertex2D { pos: [x, y], uv: [u, v], color: col, color2: col, corner_radii: 0, softness: 0.0, half_size: [0.0, 0.0], border_width: 0.0, border_color: 0 };
+
+// ---------------------------------------------------------------------------
+// Draw the cube using raw RHI triangles
+// ---------------------------------------------------------------------------
+
+fn draw_cube<R: Rhi>(var rhi&: R, time: f32, screen_cx: f32, screen_cy: f32) {
+  let scale: f32 = 120.0;
+  let focal: f32 = 600.0;
+
+  let rot_y = time * 0.7;
+  let rot_x = @sin(time * 0.3) * 0.35 + 0.4;
+
+  // Transform and project all 8 vertices
+  var xformed: [Vec3; 8] = [Vec3 { x: 0.0, y: 0.0, z: 0.0 }; 8];
+  var proj_x: [f32; 8] = [0.0; 8];
+  var proj_y: [f32; 8] = [0.0; 8];
+  for (let i in 0usize..8) {
+    var v = Vec3 { x: kCubeVerts[i].x * scale, y: kCubeVerts[i].y * scale, z: kCubeVerts[i].z * scale };
+    v = rotate_x(v, rot_x);
+    v = rotate_y(v, rot_y);
+    xformed[i] = v;
+    let (px, py) = project(v, screen_cx, screen_cy, focal);
+    proj_x[i] = px;
+    proj_y[i] = py;
+  }
+
+  // Sort faces back-to-front (painter's algorithm)
+  var draw_order: [FaceDraw; 6] = [FaceDraw { face_idx: 0, avg_z: 0.0 }; 6];
+  for (let f in 0usize..6) {
+    let face = kCubeFaces[f];
+    draw_order[f] = FaceDraw {
+      face_idx: f,
+      avg_z: (xformed[face.idx[0]].z + xformed[face.idx[1]].z + xformed[face.idx[2]].z + xformed[face.idx[3]].z) * 0.25,
+    };
+  }
+  intro_sort(draw_order[..], fn(a: &FaceDraw, b: &FaceDraw): bool => a.avg_z > b.avg_z);
+
+  // Light direction (normalized)
+  let light_dir = normalize(Vec3 { x: 0.3, y: -0.5, z: -0.8 });
+
+  var all_verts = List::<Vertex2D>();
+  var all_indices = List::<u32>();
+
+  for (let d in 0usize..6) {
+    let face = kCubeFaces[draw_order[d].face_idx];
+
+    // Face normal from cross product of two edges
+    let e1 = Vec3 {
+      x: xformed[face.idx[1]].x - xformed[face.idx[0]].x,
+      y: xformed[face.idx[1]].y - xformed[face.idx[0]].y,
+      z: xformed[face.idx[1]].z - xformed[face.idx[0]].z,
+    };
+    let e2 = Vec3 {
+      x: xformed[face.idx[2]].x - xformed[face.idx[0]].x,
+      y: xformed[face.idx[2]].y - xformed[face.idx[0]].y,
+      z: xformed[face.idx[2]].z - xformed[face.idx[0]].z,
+    };
+    var n = normalize(cross_product(e1, e2));
+    n = Vec3 { x: -n.x, y: -n.y, z: -n.z };  // flip inward -> outward
+
+    let d_nl = dot(n, light_dir);
+    let ndl = 0.0f32 < d_nl ? d_nl : 0.0;  // std::max(0.0f, ...)
+    let light = 0.35 + 0.65 * ndl;
+
+    let lit = pack_color(face.base_r * light, face.base_g * light, face.base_b * light, 1.0);
+
+    let base = all_verts.len() as u32;
+    for (let v in 0usize..4) {
+      let vi = face.idx[v];
+      let u: f32 = (v == 1 || v == 2) ? 1.0 : 0.0;
+      let w: f32 = (v == 2 || v == 3) ? 1.0 : 0.0;
+      all_verts.push(flat_vertex(proj_x[vi], proj_y[vi], u, w, lit));
+    }
+
+    for (let k in [0u32, 1, 2, 0, 2, 3]) {
+      all_indices.push(base + k);
+    }
+  }
+
+  // Wireframe edges (thin quads)
+  let edge_color = pack_color(1.0, 1.0, 1.0, 0.15);
+  let thickness: f32 = 1.2;
+
+  for (let edge in kCubeEdges) {
+    let x0 = proj_x[edge[0]];
+    let y0 = proj_y[edge[0]];
+    let x1 = proj_x[edge[1]];
+    let y1 = proj_y[edge[1]];
+
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.01) {
+      continue;
+    }
+    let nx = -dy / len * thickness * 0.5;
+    let ny = dx / len * thickness * 0.5;
+
+    let base = all_verts.len() as u32;
+    all_verts.push(flat_vertex(x0 + nx, y0 + ny, 0.0, 0.0, edge_color));
+    all_verts.push(flat_vertex(x1 + nx, y1 + ny, 0.0, 0.0, edge_color));
+    all_verts.push(flat_vertex(x1 - nx, y1 - ny, 0.0, 0.0, edge_color));
+    all_verts.push(flat_vertex(x0 - nx, y0 - ny, 0.0, 0.0, edge_color));
+
+    for (let k in [0u32, 1, 2, 0, 2, 3]) {
+      all_indices.push(base + k);
+    }
+  }
+
+  rhi.draw_triangles(all_verts.as_slice(), all_indices.as_slice(), kInvalidTexture);
+}
+
+// ---------------------------------------------------------------------------
+// Starfield background
+// ---------------------------------------------------------------------------
+
+fn draw_stars<R: Rhi>(var rhi&: R, w: f32, h: f32, time: f32) {
+  let star_count = 80usize;
+  var verts = List::<Vertex2D>();
+  var indices = List::<u32>();
+
+  for (let i in 0..star_count) {
+    let fi = i as f32;
+    let fx = fmodf(fi * 127.1 + 311.7, w);
+    let fy = fmodf(fi * 269.5 + 183.3, h);
+    let b = 0.15 + 0.15 * @sin(time * (0.5 + fi * 0.03) + fi);
+    let size = 1.0 + ((i % 3) as f32) * 0.5;
+
+    let col = pack_color(b, b, b * 1.2, b);
+    verts.push(flat_vertex(fx, fy, 0.0, 0.0, col));
+    verts.push(flat_vertex(fx + size, fy, 0.0, 0.0, col));
+    verts.push(flat_vertex(fx + size, fy + size, 0.0, 0.0, col));
+    verts.push(flat_vertex(fx, fy + size, 0.0, 0.0, col));
+
+    let base = (i * 4) as u32;
+    for (let k in [0u32, 1, 2, 0, 2, 3]) {
+      indices.push(base + k);
+    }
+  }
+
+  rhi.draw_triangles(verts.as_slice(), indices.as_slice(), kInvalidTexture);
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+pub fn main(): i32 {
+  let args = arguments();
+  let font_path = args.len() > 0 ? from_str(args[0]) : find_font() else {
+    eprintln("No font found. Set ULTRAGUI_FONT or pass a TTF path.");
+    return 1;
+  };
+  println(f"Font: {font_path}");
+
+  let config = UIConfig {
+    title: from_str("libultragui: Game Overlay Demo"),
+    width: 1280,
+    height: 720,
+    clear_color: Color::from_hex(0x08081a),
+    shader_dir: from_str(f"{@package_dir()}/../../ultragui_vulkan/shaders"),
+  };
+
+  var ui_box = lua_ui_context(GlfwPlatform(), VulkanRhi(), LuaBindings {});
+  var ui& = ui_box.get_var();
+  add_lottie_lua(ui);
+  add_video_lua(ui);
+  if (!ui.init(config)) {
+    eprintln("Failed to initialize");
+    return 1;
+  }
+
+  let font = ui.load_font(font_path.as_str());
+  if (font == kInvalidFont) {
+    ui.shutdown();
+    return 1;
+  }
+  ui.set_default_font(font);
+
+  // Load HUD layout + script
+  let base = f"{@package_dir()}/../../../examples/game_overlay";
+  let _ = ui.load_ui(f"{base}/hud.ugui".as_str());
+  let _ = ui.load_script(f"{base}/hud.lua".as_str());
+
+  // Wire click handler: dispatch on_<name> to Lua
+  ui.set_script_click_dispatch();
+
+  // Separate layout engine for HUD (the UIContext's own is private)
+  let layout_engine = Mutex::<LayoutEngine>(LayoutEngine());
+
+  // FPS tracking
+  var frame_count: i32 = 0;
+  var fps_accum: f64 = 0.0;
+  var last_fps_update: f64 = 0.0;
+
+  // Custom paint: draw game scene first, then HUD on top
+  ui.set_on_paint(own fn(env: &var PaintEnv<VulkanRhi>) {
+    let ds = env.rhi.display_size();
+    let t = env.time as f32;
+
+    // 1. Game scene (drawn directly via RHI)
+    draw_stars(env.rhi, ds.x, ds.y, t);
+    draw_cube(env.rhi, t, ds.x * 0.5, ds.y * 0.45);
+
+    // 2. Subtle vignette gradient at bottom
+    env.renderer.draw_rect_gradient(Rect { x: 0.0, y: ds.y * 0.75, w: ds.x, h: ds.y * 0.25 }, Color::from_hex(0x1a1a3a, 0.0),
+                                    Color::from_hex(0x0a0a2a, 0.15));
+
+    // 3. HUD overlay (layout + paint)
+    let root = env.root;
+    if (root.valid()) {
+      let vp = LayoutViewport { width: ds.x, height: ds.y };
+      layout_engine.with(fn(engine: &var LayoutEngine) {
+        compute_widget_layout(env.world, env.ctx, root, vp, engine);
+      });
+      paint_widget_tree(env.world, env.ctx, root, env.renderer);
+    }
+  });
+
+  println("Game overlay demo running. The 3D cube is the 'game'; HUD is libultragui.");
+
+  while (ui.running()) {
+    // Update FPS counter in HUD
+    let now = ui.time();
+    frame_count += 1;
+    fps_accum += ui.delta_time();
+    if (now - last_fps_update >= 0.5) {
+      let fps = @saturating_cast(i32, (frame_count as f64) / fps_accum + 0.5);
+      frame_count = 0;
+      fps_accum = 0.0;
+      last_fps_update = now;
+
+      let fps_str = f"{fps} FPS";
+      let script = f"ugui.set('fps_text', 'text', '{fps_str}')";
+      if (!ui.script_exec(script.as_str(), "fps")) {
+        let w = ui.find_widget("fps_text");
+        set_text(ui.world, w, fps_str.as_str());
+      }
+    }
+
+    ui.update();
+  }
+
+  ui.shutdown();
+  return 0;
+}

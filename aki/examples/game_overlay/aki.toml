@@ -1,0 +1,19 @@
+# examples/game_overlay in aki: a "game" (a spinning cube and stars drawn
+# straight through the Rhi) with a libultragui HUD (.ugui + Lua) on top;
+# UIContext over GLFW and Vulkan with the Lua runtime, as
+# examples/game_overlay/main.cc.
+[package]
+name = "ultragui_game_overlay"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_vulkan = { path = "../../ultragui_vulkan" }
+ultragui_lua = { path = "../../ultragui_lua" }
+ultragui_lua_lottie = { path = "../../ultragui_lua_lottie" }
+ultragui_lua_video = { path = "../../ultragui_lua_video" }
+
+[build]
+opt = 2

@@ -2,7 +2,8 @@
 # xshot_fixed.sh <out.png> <seconds> <fixed_time> <command...>: xshot.sh with
 # the program's GLFW clock driven by glfw_fixed_time.c (time advances 1/60 s
 # per glfwPollEvents and stops at <fixed_time>), so screenshots of animated
-# programs taken after they reach <fixed_time> are comparable. Run from the
+# programs taken after they reach <fixed_time> are comparable; Lua's
+# math.random is seeded (42) as well. Run from the
 # repository root.
 set -eu
 out=$1; secs=$2; fixed=$3; shift 3
