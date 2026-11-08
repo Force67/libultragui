@@ -1,0 +1,630 @@
+// ugui/svg/svg_rasterizer.cc: flattening, stroke expansion, gradient
+// sampling and the 8x-sub-scanline coverage rasterizer. Output is byte for
+// byte the C++'s: the float expressions keep the C++ operation order, the edge
+// and active-edge sorts are IntroSort (std::sort's tie order), and the places
+// clang fuses `a * b + c` on aarch64 are the places akiko fuses it.
+//
+// Differences in shape: `Rasterize(doc, pixels, width, height)` is
+// `rasterize(doc, pixels, width, height)` with `pixels` a `&var [u8]` of at
+// least width * height * 4 bytes; the C++'s `static thread_local` scratch
+// vectors are locals of `rasterize_edges` (allocation only, no state crosses
+// calls: each is cleared or overwritten first).
+
+module ultragui::svg::svg_rasterizer;
+
+import {List, filled} from akikit::containers::list;
+import {erase_if, intro_sort, max, max_f32, min, min_f32} from ultragui::core::algorithm;
+import {Color, lerp_color} from ultragui::core::color;
+import {Vec2, clamp} from ultragui::core::math;
+import {fmod_f32} from ultragui::sys::c_text;
+import {Document, FillRule, Gradient, GradientType, Paint, PaintType, Path, PathCmd, SpreadMethod, Transform} from ultragui::svg::svg_types;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+comptime let kAaLevel: i32 = 8;          // sub-scanlines per pixel row
+comptime let kFlattenTol: f32 = 0.25;    // bezier flatten tolerance (pixels)
+comptime let kInvAa: f32 = 1.0 / 8.0;
+
+// ============================================================================
+// Edge representation
+// ============================================================================
+
+struct Edge : Copy {
+  pub var x0: f32  // y0 < y1 guaranteed
+  pub var y0: f32
+  pub var x1: f32
+  pub var y1: f32
+  pub var dir: i32  // +1 going down, -1 going up (for winding number)
+}
+
+// ============================================================================
+// Path flattening: convert cubics to line segments
+// ============================================================================
+
+fn flatten_cubic(var out&: List<Vec2>, p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2, tol: f32) {
+  // Adaptive subdivision based on flatness
+  let dx = p3.x - p0.x;
+  let dy = p3.y - p0.y;
+  let d2 = @abs((c1.x - p3.x) * dy - (c1.y - p3.y) * dx);
+  let d3 = @abs((c2.x - p3.x) * dy - (c2.y - p3.y) * dx);
+
+  let flatness = d2 + d3;
+  let len_sq = dx * dx + dy * dy;
+  let tol_sq = tol * tol * len_sq;
+
+  if (flatness * flatness <= tol_sq || len_sq < 0.25) {
+    out.push(p3);
+    return;
+  }
+
+  // de Casteljau split at t=0.5
+  let m01 = (p0 + c1).scale(0.5);
+  let m12 = (c1 + c2).scale(0.5);
+  let m23 = (c2 + p3).scale(0.5);
+  let m012 = (m01 + m12).scale(0.5);
+  let m123 = (m12 + m23).scale(0.5);
+  let mid = (m012 + m123).scale(0.5);
+
+  flatten_cubic(out, p0, m01, m012, mid, tol);
+  flatten_cubic(out, mid, m123, m23, p3, tol);
+}
+
+fn flatten_path(path&: Path, xform&: Transform, var points&: List<Vec2>, var subpath_starts&: List<u32>) {
+  var cur = Vec2 { x: 0.0, y: 0.0 };
+  var subpath_start = Vec2 { x: 0.0, y: 0.0 };
+
+  for (let entry& in path.entries) {
+    match (entry.cmd) {
+      PathCmd::MoveTo => {
+        let p = xform.apply(entry.pts[0]);
+        subpath_starts.push(points.len() as u32);
+        points.push(p);
+        cur = p;
+        subpath_start = p;
+      }
+      PathCmd::LineTo => {
+        let p = xform.apply(entry.pts[0]);
+        points.push(p);
+        cur = p;
+      }
+      PathCmd::CubicTo => {
+        let c1 = xform.apply(entry.pts[0]);
+        let c2 = xform.apply(entry.pts[1]);
+        let p3 = xform.apply(entry.pts[2]);
+        flatten_cubic(points, cur, c1, c2, p3, kFlattenTol);
+        cur = p3;
+      }
+      PathCmd::Close => {
+        if (cur != subpath_start) {
+          points.push(subpath_start);
+        }
+        cur = subpath_start;
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Build edge list from flattened points
+// ============================================================================
+
+fn build_edges(points&: List<Vec2>, subpath_starts&: List<u32>, var edges&: List<Edge>) {
+  for (let s in 0..subpath_starts.len()) {
+    let start = subpath_starts[s];
+    let end = (s + 1 < subpath_starts.len()) ? subpath_starts[s + 1] : points.len() as u32;
+    if (end - start < 2) {
+      continue;
+    }
+
+    var i = start;
+    while (i + 1 < end) {
+      let p0 = points[i as usize];
+      let p1 = points[(i + 1) as usize];
+      i += 1;
+      if (p0.y == p1.y) {
+        continue;  // skip horizontal edges
+      }
+      if (p0.y < p1.y) {
+        edges.push(Edge { x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y, dir: 1 });
+      } else {
+        edges.push(Edge { x0: p1.x, y0: p1.y, x1: p0.x, y1: p0.y, dir: -1 });
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Stroke expansion: convert stroke to fill outline
+// ============================================================================
+
+// The mitered normal at the joint of segments seg_a and seg_b.
+fn avg_normal(norms&: List<Vec2>, seg_a: u32, seg_b: u32): Vec2 {
+  var n = norms[seg_a as usize] + norms[seg_b as usize];
+  let len = n.length();
+  if (len > 0.001) {
+    n = n.scale(1.0 / len);
+  } else {
+    n = norms[seg_a as usize];
+  }
+
+  // Miter factor
+  let dot = norms[seg_a as usize].dot(n);
+  if (dot > 0.1) {
+    n = n.scale(1.0 / dot);
+  }
+  return n;
+}
+
+fn stroke_to_fill(points&: List<Vec2>, subpath_starts&: List<u32>, width: f32, var out_points&: List<Vec2>, var out_starts&: List<u32>) {
+  let half_w = width * 0.5;
+
+  for (let s in 0..subpath_starts.len()) {
+    let start = subpath_starts[s];
+    let end = (s + 1 < subpath_starts.len()) ? subpath_starts[s + 1] : points.len() as u32;
+    let count = end - start;
+    if (count < 2) {
+      continue;
+    }
+
+    // Check if subpath is closed
+    let closed = points[start as usize] == points[(end - 1) as usize] && count > 2;
+    let seg_count = count - 1;
+
+    // Compute left normals for each segment
+    var norms: List<Vec2> = filled(seg_count as usize, Vec2 { x: 0.0, y: 0.0 });
+    for (let i in 0..seg_count) {
+      var d = points[(start + i + 1) as usize] - points[(start + i) as usize];
+      let len = d.length();
+      if (len > 0.0) {
+        d = d.scale(1.0 / len);
+        norms[i as usize] = Vec2 { x: -d.y, y: d.x };
+      }
+    }
+
+    // Build left and right offset polylines
+    var left: List<Vec2> = List();
+    var right: List<Vec2> = List();
+
+    for (let i in 0..=seg_count) {
+      let idx = start + (closed ? (i % (count - 1)) : i);
+      let p = points[idx as usize];
+      var n = Vec2 { x: 0.0, y: 0.0 };
+
+      if (!closed) {
+        if (i == 0) {
+          n = norms[0];
+        } else if (i == seg_count) {
+          n = norms[(seg_count - 1) as usize];
+        } else {
+          n = avg_normal(norms, i - 1, i);
+        }
+      } else {
+        let prev = (i == 0) ? seg_count - 1 : i - 1;
+        let cur = i % seg_count;
+        n = avg_normal(norms, prev, cur);
+      }
+
+      left.push(p + n.scale(half_w));
+      right.push(p - n.scale(half_w));
+    }
+
+    // Build closed outline: left forward + right reverse
+    out_starts.push(out_points.len() as u32);
+    for (let lp& in left) {
+      out_points.push(lp);
+    }
+    var k = right.len();
+    while (k > 0) {
+      k -= 1;
+      out_points.push(right[k]);
+    }
+    // Close
+    if (out_points.len() != 0) {
+      out_points.push(out_points[out_starts[out_starts.len() - 1] as usize]);
+    }
+  }
+}
+
+// ============================================================================
+// Gradient sampling
+// ============================================================================
+
+fn sample_gradient(grad&: Gradient, t_in: f32): Color {
+  if (grad.stops.len() == 0) {
+    return Color::black();
+  }
+  var t = t_in;
+
+  // Apply spread method
+  match (grad.spread) {
+    SpreadMethod::Pad => {
+      t = clamp(t, 0.0, 1.0);
+    }
+    SpreadMethod::Reflect => {
+      t = fmod_f32(t, 2.0);
+      if (t < 0.0) {
+        t += 2.0;
+      }
+      if (t > 1.0) {
+        t = 2.0 - t;
+      }
+    }
+    SpreadMethod::Repeat => {
+      t = t - @floor(t);
+    }
+  }
+
+  let front = grad.stops[0];
+  let back = grad.stops[grad.stops.len() - 1];
+  if (t <= front.offset) {
+    return front.color;
+  }
+  if (t >= back.offset) {
+    return back.color;
+  }
+
+  for (let i in 1..grad.stops.len()) {
+    if (t <= grad.stops[i].offset) {
+      let range = grad.stops[i].offset - grad.stops[i - 1].offset;
+      let local_t = (range > 0.0) ? (t - grad.stops[i - 1].offset) / range : 0.0;
+      return lerp_color(grad.stops[i - 1].color, grad.stops[i].color, local_t);
+    }
+  }
+  return back.color;
+}
+
+fn eval_gradient_at(grad&: Gradient, px: f32, py: f32, bbox_x: f32, bbox_y: f32, bbox_w: f32, bbox_h: f32): Color {
+  var t: f32 = 0.0;
+
+  if (grad.type_ == GradientType::Linear) {
+    var gx1: f32 = 0.0;
+    var gy1: f32 = 0.0;
+    var gx2: f32 = 0.0;
+    var gy2: f32 = 0.0;
+    if (grad.user_space) {
+      gx1 = grad.x1;
+      gy1 = grad.y1;
+      gx2 = grad.x2;
+      gy2 = grad.y2;
+    } else {
+      gx1 = bbox_x + grad.x1 * bbox_w;
+      gy1 = bbox_y + grad.y1 * bbox_h;
+      gx2 = bbox_x + grad.x2 * bbox_w;
+      gy2 = bbox_y + grad.y2 * bbox_h;
+    }
+
+    // Apply gradient transform
+    let p1 = grad.transform.apply(Vec2 { x: gx1, y: gy1 });
+    let p2 = grad.transform.apply(Vec2 { x: gx2, y: gy2 });
+
+    let dx = p2.x - p1.x;
+    let dy = p2.y - p1.y;
+    let len_sq = dx * dx + dy * dy;
+    if (len_sq > 0.0) {
+      t = ((px - p1.x) * dx + (py - p1.y) * dy) / len_sq;
+    }
+  } else {
+    // Radial
+    var gcx: f32 = 0.0;
+    var gcy: f32 = 0.0;
+    var gr: f32 = 0.0;
+    if (grad.user_space) {
+      gcx = grad.cx;
+      gcy = grad.cy;
+      gr = grad.r;
+    } else {
+      gcx = bbox_x + grad.cx * bbox_w;
+      gcy = bbox_y + grad.cy * bbox_h;
+      gr = grad.r * max_f32(bbox_w, bbox_h);
+    }
+
+    let center = grad.transform.apply(Vec2 { x: gcx, y: gcy });
+    let dist = @sqrt((px - center.x) * (px - center.x) + (py - center.y) * (py - center.y));
+    t = (gr > 0.0) ? dist / gr : 0.0;
+  }
+
+  return sample_gradient(grad, t);
+}
+
+// ============================================================================
+// Bounding box computation
+// ============================================================================
+
+struct BBox : Copy {
+  pub var x0: f32 = 1e30
+  pub var y0: f32 = 1e30
+  pub var x1: f32 = -1e30
+  pub var y1: f32 = -1e30
+
+  pub fn add(var self&, x: f32, y: f32) {
+    if (x < self.x0) {
+      self.x0 = x;
+    }
+    if (y < self.y0) {
+      self.y0 = y;
+    }
+    if (x > self.x1) {
+      self.x1 = x;
+    }
+    if (y > self.y1) {
+      self.y1 = y;
+    }
+  }
+  pub fn width(self&): f32 => self.x1 - self.x0;
+  pub fn height(self&): f32 => self.y1 - self.y0;
+}
+
+fn compute_bbox(edges&: List<Edge>): BBox {
+  var bb = BBox {};
+  for (let e& in edges) {
+    bb.add(e.x0, e.y0);
+    bb.add(e.x1, e.y1);
+  }
+  return bb;
+}
+
+// ============================================================================
+// Resolve paint to a color at a given pixel
+// ============================================================================
+
+fn resolve_paint(paint&: Paint, px: f32, py: f32, alpha: f32, doc&: Document, bbox&: BBox): Color {
+  if (paint.type_ == PaintType::None) {
+    return Color::transparent();
+  }
+  if (paint.type_ == PaintType::Solid) {
+    return paint.color.with_alpha(paint.color.a * alpha);
+  }
+  if (paint.type_ == PaintType::GradientRef) {
+    let grad = doc.gradients.get(paint.gradient_id) else {
+      return Color::black().with_alpha(alpha);
+    };
+    let c = eval_gradient_at(grad, px, py, bbox.x0, bbox.y0, bbox.width(), bbox.height());
+    return c.with_alpha(c.a * alpha);
+  }
+  return Color::transparent();
+}
+
+// ============================================================================
+// Alpha compositing (source over, straight alpha)
+// ============================================================================
+
+// `dst` is the 4 bytes of one pixel at `base` in `pixels`.
+fn composite_pixel(var pixels&: [u8], base: usize, src: Color) {
+  if (src.a <= 0.0) {
+    return;
+  }
+
+  let da = pixels[base + 3] as f32 / 255.0;
+  let sa = src.a;
+  let out_a = sa + da * (1.0 - sa);
+
+  if (out_a <= 0.0) {
+    pixels[base] = 0;
+    pixels[base + 1] = 0;
+    pixels[base + 2] = 0;
+    pixels[base + 3] = 0;
+    return;
+  }
+
+  let inv_out_a = 1.0 / out_a;
+  let dr = pixels[base] as f32 / 255.0;
+  let dg = pixels[base + 1] as f32 / 255.0;
+  let db = pixels[base + 2] as f32 / 255.0;
+
+  pixels[base] = @saturating_cast(u8, clamp((src.r * sa + dr * da * (1.0 - sa)) * inv_out_a, 0.0, 1.0) * 255.0 + 0.5);
+  pixels[base + 1] = @saturating_cast(u8, clamp((src.g * sa + dg * da * (1.0 - sa)) * inv_out_a, 0.0, 1.0) * 255.0 + 0.5);
+  pixels[base + 2] = @saturating_cast(u8, clamp((src.b * sa + db * da * (1.0 - sa)) * inv_out_a, 0.0, 1.0) * 255.0 + 0.5);
+  pixels[base + 3] = @saturating_cast(u8, clamp(out_a, 0.0, 1.0) * 255.0 + 0.5);
+}
+
+// ============================================================================
+// Scanline rasterizer with multi-sample AA
+// ============================================================================
+
+struct ActiveEdge : Copy {
+  pub var x: f32    // current x intersection
+  pub var dx: f32   // x increment per sub-scanline (1/kAaLevel pixel)
+  pub var y1: f32   // bottom y of edge
+  pub var dir: i32  // winding direction
+}
+
+// Adds the coverage of [span_start, span_end] to a pixel row.
+fn add_span(var coverage&: List<f32>, span_start: f32, span_end: f32, fwidth: f32, width: u32) {
+  let x0 = clamp(span_start, 0.0, fwidth);
+  let x1 = clamp(span_end, 0.0, fwidth);
+  var ix0 = @saturating_cast(i32, x0);
+  var ix1 = @saturating_cast(i32, @ceil(x1));
+  ix0 = max(ix0, 0i32);
+  ix1 = min(ix1, width as i32);
+
+  var x = ix0;
+  while (x < ix1) {
+    let left = max_f32(x as f32, x0);
+    let right = min_f32((x + 1) as f32, x1);
+    coverage[x as usize] += (right - left) * kInvAa;
+    x += 1;
+  }
+}
+
+fn rasterize_edges(edges&: List<Edge>, rule: FillRule, var pixels&: [u8], width: u32, height: u32, paint&: Paint, opacity: f32, doc&: Document) {
+  if (edges.len() == 0) {
+    return;
+  }
+
+  let bbox = compute_bbox(edges);
+
+  // Sort edges by min-Y. Edges sharing a y0 activate in the order this leaves
+  // them, which feeds the x sort below; see there for why that has to be
+  // std::sort's order.
+  var sorted: List<usize> = List();
+  for (let i in 0..edges.len()) {
+    sorted.push(i);
+  }
+  intro_sort(sorted.as_slice_var(), fn(a&: usize, b&: usize): bool => edges[a].y0 < edges[b].y0);
+
+  // Coverage buffer for one pixel row
+  var coverage: List<f32> = filled(width as usize, 0.0f32);
+  var active: List<ActiveEdge> = List();
+
+  var edge_idx: usize = 0;  // next edge to activate
+
+  let fwidth = width as f32;
+
+  for (let py in 0..height) {
+    for (let x in 0..width as usize) {
+      coverage[x] = 0.0;
+    }
+
+    for (let sub in 0..kAaLevel) {
+      let scan_y = py as f32 + (sub as f32 + 0.5) * kInvAa;
+
+      // Add new edges that start at or before this scanline
+      while (edge_idx < sorted.len() && edges[sorted[edge_idx]].y0 <= scan_y) {
+        let e = edges[sorted[edge_idx]];
+        if (e.y1 > scan_y) {
+          let dy = e.y1 - e.y0;
+          let dxdy = (dy > 0.0) ? (e.x1 - e.x0) / dy : 0.0;
+          let x = e.x0 + dxdy * (scan_y - e.y0);
+          active.push(ActiveEdge { x, dx: dxdy * kInvAa, y1: e.y1, dir: e.dir });
+        }
+        edge_idx += 1;
+      }
+
+      // Remove expired edges
+      erase_if(active, fn(ae&: ActiveEdge): bool => ae.y1 <= scan_y);
+
+      // Sort active edges by x. Coincident edges tie, and under the non-zero
+      // rule their order decides whether a span closes and reopens at that x,
+      // which sums coverage differently in the last bit, so this has to leave
+      // ties exactly where std::sort did: IntroSort.
+      intro_sort(active.as_slice_var(), fn(a&: ActiveEdge, b&: ActiveEdge): bool => a.x < b.x);
+
+      // Fill spans based on fill rule
+      if (rule == FillRule::EvenOdd) {
+        var i: usize = 0;
+        while (i + 1 < active.len()) {
+          add_span(coverage, active[i].x, active[i + 1].x, fwidth, width);
+          i += 2;
+        }
+      } else {
+        // Non-zero winding
+        var winding: i32 = 0;
+        var i: usize = 0;
+        while (i < active.len()) {
+          let old_winding = winding;
+          winding += active[i].dir;
+
+          if (old_winding == 0 && winding != 0) {
+            // Start of filled span
+            let span_start = active[i].x;
+            i += 1;
+            while (i < active.len()) {
+              winding += active[i].dir;
+              if (winding == 0) {
+                // End of filled span
+                add_span(coverage, span_start, active[i].x, fwidth, width);
+                i += 1;
+                break;
+              }
+              i += 1;
+            }
+          } else {
+            i += 1;
+          }
+        }
+      }
+
+      // Step active edge x values
+      for (var ae& in active) {
+        ae.x += ae.dx;
+      }
+    }
+
+    // Apply coverage to pixels
+    let row = (py * width) as usize * 4;
+    for (let px in 0..width) {
+      let cov = clamp(coverage[px as usize], 0.0, 1.0);
+      if (cov > 0.001) {
+        let c = resolve_paint(paint, px as f32 + 0.5, py as f32 + 0.5, opacity * cov, doc, bbox);
+        composite_pixel(pixels, row + px as usize * 4, c);
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Public rasterize entry point
+// ============================================================================
+
+// Rasterize(doc, pixels, width, height): `pixels` is RGBA8, width * height * 4
+// bytes, cleared first.
+pub fn rasterize(doc&: Document, var pixels&: [u8], width: u32, height: u32) {
+  let total = (width * height) as usize * 4;
+  for (let i in 0..total) {
+    pixels[i] = 0;
+  }
+
+  // Compute viewBox -> target transform
+  var view_xform = Transform::identity();
+  if (doc.view_w > 0.0 && doc.view_h > 0.0) {
+    let sx = width as f32 / doc.view_w;
+    let sy = height as f32 / doc.view_h;
+    view_xform = Transform::scale(sx, sy).mul(Transform::translate(-doc.view_x, -doc.view_y));
+  } else if (doc.width > 0.0 && doc.height > 0.0) {
+    let sx = width as f32 / doc.width;
+    let sy = height as f32 / doc.height;
+    view_xform = Transform::scale(sx, sy);
+  }
+
+  // Scratch buffers: reused across shapes (clear preserves capacity)
+  var points: List<Vec2> = List();
+  var subpath_starts: List<u32> = List();
+  var edges: List<Edge> = List();
+  var stroke_points: List<Vec2> = List();
+  var stroke_starts: List<u32> = List();
+
+  for (let shape& in doc.shapes) {
+    let xform = view_xform.mul(shape.transform);
+
+    // --- Fill ---
+    if (shape.fill.type_ != PaintType::None) {
+      points.clear();
+      subpath_starts.clear();
+      edges.clear();
+
+      flatten_path(shape.path, xform, points, subpath_starts);
+      build_edges(points, subpath_starts, edges);
+
+      if (edges.len() != 0) {
+        rasterize_edges(edges, shape.fill_rule, pixels, width, height, shape.fill, shape.opacity * shape.fill_opacity, doc);
+      }
+    }
+
+    // --- Stroke ---
+    if (shape.stroke.type_ != PaintType::None && shape.stroke_width > 0.0) {
+      points.clear();
+      subpath_starts.clear();
+      edges.clear();
+
+      flatten_path(shape.path, xform, points, subpath_starts);
+
+      // Compute stroke width in transformed space (approximate)
+      let scale = @sqrt(@abs(xform.a * xform.d - xform.b * xform.c));
+      let sw = shape.stroke_width * scale;
+
+      // Expand stroke to fill outline
+      stroke_points.clear();
+      stroke_starts.clear();
+      stroke_to_fill(points, subpath_starts, sw, stroke_points, stroke_starts);
+
+      edges.clear();
+      build_edges(stroke_points, stroke_starts, edges);
+
+      if (edges.len() != 0) {
+        rasterize_edges(edges, FillRule::NonZero, pixels, width, height, shape.stroke, shape.opacity * shape.stroke_opacity, doc);
+      }
+    }
+  }
+}
