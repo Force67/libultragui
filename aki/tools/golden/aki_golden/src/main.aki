@@ -1,0 +1,482 @@
+// Golden runner, aki side: aki/tools/golden/ugui_golden.cc for the aki port.
+// Plays a scenario against UIContext in draw-data mode on the host platform
+// with the scenario's clock and writes everything the frame hands a renderer
+// to one binary file, in ugui_golden.cc's format (see there); compare.py
+// diffs the two dumps.
+//
+//   aki_golden <scenario.txt> <out.bin>
+//
+// The script runtime is the one alias below (`Runtime`); the Lua scenarios
+// need ultragui_lua's runtime there.
+
+module aki_golden;
+
+import {List} from akikit::containers::list;
+import {from_str} from akikit::strings::string;
+import {Box} from akikit::memory::box;
+import {split_whitespace} from akikit::strings::string_util;
+import {parse_i64} from akikit::strings::string_to_number;
+import {read_file, write_bytes} from akikit::filesystem::file_util;
+import {arguments} from akikit::process::command_line;
+import {eprintln} from akikit::logging;
+import {Vec2} from ultragui::core::math;
+import {InputQueue, MouseButton} from ultragui::input::input_queue;
+import {Platform, WindowConfig} from ultragui::platform::platform;
+import {HostPlatform} from ultragui::platform::platform_host;
+import {DrawData, TextureId} from ultragui::render::draw_data;
+import {TextureBackend, TextureBackendBox} from ultragui::render::texture_backend;
+import {Vertex2D} from ultragui::render::vertex;
+import {NullRhi} from ultragui::rhi::null_rhi;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {NoScript} from ultragui::scripting::script_runtime;
+import {Cursor, ViewportScaleMode} from ultragui::style::enums;
+import {CText} from ultragui::sys::c_text;
+import {kInvalidFont} from ultragui::text::text_engine;
+import {UIConfig, UIContext} from ultragui::ui_context;
+
+// The scenario's script runtime: NoScript until ultragui_lua's runtime can be
+// named here.
+type Runtime = NoScript;
+fn make_runtime(): Runtime => NoScript();
+
+// golden_platform.cc: the host platform with time() reading the scenario's
+// clock.
+struct GoldenPlatform : Platform {
+  pub var host: HostPlatform
+  pub var clock: f64 = 0.0
+
+  pub fn init(var self&, config&: WindowConfig): bool => self.host.init(config);
+  pub fn shutdown(var self&) {
+    self.host.shutdown();
+  }
+  pub fn should_close(self&): bool => self.host.should_close();
+  pub fn poll_events(var self&) {
+    self.host.poll_events();
+  }
+  pub fn window_size(self&): Vec2 => self.host.window_size();
+  pub fn framebuffer_size(self&): Vec2 => self.host.framebuffer_size();
+  pub fn dpi_scale(self&): f32 => self.host.dpi_scale();
+  pub fn time(self&): f64 => self.clock;
+  pub fn native_handle(self&): *var u8 => self.host.native_handle();
+  pub fn set_cursor(var self&, cursor: Cursor) {
+    self.host.set_cursor(cursor);
+  }
+  pub fn clipboard_text(var self&): str => self.host.clipboard_text();
+  pub fn set_clipboard_text(var self&, text: str) {
+    self.host.set_clipboard_text(text);
+  }
+  pub fn open_url(var self&, url: str) {
+    self.host.open_url(url);
+  }
+  pub fn input_queue(var self&): &var InputQueue => self.host.input_queue();
+  pub fn host_fed(self&): bool => true;
+}
+
+// The dump, buffered and written at the end.
+struct Writer {
+  pub var buf: List<byte> = List()
+}
+
+fn Writer::bytes(var self&, b: bytes) {
+  for (let x in b) {
+    self.buf.push(x);
+  }
+}
+fn Writer::u8v(var self&, v: u8) {
+  self.buf.push(v as byte);
+}
+fn Writer::u32v(var self&, v: u32) {
+  for (let i in 0u32..4) {
+    self.buf.push(((v >> (i * 8)) & 0xFF) as byte);
+  }
+}
+fn Writer::u64v(var self&, v: u64) {
+  for (let i in 0u64..8) {
+    self.buf.push(((v >> (i * 8)) & 0xFF) as byte);
+  }
+}
+fn Writer::f32v(var self&, v: f32) => self.u32v(@bit_cast(u32, v));
+
+fn fnv1a(data: bytes): u64 {
+  var h: u64 = 1469598103934665603;
+  for (let x in data) {
+    h = h ^ (x as u64);
+    h = h *% 1099511628211;
+  }
+  return h;
+}
+
+fn bytes_per_pixel(format: RhiFormat): u64 => match (format) {
+  RhiFormat::R8Unorm => 1,
+  RhiFormat::Rgba8Unorm => 4,
+  RhiFormat::Bgra8Unorm => 4,
+  RhiFormat::Rgba32Float => 16,
+};
+
+struct TexInfo : Copy {
+  pub var w: u32
+  pub var h: u32
+  pub var format: RhiFormat
+}
+
+// Mints ids 1, 2, 3, ... and records every upload into the shared writer.
+struct RecordingTextures : TextureBackend {
+  pub unowned var out: *var Writer
+  pub var infos: List<TexInfo> = List()
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+    self.infos.push(TexInfo { w: width, h: height, format });
+    let id = self.infos.len() as TextureId;
+    let n = width as u64 * height as u64 * bytes_per_pixel(format);
+    var w& = unsafe *self.out;
+    let has = #pixels > 0;
+    w.u8v('T' as u8);
+    w.u64v(id);
+    w.u32v(width);
+    w.u32v(height);
+    w.u8v(format as u8);
+    w.u8v(filter as u8);
+    w.u64v(has ? n : 0);
+    w.u64v(has ? fnv1a(pixels[..n as usize]) : 0);
+    return id;
+  }
+
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {
+    var n: u64 = 0;
+    var h: u64 = 0;
+    if (id >= 1 && id <= self.infos.len() as u64 && #pixels > 0) {
+      let i = self.infos[(id - 1) as usize];
+      n = i.w as u64 * i.h as u64 * bytes_per_pixel(i.format);
+      h = fnv1a(pixels[..n as usize]);
+    }
+    var w& = unsafe *self.out;
+    w.u8v('U' as u8);
+    w.u64v(id);
+    w.u64v(n);
+    w.u64v(h);
+  }
+
+  pub fn destroy_texture(var self&, id: TextureId) {
+    var w& = unsafe *self.out;
+    w.u8v('X' as u8);
+    w.u64v(id);
+  }
+}
+
+fn vertex_bytes(v: &[Vertex2D]): bytes {
+  if (#v == 0) {
+    return [];
+  }
+  return unsafe @slice(@ptr(v) as *const u8, #v * 48) as bytes;
+}
+
+fn dump_frame(var w&: Writer, frame: u32, dd&: DrawData) {
+  w.u8v('F' as u8);
+  w.u32v(frame);
+  w.f32v(dd.display_pos.x);
+  w.f32v(dd.display_pos.y);
+  w.f32v(dd.display_size.x);
+  w.f32v(dd.display_size.y);
+  w.f32v(dd.framebuffer_scale.x);
+  w.f32v(dd.framebuffer_scale.y);
+  w.u8v(dd.valid ? 1 : 0);
+  w.u32v(dd.quad_vertex_count());
+  w.bytes(vertex_bytes(dd.quad_vertices));
+  w.u32v(dd.quad_index_count());
+  for (let i in dd.quad_indices) {
+    w.u32v(i);
+  }
+  w.u32v(dd.text_vertex_count());
+  w.bytes(vertex_bytes(dd.text_vertices));
+  w.u32v(dd.text_index_count());
+  for (let i in dd.text_indices) {
+    w.u32v(i);
+  }
+  w.u32v(dd.command_count());
+  for (let c in dd.commands) {
+    w.f32v(c.clip_rect.x);
+    w.f32v(c.clip_rect.y);
+    w.f32v(c.clip_rect.w);
+    w.f32v(c.clip_rect.h);
+    w.u64v(c.texture_id);
+    w.u32v(c.index_offset);
+    w.u32v(c.elem_count);
+    w.u8v(c.is_text ? 1 : 0);
+    w.f32v(c.blur);
+  }
+}
+
+fn parse_button(s: str): MouseButton {
+  if (s == "right") {
+    return MouseButton::Right;
+  }
+  if (s == "middle") {
+    return MouseButton::Middle;
+  }
+  return MouseButton::Left;
+}
+
+// A line's operands, read as istringstream >> reads them: a failed read
+// leaves the target alone.
+struct Operands<'a> {
+  pub var toks: List<str<'a>>
+  pub var pos: usize = 1
+}
+
+fn Operands::word(var self&): str? {
+  if (self.pos >= self.toks.len()) {
+    return none;
+  }
+  let t = self.toks[self.pos];
+  self.pos += 1;
+  return t;
+}
+fn Operands::f32_into(var self&, var v&: f32) {
+  if (let t = self.word()) {
+    let (x, _) = CText(t).strtof_at(0);
+    v = x;
+  }
+}
+fn Operands::f64_into(var self&, var v&: f64) {
+  if (let t = self.word()) {
+    let (x, _) = CText(t).strtod_at(0);
+    v = x;
+  }
+}
+fn Operands::int(var self&): i64 {
+  if (let t = self.word()) {
+    return parse_i64(t) ?? 0;
+  }
+  return 0;
+}
+
+struct Runner {
+  pub var ui: UIContext<GoldenPlatform, NullRhi, Runtime>
+  pub var out: Box<Writer>
+  pub var config: UIConfig = UIConfig { draw_data: true }
+  pub var initialized: bool = false
+  pub var window: Vec2 = Vec2 { x: 1280.0, y: 720.0 }
+  pub var framebuffer: Vec2 = Vec2 { x: 1280.0, y: 720.0 }
+  pub var frame: u32 = 0
+  pub var last_atlas_revision: u32 = 0
+  pub var atlas_seen: bool = false
+}
+
+
+fn Runner::ensure_init(var self&): bool {
+  if (self.initialized) {
+    return true;
+  }
+  self.config.width = self.window.x as i32;
+  self.config.height = self.window.y as i32;
+  var cfg = UIConfig {
+    draw_data: true, width: self.config.width, height: self.config.height, scale_mode: self.config.scale_mode,
+    design_width: self.config.design_width, design_height: self.config.design_height,
+  };
+  if (!self.ui.init(cfg)) {
+    eprintln("ugui_golden: Init failed");
+    return false;
+  }
+  let p = unsafe (self.out.as_ptr() as *var Writer);
+  self.ui.set_texture_backend(TextureBackendBox::of(RecordingTextures { out: p }));
+  self.ui.platform.host.set_viewport(self.window, self.framebuffer);
+  self.initialized = true;
+  return true;
+}
+
+fn Runner::render(var self&, dt: f64) {
+  self.ui.platform.clock += dt;
+  // The frame record is built while the draw list is held and appended after
+  // the atlas record, as the C++ writes them.
+  var frame_rec = Writer {};
+  {
+    let dd = self.ui.render_draw_data();
+    dump_frame(frame_rec, self.frame, dd);
+  }
+  var w& = self.out.get_var();
+  let te& = self.ui.text_engine;
+  let rev = te.atlas_revision();
+  if (!self.atlas_seen || rev != self.last_atlas_revision) {
+    let size = te.atlas_size();
+    let aw = size.x as u32;
+    let ah = size.y as u32;
+    w.u8v('A' as u8);
+    w.u32v(rev);
+    w.u32v(aw);
+    w.u32v(ah);
+    let px = te.atlas_pixels();
+    w.u64v(#px > 0 ? fnv1a(px[..(aw as usize * ah as usize)] as bytes) : 0);
+    self.atlas_seen = true;
+    self.last_atlas_revision = rev;
+  }
+  w.bytes(frame_rec.buf.as_slice());
+  self.frame += 1;
+}
+
+fn main(): i32 {
+  let args = arguments();
+  if (args.len() != 2) {
+    eprintln("usage: ugui_golden <scenario.txt> <out.bin>");
+    return 2;
+  }
+  let text = read_file(args[0]) else {
+    eprintln(f"ugui_golden: cannot read {args[0]}");
+    return 2;
+  };
+  var r = Runner {
+    ui: UIContext::<GoldenPlatform, NullRhi, Runtime>(GoldenPlatform { host: HostPlatform() }, NullRhi(), make_runtime()),
+    out: Box::<Writer>(Writer {}),
+  };
+  r.out.get_var().bytes("UGGD" as bytes);
+  r.out.get_var().u32v(1);
+
+  var lineno: i32 = 0;
+  var start = 0usize;
+  let src = text.as_str();
+  while (start <= #src) {
+    var end = start;
+    while (end < #src && src[end] != '\n') {
+      end += 1;
+    }
+    var line = src[start..end];
+    let at_end = end >= #src;
+    start = end + 1;
+    lineno += 1;
+    if (at_end && #line == 0) {
+      break;
+    }
+    for (let i in 0..#line) {
+      if (line[i] == '#') {
+        line = line[..i];
+        break;
+      }
+    }
+    var ops = Operands { toks: split_whitespace(line) };
+    if (ops.toks.len() == 0) {
+      continue;
+    }
+    let op = ops.toks[0];
+    if (op == "viewport") {
+      ops.f32_into(r.window.x);
+      ops.f32_into(r.window.y);
+      ops.f32_into(r.framebuffer.x);
+      ops.f32_into(r.framebuffer.y);
+      if (r.initialized) {
+        r.ui.platform.host.set_viewport(r.window, r.framebuffer);
+      }
+    } else if (op == "scale_mode") {
+      let mode = from_str(ops.word() ?? "");
+      let m = mode.as_str();
+      var dw: f32 = 0.0;
+      var dh: f32 = 0.0;
+      ops.f32_into(dw);
+      ops.f32_into(dh);
+      r.config.scale_mode = m == "contain" ? ViewportScaleMode::Contain
+                          : m == "cover" ? ViewportScaleMode::Cover
+                          : m == "width" ? ViewportScaleMode::Width
+                          : m == "height" ? ViewportScaleMode::Height
+                          : ViewportScaleMode::None;
+      r.config.design_width = dw;
+      r.config.design_height = dh;
+    } else if (op == "font") {
+      let path = ops.word() ?? "";
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      let font = r.ui.load_font(path);
+      if (font == kInvalidFont) {
+        eprintln(f"ugui_golden:{lineno}: cannot load font {path}");
+        return 1;
+      }
+      r.ui.set_default_font(font);
+    } else if (op == "ui") {
+      let path = ops.word() ?? "";
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      let _ = r.ui.load_ui(path);
+    } else if (op == "script") {
+      let path = ops.word() ?? "";
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      let _ = r.ui.load_script(path);
+    } else if (op == "frame") {
+      var dt: f64 = 1.0 / 60.0;
+      ops.f64_into(dt);
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      r.render(dt);
+    } else if (op == "frames") {
+      let n = ops.int();
+      var dt: f64 = 1.0 / 60.0;
+      ops.f64_into(dt);
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      for (let _i in 0..(n < 0 ? 0 : n)) {
+        r.render(dt);
+      }
+    } else if (op == "move") {
+      var x: f32 = 0.0;
+      var y: f32 = 0.0;
+      ops.f32_into(x);
+      ops.f32_into(y);
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      r.ui.platform.host.push_mouse_move(Vec2 { x, y });
+    } else if (op == "down" || op == "up") {
+      let b = ops.word() ?? "left";
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      r.ui.platform.host.push_mouse_button(parse_button(b), op == "down");
+    } else if (op == "scroll") {
+      var x: f32 = 0.0;
+      var y: f32 = 0.0;
+      ops.f32_into(x);
+      ops.f32_into(y);
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      r.ui.platform.host.push_scroll(Vec2 { x, y });
+    } else if (op == "key") {
+      let key = ops.int();
+      let scancode = ops.int();
+      let pressed = ops.int();
+      let repeat = ops.int();
+      let mods = ops.int();
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      r.ui.platform.host.push_key(key as i32, scancode as i32, pressed != 0, repeat != 0, mods as i32);
+    } else if (op == "char") {
+      let cp = ops.int();
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      r.ui.platform.host.push_char(cp as u32);
+    } else if (op == "ui_scale") {
+      var s: f32 = 0.0;
+      ops.f32_into(s);
+      if (!r.ensure_init()) {
+        return 1;
+      }
+      r.ui.set_ui_scale(s);
+    } else {
+      eprintln(f"ugui_golden:{lineno}: unknown op '{op}'");
+      return 2;
+    }
+  }
+  r.out.get_var().u8v('E' as u8);
+  if (r.initialized) {
+    r.ui.shutdown();
+  }
+  let _written = write_bytes(args[1], r.out.get().buf.as_slice()) else {
+    eprintln(f"ugui_golden: cannot write {args[1]}");
+    return 2;
+  };
+  return 0;
+}
