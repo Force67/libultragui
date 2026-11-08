@@ -19,6 +19,9 @@ aki/
     os/<os>/ultragui/sys/c_long.aki   C `long` per target OS (CLong, CULong)
     tests/*_test.aki     one program per test; tests/support/ shared helpers
     tools/gen_reference.cc  prints C++-computed reference values for the tests
+    tools/gen_svg_reference.cc, gen_svg_table.py, gen_svg_corpus.py
+                         SVG pixel hashes from the C++ -> tests/support/svg_corpus.aki
+    tests/data/svg/      the SVG corpus (@embed'ed by tests/support/svg_corpus.aki)
   tools/golden/          draw-data golden harness (C++ side), see its README
   tools/xshot.sh         screenshots of windowed backends under Xvfb
 ```
@@ -114,7 +117,7 @@ package), **gone** (no counterpart, reason given).
 | widgets/{panel,text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | next |
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} (+ sys::yoga) | next |
 | idl/parser.{h,cc}, builder.{h,cc} | ultragui::idl::{parser,builder} | next |
-| svg/* | ultragui::svg::* | next (pure code, core) |
+| svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
 | anim/* | ultragui::anim::* | next (pure code, core) |
 | ui_context.{h,cc} | ultragui::ui_context | next |
 | lottie/* | | pkg:ultragui_lottie |
@@ -490,8 +493,24 @@ so bit-exact tables are aarch64's.
   `row * pitch` unsigned).
 - KeyframeAnimation with a zero duration: the C++ casts inf to int (UB); the
   port saturates.
+- SVG: a gradient `<stop>` without `offset` has an uninitialized offset in the
+  C++ (the port uses 0); `style=` on a `<stop>` is parsed and dropped.
+- SVG: three C++ loops never end on malformed input (text or a stray close
+  tag before the root; path data or polyline `points` that stop being
+  numbers, which would also grow the path without bound). The port stops at
+  the first iteration that consumes no input; every terminating input behaves
+  as the C++.
+- SVG: attribute values are C strings, so a value is cut at its first NUL and
+  numbers are libc's `strtof` (viewBox, width/height, path data) or
+  `atof`-through-`strtod` rounded to f32 (everything else), as in the C++;
+  `sys::c_text` calls libc for both so the values cannot differ.
 
 ### Shape differences (not behavior)
+
+- SVG: `LoadSvg*` return `SvgImage?`, `ParseSvg` returns `Document?`,
+  `Rasterize` writes into a `&var [u8]`, `LoadSvgTexture` takes `(&var T)?`
+  for any `TextureBackend` (a `DynTextureBackend` is one); the rasterizer's
+  `thread_local` scratch vectors are locals. `w * h * 4` is a `usize`.
 
 - No thread-local active registry; World passed explicitly.
 - WidgetContext passed, not pointed to; `current_time` is a value.
@@ -535,5 +554,15 @@ so bit-exact tables are aarch64's.
 - akiko adds no runpath for C libraries: the dev shell's `LD_LIBRARY_PATH`
   carries libstdc++, FreeType and HarfBuzz; a new C dependency needs its lib
   directory there too (flake.nix shellHook).
+- **Float fusion is per expression, and matches clang's on aarch64** for the
+  SVG rasterizer (`a*b + c*d`, `a*b - c*d - e*f`, `x*y + z*w + e`: 19 of the
+  62 corpus renders change when the C++ is built with `-ffp-contract=off`, and
+  all 62 match the default build). Vec2/Transform operator methods never
+  fuse, as the C++ operators do not: write `p + n.scale(w)` where the C++
+  writes `p + n * w`.
+- `match` patterns take integer literals, not `'x' as u8`: match on the code
+  (`109 => { // 'm'`).
+- `fn` literals as `less`/`erase_if` predicates may capture locals
+  (`fn(a&: usize, b&: usize): bool => edges[a].y0 < edges[b].y0`).
 - yoga's sources warn about `_FORTIFY_SOURCE` without `-O`; `-Wno-#warnings`
   in `c_flags` silences it.
