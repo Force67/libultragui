@@ -1,0 +1,182 @@
+// No C++ counterpart: the slice of Vulkan 1.0 (vulkan/vulkan.h) and GLFW's
+// Vulkan entry points that d3d12_rhi.cc uses for presentation. Linux has no
+// DXGI, so the C++ backend creates a Vulkan surface and swapchain beside the
+// vkd3d device and wraps the swapchain images as D3D12 resources. Declared by
+// hand and only as far as the port goes (ultragui_vulkan carries the full
+// generated binding; this package does not depend on it, see PORTING.md).
+// Layouts are C's; tools/gen_d3d12.py checks them against vulkan.h
+// (tests/layout_test.aki). 64-bit targets only (non-dispatchable handles are
+// u64).
+
+module ultragui_d3d12::sys::vulkan;
+
+import {GlfwWindow} from ultragui_d3d12::sys::glfw;
+
+// Dispatchable handles: pointers to opaque driver objects.
+pub extern type VkInstanceT;
+pub type VkInstance = *var VkInstanceT;
+pub extern type VkPhysicalDeviceT;
+pub type VkPhysicalDevice = *var VkPhysicalDeviceT;
+pub extern type VkDeviceT;
+pub type VkDevice = *var VkDeviceT;
+pub extern type VkQueueT;
+pub type VkQueue = *var VkQueueT;
+
+// Non-dispatchable handles: 64-bit values, VK_NULL_HANDLE is 0.
+pub type VkSurfaceKHR = u64;
+pub type VkSwapchainKHR = u64;
+pub type VkImage = u64;
+pub type VkFence = u64;
+pub type VkSemaphore = u64;
+pub comptime let kVkNullHandle: u64 = 0;
+
+pub type VkResult = i32;
+pub type VkBool32 = u32;
+
+pub comptime let kVkSuccess: i32 = 0;
+pub comptime let kVkSuboptimalKhr: i32 = 1000001003;
+pub comptime let kVkErrorOutOfDateKhr: i32 = -1000001004;
+
+pub comptime let kVkStructureTypeFenceCreateInfo: u32 = 8;
+pub comptime let kVkStructureTypeSwapchainCreateInfoKhr: u32 = 1000001000;
+pub comptime let kVkStructureTypePresentInfoKhr: u32 = 1000001001;
+
+pub comptime let kVkFormatUndefined: u32 = 0;
+pub comptime let kVkFormatR8G8B8A8Unorm: u32 = 37;
+pub comptime let kVkFormatR8G8B8A8Srgb: u32 = 43;
+pub comptime let kVkFormatB8G8R8A8Unorm: u32 = 44;
+pub comptime let kVkFormatB8G8R8A8Srgb: u32 = 50;
+pub comptime let kVkColorSpaceSrgbNonlinearKhr: u32 = 0;
+pub comptime let kVkPresentModeMailboxKhr: u32 = 1;
+pub comptime let kVkPresentModeFifoKhr: u32 = 2;
+pub comptime let kVkQueueGraphicsBit: u32 = 1;
+pub comptime let kVkImageUsageColorAttachmentBit: u32 = 0x10;
+pub comptime let kVkSharingModeExclusive: u32 = 0;
+pub comptime let kVkSharingModeConcurrent: u32 = 1;
+pub comptime let kVkCompositeAlphaOpaqueBitKhr: u32 = 1;
+
+pub extern struct VkExtent2D : Copy {
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+}
+
+pub extern struct VkExtent3D : Copy {
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var depth: u32 = 0
+}
+
+pub extern struct VkSurfaceCapabilitiesKHR {
+  pub var min_image_count: u32 = 0
+  pub var max_image_count: u32 = 0
+  pub var current_extent: VkExtent2D = VkExtent2D {}
+  pub var min_image_extent: VkExtent2D = VkExtent2D {}
+  pub var max_image_extent: VkExtent2D = VkExtent2D {}
+  pub var max_image_array_layers: u32 = 0
+  pub var supported_transforms: u32 = 0
+  pub var current_transform: u32 = 0
+  pub var supported_composite_alpha: u32 = 0
+  pub var supported_usage_flags: u32 = 0
+}
+
+pub extern struct VkSurfaceFormatKHR : Copy {
+  pub var format: u32 = 0
+  pub var color_space: u32 = 0
+}
+
+pub extern struct VkSwapchainCreateInfoKHR {
+  pub var s_type: u32 = kVkStructureTypeSwapchainCreateInfoKhr
+  pub var next: *const u8 = null
+  pub var flags: u32 = 0
+  pub var surface: VkSurfaceKHR = 0
+  pub var min_image_count: u32 = 0
+  pub var image_format: u32 = 0
+  pub var image_color_space: u32 = 0
+  pub var image_extent: VkExtent2D = VkExtent2D {}
+  pub var image_array_layers: u32 = 0
+  pub var image_usage: u32 = 0
+  pub var image_sharing_mode: u32 = 0
+  pub var queue_family_index_count: u32 = 0
+  pub var queue_family_indices: *const u32 = null
+  pub var pre_transform: u32 = 0
+  pub var composite_alpha: u32 = 0
+  pub var present_mode: u32 = 0
+  pub var clipped: VkBool32 = 0
+  pub var old_swapchain: VkSwapchainKHR = 0
+}
+
+pub extern struct VkPresentInfoKHR {
+  pub var s_type: u32 = kVkStructureTypePresentInfoKhr
+  pub var next: *const u8 = null
+  pub var wait_semaphore_count: u32 = 0
+  pub var wait_semaphores: *const VkSemaphore = null
+  pub var swapchain_count: u32 = 0
+  pub var swapchains: *const VkSwapchainKHR = null
+  pub var image_indices: *const u32 = null
+  pub var results: *var VkResult = null
+}
+
+pub extern struct VkFenceCreateInfo {
+  pub var s_type: u32 = kVkStructureTypeFenceCreateInfo
+  pub var next: *const u8 = null
+  pub var flags: u32 = 0
+}
+
+pub extern struct VkQueueFamilyProperties {
+  pub var queue_flags: u32 = 0
+  pub var queue_count: u32 = 0
+  pub var timestamp_valid_bits: u32 = 0
+  pub var min_image_transfer_granularity: VkExtent3D = VkExtent3D {}
+}
+
+// Only deviceName is read; `limits` is VkPhysicalDeviceLimits as opaque bytes.
+pub extern struct VkPhysicalDeviceProperties {
+  pub var api_version: u32 = 0
+  pub var driver_version: u32 = 0
+  pub var vendor_id: u32 = 0
+  pub var device_id: u32 = 0
+  pub var device_type: u32 = 0
+  pub var device_name: [u8; 256] = [0; 256]
+  pub var pipeline_cache_uuid: [u8; 16] = [0; 16]
+  pub var limits: [u64; 63] = [0; 63]
+  pub var sparse_properties: [u32; 5] = [0; 5]
+}
+
+pub extern("vkEnumeratePhysicalDevices") fn vk_enumerate_physical_devices(instance: VkInstance, count: *var u32,
+  devices: *var VkPhysicalDevice): VkResult;
+pub extern("vkGetPhysicalDeviceQueueFamilyProperties") fn vk_get_physical_device_queue_family_properties(
+  device: VkPhysicalDevice, count: *var u32, properties: *var VkQueueFamilyProperties): ();
+pub extern("vkGetPhysicalDeviceProperties") fn vk_get_physical_device_properties(device: VkPhysicalDevice,
+  properties: *var VkPhysicalDeviceProperties): ();
+pub extern("vkGetPhysicalDeviceSurfaceSupportKHR") fn vk_get_physical_device_surface_support_khr(device: VkPhysicalDevice,
+  queue_family_index: u32, surface: VkSurfaceKHR, supported: *var VkBool32): VkResult;
+pub extern("vkGetPhysicalDeviceSurfaceCapabilitiesKHR") fn vk_get_physical_device_surface_capabilities_khr(
+  device: VkPhysicalDevice, surface: VkSurfaceKHR, capabilities: *var VkSurfaceCapabilitiesKHR): VkResult;
+pub extern("vkGetPhysicalDeviceSurfaceFormatsKHR") fn vk_get_physical_device_surface_formats_khr(device: VkPhysicalDevice,
+  surface: VkSurfaceKHR, count: *var u32, formats: *var VkSurfaceFormatKHR): VkResult;
+pub extern("vkGetPhysicalDeviceSurfacePresentModesKHR") fn vk_get_physical_device_surface_present_modes_khr(
+  device: VkPhysicalDevice, surface: VkSurfaceKHR, count: *var u32, modes: *var u32): VkResult;
+pub extern("vkCreateSwapchainKHR") fn vk_create_swapchain_khr(device: VkDevice, create_info: *const VkSwapchainCreateInfoKHR,
+  allocator: *const u8, swapchain: *var VkSwapchainKHR): VkResult;
+pub extern("vkDestroySwapchainKHR") fn vk_destroy_swapchain_khr(device: VkDevice, swapchain: VkSwapchainKHR,
+  allocator: *const u8): ();
+pub extern("vkGetSwapchainImagesKHR") fn vk_get_swapchain_images_khr(device: VkDevice, swapchain: VkSwapchainKHR,
+  count: *var u32, images: *var VkImage): VkResult;
+pub extern("vkAcquireNextImageKHR") fn vk_acquire_next_image_khr(device: VkDevice, swapchain: VkSwapchainKHR, timeout: u64,
+  semaphore: VkSemaphore, fence: VkFence, image_index: *var u32): VkResult;
+pub extern("vkQueuePresentKHR") fn vk_queue_present_khr(queue: VkQueue, present_info: *const VkPresentInfoKHR): VkResult;
+pub extern("vkGetDeviceQueue") fn vk_get_device_queue(device: VkDevice, queue_family_index: u32, queue_index: u32,
+  queue: *var VkQueue): ();
+pub extern("vkCreateFence") fn vk_create_fence(device: VkDevice, create_info: *const VkFenceCreateInfo, allocator: *const u8,
+  fence: *var VkFence): VkResult;
+pub extern("vkDestroyFence") fn vk_destroy_fence(device: VkDevice, fence: VkFence, allocator: *const u8): ();
+pub extern("vkWaitForFences") fn vk_wait_for_fences(device: VkDevice, count: u32, fences: *const VkFence, wait_all: VkBool32,
+  timeout: u64): VkResult;
+pub extern("vkResetFences") fn vk_reset_fences(device: VkDevice, count: u32, fences: *const VkFence): VkResult;
+pub extern("vkDestroySurfaceKHR") fn vk_destroy_surface_khr(instance: VkInstance, surface: VkSurfaceKHR,
+  allocator: *const u8): ();
+
+// GLFW's Vulkan entry points
+pub extern("glfwGetRequiredInstanceExtensions") fn glfw_get_required_instance_extensions(count: *var u32): *var *const c_char;
+pub extern("glfwCreateWindowSurface") fn glfw_create_window_surface(instance: VkInstance, window: *var GlfwWindow,
+  allocator: *const u8, surface: *var VkSurfaceKHR): VkResult;

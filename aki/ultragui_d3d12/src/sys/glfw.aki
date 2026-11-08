@@ -1,0 +1,33 @@
+// No C++ counterpart: the GLFW 3 calls d3d12_rhi.cc makes (the window it is
+// given, its sizes and its framebuffer-size callback, event waiting while
+// minimized) plus window creation for this package's example and tests.
+// Declared by hand; the platform package ultragui_glfw carries the full
+// binding, this package does not depend on it (see PORTING.md).
+
+module ultragui_d3d12::sys::glfw;
+
+pub extern type GlfwWindow;
+pub extern type GlfwMonitor;
+
+pub comptime let kGlfwFalse: i32 = 0;
+pub comptime let kGlfwResizable: i32 = 0x00020003;
+pub comptime let kGlfwClientApi: i32 = 0x00022001;
+pub comptime let kGlfwNoApi: i32 = 0;
+
+pub type GlfwFramebufferSizeFun = extern fn(*var GlfwWindow, i32, i32): ();
+
+pub extern("glfwInit") fn glfw_init(): i32;
+pub extern("glfwTerminate") fn glfw_terminate(): ();
+pub extern("glfwWindowHint") fn glfw_window_hint(hint: i32, value: i32): ();
+pub extern("glfwCreateWindow") fn glfw_create_window(width: i32, height: i32, title: *const c_char, monitor: *var GlfwMonitor,
+  share: *var GlfwWindow): *var GlfwWindow;
+pub extern("glfwDestroyWindow") fn glfw_destroy_window(window: *var GlfwWindow): ();
+pub extern("glfwWindowShouldClose") fn glfw_window_should_close(window: *var GlfwWindow): i32;
+pub extern("glfwPollEvents") fn glfw_poll_events(): ();
+pub extern("glfwWaitEvents") fn glfw_wait_events(): ();
+pub extern("glfwGetWindowSize") fn glfw_get_window_size(window: *var GlfwWindow, width: *var i32, height: *var i32): ();
+pub extern("glfwGetFramebufferSize") fn glfw_get_framebuffer_size(window: *var GlfwWindow, width: *var i32, height: *var i32): ();
+
+// The previous callback is returned and ignored, as the C++ does.
+pub extern("glfwSetFramebufferSizeCallback") fn glfw_set_framebuffer_size_callback(window: *var GlfwWindow,
+  callback: GlfwFramebufferSizeFun?): GlfwFramebufferSizeFun?;
