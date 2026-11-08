@@ -1,0 +1,275 @@
+// A scene that drives an Rhi directly, the way Renderer2D::EndFrame does:
+// rounded rects with borders, a gradient, a shadow, textures (nearest, linear,
+// BGRA, one filled by update_texture), glyph quads from the TextEngine atlas,
+// scissor batches over shared vertex arrays (the dedup path) and an offscreen
+// render target drawn back as a texture. UIContext is not ported yet, so this
+// stands in for it; tools/rhi_scene.cc is the same scene against the C++ RHI,
+// and the screenshots of the two are compared (see tools/compare_shots.sh).
+// The vertex building follows Renderer2D::EmitQuad and DrawText at dpi 1.
+// Generic over the Rhi, so the same file runs on every backend package.
+
+module support::scene;
+
+import {List} from akikit::containers::list;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D, pack_color, pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {rhi_handle_from_texture_id} from ultragui::render::texture_backend;
+import {Rhi} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {FontHandle, TextEngine} from ultragui::text::text_engine;
+
+pub comptime let kSceneWidth: i32 = 640;
+pub comptime let kSceneHeight: i32 = 400;
+pub comptime let kFontPath: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+// Renderer2D's batches: a run of indices with a scissor and a texture.
+struct Batch : Copy {
+  pub var scissor: Rect
+  pub var texture: RhiTextureHandle
+  pub var index_offset: u32
+  pub var index_count: u32
+}
+
+// Geometry for one pipeline: shared vertex/index arrays plus its batches.
+pub struct Geometry {
+  pub var vertices: List<Vertex2D> = List()
+  pub var indices: List<u32> = List()
+  pub var batches: List<Batch> = List()
+  pub var batch_start: u32 = 0
+
+  // Closes the quads emitted since the last close into a batch.
+  pub fn close(var self&, scissor: Rect, texture: RhiTextureHandle) {
+    let total = self.indices.len() as u32;
+    if (total <= self.batch_start) {
+      return;
+    }
+    self.batches.push(Batch { scissor, texture, index_offset: self.batch_start, index_count: total - self.batch_start });
+    self.batch_start = total;
+  }
+
+  // Renderer2D::EmitQuad
+  pub fn quad(var self&, rect: Rect, color: u32, color2: u32, radii: u32, softness: f32, border_width: f32, border_color: u32) {
+    let hw = rect.w * 0.5;
+    let hh = rect.h * 0.5;
+    let base = self.vertices.len() as u32;
+    self.vertices.push(vertex(rect.x, rect.y, 0.0, 0.0, color, color2, radii, softness, hw, hh, border_width, border_color));
+    self.vertices.push(vertex(rect.x + rect.w, rect.y, 1.0, 0.0, color, color2, radii, softness, hw, hh, border_width, border_color));
+    self.vertices.push(vertex(rect.x + rect.w, rect.y + rect.h, 1.0, 1.0, color, color2, radii, softness, hw, hh, border_width,
+      border_color));
+    self.vertices.push(vertex(rect.x, rect.y + rect.h, 0.0, 1.0, color, color2, radii, softness, hw, hh, border_width,
+      border_color));
+    self.indices.push(base);
+    self.indices.push(base + 1);
+    self.indices.push(base + 2);
+    self.indices.push(base);
+    self.indices.push(base + 2);
+    self.indices.push(base + 3);
+  }
+
+  // Renderer2D::DrawShadow
+  pub fn shadow(var self&, rect: Rect, color: u32, blur: f32, spread: f32, ox: f32, oy: f32, tl: f32, tr: f32, br: f32, bl: f32) {
+    let r = Rect {
+      x: rect.x + ox - spread - blur,
+      y: rect.y + oy - spread - blur,
+      w: rect.w + (spread + blur) * 2.0,
+      h: rect.h + (spread + blur) * 2.0,
+    };
+    self.quad(r, color, color, pack_radii(tl + spread, tr + spread, br + spread, bl + spread), blur, 0.0, 0);
+  }
+
+  // Renderer2D::DrawText at dpi 1: one glyph quad per visible glyph.
+  pub fn text(var self&, var te&: TextEngine, font: FontHandle, x: f32, y: f32, s: str, size: f32, color: u32) {
+    let run = te.shape(font, s, size);
+    var cursor_x = x;
+    let baseline_y = y + run.ascent;
+    for (let g& in run.glyphs()) {
+      if (g.bmp_w <= 0.0 || g.bmp_h <= 0.0) {
+        cursor_x += g.x_advance;
+        continue;
+      }
+      let gx = @round((cursor_x + g.bearing_x + g.x_offset) * 1.0) * 1.0;
+      let gy = @round((baseline_y - g.bearing_y + g.y_offset) * 1.0) * 1.0;
+      let gw = @round(g.bmp_w * 1.0) * 1.0;
+      let gh = @round(g.bmp_h * 1.0) * 1.0;
+      let base = self.vertices.len() as u32;
+      self.vertices.push(vertex(gx, gy, g.u0, g.v0, color, color, 0, 0.0, 0.0, 0.0, 0.0, 0));
+      self.vertices.push(vertex(gx + gw, gy, g.u1, g.v0, color, color, 0, 0.0, 0.0, 0.0, 0.0, 0));
+      self.vertices.push(vertex(gx + gw, gy + gh, g.u1, g.v1, color, color, 0, 0.0, 0.0, 0.0, 0.0, 0));
+      self.vertices.push(vertex(gx, gy + gh, g.u0, g.v1, color, color, 0, 0.0, 0.0, 0.0, 0.0, 0));
+      self.indices.push(base);
+      self.indices.push(base + 1);
+      self.indices.push(base + 2);
+      self.indices.push(base);
+      self.indices.push(base + 2);
+      self.indices.push(base + 3);
+      cursor_x += g.x_advance;
+    }
+  }
+}
+
+fn vertex(x: f32, y: f32, u: f32, v: f32, color: u32, color2: u32, radii: u32, softness: f32, hw: f32, hh: f32, bw: f32,
+  bc: u32): Vertex2D =>
+  Vertex2D {
+    pos: [x, y],
+    uv: [u, v],
+    color,
+    color2,
+    corner_radii: radii,
+    softness,
+    half_size: [hw, hh],
+    border_width: bw,
+    border_color: bc,
+  };
+
+fn rgba(c: u32, a: f32): u32 {
+  let r = ((c >> 16) & 0xFF) as f32 / 255.0;
+  let g = ((c >> 8) & 0xFF) as f32 / 255.0;
+  let b = (c & 0xFF) as f32 / 255.0;
+  return pack_color(r, g, b, a);
+}
+
+// The textures the scene makes; destroyed by `Textures::destroy`.
+pub struct Textures {
+  pub var checker: RhiTextureHandle = kInvalidTexture
+  pub var smooth: RhiTextureHandle = kInvalidTexture
+  pub var target: RhiTextureHandle = kInvalidTexture
+}
+
+pub fn make_textures<R: Rhi>(var rhi&: R): Textures {
+  var t = Textures {};
+  // 8x8 checker, created empty and filled by update_texture (nearest).
+  t.checker = rhi.create_texture(8, 8, RhiFormat::Rgba8Unorm, [], RhiFilter::Nearest);
+  var px = [0u8; 256];
+  for (let y in 0..8usize) {
+    for (let x in 0..8usize) {
+      let on = (x + y) % 2 == 0;
+      let o = (y * 8 + x) * 4;
+      px[o] = on ? 240 : 40;
+      px[o + 1] = on ? 200 : 60;
+      px[o + 2] = on ? 60 : 160;
+      px[o + 3] = 255;
+    }
+  }
+  rhi.update_texture(t.checker, px[..] as bytes);
+  // 4x4 BGRA ramp, linear.
+  var ramp = [0u8; 64];
+  for (let y in 0..4usize) {
+    for (let x in 0..4usize) {
+      let o = (y * 4 + x) * 4;
+      ramp[o] = (x * 85) as u8;       // B
+      ramp[o + 1] = (y * 85) as u8;   // G
+      ramp[o + 2] = (255 - x * 60) as u8;  // R
+      ramp[o + 3] = 255;
+    }
+  }
+  t.smooth = rhi.create_texture(4, 4, RhiFormat::Bgra8Unorm, ramp[..] as bytes, RhiFilter::Linear);
+  t.target = rhi.create_render_target(128, 96);
+  return t;
+}
+
+pub fn destroy_textures<R: Rhi>(var rhi&: R, t&: Textures) {
+  rhi.destroy_texture(t.checker);
+  rhi.destroy_texture(t.smooth);
+  rhi.destroy_render_target(t.target);
+}
+
+// The main pass: panel, gradient, shadow, textures, clipped and translucent
+// panels, and the text over them. `big` is the texture of the 128x96 quad.
+pub fn build_main(var quads&: Geometry, var text&: Geometry, var te&: TextEngine, font: FontHandle, checker: RhiTextureHandle,
+  smooth: RhiTextureHandle, big: RhiTextureHandle, full: Rect) {
+  // Batch 1 (white): panel, gradient, shadow + button.
+  quads.quad(Rect { x: 20.0, y: 20.0, w: 300.0, h: 170.0 }, rgba(0x2a3a5a, 1.0), rgba(0x2a3a5a, 1.0),
+    pack_radii(16.0, 16.0, 16.0, 16.0), 0.0, 2.0, rgba(0x8fb0ff, 1.0));
+  quads.quad(Rect { x: 340.0, y: 20.0, w: 280.0, h: 60.0 }, rgba(0xff5050, 1.0), rgba(0x5050ff, 1.0),
+    pack_radii(30.0, 4.0, 30.0, 4.0), 0.0, 0.0, 0);
+  quads.shadow(Rect { x: 40.0, y: 130.0, w: 140.0, h: 40.0 }, rgba(0x000000, 0.6), 12.0, 0.0, 0.0, 4.0, 10.0, 10.0, 10.0, 10.0);
+  quads.quad(Rect { x: 40.0, y: 130.0, w: 140.0, h: 40.0 }, rgba(0x4a4aff, 1.0), rgba(0x4a4aff, 1.0), pack_radii_uniform(10.0),
+    0.0, 0.0, 0);
+  quads.close(full, kInvalidTexture);
+  // Batch 2: the checker (nearest), tinted white.
+  quads.quad(Rect { x: 340.0, y: 100.0, w: 64.0, h: 64.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), pack_radii_uniform(8.0),
+    0.0, 0.0, 0);
+  quads.close(full, checker);
+  // Batch 3: the BGRA ramp (linear).
+  quads.quad(Rect { x: 416.0, y: 100.0, w: 64.0, h: 64.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), 0, 0.0, 0.0, 0);
+  quads.close(full, smooth);
+  // Batch 4: the offscreen target.
+  quads.quad(Rect { x: 492.0, y: 100.0, w: 128.0, h: 96.0 }, rgba(0xffffff, 1.0), rgba(0xffffff, 1.0), pack_radii_uniform(6.0),
+    0.0, 0.0, 0);
+  quads.close(full, big);
+  // Clipped batch: a big rect clipped to a smaller scissor.
+  let clip = Rect { x: 40.0, y: 230.0, w: 150.0, h: 60.0 };
+  quads.quad(Rect { x: 20.0, y: 210.0, w: 300.0, h: 120.0 }, rgba(0x30c070, 1.0), rgba(0x108040, 1.0), pack_radii_uniform(20.0),
+    0.0, 4.0, rgba(0xffffff, 1.0));
+  quads.close(clip, kInvalidTexture);
+  // A translucent panel over the clear colour.
+  quads.quad(Rect { x: 340.0, y: 220.0, w: 280.0, h: 150.0 }, rgba(0xffffff, 0.15), rgba(0xffffff, 0.45),
+    pack_radii(24.0, 24.0, 4.0, 4.0), 0.0, 1.0, rgba(0xffffff, 0.8));
+  quads.close(full, kInvalidTexture);
+
+  // Text, over the quads.
+  text.text(te, font, 36.0, 32.0, "Hello, ultragui", 24.0, rgba(0xffffff, 1.0));
+  text.text(te, font, 36.0, 66.0, "Rounded rects, SDF borders", 14.0, rgba(0xa8c0ff, 1.0));
+  text.text(te, font, 36.0, 90.0, "gradient / shadow / texture / text", 12.0, rgba(0xffd070, 1.0));
+  text.close(full, kInvalidTexture);
+  text.text(te, font, 28.0, 250.0, "clipped text overflows the scissor rectangle", 16.0, rgba(0x000000, 1.0));
+  text.close(clip, kInvalidTexture);
+  text.text(te, font, 356.0, 236.0, "alpha blended panel", 18.0, rgba(0xffffff, 1.0));
+  text.close(full, kInvalidTexture);
+}
+
+// One frame: geometry first, then the atlas upload, the offscreen pass and the
+// main pass, as UIContext orders them.
+pub fn draw_scene<R: Rhi>(var rhi&: R, var te&: TextEngine, font: FontHandle, tex&: Textures): bool {
+  te.begin_frame();
+
+  // Offscreen layer: its own arrays.
+  let off_full = Rect { x: 0.0, y: 0.0, w: 128.0, h: 96.0 };
+  var off_quads = Geometry {};
+  var off_text = Geometry {};
+  off_quads.quad(Rect { x: 8.0, y: 8.0, w: 112.0, h: 80.0 }, rgba(0xff8030, 1.0), rgba(0xffd060, 1.0), pack_radii_uniform(14.0),
+    0.0, 3.0, rgba(0xffffff, 1.0));
+  off_quads.close(off_full, kInvalidTexture);
+  off_text.text(te, font, 24.0, 30.0, "RT", 28.0, rgba(0x102040, 1.0));
+  off_text.close(off_full, kInvalidTexture);
+
+  let ds = rhi.display_size();
+  let full = Rect { x: 0.0, y: 0.0, w: ds.x, h: ds.y };
+  var quads = Geometry {};
+  var text = Geometry {};
+
+  build_main(quads, text, te, font, tex.checker, tex.smooth, tex.target, full);
+
+  te.flush_atlas(rhi);
+  let atlas = rhi_handle_from_texture_id(te.atlas_texture());
+
+  rhi.acquire_frame();
+  if (rhi.begin_offscreen(tex.target, Color { r: 0.2, g: 0.0, b: 0.3, a: 1.0 })) {
+    submit_batches(rhi, off_quads.vertices.as_slice(), off_quads.indices.as_slice(), off_quads.batches.as_slice(), false, atlas);
+    submit_batches(rhi, off_text.vertices.as_slice(), off_text.indices.as_slice(), off_text.batches.as_slice(), true, atlas);
+    rhi.end_offscreen(tex.target);
+  }
+
+  if (!rhi.begin_frame(Color { r: 0.07, g: 0.08, b: 0.12, a: 1.0 })) {
+    return false;
+  }
+  submit_batches(rhi, quads.vertices.as_slice(), quads.indices.as_slice(), quads.batches.as_slice(), false, atlas);
+  submit_batches(rhi, text.vertices.as_slice(), text.indices.as_slice(), text.batches.as_slice(), true, atlas);
+  rhi.reset_scissor();
+  rhi.end_frame();
+  return true;
+}
+
+fn submit_batches<R: Rhi>(var rhi&: R, vertices&: [Vertex2D], indices&: [u32], batches&: [Batch], is_text: bool,
+  atlas: RhiTextureHandle) {
+  for (let b& in batches) {
+    rhi.set_scissor(b.scissor);
+    let slice = indices[b.index_offset as usize..(b.index_offset + b.index_count) as usize];
+    if (is_text) {
+      rhi.draw_text_triangles(vertices, slice, atlas);
+    } else {
+      rhi.draw_triangles(vertices, slice, b.texture);
+    }
+  }
+}

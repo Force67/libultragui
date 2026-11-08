@@ -1,0 +1,1600 @@
+// ugui/rhi/d3d11/d3d11_rhi.cc: the D3D11 RHI. It builds against the Windows
+// SDK, and on Linux against DXVK-native, which turns these calls back into
+// Vulkan. Development and testing therefore need no Windows machine.
+//
+// Three things differ between the two builds: the HLSL compiler (see
+// d3d_shader_compiler), the HWND, and the libraries aki.toml links. DXVK-native
+// has no window system of its own, so it takes a GLFWwindow* as its HWND. Start
+// it with DXVK_WSI_DRIVER=GLFW.
+//
+// Shape differences from the C++ (behavior is the same):
+//
+// * The C++ RHI is one class whose .cc is swapped at link time; this is
+//   D3d11Rhi, a type implementing the Rhi capability. Like the C++ it keeps its
+//   state in a separate heap object (D3dImpl in a Box): the framebuffer resize
+//   callback reaches it through the module static `s_rhi_instance`.
+// * COM through vtables of extern structs (sys::d3d11_vtbl), the C-style
+//   interface the C++ uses (CINTERFACE/COBJMACROS). Every interface pointer is
+//   `*var Unknown` except the device, context and swap chain.
+// * The window is RhiConfig::native_window (a GLFWwindow*).
+// * The four dynamic buffers' capacity bookkeeping (buffer, capacity, write
+//   position) is grouped in DynBuffer; `ensure_buffer` is DynBuffer::ensure.
+// * The HLSL comes from hlsl_embedded (the C++'s generated header).
+// * Vertex-array identity for the per-frame vertex dedup is the slice's data
+//   pointer, as the C++ compares the `const Vertex2D*` it was handed.
+
+module ultragui_d3d11::d3d11_rhi;
+
+import {Box} from akikit::memory::box;
+import {eprintln, println} from akikit::logging;
+import {max} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {Vertex2D} from ultragui::render::vertex;
+import {glfw_get_framebuffer_size, glfw_get_window_size, glfw_set_framebuffer_size_callback, GlfwWindow}
+  from ultragui_glfw::sys::glfw;
+import {compile_hlsl} from ultragui_d3d11::d3d_shader_compiler;
+import {quad_hlsl, text_hlsl, video_hlsl} from ultragui_d3d11::hlsl_embedded;
+import {BlendDesc, BufferDesc, D3dRect, Hresult, InputElementDesc, MappedSubresource, RasterizerDesc, RenderTargetBlendDesc,
+  RenderTargetViewDesc, SamplerDesc, ShaderResourceViewDesc, SubresourceData, Texture2dDesc, Viewport, DxgiSampleDesc,
+  DxgiModeDesc, DxgiRational, DxgiSwapChainDesc, kBindConstantBuffer, kBindIndexBuffer, kBindRenderTarget, kBindShaderResource,
+  kBindVertexBuffer, kBlendInvSrcAlpha, kBlendOpAdd, kBlendSrcAlpha, kColorWriteEnableAll, kComparisonNever, kCpuAccessWrite,
+  kCullNone, kD3dDriverTypeHardware, kD3dFeatureLevel11_0, kD3dFeatureLevel11_1, kD3d11SdkVersion, kDxgiFormatB8G8R8A8Unorm,
+  kDxgiFormatR32Float, kDxgiFormatR32G32Float, kDxgiFormatR32Uint, kDxgiFormatR8G8B8A8Typeless, kDxgiFormatR8G8B8A8Unorm,
+  kDxgiFormatR8G8B8A8UnormSrgb, kDxgiFormatR8Unorm, kDxgiFormatUnknown, kDxgiSwapEffectDiscard, kDxgiUsageRenderTargetOutput,
+  kFillSolid, kFilterMinMagMipLinear, kFilterMinMagMipPoint, kFloat32Max, kIidDxgiDevice, kIidDxgiFactory, kIidTexture2d,
+  kInputPerVertexData, kMapWriteDiscard, kMapWriteNoOverwrite, kPrimitiveTopologyTriangleList, kRtvDimensionTexture2d,
+  kSrvDimensionTexture2d, kTextureAddressClamp, kUsageDefault, kUsageDynamic, succeeded, failed}
+  from ultragui_d3d11::sys::d3d11;
+import {Device, DeviceContext, DxgiAdapter, DxgiDevice, DxgiFactory, SwapChain, Unknown, context_clear_render_target_view,
+  context_draw, context_draw_indexed, context_flush, context_ia_set_index_buffer, context_ia_set_input_layout,
+  context_ia_set_primitive_topology, context_ia_set_vertex_buffers, context_map, context_om_set_blend_state,
+  context_om_set_render_targets, context_ps_set_samplers, context_ps_set_shader, context_ps_set_shader_resources,
+  context_release, context_rs_set_scissor_rects, context_rs_set_state, context_rs_set_viewports, context_unmap,
+  context_update_subresource, context_vs_set_constant_buffers, context_vs_set_shader, d3d11_create_device,
+  device_create_blend_state, device_create_buffer, device_create_input_layout, device_create_pixel_shader,
+  device_create_rasterizer_state, device_create_render_target_view, device_create_sampler_state,
+  device_create_shader_resource_view, device_create_texture2d, device_create_vertex_shader, device_query_interface,
+  device_release, dxgi_adapter_get_parent, dxgi_device_get_adapter, dxgi_factory_create_swap_chain, release,
+  swap_chain_get_buffer, swap_chain_present, swap_chain_resize_buffers} from ultragui_d3d11::sys::d3d11_vtbl;
+
+extern fn memcpy(dst: *var u8, src: *const u8, n: usize): *var u8;
+extern("glfwGetWin32Window") fn glfw_get_win32_window(window: *var GlfwWindow): *var u8;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// RHI::Impl::MAX_TEXTURES
+comptime let kMaxTextures: u32 = 256;
+
+fn hr_hex(hr: Hresult): u32 => @bit_cast(u32, hr);
+
+// The slice's data pointer, as the identity the vertex dedup compares.
+fn vptr(vertices&: [Vertex2D]): *const u8 => unsafe @ptr(vertices) as *const u8;
+
+fn dpi_of(window: *var GlfwWindow): f32 {
+  var fw: i32 = 0;
+  var fh: i32 = 0;
+  var ww: i32 = 0;
+  var wh: i32 = 0;
+  unsafe {
+    glfw_get_framebuffer_size(window, &raw var fw, &raw var fh);
+    glfw_get_window_size(window, &raw var ww, &raw var wh);
+  }
+  return ww > 0 ? fw as f32 / ww as f32 : 1.0;
+}
+
+// An immutable view of one COM pointer as the array the API wants.
+unsafe fn one(p: *var *var Unknown): *const *var Unknown => unsafe (p as *const *var Unknown);
+
+// Vertex2D as the quad and text shaders read it (shared with ugui_impl_dx11).
+pub fn vertex_input_layout(): [InputElementDesc; 9] {
+  return [
+    input_element(c"POSITION", 0, kDxgiFormatR32G32Float, 0),
+    input_element(c"TEXCOORD", 0, kDxgiFormatR32G32Float, 8),
+    input_element(c"COLOR", 0, kDxgiFormatR32Uint, 16),
+    input_element(c"COLOR", 1, kDxgiFormatR32Uint, 20),
+    input_element(c"BLENDINDICES", 0, kDxgiFormatR32Uint, 24),
+    input_element(c"BLENDWEIGHT", 0, kDxgiFormatR32Float, 28),
+    input_element(c"TEXCOORD", 1, kDxgiFormatR32G32Float, 32),
+    input_element(c"BLENDWEIGHT", 1, kDxgiFormatR32Float, 40),
+    input_element(c"COLOR", 2, kDxgiFormatR32Uint, 44),
+  ];
+}
+
+fn input_element(name: *const c_char, index: u32, format: u32, offset: u32): InputElementDesc => InputElementDesc {
+  semantic_name: name,
+  semantic_index: index,
+  format,
+  input_slot: 0,
+  aligned_byte_offset: offset,
+  input_slot_class: kInputPerVertexData,
+  instance_data_step_rate: 0,
+};
+
+// ---------------------------------------------------------------------------
+// RHI::Impl
+// ---------------------------------------------------------------------------
+
+struct TextureSlot : Copy {
+  pub var texture: *var Unknown = null
+  pub var srv: *var Unknown = null
+  pub var rtv: *var Unknown = null  // only for render targets
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var pixel_size: u32 = 0
+  pub var filter: RhiFilter = RhiFilter::Linear
+  pub var in_use: bool = false
+  pub var is_render_target: bool = false
+}
+
+// A dynamic (USAGE_DYNAMIC) vertex or index buffer, with its capacity (in
+// elements) and the next write position (in elements) of the frame.
+struct DynBuffer : Copy {
+  pub var buf: *var Unknown = null
+  pub var capacity: u32 = 0
+  pub var write_pos: u32 = 0
+}
+
+struct D3dImpl {
+  pub unowned var window_: *var GlfwWindow = null
+  pub var dpi_scale_: f32 = 1.0
+  pub var vsync_: bool = true
+
+  // D3D11 core
+  pub unowned var device_: *var Device = null
+  pub unowned var ctx_: *var DeviceContext = null
+  pub unowned var swapchain_: *var SwapChain = null
+
+  // Swapchain state
+  pub unowned var backbuffer_rtv_: *var Unknown = null
+  pub var swapchain_width_: u32 = 0
+  pub var swapchain_height_: u32 = 0
+
+  // Shaders
+  pub unowned var quad_vs_: *var Unknown = null
+  pub unowned var quad_ps_: *var Unknown = null
+  pub unowned var text_vs_: *var Unknown = null
+  pub unowned var text_ps_: *var Unknown = null
+  pub unowned var video_vs_: *var Unknown = null
+  pub unowned var video_ps_: *var Unknown = null
+
+  // Input layout (shared by quad and text -- same vertex format)
+  pub unowned var input_layout_: *var Unknown = null
+
+  // State objects
+  pub unowned var blend_state_: *var Unknown = null
+  pub unowned var raster_state_: *var Unknown = null
+  pub unowned var sampler_linear_: *var Unknown = null
+  pub unowned var sampler_nearest_: *var Unknown = null
+
+  // Constant buffer for projection (scale.xy, translate.xy -- 16 bytes)
+  pub unowned var projection_cb_: *var Unknown = null
+
+  // Dynamic vertex/index buffers (USAGE_DYNAMIC): quad pipeline, then the
+  // separate text buffers.
+  pub var vertex_: DynBuffer = DynBuffer {}
+  pub var index_: DynBuffer = DynBuffer {}
+  pub var text_vertex_: DynBuffer = DynBuffer {}
+  pub var text_index_: DynBuffer = DynBuffer {}
+
+  // Vertex dedup
+  pub unowned var last_quad_verts_: *const u8 = null
+  pub var last_quad_vert_count_: u32 = 0
+  pub var last_quad_vb_offset_: u32 = 0
+
+  pub unowned var last_text_verts_: *const u8 = null
+  pub var last_text_vert_count_: u32 = 0
+  pub var last_text_vb_offset_: u32 = 0
+
+  // First draw of frame (use MAP_WRITE_DISCARD vs MAP_WRITE_NO_OVERWRITE)
+  pub var first_quad_draw_: bool = true
+  pub var first_text_draw_: bool = true
+
+  // Textures
+  pub var textures_: [TextureSlot; 256] = [TextureSlot {}; 256]
+  pub var white_texture_: RhiTextureHandle = kInvalidTexture
+
+  // Offscreen
+  pub var active_offscreen_target_: RhiTextureHandle = kInvalidTexture
+  pub var offscreen_display_size_: Vec2 = Vec2 {}
+  pub var frame_active_: bool = false
+
+  pub var framebuffer_resized_: bool = false
+}
+
+static var s_rhi_instance: *var D3dImpl = null;
+
+// The framebuffer resize callback (installed in Init).
+extern fn framebuffer_size_callback(window: *var GlfwWindow, w: i32, h: i32) {
+  unsafe {
+    if (s_rhi_instance == null) {
+      return;
+    }
+    var inst& = *s_rhi_instance;
+    inst.framebuffer_resized_ = true;
+    inst.dpi_scale_ = dpi_of(inst.window_);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic buffer helpers
+// ---------------------------------------------------------------------------
+
+fn create_dynamic_buffer(device: *var Device, size: u64, bind_flags: u32): *var Unknown {
+  // ByteWidth is 32-bit. Refuse rather than wrap, which would hand back a
+  // buffer far smaller than the caller is about to write into.
+  if (size > 0xFFFFFFFF) {
+    eprintln(f"ultragui-d3d11: buffer of {size} bytes is too large");
+    return null;
+  }
+
+  let desc = BufferDesc {
+    byte_width: size as u32,
+    usage: kUsageDynamic,
+    bind_flags,
+    cpu_access_flags: kCpuAccessWrite,
+    misc_flags: 0,
+    structure_byte_stride: 0,
+  };
+
+  var buf: *var Unknown = null;
+  let hr = unsafe device_create_buffer(device, &raw desc, null, &raw var buf);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateBuffer failed: 0x{hr_hex(hr):08x}");
+    return null;
+  }
+  return buf;
+}
+
+// Grows the buffer to hold `required` elements. Returns true when it allocated
+// a new buffer. Releasing the old one mid-frame is safe: draws already recorded
+// on the immediate context hold an internal reference, so it keeps its
+// contents until the GPU is done. The return value warns callers that cache an
+// offset into it.
+fn DynBuffer::ensure(var self&, device: *var Device, required: u32, bind_flags: u32, stride: u32): bool {
+  if (self.capacity >= required) {
+    return false;
+  }
+
+  if (self.buf != null) {
+    unsafe release(self.buf);
+    self.buf = null;
+  }
+
+  var new_cap = max(required, self.capacity * 2);
+  new_cap = max(new_cap, 16384);
+  self.buf = create_dynamic_buffer(device, new_cap as u64 * stride as u64, bind_flags);
+  self.capacity = self.buf != null ? new_cap : 0;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Projection constant buffer
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::update_projection(self&, width: f32, height: f32) {
+  // D3D11 NDC: Y-up (bottom=-1, top=+1). Negate Y to flip to screen coords
+  // (Y-down).
+  let push = [2.0 / width, -2.0 / height, -1.0, 1.0];
+
+  var mapped = MappedSubresource { data: null, row_pitch: 0, depth_pitch: 0 };
+  let hr = unsafe context_map(self.ctx_, self.projection_cb_, 0, kMapWriteDiscard, 0, &raw var mapped);
+  if (succeeded(hr)) {
+    unsafe {
+      memcpy(mapped.data, @ptr(push[..]) as *const u8, 16);
+      context_unmap(self.ctx_, self.projection_cb_, 0);
+    }
+  }
+
+  var cb = self.projection_cb_;
+  unsafe context_vs_set_constant_buffers(self.ctx_, 0, 1, one(&raw var cb));
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline binding helpers
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::bind_quad_pipeline(self&) {
+  unsafe {
+    context_vs_set_shader(self.ctx_, self.quad_vs_, null, 0);
+    context_ps_set_shader(self.ctx_, self.quad_ps_, null, 0);
+  }
+}
+
+fn D3dImpl::set_full_scissor(self&) {
+  if (self.active_offscreen_target_ != kInvalidTexture) {
+    let slot = self.textures_[self.active_offscreen_target_ as usize];
+    self.set_full_scissor_for(slot.width, slot.height);
+  } else {
+    self.set_full_scissor_for(self.swapchain_width_, self.swapchain_height_);
+  }
+}
+
+fn D3dImpl::set_full_scissor_for(self&, width: u32, height: u32) {
+  let scissor = D3dRect { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+  unsafe context_rs_set_scissor_rects(self.ctx_, 1, &raw scissor);
+}
+
+fn D3dImpl::set_viewport(self&, width: f32, height: f32) {
+  let viewport = Viewport { top_left_x: 0.0, top_left_y: 0.0, width, height, min_depth: 0.0, max_depth: 1.0 };
+  unsafe context_rs_set_viewports(self.ctx_, 1, &raw viewport);
+}
+
+// The two samplers, slot 0 = linear, slot 1 = nearest.
+fn D3dImpl::bind_samplers(self&) {
+  var samplers = [self.sampler_linear_, self.sampler_nearest_];
+  unsafe context_ps_set_samplers(self.ctx_, 0, 2, @ptr(samplers[..]) as *const *var Unknown);
+}
+
+fn D3dImpl::set_blend_and_raster(self&) {
+  let blend_factor = [0.0f32; 4];
+  unsafe {
+    context_om_set_blend_state(self.ctx_, self.blend_state_, @ptr(blend_factor[..]) as *const f32, 0xFFFFFFFF);
+    context_rs_set_state(self.ctx_, self.raster_state_);
+  }
+}
+
+fn D3dImpl::set_render_target(self&, rtv: *var Unknown) {
+  var v = rtv;
+  unsafe context_om_set_render_targets(self.ctx_, 1, one(&raw var v), null);
+}
+
+fn D3dImpl::clear_target(self&, rtv: *var Unknown, color: Color) {
+  let clear = [color.r, color.g, color.b, color.a];
+  unsafe context_clear_render_target_view(self.ctx_, rtv, @ptr(clear[..]) as *const f32);
+}
+
+// ---------------------------------------------------------------------------
+// Shader creation
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::create_shaders(var self&): bool {
+  // Quad vertex shader
+  let quad_vs_code = compile_hlsl(quad_hlsl(), "VSMain", "vs_5_0") else { return false; };
+  var hr = unsafe device_create_vertex_shader(self.device_, @ptr(quad_vs_code.as_slice()) as *const u8, quad_vs_code.len(),
+    null, &raw var self.quad_vs_);
+  if (failed(hr)) {
+    eprintln("ultragui-d3d11: CreateVertexShader (quad) failed");
+    return false;
+  }
+
+  // Create input layout from quad VS bytecode
+  if (!self.create_input_layout(quad_vs_code.as_slice())) {
+    return false;
+  }
+
+  // Quad pixel shader
+  let quad_ps_code = compile_hlsl(quad_hlsl(), "PSMain", "ps_5_0") else { return false; };
+  hr = unsafe device_create_pixel_shader(self.device_, @ptr(quad_ps_code.as_slice()) as *const u8, quad_ps_code.len(), null,
+    &raw var self.quad_ps_);
+  if (failed(hr)) {
+    eprintln("ultragui-d3d11: CreatePixelShader (quad) failed");
+    return false;
+  }
+
+  // Text vertex shader
+  let text_vs_code = compile_hlsl(text_hlsl(), "VSMain", "vs_5_0") else { return false; };
+  hr = unsafe device_create_vertex_shader(self.device_, @ptr(text_vs_code.as_slice()) as *const u8, text_vs_code.len(), null,
+    &raw var self.text_vs_);
+  if (failed(hr)) {
+    eprintln("ultragui-d3d11: CreateVertexShader (text) failed");
+    return false;
+  }
+
+  // Text pixel shader
+  let text_ps_code = compile_hlsl(text_hlsl(), "PSMain", "ps_5_0") else { return false; };
+  hr = unsafe device_create_pixel_shader(self.device_, @ptr(text_ps_code.as_slice()) as *const u8, text_ps_code.len(), null,
+    &raw var self.text_ps_);
+  if (failed(hr)) {
+    eprintln("ultragui-d3d11: CreatePixelShader (text) failed");
+    return false;
+  }
+
+  // Video shaders are lazy-created on first use
+  return true;
+}
+
+fn D3dImpl::create_input_layout(var self&, vs_bytecode&: [u8]): bool {
+  let layout = vertex_input_layout();
+  let hr = unsafe device_create_input_layout(self.device_, @ptr(layout[..]) as *const InputElementDesc, 9,
+    @ptr(vs_bytecode) as *const u8, #vs_bytecode, &raw var self.input_layout_);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateInputLayout failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+  return true;
+}
+
+fn D3dImpl::create_blend_state(var self&): bool {
+  var bd = BlendDesc {
+    alpha_to_coverage_enable: 0,
+    independent_blend_enable: 0,
+    render_target: [RenderTargetBlendDesc {
+      blend_enable: 0,
+      src_blend: 0,
+      dest_blend: 0,
+      blend_op: 0,
+      src_blend_alpha: 0,
+      dest_blend_alpha: 0,
+      blend_op_alpha: 0,
+      render_target_write_mask: 0,
+    }; 8],
+  };
+  bd.render_target[0] = RenderTargetBlendDesc {
+    blend_enable: 1,
+    src_blend: kBlendSrcAlpha,
+    dest_blend: kBlendInvSrcAlpha,
+    blend_op: kBlendOpAdd,
+    src_blend_alpha: kBlendSrcAlpha,
+    dest_blend_alpha: kBlendInvSrcAlpha,
+    blend_op_alpha: kBlendOpAdd,
+    render_target_write_mask: kColorWriteEnableAll,
+  };
+
+  let hr = unsafe device_create_blend_state(self.device_, &raw bd, &raw var self.blend_state_);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateBlendState failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+  return true;
+}
+
+fn D3dImpl::create_rasterizer_state(var self&): bool {
+  let rd = RasterizerDesc {
+    fill_mode: kFillSolid,
+    cull_mode: kCullNone,
+    front_counter_clockwise: 1,
+    depth_bias: 0,
+    depth_bias_clamp: 0.0,
+    slope_scaled_depth_bias: 0.0,
+    depth_clip_enable: 0,
+    scissor_enable: 1,  // Always TRUE, just change the rect
+    multisample_enable: 0,
+    antialiased_line_enable: 0,
+  };
+
+  let hr = unsafe device_create_rasterizer_state(self.device_, &raw rd, &raw var self.raster_state_);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateRasterizerState failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+  return true;
+}
+
+fn sampler_desc(filter: u32): SamplerDesc => SamplerDesc {
+  filter,
+  address_u: kTextureAddressClamp,
+  address_v: kTextureAddressClamp,
+  address_w: kTextureAddressClamp,
+  mip_lod_bias: 0.0,
+  max_anisotropy: 1,
+  comparison_func: kComparisonNever,
+  border_color: [0.0; 4],
+  min_lod: 0.0,
+  max_lod: kFloat32Max,
+};
+
+fn D3dImpl::create_samplers(var self&): bool {
+  // Linear clamp sampler (slot 0)
+  {
+    let sd = sampler_desc(kFilterMinMagMipLinear);
+    let hr = unsafe device_create_sampler_state(self.device_, &raw sd, &raw var self.sampler_linear_);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d11: CreateSamplerState (linear) failed: 0x{hr_hex(hr):08x}");
+      return false;
+    }
+  }
+
+  // Nearest clamp sampler (slot 1)
+  {
+    let sd = sampler_desc(kFilterMinMagMipPoint);
+    let hr = unsafe device_create_sampler_state(self.device_, &raw sd, &raw var self.sampler_nearest_);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d11: CreateSamplerState (nearest) failed: 0x{hr_hex(hr):08x}");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+fn D3dImpl::create_projection_cb(var self&): bool {
+  // CB must be a multiple of 16 bytes. We need 16 bytes (4 floats).
+  let desc = BufferDesc {
+    byte_width: 16,
+    usage: kUsageDynamic,
+    bind_flags: kBindConstantBuffer,
+    cpu_access_flags: kCpuAccessWrite,
+    misc_flags: 0,
+    structure_byte_stride: 0,
+  };
+
+  let hr = unsafe device_create_buffer(self.device_, &raw desc, null, &raw var self.projection_cb_);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateBuffer (projection CB) failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+  return true;
+}
+
+fn D3dImpl::create_default_resources(var self&): bool {
+  // Create 1x1 white fallback texture
+  let white_pixel = [255u8; 4];
+  self.white_texture_ = self.create_texture(1, 1, RhiFormat::Rgba8Unorm, white_pixel[..] as bytes, RhiFilter::Linear);
+  if (self.white_texture_ == kInvalidTexture) {
+    eprintln("ultragui-d3d11: failed to create white fallback texture");
+    return false;
+  }
+  return true;
+}
+
+fn D3dImpl::ensure_video_shaders(var self&): bool {
+  if (self.video_vs_ != null && self.video_ps_ != null) {
+    return true;
+  }
+
+  let vs_code = compile_hlsl(video_hlsl(), "VSMain", "vs_5_0") else { return false; };
+  var hr = unsafe device_create_vertex_shader(self.device_, @ptr(vs_code.as_slice()) as *const u8, vs_code.len(), null,
+    &raw var self.video_vs_);
+  if (failed(hr)) {
+    eprintln("ultragui-d3d11: CreateVertexShader (video) failed");
+    return false;
+  }
+
+  let ps_code = compile_hlsl(video_hlsl(), "PSMain", "ps_5_0") else { return false; };
+  hr = unsafe device_create_pixel_shader(self.device_, @ptr(ps_code.as_slice()) as *const u8, ps_code.len(), null,
+    &raw var self.video_ps_);
+  if (failed(hr)) {
+    eprintln("ultragui-d3d11: CreatePixelShader (video) failed");
+    return false;
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Swapchain back buffer management
+// ---------------------------------------------------------------------------
+
+fn create_backbuffer_rtv(device: *var Device, swapchain: *var SwapChain, rtv_out: *var *var Unknown): bool {
+  var backbuffer: *var Unknown = null;
+  var hr = unsafe swap_chain_get_buffer(swapchain, 0, &raw kIidTexture2d, &raw var backbuffer);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: GetBuffer failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+
+  hr = unsafe device_create_render_target_view(device, backbuffer, null, rtv_out);
+  unsafe release(backbuffer);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateRenderTargetView failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::init(var self&, config&: RhiConfig): bool {
+  self.window_ = unsafe (config.native_window as *var GlfwWindow);
+  self.vsync_ = config.vsync;
+
+  // Compute DPI scale
+  self.dpi_scale_ = dpi_of(self.window_);
+
+  // Use a static to avoid glfwSetWindowUserPointer conflict with InputRouter
+  unsafe {
+    var inst& = self;
+    s_rhi_instance = &raw var inst;
+    let _ = glfw_set_framebuffer_size_callback(self.window_, @c_fn(framebuffer_size_callback));
+  }
+
+  // Get framebuffer size for swapchain
+  var fb_w: i32 = 0;
+  var fb_h: i32 = 0;
+  unsafe glfw_get_framebuffer_size(self.window_, &raw var fb_w, &raw var fb_h);
+  self.swapchain_width_ = fb_w as u32;
+  self.swapchain_height_ = fb_h as u32;
+
+  // Set up swap chain description
+  var output_window: *var u8 = null;
+  if (comptime @target_os() == "windows") {
+    output_window = unsafe glfw_get_win32_window(self.window_);
+  } else {
+    // DXVK-native's GLFW WSI takes the GLFWwindow* in place of an HWND.
+    output_window = unsafe (self.window_ as *var u8);
+  }
+  let sc_desc = DxgiSwapChainDesc {
+    buffer_desc: DxgiModeDesc {
+      width: self.swapchain_width_,
+      height: self.swapchain_height_,
+      refresh_rate: DxgiRational { numerator: 0, denominator: 1 },
+      format: kDxgiFormatR8G8B8A8UnormSrgb,
+      scanline_ordering: 0,
+      scaling: 0,
+    },
+    sample_desc: DxgiSampleDesc { count: 1, quality: 0 },
+    buffer_usage: kDxgiUsageRenderTargetOutput,
+    buffer_count: 2,
+    output_window,
+    windowed: 1,
+    swap_effect: kDxgiSwapEffectDiscard,
+    flags: 0,
+  };
+
+  let feature_levels = [kD3dFeatureLevel11_1, kD3dFeatureLevel11_0];
+  var achieved_level = kD3dFeatureLevel11_0;
+
+  // Create device first (no swapchain)
+  var hr = unsafe d3d11_create_device(null,  // adapter (default)
+    kD3dDriverTypeHardware, null,  // software rasterizer module
+    0,  // flags
+    @ptr(feature_levels[..]) as *const u32, 2, kD3d11SdkVersion, &raw var self.device_, &raw var achieved_level,
+    &raw var self.ctx_);
+
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: D3D11CreateDevice failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+
+  eprintln(f"ultragui-d3d11: device created (FL 0x{achieved_level:x})");
+
+  // Get DXGI factory from device to create swapchain
+  var dxgi_device_obj: *var Unknown = null;
+  hr = unsafe device_query_interface(self.device_, &raw kIidDxgiDevice, &raw var dxgi_device_obj);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: QI for IDXGIDevice failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+
+  var adapter: *var Unknown = null;
+  hr = unsafe dxgi_device_get_adapter(dxgi_device_obj as *var DxgiDevice, &raw var adapter);
+  unsafe release(dxgi_device_obj);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: GetAdapter failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+
+  var factory: *var Unknown = null;
+  hr = unsafe dxgi_adapter_get_parent(adapter as *var DxgiAdapter, &raw kIidDxgiFactory, &raw var factory);
+  unsafe release(adapter);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: GetParent for IDXGIFactory failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+
+  eprintln("ultragui-d3d11: got DXGI factory, creating swapchain");
+
+  var swapchain: *var Unknown = null;
+  hr = unsafe dxgi_factory_create_swap_chain(factory as *var DxgiFactory, self.device_ as *var Unknown, &raw sc_desc,
+    &raw var swapchain);
+  self.swapchain_ = unsafe (swapchain as *var SwapChain);
+  unsafe release(factory);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateSwapChain failed: 0x{hr_hex(hr):08x}");
+    return false;
+  }
+
+  eprintln("ultragui-d3d11: swapchain created");
+
+  // Get back buffer RTV
+  eprintln("ultragui-d3d11: creating backbuffer RTV");
+  if (!unsafe create_backbuffer_rtv(self.device_, self.swapchain_, &raw var self.backbuffer_rtv_)) {
+    return false;
+  }
+  eprintln("ultragui-d3d11: compiling shaders");
+  if (!self.create_shaders()) {
+    return false;
+  }
+  eprintln("ultragui-d3d11: creating states");
+  if (!self.create_blend_state()) {
+    return false;
+  }
+  if (!self.create_rasterizer_state()) {
+    return false;
+  }
+  if (!self.create_samplers()) {
+    return false;
+  }
+  if (!self.create_projection_cb()) {
+    return false;
+  }
+  if (!self.create_default_resources()) {
+    return false;
+  }
+
+  println(f"ultragui-d3d11: initialization complete ({self.swapchain_width_}x{self.swapchain_height_})");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// AcquireFrame (no-op for D3D11 -- no explicit sync needed)
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::acquire_frame(var self&): bool {
+  // D3D11 handles synchronization internally. Nothing to do.
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// BeginFrame
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::begin_frame(var self&, clear_color: Color): bool {
+  // Handle resize
+  if (self.framebuffer_resized_) {
+    self.framebuffer_resized_ = false;
+
+    // ResizeBuffers needs every reference to the back buffers gone, and the
+    // context holds one for as long as the view is bound as a render target.
+    // Unbind before releasing, or the resize fails with
+    // DXGI_ERROR_INVALID_CALL. (DXVK is lenient here; Windows is not.)
+    self.set_render_target(null);
+    if (self.backbuffer_rtv_ != null) {
+      unsafe release(self.backbuffer_rtv_);
+      self.backbuffer_rtv_ = null;
+    }
+
+    var fb_w: i32 = 0;
+    var fb_h: i32 = 0;
+    unsafe glfw_get_framebuffer_size(self.window_, &raw var fb_w, &raw var fb_h);
+    if (fb_w == 0 || fb_h == 0) {
+      return false;
+    }
+
+    self.swapchain_width_ = fb_w as u32;
+    self.swapchain_height_ = fb_h as u32;
+
+    let hr = unsafe swap_chain_resize_buffers(self.swapchain_, 0, self.swapchain_width_, self.swapchain_height_,
+      kDxgiFormatUnknown, 0);
+    if (failed(hr)) {
+      eprintln(f"ultragui-d3d11: ResizeBuffers failed: 0x{hr_hex(hr):08x}");
+      return false;
+    }
+
+    if (!unsafe create_backbuffer_rtv(self.device_, self.swapchain_, &raw var self.backbuffer_rtv_)) {
+      return false;
+    }
+  }
+
+  // Check for zero-size framebuffer (minimized window)
+  if (self.swapchain_width_ == 0 || self.swapchain_height_ == 0) {
+    return false;
+  }
+
+  // Set render target
+  self.set_render_target(self.backbuffer_rtv_);
+
+  // Clear
+  self.clear_target(self.backbuffer_rtv_, clear_color);
+
+  // Set viewport (framebuffer pixels)
+  self.set_viewport(self.swapchain_width_ as f32, self.swapchain_height_ as f32);
+
+  // Set scissor to full viewport
+  self.set_full_scissor_for(self.swapchain_width_, self.swapchain_height_);
+
+  // Bind quad shaders
+  self.bind_quad_pipeline();
+
+  // Bind input layout
+  unsafe context_ia_set_input_layout(self.ctx_, self.input_layout_);
+
+  // Bind blend state, rasterizer state
+  self.set_blend_and_raster();
+
+  // Bind samplers (slot 0 = linear, slot 1 = nearest)
+  self.bind_samplers();
+
+  // Update and bind projection CB using WINDOW coordinates (not framebuffer)
+  let win_w = self.swapchain_width_ as f32 / self.dpi_scale_;
+  let win_h = self.swapchain_height_ as f32 / self.dpi_scale_;
+  self.update_projection(win_w, win_h);
+
+  // Set topology
+  unsafe context_ia_set_primitive_topology(self.ctx_, kPrimitiveTopologyTriangleList);
+
+  // Reset buffer write positions and dedup state
+  self.vertex_.write_pos = 0;
+  self.index_.write_pos = 0;
+  self.text_vertex_.write_pos = 0;
+  self.text_index_.write_pos = 0;
+
+  self.last_quad_verts_ = null;
+  self.last_quad_vert_count_ = 0;
+  self.last_text_verts_ = null;
+  self.last_text_vert_count_ = 0;
+
+  self.first_quad_draw_ = true;
+  self.first_text_draw_ = true;
+
+  self.frame_active_ = true;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// EndFrame
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::end_frame(var self&) {
+  unsafe swap_chain_present(self.swapchain_, self.vsync_ ? 1 : 0, 0);
+  self.frame_active_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// Scissor
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::set_scissor(var self&, rect: Rect) {
+  let scale = self.active_offscreen_target_ != kInvalidTexture ? 1.0 : self.dpi_scale_;
+
+  let scissor = D3dRect {
+    left: @saturating_cast(i32, rect.x * scale),
+    top: @saturating_cast(i32, rect.y * scale),
+    right: @saturating_cast(i32, (rect.x + rect.w) * scale),
+    bottom: @saturating_cast(i32, (rect.y + rect.h) * scale),
+  };
+  unsafe context_rs_set_scissor_rects(self.ctx_, 1, &raw scissor);
+}
+
+fn D3dImpl::reset_scissor(var self&) {
+  self.set_full_scissor();
+}
+
+// Copies `bytes` into a mapped dynamic buffer at `offset`. DISCARD for the
+// first write into a buffer (the first of the frame, or one that just grew),
+// NO_OVERWRITE to append after that, so the draws already recorded keep reading
+// what they were given.
+fn D3dImpl::upload(self&, buf: *var Unknown, map_type: u32, offset: u32, data: *const u8, bytes: usize) {
+  var mapped = MappedSubresource { data: null, row_pitch: 0, depth_pitch: 0 };
+  let hr = unsafe context_map(self.ctx_, buf, 0, map_type, 0, &raw var mapped);
+  if (succeeded(hr)) {
+    unsafe {
+      memcpy((mapped.data as usize + offset as usize) as *var u8, data, bytes);
+      context_unmap(self.ctx_, buf, 0);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DrawTriangles
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return;
+  }
+
+  let vp = vptr(vertices);
+
+  // Vertex dedup check
+  var vb_byte_offset: u32 = 0;
+  if (vp == self.last_quad_verts_ && vertex_count == self.last_quad_vert_count_) {
+    vb_byte_offset = self.last_quad_vb_offset_;
+  } else {
+    let vb_grown = self.vertex_.ensure(self.device_, self.vertex_.write_pos + vertex_count, kBindVertexBuffer,
+      @size_of(Vertex2D) as u32);
+    if (vb_grown) {
+      // The cached offset points into the buffer that was just replaced.
+      self.last_quad_verts_ = null;
+      self.last_quad_vert_count_ = 0;
+    }
+    if (self.vertex_.buf == null) {
+      return;
+    }
+
+    vb_byte_offset = self.vertex_.write_pos * @size_of(Vertex2D) as u32;
+
+    let map_type = (self.first_quad_draw_ || vb_grown) ? kMapWriteDiscard : kMapWriteNoOverwrite;
+    self.upload(self.vertex_.buf, map_type, vb_byte_offset, vp, vertex_count as usize * @size_of(Vertex2D));
+
+    self.last_quad_verts_ = vp;
+    self.last_quad_vert_count_ = vertex_count;
+    self.last_quad_vb_offset_ = vb_byte_offset;
+    self.vertex_.write_pos += vertex_count;
+    self.first_quad_draw_ = false;
+  }
+
+  // Always append indices
+  let ib_grown = self.index_.ensure(self.device_, self.index_.write_pos + index_count, kBindIndexBuffer, 4);
+  if (self.index_.buf == null) {
+    return;
+  }
+
+  let ib_byte_offset = self.index_.write_pos * 4;
+  {
+    let map_type = (ib_byte_offset == 0 || ib_grown) ? kMapWriteDiscard : kMapWriteNoOverwrite;
+    self.upload(self.index_.buf, map_type, ib_byte_offset, unsafe @ptr(indices) as *const u8, index_count as usize * 4);
+  }
+  self.index_.write_pos += index_count;
+
+  // Bind vertex buffer
+  let stride = @size_of(Vertex2D) as u32;
+  let offset = vb_byte_offset;
+  var vb = self.vertex_.buf;
+  unsafe context_ia_set_vertex_buffers(self.ctx_, 0, 1, one(&raw var vb), &raw stride, &raw offset);
+
+  // Bind index buffer
+  unsafe context_ia_set_index_buffer(self.ctx_, self.index_.buf, kDxgiFormatR32Uint, ib_byte_offset);
+
+  // Bind texture SRV and its sampler to PS slot 0. The quad shader samples
+  // s0, so honouring RHIFilter means picking the sampler per draw.
+  let tex = texture != kInvalidTexture ? texture : self.white_texture_;
+  if (tex < kMaxTextures && self.textures_[tex as usize].in_use) {
+    var srv = self.textures_[tex as usize].srv;
+    unsafe context_ps_set_shader_resources(self.ctx_, 0, 1, one(&raw var srv));
+    var sampler = self.textures_[tex as usize].filter == RhiFilter::Nearest ? self.sampler_nearest_ : self.sampler_linear_;
+    unsafe context_ps_set_samplers(self.ctx_, 0, 1, one(&raw var sampler));
+  }
+
+  unsafe context_draw_indexed(self.ctx_, index_count, 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// DrawTextTriangles
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return;
+  }
+
+  // Switch to text pipeline
+  unsafe {
+    context_vs_set_shader(self.ctx_, self.text_vs_, null, 0);
+    context_ps_set_shader(self.ctx_, self.text_ps_, null, 0);
+  }
+
+  // Re-update projection (display_size may differ for offscreen)
+  let ds = self.display_size();
+  self.update_projection(ds.x, ds.y);
+
+  let vp = vptr(vertices);
+
+  // Use SEPARATE buffers for text to avoid overwriting quad data
+  var vb_byte_offset: u32 = 0;
+  if (vp == self.last_text_verts_ && vertex_count == self.last_text_vert_count_) {
+    vb_byte_offset = self.last_text_vb_offset_;
+  } else {
+    let vb_grown = self.text_vertex_.ensure(self.device_, self.text_vertex_.write_pos + vertex_count, kBindVertexBuffer,
+      @size_of(Vertex2D) as u32);
+    if (vb_grown) {
+      self.last_text_verts_ = null;
+      self.last_text_vert_count_ = 0;
+    }
+    if (self.text_vertex_.buf == null) {
+      return;
+    }
+
+    vb_byte_offset = self.text_vertex_.write_pos * @size_of(Vertex2D) as u32;
+
+    let map_type = (self.first_text_draw_ || vb_grown) ? kMapWriteDiscard : kMapWriteNoOverwrite;
+    self.upload(self.text_vertex_.buf, map_type, vb_byte_offset, vp, vertex_count as usize * @size_of(Vertex2D));
+
+    self.last_text_verts_ = vp;
+    self.last_text_vert_count_ = vertex_count;
+    self.last_text_vb_offset_ = vb_byte_offset;
+    self.text_vertex_.write_pos += vertex_count;
+    self.first_text_draw_ = false;
+  }
+
+  // Always append text indices
+  let ib_grown = self.text_index_.ensure(self.device_, self.text_index_.write_pos + index_count, kBindIndexBuffer, 4);
+  if (self.text_index_.buf == null) {
+    return;
+  }
+
+  let ib_byte_offset = self.text_index_.write_pos * 4;
+  {
+    let map_type = (ib_byte_offset == 0 || ib_grown) ? kMapWriteDiscard : kMapWriteNoOverwrite;
+    self.upload(self.text_index_.buf, map_type, ib_byte_offset, unsafe @ptr(indices) as *const u8, index_count as usize * 4);
+  }
+  self.text_index_.write_pos += index_count;
+
+  // Bind text vertex buffer
+  let stride = @size_of(Vertex2D) as u32;
+  let vb_offset = vb_byte_offset;
+  var vb = self.text_vertex_.buf;
+  unsafe context_ia_set_vertex_buffers(self.ctx_, 0, 1, one(&raw var vb), &raw stride, &raw vb_offset);
+
+  // Bind text index buffer
+  unsafe context_ia_set_index_buffer(self.ctx_, self.text_index_.buf, kDxgiFormatR32Uint, ib_byte_offset);
+
+  // Bind atlas texture SRV to PS slot 0
+  if (atlas_texture < kMaxTextures && self.textures_[atlas_texture as usize].in_use) {
+    var srv = self.textures_[atlas_texture as usize].srv;
+    unsafe context_ps_set_shader_resources(self.ctx_, 0, 1, one(&raw var srv));
+  }
+
+  unsafe {
+    context_ia_set_primitive_topology(self.ctx_, kPrimitiveTopologyTriangleList);
+    context_draw_indexed(self.ctx_, index_count, 0, 0);
+  }
+
+  // Switch back to quad pipeline and restore projection
+  self.bind_quad_pipeline();
+  self.update_projection(ds.x, ds.y);
+}
+
+// ---------------------------------------------------------------------------
+// display_size / dpi_scale
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::display_size(self&): Vec2 {
+  if (self.active_offscreen_target_ != kInvalidTexture) {
+    return self.offscreen_display_size_;
+  }
+  return Vec2 { x: self.swapchain_width_ as f32 / self.dpi_scale_, y: self.swapchain_height_ as f32 / self.dpi_scale_ };
+}
+
+// ---------------------------------------------------------------------------
+// Texture management
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::find_free_slot(self&): RhiTextureHandle {
+  for (let i in 0..kMaxTextures) {
+    if (!self.textures_[i as usize].in_use) {
+      return i;
+    }
+  }
+  return kInvalidTexture;
+}
+
+fn D3dImpl::create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter):
+  RhiTextureHandle {
+  // Find free slot
+  let handle = self.find_free_slot();
+  if (handle == kInvalidTexture) {
+    return kInvalidTexture;
+  }
+
+  var dxgi_format = kDxgiFormatR8G8B8A8Unorm;
+  var pixel_size: u32 = 4;
+  match (format) {
+    RhiFormat::Rgba8Unorm => {
+      dxgi_format = kDxgiFormatR8G8B8A8Unorm;
+      pixel_size = 4;
+    },
+    RhiFormat::Bgra8Unorm => {
+      dxgi_format = kDxgiFormatB8G8R8A8Unorm;
+      pixel_size = 4;
+    },
+    RhiFormat::R8Unorm => {
+      dxgi_format = kDxgiFormatR8Unorm;
+      pixel_size = 1;
+    },
+    _ => {
+      return kInvalidTexture;
+    },
+  }
+
+  // Create texture
+  let tex_desc = Texture2dDesc {
+    width,
+    height,
+    mip_levels: 1,
+    array_size: 1,
+    format: dxgi_format,
+    sample_desc: DxgiSampleDesc { count: 1, quality: 0 },
+    usage: kUsageDefault,
+    bind_flags: kBindShaderResource,
+    cpu_access_flags: 0,
+    misc_flags: 0,
+  };
+
+  let has_pixels = #pixels != 0;
+  let init_data = SubresourceData {
+    sys_mem: has_pixels ? unsafe @ptr(pixels) as *const u8 : null,
+    sys_mem_pitch: width * pixel_size,
+    sys_mem_slice_pitch: 0,
+  };
+
+  var slot = TextureSlot {};
+  var hr = unsafe device_create_texture2d(self.device_, &raw tex_desc, has_pixels ? &raw init_data : null,
+    &raw var slot.texture);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateTexture2D failed: 0x{hr_hex(hr):08x}");
+    return kInvalidTexture;
+  }
+
+  // Create SRV (NULL desc -> auto from texture format)
+  hr = unsafe device_create_shader_resource_view(self.device_, slot.texture, null, &raw var slot.srv);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateShaderResourceView failed: 0x{hr_hex(hr):08x}");
+    unsafe release(slot.texture);
+    return kInvalidTexture;
+  }
+
+  slot.width = width;
+  slot.height = height;
+  slot.pixel_size = pixel_size;
+  slot.filter = filter;
+  slot.in_use = true;
+  self.textures_[handle as usize] = slot;
+  return handle;
+}
+
+fn D3dImpl::update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use) {
+    return;
+  }
+
+  let slot = self.textures_[handle as usize];
+  unsafe context_update_subresource(self.ctx_, slot.texture, 0, null, #pixels == 0 ? null : @ptr(pixels) as *const u8,
+    slot.width * slot.pixel_size, 0);
+}
+
+fn D3dImpl::destroy_texture(var self&, handle: RhiTextureHandle) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use) {
+    return;
+  }
+  if (self.textures_[handle as usize].is_render_target) {
+    self.destroy_render_target(handle);
+    return;
+  }
+
+  let slot = self.textures_[handle as usize];
+  unsafe {
+    if (slot.srv != null) {
+      release(slot.srv);
+    }
+    if (slot.texture != null) {
+      release(slot.texture);
+    }
+  }
+  self.textures_[handle as usize] = TextureSlot {};
+}
+
+// ---------------------------------------------------------------------------
+// Render targets
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::create_render_target(var self&, width: u32, height: u32): RhiTextureHandle {
+  // Find free slot
+  let handle = self.find_free_slot();
+  if (handle == kInvalidTexture) {
+    return kInvalidTexture;
+  }
+
+  // A render target holds sRGB-encoded bytes, like every other texture the
+  // quad shader samples. TYPELESS storage lets the RTV be sRGB, so the
+  // hardware encodes what the shader writes. The SRV stays UNORM, which leaves
+  // srgb_to_linear() in the shader as the only decode. Decoding twice darkens
+  // every offscreen pass.
+  let tex_desc = Texture2dDesc {
+    width,
+    height,
+    mip_levels: 1,
+    array_size: 1,
+    format: kDxgiFormatR8G8B8A8Typeless,
+    sample_desc: DxgiSampleDesc { count: 1, quality: 0 },
+    usage: kUsageDefault,
+    bind_flags: kBindShaderResource | kBindRenderTarget,
+    cpu_access_flags: 0,
+    misc_flags: 0,
+  };
+
+  var slot = TextureSlot {};
+  var hr = unsafe device_create_texture2d(self.device_, &raw tex_desc, null, &raw var slot.texture);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateTexture2D (RT) failed: 0x{hr_hex(hr):08x}");
+    return kInvalidTexture;
+  }
+
+  // Create SRV (UNORM: hands the shader the stored bytes as they are)
+  let srv_desc = ShaderResourceViewDesc {
+    format: kDxgiFormatR8G8B8A8Unorm,
+    view_dimension: kSrvDimensionTexture2d,
+    most_detailed_mip: 0,
+    mip_levels: 1,
+    pad0: 0,
+    pad1: 0,
+  };
+  hr = unsafe device_create_shader_resource_view(self.device_, slot.texture, &raw srv_desc, &raw var slot.srv);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateShaderResourceView (RT) failed: 0x{hr_hex(hr):08x}");
+    unsafe release(slot.texture);
+    return kInvalidTexture;
+  }
+
+  // Create RTV (sRGB: the hardware encodes what the shader writes)
+  let rtv_desc = RenderTargetViewDesc {
+    format: kDxgiFormatR8G8B8A8UnormSrgb,
+    view_dimension: kRtvDimensionTexture2d,
+    mip_slice: 0,
+    pad0: 0,
+    pad1: 0,
+  };
+  hr = unsafe device_create_render_target_view(self.device_, slot.texture, &raw rtv_desc, &raw var slot.rtv);
+  if (failed(hr)) {
+    eprintln(f"ultragui-d3d11: CreateRenderTargetView (RT) failed: 0x{hr_hex(hr):08x}");
+    unsafe {
+      release(slot.srv);
+      release(slot.texture);
+    }
+    return kInvalidTexture;
+  }
+
+  slot.width = width;
+  slot.height = height;
+  slot.pixel_size = 4;
+  slot.in_use = true;
+  slot.is_render_target = true;
+  self.textures_[handle as usize] = slot;
+  return handle;
+}
+
+fn D3dImpl::destroy_render_target(var self&, handle: RhiTextureHandle) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use || !self.textures_[handle as usize].is_render_target) {
+    return;
+  }
+
+  let slot = self.textures_[handle as usize];
+  unsafe {
+    if (slot.rtv != null) {
+      release(slot.rtv);
+    }
+    if (slot.srv != null) {
+      release(slot.srv);
+    }
+    if (slot.texture != null) {
+      release(slot.texture);
+    }
+  }
+  self.textures_[handle as usize] = TextureSlot {};
+}
+
+// ---------------------------------------------------------------------------
+// Offscreen rendering
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool {
+  if (target >= kMaxTextures || !self.textures_[target as usize].in_use || !self.textures_[target as usize].is_render_target) {
+    return false;
+  }
+
+  let slot = self.textures_[target as usize];
+
+  self.active_offscreen_target_ = target;
+  self.offscreen_display_size_ = Vec2 { x: slot.width as f32, y: slot.height as f32 };
+
+  // Unbind SRV if this texture is currently bound (D3D11 validation requires
+  // it)
+  var null_srv: *var Unknown = null;
+  unsafe context_ps_set_shader_resources(self.ctx_, 0, 1, one(&raw var null_srv));
+
+  // Set render target
+  self.set_render_target(slot.rtv);
+
+  // Clear
+  self.clear_target(slot.rtv, clear_color);
+
+  // Set viewport
+  self.set_viewport(slot.width as f32, slot.height as f32);
+
+  // Set scissor
+  self.set_full_scissor_for(slot.width, slot.height);
+
+  // Bind quad pipeline
+  self.bind_quad_pipeline();
+  unsafe context_ia_set_input_layout(self.ctx_, self.input_layout_);
+
+  // Bind blend and rasterizer state
+  self.set_blend_and_raster();
+
+  // Bind samplers
+  self.bind_samplers();
+
+  // Projection for pixel-exact offscreen coordinates
+  self.update_projection(slot.width as f32, slot.height as f32);
+
+  unsafe context_ia_set_primitive_topology(self.ctx_, kPrimitiveTopologyTriangleList);
+
+  return true;
+}
+
+fn D3dImpl::end_offscreen(var self&, target: RhiTextureHandle) {
+  if (self.active_offscreen_target_ == kInvalidTexture) {
+    return;
+  }
+
+  self.active_offscreen_target_ = kInvalidTexture;
+
+  // Restore swapchain render target
+  self.set_render_target(self.backbuffer_rtv_);
+
+  // Restore viewport
+  self.set_viewport(self.swapchain_width_ as f32, self.swapchain_height_ as f32);
+
+  // Restore scissor
+  self.set_full_scissor_for(self.swapchain_width_, self.swapchain_height_);
+
+  // Restore pipeline state
+  self.bind_quad_pipeline();
+  unsafe context_ia_set_input_layout(self.ctx_, self.input_layout_);
+
+  self.set_blend_and_raster();
+  self.bind_samplers();
+
+  let win_w = self.swapchain_width_ as f32 / self.dpi_scale_;
+  let win_h = self.swapchain_height_ as f32 / self.dpi_scale_;
+  self.update_projection(win_w, win_h);
+
+  unsafe context_ia_set_primitive_topology(self.ctx_, kPrimitiveTopologyTriangleList);
+}
+
+// ---------------------------------------------------------------------------
+// Video frame conversion (YCbCr -> RGBA)
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::in_use_texture(self&, handle: RhiTextureHandle): bool =>
+  handle < kMaxTextures && self.textures_[handle as usize].in_use;
+
+fn D3dImpl::convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle,
+  cr: RhiTextureHandle) {
+  if (!self.ensure_video_shaders()) {
+    return;
+  }
+  if (!self.in_use_texture(target) || !self.textures_[target as usize].is_render_target) {
+    return;
+  }
+  if (!self.in_use_texture(y)) {
+    return;
+  }
+  if (!self.in_use_texture(cb)) {
+    return;
+  }
+  if (!self.in_use_texture(cr)) {
+    return;
+  }
+
+  let slot = self.textures_[target as usize];
+
+  // Unbind SRVs that might conflict
+  var null_srvs: [*var Unknown; 3] = [null, null, null];
+  unsafe context_ps_set_shader_resources(self.ctx_, 0, 3, @ptr(null_srvs[..]) as *const *var Unknown);
+
+  // Set render target
+  self.set_render_target(slot.rtv);
+
+  // Clear
+  self.clear_target(slot.rtv, Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
+
+  // Set video shaders
+  unsafe {
+    context_vs_set_shader(self.ctx_, self.video_vs_, null, 0);
+    context_ps_set_shader(self.ctx_, self.video_ps_, null, 0);
+
+    // No input layout needed for fullscreen triangle (uses SV_VertexID)
+    context_ia_set_input_layout(self.ctx_, null);
+  }
+
+  // Set viewport
+  self.set_viewport(slot.width as f32, slot.height as f32);
+
+  // Set scissor
+  self.set_full_scissor_for(slot.width, slot.height);
+
+  // Bind 3 SRVs (Y=slot0, Cb=slot1, Cr=slot2) to PS slots 0,1,2
+  var srvs: [*var Unknown; 3] = [self.textures_[y as usize].srv, self.textures_[cb as usize].srv, self.textures_[cr as usize].srv];
+  unsafe context_ps_set_shader_resources(self.ctx_, 0, 3, @ptr(srvs[..]) as *const *var Unknown);
+
+  // Bind linear sampler
+  var linear = self.sampler_linear_;
+  unsafe context_ps_set_samplers(self.ctx_, 0, 1, one(&raw var linear));
+
+  // Bind blend state and rasterizer (needed even for fullscreen pass)
+  self.set_blend_and_raster();
+
+  unsafe {
+    context_ia_set_primitive_topology(self.ctx_, kPrimitiveTopologyTriangleList);
+
+    // Draw fullscreen triangle (3 vertices, no vertex buffer)
+    context_draw(self.ctx_, 3, 0);
+
+    // Unbind SRVs from PS to allow the target to be read as texture later
+    context_ps_set_shader_resources(self.ctx_, 0, 3, @ptr(null_srvs[..]) as *const *var Unknown);
+  }
+
+  // Restore swapchain render target and quad pipeline
+  self.set_render_target(self.backbuffer_rtv_);
+
+  // Restore viewport/scissor for swapchain
+  self.set_viewport(self.swapchain_width_ as f32, self.swapchain_height_ as f32);
+  self.set_full_scissor_for(self.swapchain_width_, self.swapchain_height_);
+
+  // Restore quad shaders and input layout
+  self.bind_quad_pipeline();
+  unsafe context_ia_set_input_layout(self.ctx_, self.input_layout_);
+
+  // Restore samplers
+  self.bind_samplers();
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
+fn D3dImpl::shutdown(var self&) {
+  // Flush any pending GPU work
+  if (self.ctx_ != null) {
+    unsafe context_flush(self.ctx_);
+  }
+
+  // Textures
+  for (let i in 0..kMaxTextures) {
+    let slot = self.textures_[i as usize];
+    if (!slot.in_use) {
+      continue;
+    }
+    unsafe {
+      if (slot.is_render_target) {
+        if (slot.rtv != null) {
+          release(slot.rtv);
+        }
+      }
+      if (slot.srv != null) {
+        release(slot.srv);
+      }
+      if (slot.texture != null) {
+        release(slot.texture);
+      }
+    }
+    self.textures_[i as usize] = TextureSlot {};
+  }
+  self.white_texture_ = kInvalidTexture;
+
+  unsafe {
+    // Dynamic buffers
+    if (self.vertex_.buf != null) {
+      release(self.vertex_.buf);
+    }
+    if (self.index_.buf != null) {
+      release(self.index_.buf);
+    }
+    if (self.text_vertex_.buf != null) {
+      release(self.text_vertex_.buf);
+    }
+    if (self.text_index_.buf != null) {
+      release(self.text_index_.buf);
+    }
+
+    // Projection CB
+    if (self.projection_cb_ != null) {
+      release(self.projection_cb_);
+    }
+
+    // Samplers
+    if (self.sampler_linear_ != null) {
+      release(self.sampler_linear_);
+    }
+    if (self.sampler_nearest_ != null) {
+      release(self.sampler_nearest_);
+    }
+
+    // Rasterizer state
+    if (self.raster_state_ != null) {
+      release(self.raster_state_);
+    }
+
+    // Blend state
+    if (self.blend_state_ != null) {
+      release(self.blend_state_);
+    }
+
+    // Input layout
+    if (self.input_layout_ != null) {
+      release(self.input_layout_);
+    }
+
+    // Shaders
+    if (self.video_ps_ != null) {
+      release(self.video_ps_);
+    }
+    if (self.video_vs_ != null) {
+      release(self.video_vs_);
+    }
+    if (self.text_ps_ != null) {
+      release(self.text_ps_);
+    }
+    if (self.text_vs_ != null) {
+      release(self.text_vs_);
+    }
+    if (self.quad_ps_ != null) {
+      release(self.quad_ps_);
+    }
+    if (self.quad_vs_ != null) {
+      release(self.quad_vs_);
+    }
+
+    // Backbuffer RTV
+    if (self.backbuffer_rtv_ != null) {
+      release(self.backbuffer_rtv_);
+    }
+
+    // D3D11 core (release in reverse order)
+    if (self.ctx_ != null) {
+      context_release(self.ctx_);
+    }
+    if (self.swapchain_ != null) {
+      release(self.swapchain_);
+    }
+    if (self.device_ != null) {
+      device_release(self.device_);
+    }
+
+    s_rhi_instance = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// RHI forwarding methods (PIMPL)
+// ---------------------------------------------------------------------------
+
+pub struct D3d11Rhi : Rhi {
+  var impl_: Box<D3dImpl>
+
+  pub fn D3d11Rhi(): D3d11Rhi => D3d11Rhi { impl_: Box(D3dImpl {}) };
+
+  pub fn init(var self&, config&: RhiConfig): bool => self.impl_.get_var().init(config);
+  pub fn shutdown(var self&) {
+    self.impl_.get_var().shutdown();
+  }
+  pub fn begin_frame(var self&, clear_color: Color): bool => self.impl_.get_var().begin_frame(clear_color);
+  pub fn end_frame(var self&) {
+    self.impl_.get_var().end_frame();
+  }
+  pub fn set_scissor(var self&, rect: Rect) {
+    self.impl_.get_var().set_scissor(rect);
+  }
+  pub fn reset_scissor(var self&) {
+    self.impl_.get_var().reset_scissor();
+  }
+
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+    self.impl_.get_var().draw_triangles(vertices, indices, texture);
+  }
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+    self.impl_.get_var().draw_text_triangles(vertices, indices, atlas_texture);
+  }
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter):
+    RhiTextureHandle => self.impl_.get_var().create_texture(width, height, format, pixels, filter);
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+    self.impl_.get_var().update_texture(handle, pixels);
+  }
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {
+    self.impl_.get_var().destroy_texture(handle);
+  }
+
+  pub fn acquire_frame(var self&): bool => self.impl_.get_var().acquire_frame();
+
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle =>
+    self.impl_.get_var().create_render_target(width, height);
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {
+    self.impl_.get_var().destroy_render_target(handle);
+  }
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool =>
+    self.impl_.get_var().begin_offscreen(target, clear_color);
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {
+    self.impl_.get_var().end_offscreen(target);
+  }
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle,
+    cr: RhiTextureHandle) {
+    self.impl_.get_var().convert_video_frame(target, y, cb, cr);
+  }
+
+  pub fn display_size(self&): Vec2 => self.impl_.get().display_size();
+  pub fn dpi_scale(self&): f32 => self.impl_.get().dpi_scale_;
+}
