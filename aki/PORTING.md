@@ -315,7 +315,10 @@ pub capability ScriptRuntime {
 }
 ```
 
-`NoScript` is script_runtime_none.cc and the default. What UIContext gives a
+`NoScript` is script_runtime_none.cc and the default. Left for ultragui_lua's
+tests: test_runtime_safety.cc's `script_runtime_widget_registry_can_be_cleared`
+(needs a runtime that registers widgets; the rest of that file is
+tests/runtime_safety_test.aki). What UIContext gives a
 runtime beyond these methods (the C++ Init's RegisterAudioLua,
 RegisterAnimLua, RegisterLottieLua, RegisterVideoLua lambdas) is the
 `ScriptHost` in `ctx.host`, see "UIContext". Methods that can touch
