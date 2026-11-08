@@ -1,0 +1,92 @@
+// Shared by renderer2d_test and paint_test: compares a DrawData with tables
+// printed by tools/gen_renderer_reference.cc / gen_paint_reference.cc.
+
+module support::draw_check;
+
+import {DrawData} from ultragui::render::draw_data;
+import {Vertex2D} from ultragui::render::vertex;
+import {Expect} from support::expect;
+
+// One CMD line: clip (bits), texture, index offset, count, is_text, blur (bits).
+pub struct CmdRef : Copy {
+  pub let clip: [u32; 4]
+  pub let texture: u64
+  pub let offset: u32
+  pub let count: u32
+  pub let is_text: bool
+  pub let blur: u32
+}
+
+// The C++ tables of one DrawData.
+pub struct DrawRef<'a> {
+  pub let counts: [u32; 5]
+  pub let quad_vertices: &'a [[u32; 12]]
+  pub let text_vertices: &'a [[u32; 12]]
+  pub let quad_indices: &'a [u32]
+  pub let text_indices: &'a [u32]
+  pub let commands: &'a [CmdRef]
+}
+
+pub fn fnv(pixels: bytes): u64 {
+  var h: u64 = 1469598103934665603;
+  for (let p in pixels) {
+    h ^= p as u64;
+    h = h *% 1099511628211;
+  }
+  return h;
+}
+
+fn vertex_row(v&: Vertex2D): [u32; 12] => [
+  @bit_cast(u32, v.pos[0]), @bit_cast(u32, v.pos[1]), @bit_cast(u32, v.uv[0]), @bit_cast(u32, v.uv[1]), v.color, v.color2,
+  v.corner_radii, @bit_cast(u32, v.softness), @bit_cast(u32, v.half_size[0]), @bit_cast(u32, v.half_size[1]),
+  @bit_cast(u32, v.border_width), v.border_color,
+];
+
+pub fn check_vertices(var t&: Expect, got: &[Vertex2D], want: &[[u32; 12]], what: str) {
+  t.that(#got == #want, f"{what}: vertex count {#got}, want {#want}");
+  var bad: u32 = 0;
+  for (let i in 0..(#got < #want ? #got : #want)) {
+    let row = vertex_row(got[i]);
+    for (let k in 0..12) {
+      if (row[k] != want[i][k]) {
+        if (bad < 12) {
+          t.that(false, f"{what} vertex {i} field {k}: got 0x{row[k]:08x}, want 0x{want[i][k]:08x}");
+        }
+        bad += 1;
+      }
+    }
+  }
+  t.that(bad == 0, f"{what}: {bad} differing fields");
+}
+
+pub fn check_indices(var t&: Expect, got: &[u32], want: &[u32], what: str) {
+  var same = #got == #want;
+  if (same) {
+    for (let i in 0..#got) {
+      if (got[i] != want[i]) {
+        same = false;
+      }
+    }
+  }
+  t.that(same, f"{what} indices");
+}
+
+pub fn check_draw_data(var t&: Expect, dd&: DrawData, want&: DrawRef) {
+  t.that(dd.valid, "draw data valid");
+  t.that(dd.quad_vertex_count() == want.counts[0] && dd.quad_index_count() == want.counts[1] &&
+           dd.text_vertex_count() == want.counts[2] && dd.text_index_count() == want.counts[3] &&
+           dd.command_count() == want.counts[4], "counts");
+  check_vertices(t, dd.quad_vertices, want.quad_vertices, "quad");
+  check_vertices(t, dd.text_vertices, want.text_vertices, "text");
+  check_indices(t, dd.quad_indices, want.quad_indices, "quad");
+  check_indices(t, dd.text_indices, want.text_indices, "text");
+  t.that(#dd.commands == #want.commands, "command count");
+  for (let i in 0..(#dd.commands < #want.commands ? #dd.commands : #want.commands)) {
+    let c = dd.commands[i];
+    let w = want.commands[i];
+    let ok = @bit_cast(u32, c.clip_rect.x) == w.clip[0] && @bit_cast(u32, c.clip_rect.y) == w.clip[1] &&
+             @bit_cast(u32, c.clip_rect.w) == w.clip[2] && @bit_cast(u32, c.clip_rect.h) == w.clip[3] && c.texture_id == w.texture &&
+             c.index_offset == w.offset && c.elem_count == w.count && c.is_text == w.is_text && @bit_cast(u32, c.blur) == w.blur;
+    t.that(ok, f"command {i}");
+  }
+}

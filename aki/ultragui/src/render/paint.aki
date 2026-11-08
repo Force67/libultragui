@@ -1,0 +1,97 @@
+// ugui/render/paint.{h,cc}: the depth-first paint pass. Renders widget
+// backgrounds/text, then children; handles visibility culling, overflow
+// scissoring, rotation and scroll offsets.
+//
+// Shape: PaintWidgetTree(root, renderer) takes the World and the
+// WidgetContext first (no active registry).
+
+module ultragui::render::paint;
+
+import {to_list} from akikit::containers::list;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {Overflow, Visibility} from ultragui::style::enums;
+import {scroll_offset} from ultragui::widgets::scroll_view;
+import {WidgetKind, computed_style, kHierarchy, kTransform, kWidgetNode, paint_widget_styled} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+fn paint_widget_tree_impl(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D, scroll: Vec2,
+                          inherited_opacity: f32) {
+  let t& = world.get_var(kTransform, e) else {
+    return;
+  };
+  t.inherited_opacity = inherited_opacity;
+  // Already carries the ancestors' opacity, so passing it down accumulates.
+  let s = computed_style(world, e);
+  if (s.opacity <= 0.0) {
+    return;
+  }
+  if (s.visibility == Visibility::Hidden || s.visibility == Visibility::Collapsed) {
+    return;
+  }
+
+  // Temporarily shift this widget's rect by the accumulated scroll offset.
+  let original = world.get(kTransform, e)!;
+  let original_rect = original.rect;
+  let original_content = original.content_rect;
+  let shifted = scroll.x != 0.0 || scroll.y != 0.0;
+  if (shifted) {
+    var tv& = world.get_var(kTransform, e)!;
+    tv.rect = Rect { x: original_rect.x - scroll.x, y: original_rect.y - scroll.y, w: original_rect.w, h: original_rect.h };
+    tv.content_rect = Rect {
+      x: original_content.x - scroll.x, y: original_content.y - scroll.y, w: original_content.w, h: original_content.h,
+    };
+  }
+
+  let cur = world.get(kTransform, e)!;
+  let is_scroll_view = world.get(kWidgetNode, e)!.kind == WidgetKind::ScrollView;
+  let clip = is_scroll_view || s.overflow == Overflow::Hidden || s.overflow == Overflow::Scroll;
+  let clip_rect = is_scroll_view ? cur.content_rect : cur.rect;
+  if (clip) {
+    renderer.push_scissor(clip_rect);
+  }
+
+  // Rotation transforms this widget and its whole subtree about its centre.
+  let rotated = s.rotation != 0.0;
+  if (rotated) {
+    renderer.push_transform(Vec2 { x: cur.rect.x + cur.rect.w * 0.5, y: cur.rect.y + cur.rect.h * 0.5 }, s.rotation);
+  }
+
+  // `s` is the style this walk already resolved.
+  paint_widget_styled(world, ctx, e, renderer, s);
+
+  // If this widget is a scroll view, add its scroll offset for children.
+  let child_offset = scroll + scroll_offset(world, e);
+
+  // The C++ walks the live child list; painting changes no tree.
+  let kids = to_list(world.get(kHierarchy, e)!.children.as_slice());
+  for (let child in kids) {
+    paint_widget_tree_impl(world, ctx, child, renderer, child_offset, s.opacity);
+  }
+
+  if (rotated) {
+    renderer.pop_transform();
+  }
+
+  if (clip) {
+    renderer.pop_scissor();
+  }
+
+  // Restore original rect.
+  if (shifted) {
+    var tv& = world.get_var(kTransform, e)!;
+    tv.rect = original_rect;
+    tv.content_rect = original_content;
+  }
+}
+
+// PaintWidgetTree
+pub fn paint_widget_tree(var world&: World, var ctx&: WidgetContext, root: WidgetId, var renderer&: Renderer2D) {
+  if (!root.valid()) {
+    return;
+  }
+  paint_widget_tree_impl(world, ctx, root, renderer, Vec2::zero(), 1.0);
+}

@@ -7,11 +7,10 @@
 // reach a subsystem (animator, clock, ui scale) take the WidgetContext too
 // (widgets::widget_context explains why it is an argument).
 //
-// Ported here: the data, the tree, style/state, dirty marking, tooltips,
-// hit testing and the vtable dispatch except paint. Next wave:
-// PaintWidget (needs Renderer2D), InputToLayoutPoint (needs ScrollOffset from
-// widgets::scroll_view), PopulateLayoutNode/ApplyLayoutResult (need
-// layout::layout's LayoutNode); they belong in this module.
+// All of widget.cc: the data, the tree, style/state, dirty marking,
+// tooltips, hit testing, the vtable dispatch, paint (PaintWidget's two
+// overloads are paint_widget and paint_widget_styled), InputToLayoutPoint and
+// the layout node bridge (PopulateLayoutNode, ApplyLayoutResult).
 //
 // Where the C++ dereferences a component it assumes is there
 // (world.Get<StyleC>(e)->style), the port stops with `!` on the same
@@ -26,15 +25,20 @@ import {index_of} from ultragui::core::algorithm;
 import {ComponentKey} from ultragui::core::component_store;
 import {WidgetId, kNullWidget} from ultragui::core::handle;
 import {Vec2} from ultragui::core::math;
+import {Color} from ultragui::core::color;
 import {Rect} from ultragui::core::rect;
-import {PointerEvents, Visibility, WidgetState} from ultragui::style::enums;
+import {LayoutNode} from ultragui::layout::layout;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {GradientType, PointerEvents, Visibility, WidgetState} from ultragui::style::enums;
 import {Style, StyleOverride, resolve_style} from ultragui::style::style;
 import {Transition} from ultragui::style::transition;
 import {AnimStyle, StateStyle, StateTransitionRule, Tooltip, kAnimStyle, kStateStyle, kTooltip} from ultragui::widgets::components;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
+import {scroll_offset} from ultragui::widgets::scroll_view;
 import {
-  vt_consumes_text_input, vt_hit_test, vt_measure, vt_on_char_input, vt_on_click, vt_on_dismiss, vt_on_key_down,
+  custom_paint, vt_draw, vt_consumes_text_input, vt_hit_test, vt_measure, vt_on_char_input, vt_on_click, vt_on_dismiss, vt_on_key_down,
   vt_on_layout, vt_on_scroll, vt_on_update,
 } from ultragui::widgets::widget_vtable;
 
@@ -442,4 +446,142 @@ pub fn measure_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId): 
   }
   let t& = world.get(kTransform, e)!;
   return (t.intrinsic_w, t.intrinsic_h);
+}
+
+// --- Paint -----------------------------------------------------------------------
+
+// Packed per-corner radii from a resolved style.
+fn style_corner_radii(s&: Style): u32 {
+  if (s.corner_radius_tl > 0.0 || s.corner_radius_tr > 0.0 || s.corner_radius_br > 0.0 || s.corner_radius_bl > 0.0) {
+    return pack_radii(s.corner_radius_tl, s.corner_radius_tr, s.corner_radius_br, s.corner_radius_bl);
+  }
+  return pack_radii_uniform(s.corner_radius);
+}
+
+// The radii inside a border of width `bw` (corners smaller than the border
+// become square).
+fn inner_radii(radii: u32, bw: f32): u32 {
+  let tl = (radii & 0xFF) as f32;
+  let tr = ((radii >> 8) & 0xFF) as f32;
+  let br = ((radii >> 16) & 0xFF) as f32;
+  let bl = ((radii >> 24) & 0xFF) as f32;
+  return pack_radii(tl > bw ? tl - bw : 0.0, tr > bw ? tr - bw : 0.0, br > bw ? br - bw : 0.0, bl > bw ? bl - bw : 0.0);
+}
+
+// PaintWidget(world, e, renderer)
+pub fn paint_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  let computed = computed_style(world, e);
+  paint_widget_styled(world, ctx, e, renderer, computed);
+}
+
+// PaintWidget(world, e, renderer, computed): paint with a style the caller has
+// already resolved (the tree walk computes one to decide visibility).
+pub fn paint_widget_styled(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D, computed&: Style) {
+  let kind = kind_of(world, e);
+  if (custom_paint(kind)) {
+    let _ = vt_draw(kind, world, ctx, e, renderer);
+    return;
+  }
+
+  let rect = world.get(kTransform, e)!.rect;
+  var s = computed;
+  s.scale(ui_scale(world, ctx, e));
+  let alpha = s.opacity;
+  let radii = style_corner_radii(s);
+
+  if (s.has_shadow() && !s.shadow.inset) {
+    let sc = s.shadow.color.with_alpha(s.shadow.color.a * alpha);
+    renderer.draw_shadow(rect, sc, s.shadow.blur, s.shadow.spread, s.shadow.offset, radii);
+  }
+
+  if (s.backdrop_blur > 0.0) {
+    // A quad flagged with the blur radius; a backend with a blurred copy of
+    // the scene fills it (frosted glass). Backends without one skip it.
+    renderer.set_next_blur(s.backdrop_blur);
+    renderer.draw_rect(rect, Color { r: 1.0, g: 1.0, b: 1.0, a: alpha }, radii);
+    renderer.set_next_blur(0.0);
+  }
+
+  if (s.background.a > 0.0 || s.border_width > 0.0 || s.has_multi_stop_gradient()) {
+    let bg = s.background.with_alpha(s.background.a * alpha);
+
+    if (s.border_width > 0.0 && s.border_color.a > 0.0) {
+      let bc = s.border_color.with_alpha(s.border_color.a * alpha);
+      if (s.has_multi_stop_gradient()) {
+        renderer.draw_bordered_rect(rect, Color::transparent(), bc, s.border_width, radii);
+        let inner = rect.shrunk(s.border_width);
+        renderer.draw_multi_stop_gradient(inner, s.gradient_stops[..s.gradient_stop_count as usize], s.gradient_type, s.gradient_angle, inner_radii(radii, s.border_width));
+      } else if (s.has_gradient()) {
+        renderer.draw_bordered_rect(rect, Color::transparent(), bc, s.border_width, radii);
+        let inner = rect.shrunk(s.border_width);
+        let ir = inner_radii(radii, s.border_width);
+        let bg2 = s.background_end.with_alpha(s.background_end.a * alpha);
+        if (s.gradient_type == GradientType::Radial) {
+          renderer.draw_radial_gradient(inner, bg, bg2, ir);
+        } else {
+          renderer.draw_rect_gradient(inner, bg, bg2, ir, s.gradient_angle);
+        }
+      } else {
+        renderer.draw_bordered_rect(rect, bg, bc, s.border_width, radii);
+      }
+    } else if (s.has_multi_stop_gradient()) {
+      renderer.draw_multi_stop_gradient(rect, s.gradient_stops[..s.gradient_stop_count as usize], s.gradient_type, s.gradient_angle, radii);
+    } else if (s.has_gradient()) {
+      let bg2 = s.background_end.with_alpha(s.background_end.a * alpha);
+      if (s.gradient_type == GradientType::Radial) {
+        renderer.draw_radial_gradient(rect, bg, bg2, radii);
+      } else {
+        renderer.draw_rect_gradient(rect, bg, bg2, radii, s.gradient_angle);
+      }
+    } else {
+      renderer.draw_rect(rect, bg, radii);
+    }
+  }
+
+  if (s.has_shadow() && s.shadow.inset) {
+    let sc = s.shadow.color.with_alpha(s.shadow.color.a * alpha);
+    renderer.push_scissor(rect);
+    renderer.draw_inset_shadow(rect, sc, s.shadow.blur, s.shadow.spread, s.shadow.offset, radii);
+    renderer.pop_scissor();
+  }
+
+  if (widget_state_of(world, e).has(WidgetState::Focused) && world.get(kWidgetNode, e)!.tab_index >= 0) {
+    let sc = ui_scale(world, ctx, e);
+    let focus_rect = Rect { x: rect.x - 2.0 * sc, y: rect.y - 2.0 * sc, w: rect.w + 4.0 * sc, h: rect.h + 4.0 * sc };
+    let base = s.border_color.a > 0.1 ? s.border_color : (s.text_color.a > 0.1 ? s.text_color : Color { r: 0.6, g: 0.6, b: 0.7, a: 1.0 });
+    let focus_color = base.with_alpha(0.5 * alpha);
+    renderer.draw_bordered_rect(focus_rect, Color::transparent(), focus_color, 2.0 * sc, radii);
+  }
+
+  let _ = vt_draw(kind, world, ctx, e, renderer);
+}
+
+// --- Layout bridge -----------------------------------------------------------------
+
+// InputToLayoutPoint: a window point in the widget's layout space, adding
+// every scroll-view ancestor's offset.
+pub fn input_to_layout_point(world&: World, e: WidgetId, point: Vec2): Vec2 {
+  var pt = point;
+  var p = world.get(kHierarchy, e)!.parent;
+  while (p.valid()) {
+    pt = pt + scroll_offset(world, p);  // (0,0) for non-scroll-view ancestors
+    p = world.get(kHierarchy, p)!.parent;
+  }
+  return pt;
+}
+
+pub fn populate_layout_node(world&: World, e: WidgetId, var node&: LayoutNode) {
+  let t& = world.get(kTransform, e)!;
+  node.style = world.get(kStyleC, e)!.style;
+  node.id = world.get(kWidgetNode, e)!.id;
+  node.intrinsic_width = t.intrinsic_w;
+  node.intrinsic_height = t.intrinsic_h;
+}
+
+pub fn apply_layout_result(var world&: World, e: WidgetId, node&: LayoutNode) {
+  var t& = world.get_var(kTransform, e)!;
+  t.rect = node.computed_rect;
+  t.content_rect = node.content_rect;
+  t.layout_dirty = false;
+  t.paint_dirty = true;
 }

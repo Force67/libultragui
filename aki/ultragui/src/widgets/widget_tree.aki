@@ -1,0 +1,90 @@
+// ugui/widgets/widget_tree.{h,cc}: tree-wide queries and passes.
+//
+// Shape: each function takes the World first (no active registry); the
+// passes that dispatch to widget kinds take the WidgetContext too.
+
+module ultragui::widgets::widget_tree;
+
+import {to_list} from akikit::containers::list;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Visibility} from ultragui::style::enums;
+import {kHierarchy, kStyleC, kTransform, kWidgetNode, measure_widget, update_widget} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// FindWidgetById: kNullWidget if not found.
+pub fn find_widget_by_id(world&: World, root: WidgetId, id: u32): WidgetId {
+  if (!root.valid()) {
+    return kNullWidget;
+  }
+  if (world.get(kWidgetNode, root)!.id == id) {
+    return root;
+  }
+  for (let c in world.get(kHierarchy, root)!.children) {
+    let found = find_widget_by_id(world, c, id);
+    if (found.valid()) {
+      return found;
+    }
+  }
+  return kNullWidget;
+}
+
+// FindWidget: find a widget by name; kNullWidget if not found.
+pub fn find_widget(world&: World, root: WidgetId, name: str): WidgetId {
+  if (!root.valid()) {
+    return kNullWidget;
+  }
+  if (world.get(kWidgetNode, root)!.name.as_str() == name) {
+    return root;
+  }
+  for (let c in world.get(kHierarchy, root)!.children) {
+    let found = find_widget(world, c, name);
+    if (found.valid()) {
+      return found;
+    }
+  }
+  return kNullWidget;
+}
+
+// UpdateWidgetTree: recursively update all widgets (scroll momentum,
+// animations, ...).
+pub fn update_widget_tree(var world&: World, var ctx&: WidgetContext, root: WidgetId, dt: f64) {
+  if (!root.valid()) {
+    return;
+  }
+  update_widget(world, ctx, root, dt);
+  // Nothing under a collapsed widget is laid out or painted, so there is no
+  // per-frame state under it worth advancing.
+  if (world.get(kStyleC, root)!.style.visibility == Visibility::Collapsed) {
+    return;
+  }
+  // The C++ walks the live child list; a copy walks the same handles unless
+  // an update entry restructures the tree, where the C++ is undefined.
+  let kids = to_list(world.get(kHierarchy, root)!.children.as_slice());
+  for (let child in kids) {
+    update_widget_tree(world, ctx, child, dt);
+  }
+}
+
+// MeasureWidgetTree: bottom-up measure pass, setting intrinsic sizes.
+// Returns how many widgets were measured.
+pub fn measure_widget_tree(var world&: World, var ctx&: WidgetContext, root: WidgetId): u32 {
+  if (!root.valid()) {
+    return 0;
+  }
+  var measured: u32 = 1;
+  // Nothing under a collapsed widget reaches layout or paint, so measuring it
+  // (shaping its text) buys nothing.
+  if (world.get(kStyleC, root)!.style.visibility == Visibility::Collapsed) {
+    return measured;
+  }
+  let kids = to_list(world.get(kHierarchy, root)!.children.as_slice());
+  for (let child in kids) {
+    measured += measure_widget_tree(world, ctx, child);
+  }
+  let (w, h) = measure_widget(world, ctx, root);
+  var t& = world.get_var(kTransform, root)!;
+  t.intrinsic_w = w;
+  t.intrinsic_h = h;
+  return measured;
+}
