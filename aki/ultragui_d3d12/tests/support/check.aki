@@ -1,0 +1,32 @@
+// The tests' ASSERT as a function and the line each test prints.
+
+module support::check;
+
+import {println} from akikit::logging;
+import {exit} from akikit::process::process;
+
+pub struct Suite {
+  var run: u32 = 0
+  var passed: u32 = 0
+
+  pub fn Suite(): Suite => Suite {};
+
+  // A test ran to its end without a failed check.
+  pub fn pass(var self&, name: str) {
+    self.run += 1;
+    self.passed += 1;
+    println(f"  {name}... PASS");
+  }
+
+  pub fn finish(self&): i32 {
+    println(f"\n{self.passed}/{self.run} tests passed");
+    return self.passed == self.run ? 0 : 1;
+  }
+}
+
+pub fn check(cond: bool, what: str) {
+  if (!cond) {
+    println(f" FAIL\n    Assertion failed: {what}");
+    exit(1);
+  }
+}

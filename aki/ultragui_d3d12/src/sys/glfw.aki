@@ -25,6 +25,7 @@ pub extern("glfwDestroyWindow") fn glfw_destroy_window(window: *var GlfwWindow):
 pub extern("glfwWindowShouldClose") fn glfw_window_should_close(window: *var GlfwWindow): i32;
 pub extern("glfwPollEvents") fn glfw_poll_events(): ();
 pub extern("glfwWaitEvents") fn glfw_wait_events(): ();
+pub extern("glfwSetWindowSize") fn glfw_set_window_size(window: *var GlfwWindow, width: i32, height: i32): ();
 pub extern("glfwGetWindowSize") fn glfw_get_window_size(window: *var GlfwWindow, width: *var i32, height: *var i32): ();
 pub extern("glfwGetFramebufferSize") fn glfw_get_framebuffer_size(window: *var GlfwWindow, width: *var i32, height: *var i32): ();
 
