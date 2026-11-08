@@ -23,16 +23,8 @@ import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::
 import {GradientType} from ultragui::style::enums;
 import {GradientStop} from ultragui::style::style;
 import {TextEngine, TextLayout, TextLayoutConfig, TextRun} from ultragui::text::text_engine;
+import {CmdRef, DrawRef, check_draw_data as support_check, fnv} from support::draw_check;
 import {Expect} from support::expect;
-
-struct CmdRef : Copy {
-  pub let clip: [u32; 4]
-  pub let texture: u64
-  pub let offset: u32
-  pub let count: u32
-  pub let is_text: bool
-  pub let blur: u32
-}
 
 // COUNTS: quad vertices, quad indices, text vertices, text indices, commands
 comptime let kCounts: [u32; 5] = [56, 84, 132, 198, 14];
@@ -254,15 +246,6 @@ static let kCommands: [CmdRef; 14] = [
 static let kTexCreated: Atomic<u32> = Atomic::<u32>(0);
 static let kTexMismatches: Atomic<u32> = Atomic::<u32>(0);
 
-fn fnv(pixels: bytes): u64 {
-  var h: u64 = 1469598103934665603;
-  for (let p in pixels) {
-    h ^= p as u64;
-    h = h *% 1099511628211;
-  }
-  return h;
-}
-
 // Checks each texture against the C++ hashes and mints ids 100, 101, ...
 // as the C++ recording backend does.
 struct RecordingBackend : TextureBackend {
@@ -379,58 +362,12 @@ fn scene(var r&: Renderer2D, run&: TextRun, prun&: TextRun, lay&: TextLayout) {
   r.draw_textured_rect(Rect::new(600.0, 500.0, 32.0, 32.0), 7, Color { r: 1.0, g: 0.5, b: 1.0, a: 1.0 }, 0);
 }
 
-fn check_vertices(var t&: Expect, got: &[Vertex2D], want: &[[u32; 12]], what: str) {
-  t.that(#got == #want, f"{what}: vertex count {#got}, want {#want}");
-  var bad: u32 = 0;
-  for (let i in 0..(#got < #want ? #got : #want)) {
-    let v = got[i];
-    let w = want[i];
-    let row: [u32; 12] = [
-      @bit_cast(u32, v.pos[0]), @bit_cast(u32, v.pos[1]), @bit_cast(u32, v.uv[0]), @bit_cast(u32, v.uv[1]), v.color, v.color2,
-      v.corner_radii, @bit_cast(u32, v.softness), @bit_cast(u32, v.half_size[0]), @bit_cast(u32, v.half_size[1]),
-      @bit_cast(u32, v.border_width), v.border_color,
-    ];
-    for (let k in 0..12) {
-      if (row[k] != w[k]) {
-        if (bad < 12) {
-          t.that(false, f"{what} vertex {i} field {k}: got 0x{row[k]:08x}, want 0x{w[k]:08x}");
-        }
-        bad += 1;
-      }
-    }
-  }
-  t.that(bad == 0, f"{what}: {bad} differing fields");
-}
-
-fn check_indices(var t&: Expect, got: &[u32], want: &[u32], what: str) {
-  var same = #got == #want;
-  if (same) {
-    for (let i in 0..#got) {
-      if (got[i] != want[i]) {
-        same = false;
-      }
-    }
-  }
-  t.that(same, f"{what} indices");
-}
-
 fn check_draw_data(var t&: Expect, dd&: DrawData) {
-  t.that(dd.valid, "draw data valid");
-  t.that(dd.quad_vertex_count() == kCounts[0] && dd.quad_index_count() == kCounts[1] && dd.text_vertex_count() == kCounts[2] &&
-           dd.text_index_count() == kCounts[3] && dd.command_count() == kCounts[4], "counts");
-  check_vertices(t, dd.quad_vertices, kQuadVertices[..], "quad");
-  check_vertices(t, dd.text_vertices, kTextVertices[..], "text");
-  check_indices(t, dd.quad_indices, kQuadIndices[..], "quad");
-  check_indices(t, dd.text_indices, kTextIndices[..], "text");
-  t.that(#dd.commands == #kCommands, "command count");
-  for (let i in 0..(#dd.commands < #kCommands ? #dd.commands : #kCommands)) {
-    let c = dd.commands[i];
-    let w = kCommands[i];
-    let ok = @bit_cast(u32, c.clip_rect.x) == w.clip[0] && @bit_cast(u32, c.clip_rect.y) == w.clip[1] &&
-             @bit_cast(u32, c.clip_rect.w) == w.clip[2] && @bit_cast(u32, c.clip_rect.h) == w.clip[3] && c.texture_id == w.texture &&
-             c.index_offset == w.offset && c.elem_count == w.count && c.is_text == w.is_text && @bit_cast(u32, c.blur) == w.blur;
-    t.that(ok, f"command {i}");
-  }
+  let want = DrawRef {
+    counts: kCounts, quad_vertices: kQuadVertices[..], text_vertices: kTextVertices[..], quad_indices: kQuadIndices[..],
+    text_indices: kTextIndices[..], commands: kCommands[..],
+  };
+  support_check(t, dd, want);
   t.that(dd.display_size.x == 800.0 && dd.display_size.y == 600.0, "display size");
 }
 
