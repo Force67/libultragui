@@ -1,0 +1,1421 @@
+// ugui/idl/builder.{h,cc}: builds a widget tree from a parsed .ugui document
+// (idl::parser's AST): element types to widget constructors, properties to
+// styles, classes, state overrides and transitions, @keyframes, @media
+// (re-resolved on viewport changes), components with props and slots, CSS
+// variables. Imports are merged by the parser.
+//
+// Shape differences (not behavior):
+//
+// * No active registry: build, rebuild, apply_style_class and
+//   reapply_media_queries take the World first. build and rebuild also take
+//   the WidgetContext the setters that change widget state need
+//   (set_checked, set_radio_selected, set_toggle_on); a widget being built
+//   has no context yet, so those calls behave as on a detached widget, as in
+//   the C++.
+// * No `set_animator`: the builder keeps no view of UIContext's animator.
+//   @keyframes start on `ctx.animator`; a context without one (none) is the
+//   C++ builder without an animator, which skips them.
+// * WidgetFactory is `own fn(&var World, String): WidgetId` (the C++
+//   `Function<wid(const String& name)>` plus the World it reached through
+//   the active registry; the name is an owned copy, see PORTING.md pitfalls).
+// * The C++ dispatch tables (kPropertyTable, kStyleMaskTable and the enum
+//   lookups) are if-chains over the same names in the same order. The C++
+//   resolves a value (`--var`) only for a known property; resolving is pure,
+//   so here every value is resolved and an unknown key is then ignored.
+// * MediaStyle::Query is MediaStyleQuery; MediaStyle is a component with the
+//   key kMediaStyle.
+
+module ultragui::idl::builder;
+
+import {swap} from akikit::algorithm;
+import {List, to_list} from akikit::containers::list;
+import {HashMap, contains_str, get_str} from akikit::containers::hash_map;
+import {String, from_str} from akikit::strings::string;
+import {eprintln} from akikit::logging;
+import {Keyframe, KeyframeAnimation} from ultragui::animation::animator;
+import {intro_sort, sorted_entries} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {from_chars_f32, from_chars_u32} from ultragui::core::from_chars;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {EdgeInsets} from ultragui::core::rect;
+import {find, find_char} from ultragui::core::string_view;
+import {UguiComponent, UguiDocument, UguiNode, UguiStyleClass} from ultragui::idl::parser;
+import {
+  AlignContent, AlignItems, AlignSelf, Cursor, FlexDirection, FlexWrap, FontStyle, FontWeight, GradientType,
+  JustifyContent, Overflow, PointerEvents, Position, TextAlign, TextDecoration, TextTransform, WidgetState,
+} from ultragui::style::enums;
+import {Length} from ultragui::style::property_types;
+import {Style, StyleMask, kMaxGradientStops} from ultragui::style::style;
+import {EasingType, Transition} from ultragui::style::transition;
+import {FontHandle} from ultragui::text::text_engine;
+import {create_button, kButtonContent, set_button_label} from ultragui::widgets::button;
+import {create_checkbox, set_checkbox_label, set_checked} from ultragui::widgets::checkbox;
+import {ContextMenuContent, ContextMenuItem, add_context_menu_separator, create_context_menu, kContextMenuContent} from ultragui::widgets::context_menu;
+import {create_dropdown, set_dropdown_options, set_dropdown_selected} from ultragui::widgets::dropdown;
+import {create_image} from ultragui::widgets::image;
+import {create_modal} from ultragui::widgets::modal;
+import {create_panel} from ultragui::widgets::panel;
+import {create_radio, set_radio_group, set_radio_label, set_radio_selected} from ultragui::widgets::radio;
+import {TextSpan, add_rich_text_span, create_rich_text} from ultragui::widgets::rich_text;
+import {create_scroll_view} from ultragui::widgets::scroll_view;
+import {create_slider, set_slider_max, set_slider_min, set_slider_value} from ultragui::widgets::slider;
+import {create_text, kTextContent, set_text} from ultragui::widgets::text;
+import {create_text_input, set_text_input_placeholder, set_text_input_value} from ultragui::widgets::text_input;
+import {create_toggle, set_toggle_on} from ultragui::widgets::toggle;
+import {
+  add_child, add_state_override, add_state_transition, destroy_widget, kHierarchy, kStyleC, kWidgetNode, mark_dirty,
+  set_style, set_tooltip,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// ---------------------------------------------------------------------------
+// MediaStyle component
+// ---------------------------------------------------------------------------
+
+// MediaStyle::Query: one `@media (<condition>: <value>) { ... }` block.
+pub struct MediaStyleQuery : Clone {
+  pub var condition: String = String()  // "min-width", "max-width", "min-height", "max-height"
+  pub var value: f32 = 0.0
+  pub var properties: HashMap<String, String> = HashMap()
+}
+
+// Component for widgets declaring `@media` blocks: base style plus raw query
+// property maps, re-resolved on viewport changes so breakpoints stay live.
+pub struct MediaStyle : Clone {
+  pub var base: Style = Style {}
+  pub var queries: List<MediaStyleQuery> = List()
+}
+
+pub static let kMediaStyle: ComponentKey<MediaStyle> = ComponentKey();
+
+// ---------------------------------------------------------------------------
+// Pure parse helpers
+// ---------------------------------------------------------------------------
+
+fn parse_float(s: str): f32 {
+  var v: f32 = 0.0;
+  let _ = from_chars_f32(s, v);
+  return v;
+}
+
+// 1, 2 or 4 values like the CSS shorthand: "10" all sides, "10 20"
+// vertical/horizontal, "10 20 30 40" top/right/bottom/left.
+fn parse_edge_insets(s: str): EdgeInsets {
+  var vals = [0.0f32; 4];
+  var count: usize = 0;
+  var p: usize = 0;
+  let end = #s;
+  while (p < end && count < 4) {
+    while (p < end && (s[p] == ' ' || s[p] == '\t')) {
+      p += 1;
+    }
+    if (p >= end) {
+      break;
+    }
+    var v: f32 = 0.0;
+    let r = from_chars_f32(s[p..], v);
+    if (r.ptr == 0) {
+      break;
+    }
+    vals[count] = v;
+    count += 1;
+    p += r.ptr;
+  }
+
+  if (count == 1) {
+    return EdgeInsets::all(vals[0]);
+  }
+  if (count == 2) {
+    return EdgeInsets::symmetric(vals[0], vals[1]);
+  }
+  if (count >= 4) {
+    return EdgeInsets::new(vals[0], vals[1], vals[2], vals[3]);
+  }
+  return EdgeInsets::all(vals[0]);
+}
+
+fn parse_length(s: str): Length {
+  if (s == "auto") {
+    return Length::auto();
+  }
+  var v: f32 = 0.0;
+  let end = from_chars_f32(s, v).ptr;
+  let unit = s[end..];
+  if (unit == "%") {
+    return Length::percent(v);
+  }
+  if (unit == "vw") {
+    return Length::vw(v);
+  }
+  if (unit == "vh") {
+    return Length::vh(v);
+  }
+  if (unit == "fr" || unit == "frac") {
+    return Length::frac(v);
+  }
+  // Bare decimal 0.0-1.0 without unit -> treat as fractional
+  if (#unit == 0 && v > 0.0 && v <= 1.0 && find_char(s, '.') != none) {
+    return Length::frac(v);
+  }
+  return Length::px(v);
+}
+
+fn parse_duration(val: str): f32 {
+  var dur: f32 = 0.0;
+  let _ = from_chars_f32(val, dur);
+  return find(val, "ms") != none ? dur / 1000.0 : dur;
+}
+
+// ---------------------------------------------------------------------------
+// Declarative enum/value lookup tables
+// ---------------------------------------------------------------------------
+
+fn lookup_flex_direction(v: str): FlexDirection? {
+  if (v == "row") { return FlexDirection::Row; }
+  if (v == "column") { return FlexDirection::Column; }
+  if (v == "row-reverse") { return FlexDirection::RowReverse; }
+  if (v == "column-reverse") { return FlexDirection::ColumnReverse; }
+  return none;
+}
+
+fn lookup_justify_content(v: str): JustifyContent? {
+  if (v == "start") { return JustifyContent::Start; }
+  if (v == "end") { return JustifyContent::End; }
+  if (v == "center") { return JustifyContent::Center; }
+  if (v == "space-between") { return JustifyContent::SpaceBetween; }
+  if (v == "space-around") { return JustifyContent::SpaceAround; }
+  if (v == "space-evenly") { return JustifyContent::SpaceEvenly; }
+  return none;
+}
+
+fn lookup_align_items(v: str): AlignItems? {
+  if (v == "start") { return AlignItems::Start; }
+  if (v == "end") { return AlignItems::End; }
+  if (v == "center") { return AlignItems::Center; }
+  if (v == "stretch") { return AlignItems::Stretch; }
+  if (v == "baseline") { return AlignItems::Baseline; }
+  return none;
+}
+
+fn lookup_align_self(v: str): AlignSelf? {
+  if (v == "auto") { return AlignSelf::Auto; }
+  if (v == "start") { return AlignSelf::Start; }
+  if (v == "end") { return AlignSelf::End; }
+  if (v == "center") { return AlignSelf::Center; }
+  if (v == "stretch") { return AlignSelf::Stretch; }
+  return none;
+}
+
+fn lookup_align_content(v: str): AlignContent? {
+  if (v == "start") { return AlignContent::Start; }
+  if (v == "end") { return AlignContent::End; }
+  if (v == "center") { return AlignContent::Center; }
+  if (v == "stretch") { return AlignContent::Stretch; }
+  if (v == "space-between") { return AlignContent::SpaceBetween; }
+  if (v == "space-around") { return AlignContent::SpaceAround; }
+  if (v == "space-evenly") { return AlignContent::SpaceEvenly; }
+  return none;
+}
+
+fn lookup_flex_wrap(v: str): FlexWrap? {
+  if (v == "nowrap") { return FlexWrap::NoWrap; }
+  if (v == "wrap") { return FlexWrap::Wrap; }
+  if (v == "wrap-reverse") { return FlexWrap::WrapReverse; }
+  return none;
+}
+
+fn lookup_text_align(v: str): TextAlign? {
+  if (v == "left") { return TextAlign::Left; }
+  if (v == "center") { return TextAlign::Center; }
+  if (v == "right") { return TextAlign::Right; }
+  return none;
+}
+
+fn lookup_overflow(v: str): Overflow? {
+  if (v == "visible") { return Overflow::Visible; }
+  if (v == "hidden") { return Overflow::Hidden; }
+  if (v == "scroll") { return Overflow::Scroll; }
+  return none;
+}
+
+fn lookup_text_transform(v: str): TextTransform? {
+  if (v == "uppercase") { return TextTransform::Uppercase; }
+  if (v == "lowercase") { return TextTransform::Lowercase; }
+  if (v == "capitalize") { return TextTransform::Capitalize; }
+  if (v == "none") { return TextTransform::None; }
+  return none;
+}
+
+fn lookup_cursor(v: str): Cursor? {
+  if (v == "default") { return Cursor::Default; }
+  if (v == "pointer") { return Cursor::Pointer; }
+  if (v == "text") { return Cursor::Text; }
+  if (v == "move") { return Cursor::Move; }
+  if (v == "not-allowed") { return Cursor::NotAllowed; }
+  return none;
+}
+
+// kWidgetStateTable. `:selected`/`:active` are the app-driven highlight
+// state (set_selected), distinct from `:pressed`.
+fn lookup_widget_state(v: str): WidgetState? {
+  if (v == "hover") { return WidgetState::Hovered; }
+  if (v == "hovered") { return WidgetState::Hovered; }
+  if (v == "pressed") { return WidgetState::Pressed; }
+  if (v == "focused") { return WidgetState::Focused; }
+  if (v == "focus") { return WidgetState::Focused; }
+  if (v == "disabled") { return WidgetState::Disabled; }
+  if (v == "checked") { return WidgetState::Checked; }
+  if (v == "selected") { return WidgetState::Selected; }
+  if (v == "active") { return WidgetState::Selected; }
+  return none;
+}
+
+// kEasingTable, in its order (ease-in-out before ease-in: the substring
+// search depends on it).
+fn lookup_easing(v: str): EasingType? {
+  if (v == "ease-in-out") { return EasingType::EaseInOut; }
+  if (v == "ease-in") { return EasingType::EaseIn; }
+  if (v == "ease-out") { return EasingType::EaseOut; }
+  if (v == "linear") { return EasingType::Linear; }
+  if (v == "spring") { return EasingType::Spring; }
+  return none;
+}
+
+fn find_easing_substring(text: str): EasingType? {
+  if (find(text, "ease-in-out") != none) { return EasingType::EaseInOut; }
+  if (find(text, "ease-in") != none) { return EasingType::EaseIn; }
+  if (find(text, "ease-out") != none) { return EasingType::EaseOut; }
+  if (find(text, "linear") != none) { return EasingType::Linear; }
+  if (find(text, "spring") != none) { return EasingType::Spring; }
+  return none;
+}
+
+// The font-weight table (kWeightTable, and kSpanWeightTable for spans: the
+// same names).
+fn lookup_font_weight(v: str): FontWeight? {
+  if (v == "thin") { return FontWeight::Thin; }
+  if (v == "extra-light") { return FontWeight::ExtraLight; }
+  if (v == "light") { return FontWeight::Light; }
+  if (v == "regular") { return FontWeight::Regular; }
+  if (v == "normal") { return FontWeight::Regular; }
+  if (v == "medium") { return FontWeight::Medium; }
+  if (v == "semi-bold") { return FontWeight::SemiBold; }
+  if (v == "semibold") { return FontWeight::SemiBold; }
+  if (v == "bold") { return FontWeight::Bold; }
+  if (v == "extra-bold") { return FontWeight::ExtraBold; }
+  if (v == "black") { return FontWeight::Black; }
+  return none;
+}
+
+// kNamedColors
+fn lookup_named_color(v: str): Color? {
+  if (v == "white") { return Color::white(); }
+  if (v == "black") { return Color::black(); }
+  if (v == "red") { return Color::red(); }
+  if (v == "green") { return Color::green(); }
+  if (v == "blue") { return Color::blue(); }
+  if (v == "transparent") { return Color::transparent(); }
+  return none;
+}
+
+pub fn parse_color(s: str): Color {
+  if (#s > 1 && s[0] == '#') {
+    var hex: u32 = 0;
+    let _ = from_chars_u32(s[1..], hex, 16);
+    if (#s == 7) {
+      return Color::from_hex(hex);
+    }
+    if (#s == 9) {
+      let rgb = hex >> 8;
+      let alpha = (hex & 0xFF) as f32 / 255.0;
+      return Color::from_hex(rgb, alpha);
+    }
+  }
+  return lookup_named_color(s) ?? Color::white();
+}
+
+fn parse_text_decoration(v: str): TextDecoration? {
+  if (v == "underline") {
+    return TextDecoration::Underline;
+  }
+  if (v == "line-through" || v == "strikethrough") {
+    return TextDecoration::Strikethrough;
+  }
+  if (v == "underline line-through" || v == "underline strikethrough") {
+    return TextDecoration::Underline.with(TextDecoration::Strikethrough);
+  }
+  return none;
+}
+
+// ---------------------------------------------------------------------------
+// Property dispatch: CSS property names to Style mutators (kPropertyTable)
+// ---------------------------------------------------------------------------
+
+fn set_gradient_stops(var s&: Style, v: str) {
+  // Comma-separated "color position%" pairs, e.g.
+  // "#ff0000 0%, #00ff00 50%, #0000ff 100%".
+  s.gradient_stop_count = 0;
+  var sv = v;
+  while (#sv != 0 && s.gradient_stop_count < kMaxGradientStops) {
+    // Skip whitespace and commas
+    while (#sv != 0 && (sv[0] == ' ' || sv[0] == ',')) {
+      sv = sv[1..];
+    }
+    if (#sv == 0) {
+      break;
+    }
+
+    // The color token (starts with # or is a name)
+    let space = find_char(sv, ' ') else {
+      break;
+    };
+    let color_str = sv[..space];
+    sv = sv[space + 1..];
+
+    // Skip whitespace
+    while (#sv != 0 && sv[0] == ' ') {
+      sv = sv[1..];
+    }
+
+    // Position (number followed by optional %)
+    var pos: f32 = 0.0;
+    let r = from_chars_f32(sv, pos);
+    if (r.ptr == 0) {
+      break;
+    }
+    sv = sv[r.ptr..];
+    if (#sv != 0 && sv[0] == '%') {
+      pos /= 100.0;
+      sv = sv[1..];
+    }
+
+    let i = s.gradient_stop_count as usize;
+    s.gradient_stop_count += 1;
+    s.gradient_stops[i].position = pos;
+    s.gradient_stops[i].color = parse_color(color_str);
+  }
+}
+
+fn set_font_weight(var s&: Style, v: str) {
+  if (let w = lookup_font_weight(v)) {
+    s.font_weight = w;
+    return;
+  }
+  // Try numeric
+  var num: f32 = 0.0;
+  let _ = from_chars_f32(v, num);
+  if (num >= 100.0 && num <= 900.0) {
+    s.font_weight = @saturating_cast(u16, num) as FontWeight;
+  }
+}
+
+fn set_corner_radius(var s&: Style, v: str) {
+  let r = parse_float(v);
+  s.corner_radius = r;
+  s.corner_radius_tl = r;
+  s.corner_radius_tr = r;
+  s.corner_radius_br = r;
+  s.corner_radius_bl = r;
+}
+
+// `transform: rotate(45deg)`: parse_float reads the leading number, so skip
+// to the first numeric character first.
+fn set_transform(var s&: Style, v: str) {
+  var i: usize = 0;
+  while (i < #v && (v[i] < '0' || v[i] > '9') && v[i] != '-' && v[i] != '+' && v[i] != '.') {
+    i += 1;
+  }
+  // A byte that stops the loop is ASCII, so v[i..] starts on a character.
+  s.rotation = parse_float(v[i..]);
+}
+
+// FindPropertySetter(key) and the call: false when `key` is no property.
+fn apply_property(var s&: Style, key: str, v: str): bool {
+  // Layout enums
+  if (key == "layout" || key == "flex-direction") {
+    if (let e = lookup_flex_direction(v)) { s.flex_direction = e; }
+  } else if (key == "justify" || key == "justify-content") {
+    if (let e = lookup_justify_content(v)) { s.justify_content = e; }
+  } else if (key == "align" || key == "align-items") {
+    if (let e = lookup_align_items(v)) { s.align_items = e; }
+  } else if (key == "text-align") {
+    if (let e = lookup_text_align(v)) { s.text_align = e; }
+  } else if (key == "overflow") {
+    if (let e = lookup_overflow(v)) { s.overflow = e; }
+  } else if (key == "text-transform") {
+    s.text_transform = lookup_text_transform(v) ?? TextTransform::None;
+  } else if (key == "font-weight") {
+    set_font_weight(s, v);
+  } else if (key == "font-style") {
+    s.font_style = v == "italic" ? FontStyle::Italic : FontStyle::Normal;
+  } else if (key == "pointer-events") {
+    s.pointer_events = v == "none" ? PointerEvents::None : PointerEvents::Auto;
+  } else if (key == "cursor") {
+    s.cursor = lookup_cursor(v) ?? Cursor::Auto;
+  } else if (key == "position") {
+    if (v == "relative") {
+      s.position = Position::Relative;
+    } else if (v == "absolute") {
+      s.position = Position::Absolute;
+    } else if (v == "sticky") {
+      s.position = Position::Sticky;
+    }
+  } else if (key == "top") {
+    s.top = parse_length(v);
+  } else if (key == "bottom") {
+    s.bottom = parse_length(v);
+  } else if (key == "left") {
+    s.left_offset = parse_length(v);
+  } else if (key == "right") {
+    s.right_offset = parse_length(v);
+  }
+  // Sizing
+  else if (key == "width") {
+    s.width = parse_length(v);
+  } else if (key == "height") {
+    s.height = parse_length(v);
+  } else if (key == "min-width") {
+    s.min_width = parse_length(v);
+  } else if (key == "min-height") {
+    s.min_height = parse_length(v);
+  } else if (key == "max-width") {
+    s.max_width = parse_length(v);
+  } else if (key == "max-height") {
+    s.max_height = parse_length(v);
+  }
+  // Flex
+  else if (key == "flex-grow") {
+    s.flex_grow = parse_float(v);
+  } else if (key == "flex-shrink") {
+    s.flex_shrink = parse_float(v);
+  } else if (key == "flex-basis") {
+    s.flex_basis = parse_length(v);
+  } else if (key == "flex") {
+    // CSS `flex: N` shorthand = grow N, shrink 1, basis 0
+    s.flex_grow = parse_float(v);
+    s.flex_shrink = 1.0;
+    s.flex_basis = Length::px(0.0);
+  } else if (key == "flex-wrap") {
+    if (let e = lookup_flex_wrap(v)) { s.flex_wrap = e; }
+  } else if (key == "align-self") {
+    if (let e = lookup_align_self(v)) { s.align_self = e; }
+  } else if (key == "align-content") {
+    if (let e = lookup_align_content(v)) { s.align_content = e; }
+  }
+  // Spacing
+  else if (key == "padding") {
+    s.padding = parse_edge_insets(v);
+  } else if (key == "margin") {
+    s.margin = parse_edge_insets(v);
+  } else if (key == "gap") {
+    s.gap = parse_float(v);
+  } else if (key == "row-gap") {
+    s.row_gap = parse_float(v);
+  } else if (key == "column-gap") {
+    s.column_gap = parse_float(v);
+  }
+  // Colors
+  else if (key == "background") {
+    s.background = parse_color(v);
+  } else if (key == "color" || key == "text-color") {
+    s.text_color = parse_color(v);
+  } else if (key == "border-color") {
+    s.border_color = parse_color(v);
+  } else if (key == "background-end" || key == "gradient-end") {
+    s.background_end = parse_color(v);
+  } else if (key == "gradient-angle") {
+    s.gradient_angle = parse_float(v);
+  } else if (key == "gradient-type") {
+    s.gradient_type = v == "radial" ? GradientType::Radial : GradientType::Linear;
+  } else if (key == "gradient-stops") {
+    set_gradient_stops(s, v);
+  }
+  // Border
+  else if (key == "border-width") {
+    s.border_width = parse_float(v);
+  } else if (key == "border-radius" || key == "corner-radius") {
+    set_corner_radius(s, v);
+  } else if (key == "corner-radius-tl") {
+    s.corner_radius_tl = parse_float(v);
+  } else if (key == "corner-radius-tr") {
+    s.corner_radius_tr = parse_float(v);
+  } else if (key == "corner-radius-br") {
+    s.corner_radius_br = parse_float(v);
+  } else if (key == "corner-radius-bl") {
+    s.corner_radius_bl = parse_float(v);
+  }
+  // Visual
+  else if (key == "opacity") {
+    s.opacity = parse_float(v);
+  } else if (key == "aspect-ratio") {
+    s.aspect_ratio = parse_float(v);
+  } else if (key == "backdrop-blur") {
+    s.backdrop_blur = parse_float(v);
+  }
+  // Transform: `rotation: 45` (degrees, `deg` optional) or
+  // `transform: rotate(45deg)`.
+  else if (key == "rotation") {
+    s.rotation = parse_float(v);
+  } else if (key == "transform") {
+    set_transform(s, v);
+  }
+  // Text
+  else if (key == "font-size") {
+    s.font_size = parse_float(v);
+  } else if (key == "letter-spacing") {
+    s.letter_spacing = parse_float(v);
+  } else if (key == "line-height") {
+    s.line_height_multiplier = parse_float(v);
+  }
+  // Box shadow
+  else if (key == "shadow-color") {
+    s.shadow.color = parse_color(v);
+  } else if (key == "shadow-blur") {
+    s.shadow.blur = parse_float(v);
+  } else if (key == "shadow-spread") {
+    s.shadow.spread = parse_float(v);
+  } else if (key == "shadow-x") {
+    s.shadow.offset.x = parse_float(v);
+  } else if (key == "shadow-y") {
+    s.shadow.offset.y = parse_float(v);
+  } else if (key == "shadow-inset") {
+    s.shadow.inset = v == "true";
+  }
+  // Text shadow
+  else if (key == "text-shadow-color") {
+    s.text_shadow_color = parse_color(v);
+  } else if (key == "text-shadow-blur") {
+    s.text_shadow_blur = parse_float(v);
+  } else if (key == "text-decoration") {
+    s.text_decoration = parse_text_decoration(v) ?? TextDecoration::None;
+  } else if (key == "text-decoration-color") {
+    s.text_decoration_color = parse_color(v);
+  } else if (key == "text-shadow-x") {
+    s.text_shadow_offset.x = parse_float(v);
+  } else if (key == "text-shadow-y") {
+    s.text_shadow_offset.y = parse_float(v);
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Style mask lookup: property names to StyleMask bits (kStyleMaskTable)
+// ---------------------------------------------------------------------------
+
+fn lookup_style_mask(key: str): u64 {
+  if (key == "background") { return StyleMask::kBackground; }
+  if (key == "border-color") { return StyleMask::kBorderColor; }
+  if (key == "border-width") { return StyleMask::kBorderWidth; }
+  if (key == "border-radius" || key == "corner-radius" || key == "corner-radius-tl" || key == "corner-radius-tr" ||
+      key == "corner-radius-br" || key == "corner-radius-bl") {
+    return StyleMask::kCornerRadius;
+  }
+  if (key == "opacity") { return StyleMask::kOpacity; }
+  if (key == "color" || key == "text-color") { return StyleMask::kTextColor; }
+  if (key == "font-size") { return StyleMask::kFontSize; }
+  if (key == "width") { return StyleMask::kWidth; }
+  if (key == "height") { return StyleMask::kHeight; }
+  if (key == "background-end" || key == "gradient-end") { return StyleMask::kBackgroundEnd; }
+  if (key == "gradient-angle") { return StyleMask::kGradientAngle; }
+  if (key == "rotation" || key == "transform") { return StyleMask::kTransform; }
+  if (key == "shadow-color" || key == "shadow-blur" || key == "shadow-spread" || key == "shadow-x" ||
+      key == "shadow-y" || key == "shadow-inset") {
+    return StyleMask::kShadow;
+  }
+  return 0;
+}
+
+fn style_mask_of(props&: HashMap<String, String>): u64 {
+  var mask: u64 = 0;
+  for (let (key, _) in props.iter()) {
+    mask |= lookup_style_mask(key.as_str());
+  }
+  return mask;
+}
+
+// ---------------------------------------------------------------------------
+// Transition parsing
+// ---------------------------------------------------------------------------
+
+fn parse_transition_shorthand(val: str): Transition {
+  var trans = Transition {};
+  var dur: f32 = 0.0;
+  var p: usize = 0;
+  let r = from_chars_f32(val, dur);
+  if (r.ptr != 0) {
+    // The C++ reads the NUL-terminated c_str(): past the end is '\0'.
+    let ms = r.ptr + 1 < #val && val[r.ptr] == 'm' && val[r.ptr + 1] == 's';
+    trans.duration = ms ? dur / 1000.0 : dur;
+    p = r.ptr;
+    while (p < #val && (val[p] == 's' || val[p] == 'm' || val[p] == ' ')) {
+      p += 1;
+    }
+  }
+  if (let easing = find_easing_substring(val[p..])) {
+    trans.easing = easing;
+  }
+  return trans;
+}
+
+// ---------------------------------------------------------------------------
+// Component expansion
+// ---------------------------------------------------------------------------
+
+fn is_prop_char(c: c8): bool => c is 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-';
+
+// Replaces `$prop` references in a property value: `$` + longest run of
+// [A-Za-z0-9_-]. Unknown names fall back to trimmed `-segment` prefixes
+// (`$accent-hover` -> `$accent`); unresolved references stay verbatim.
+fn substitute_props(value: str, props&: HashMap<String, String>): String {
+  if (find_char(value, '$') == none) {
+    return from_str(value);
+  }
+  var out = String();
+  out.reserve(#value);
+  var i: usize = 0;
+  var run: usize = 0;  // start of the bytes not yet copied
+  while (i < #value) {
+    if (value[i] != '$') {
+      i += 1;
+      continue;
+    }
+    out.push_str(value[run..i]);
+    var j = i + 1;
+    while (j < #value && is_prop_char(value[j])) {
+      j += 1;
+    }
+    var key = value[i + 1..j];
+    var prop = get_str(props, key);
+    while (prop == none) {
+      let dash = rfind_char(key, '-') else {
+        break;
+      };
+      key = key[..dash];
+      prop = get_str(props, key);
+    }
+    if (let p& = prop) {
+      out.push_str(p.as_str());
+      i += 1 + #key;
+    } else {
+      out.push_str("$");
+      i += 1;
+    }
+    run = i;
+  }
+  out.push_str(value[run..]);
+  return out;
+}
+
+fn rfind_char(s: str, c: c8): usize? {
+  var i = #s;
+  while (i > 0) {
+    i -= 1;
+    if (s[i] == c) {
+      return i;
+    }
+  }
+  return none;
+}
+
+fn substitute_map(var map&: HashMap<String, String>, props&: HashMap<String, String>) {
+  // Collect first: the map cannot be written while it is walked.
+  var keys: List<String> = List();
+  for (let (key, _) in map.iter()) {
+    keys.push(key.clone());
+  }
+  for (let key in keys) {
+    var v& = map.get_var(key)!;
+    let replaced = substitute_props(v.as_str(), props);
+    v = replaced;
+  }
+}
+
+fn substitute_node_props(var node&: UguiNode, props&: HashMap<String, String>) {
+  substitute_map(node.properties, props);
+  for (var sb& in node.state_blocks) {
+    substitute_map(sb.properties, props);
+  }
+  for (var kb& in node.keyframe_blocks) {
+    substitute_map(kb.properties, props);
+    for (var stop& in kb.stops) {
+      substitute_map(stop.properties, props);
+    }
+  }
+  for (var mq& in node.media_queries) {
+    substitute_map(mq.properties, props);
+  }
+  for (var child& in node.children) {
+    substitute_node_props(child, props);
+  }
+}
+
+// Scopes the names of a component's internal widgets to the instance:
+// `panel bar` inside component `hp` becomes `hp_bar`, so multiple instances
+// don't collide and Lua handlers stay addressable per instance.
+fn prefix_names(var node&: UguiNode, prefix: str) {
+  for (var child& in node.children) {
+    if (child.name.len() != 0) {
+      child.name = f"{prefix}_{child.name}";
+    }
+    prefix_names(child, prefix);
+  }
+}
+
+// Replaces the first `slot` element with the instance's children, or with
+// the slot's own children (fallback content) when the instance provides
+// none. True if a slot was found.
+fn replace_slot(var node&: UguiNode, var fill&: List<UguiNode>): bool {
+  for (let i in 0..node.children.len()) {
+    if (node.children[i].type_ == "slot") {
+      var slot = node.children.remove(i);
+      var content: List<UguiNode> = List();
+      if (fill.len() == 0) {
+        swap(content, slot.children);
+      } else {
+        swap(content, fill);
+      }
+      // Inserted back to front at the slot's index: the content keeps its
+      // order and the siblings theirs, as the C++ rebuild does.
+      while (let c = content.pop()) {
+        node.children.insert(i, c);
+      }
+      return true;
+    }
+    if (replace_slot(node.children[i], fill)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// The builder
+// ---------------------------------------------------------------------------
+
+// UguiBuilder::WidgetFactory: builds the widget for a registered element
+// type, given the element's name.
+pub type WidgetFactory = own fn(&var World, String): WidgetId;
+
+// Builds a widget tree from a parsed .ugui document. Maps element types to
+// widget constructors, resolves properties to styles.
+pub struct UguiBuilder {
+  var factories: HashMap<String, WidgetFactory> = HashMap()
+  var variables: HashMap<String, String> = HashMap()
+  var fonts: HashMap<String, FontHandle> = HashMap()  // named fonts for the `font:` property
+  var style_classes: HashMap<String, UguiStyleClass> = HashMap()
+  var components: HashMap<String, UguiComponent> = HashMap()
+  var viewport_size_: Vec2 = Vec2 { x: 1280.0, y: 720.0 }
+  var expand_depth: u32 = 0  // recursion guard for nested components
+
+  pub fn UguiBuilder(): UguiBuilder => UguiBuilder {};
+
+  pub fn register_type(var self&, type_name: str, factory: WidgetFactory) {
+    self.factories.insert(from_str(type_name), factory);
+  }
+
+  pub fn set_viewport_size(var self&, size: Vec2) {
+    self.viewport_size_ = size;
+  }
+  pub fn viewport_size(self&): Vec2 => self.viewport_size_;
+
+  // SetVariable: a CSS custom property (e.g. "--accent", "#4a4aff").
+  pub fn set_variable(var self&, name: str, value: str) {
+    self.variables.insert(from_str(name), from_str(value));
+  }
+
+  // RegisterFont: a named font for the `font: <name>` property. Unknown names
+  // in markup are ignored.
+  pub fn register_font(var self&, name: str, handle: FontHandle) {
+    self.fonts.insert(from_str(name), handle);
+  }
+
+  // Build a widget tree from a document. Returns the root entity.
+  pub fn build(var self&, var world&: World, var ctx&: WidgetContext, doc&: UguiDocument): WidgetId;
+
+  // Rebuild: destroy the previous tree and build the new one (the C++ has no
+  // diffing either).
+  pub fn rebuild(var self&, var world&: World, var ctx&: WidgetContext, doc&: UguiDocument, existing_root: WidgetId): WidgetId;
+
+  // Apply top-level style classes to an already-built widget (space-separated
+  // names, later wins). True if any class matched.
+  pub fn apply_style_class(self&, var world&: World, widget: WidgetId, class_name: str): bool;
+
+  // Look up a style class by name; none if not found.
+  pub fn find_style_class(self&, name: str): (&UguiStyleClass)? => get_str(self.style_classes, name);
+
+  // Re-evaluate `@media` overrides for a subtree against the current
+  // viewport. Called on window resize so breakpoints apply live.
+  pub fn reapply_media_queries(self&, var world&: World, root: WidgetId);
+}
+
+// Properties apply in key order, not hash order: two that set the same field
+// (`layout` and `flex-direction`, `border-radius` and `corner-radius-tl`)
+// would otherwise resolve differently per container configuration. Key order
+// also puts a shorthand before its longhands, so the longhand wins.
+fn UguiBuilder::apply_property_setters(self&, props&: HashMap<String, String>, var style&: Style) {
+  for (let (key, val) in sorted_entries(props)) {
+    let resolved = self.resolve_value(val.as_str());
+    let _ = apply_property(style, key.as_str(), resolved.as_str());
+  }
+}
+
+fn UguiBuilder::parse_style(self&, props&: HashMap<String, String>): Style {
+  var s = Style {};
+  self.apply_property_setters(props, s);
+  return s;
+}
+
+// CSS custom properties (--name: value)
+fn UguiBuilder::collect_variables(var self&, node&: UguiNode) {
+  for (let (key, val) in node.properties.iter()) {
+    if (key.len() > 2 && key.as_str()[0] == '-' && key.as_str()[1] == '-') {
+      self.variables.insert(key.clone(), val.clone());
+    }
+  }
+  for (let child& in node.children) {
+    self.collect_variables(child);
+  }
+}
+
+fn UguiBuilder::resolve_value(self&, value: str): String {
+  if (#value > 2 && value[0] == '-' && value[1] == '-') {
+    if (let resolved& = get_str(self.variables, value)) {
+      return resolved.clone();
+    }
+  }
+  return from_str(value);
+}
+
+fn UguiBuilder::expand_component(self&, comp&: UguiComponent, instance&: UguiNode): UguiNode {
+  // Resolve props: declared defaults, overridden by instance values. `$name`
+  // is implicit and resolves to the instance (or component) name.
+  var props = comp.props.clone();
+  for (let (key, val) in instance.properties.iter()) {
+    if (comp.props.contains(key)) {
+      props.insert(key.clone(), val.clone());
+    }
+  }
+  if (!contains_str(props, "name")) {
+    props.insert(from_str("name"), instance.name.len() == 0 ? comp.name.clone() : instance.name.clone());
+  }
+
+  var expanded = comp.root.clone();
+  substitute_node_props(expanded, props);
+
+  if (instance.name.len() != 0) {
+    expanded.name = instance.name.clone();
+    prefix_names(expanded, instance.name.as_str());
+  }
+
+  // Instance children fill the slot (or append to the root).
+  var fill = instance.children.clone();
+  if (!replace_slot(expanded, fill)) {
+    // fill is untouched when no slot took it: append its copies in order.
+    for (let child& in instance.children) {
+      expanded.children.push(child.clone());
+    }
+  }
+
+  // Non-prop instance properties override the root element's, so call sites
+  // can tweak layout/visuals (`width`, `margin`, `class`...) per instance
+  // without a dedicated prop.
+  for (let (key, val) in instance.properties.iter()) {
+    if (!comp.props.contains(key)) {
+      expanded.properties.insert(key.clone(), val.clone());
+    }
+  }
+  for (let sb& in instance.state_blocks) {
+    expanded.state_blocks.push(sb.clone());
+  }
+  for (let mq& in instance.media_queries) {
+    expanded.media_queries.push(mq.clone());
+  }
+  for (let kb& in instance.keyframe_blocks) {
+    expanded.keyframe_blocks.push(kb.clone());
+  }
+
+  return expanded;
+}
+
+fn UguiBuilder::build(var self&, var world&: World, var ctx&: WidgetContext, doc&: UguiDocument): WidgetId {
+  if (doc.roots.len() == 0 && doc.style_classes.len() == 0) {
+    return kNullWidget;
+  }
+
+  // Collect CSS custom properties from all nodes
+  for (let root& in doc.roots) {
+    self.collect_variables(root);
+  }
+
+  // Stash style class declarations so apply_properties and the public
+  // apply_style_class can look them up by name. Replaced on every build so
+  // reloading a .ugui drops stale classes.
+  self.style_classes.clear();
+  for (let sc& in doc.style_classes) {
+    self.style_classes.insert(sc.name.clone(), sc.clone());
+  }
+
+  // Same for component templates: an element whose type matches a component
+  // name expands to a copy of the component's subtree.
+  self.components.clear();
+  for (let comp& in doc.components) {
+    self.components.insert(comp.name.clone(), comp.clone());
+  }
+  self.expand_depth = 0;
+
+  if (doc.roots.len() == 0) {
+    return kNullWidget;
+  }
+
+  var id_counter: u32 = 1;
+  if (doc.roots.len() == 1) {
+    return self.build_node(world, ctx, doc.roots[0], id_counter);
+  }
+
+  // Multiple roots: wrap in a panel
+  let root = create_panel(world, 0);
+  world.get_var(kWidgetNode, root)!.name = from_str("_root");
+  for (let node& in doc.roots) {
+    let child = self.build_node(world, ctx, node, id_counter);
+    if (child.valid()) {
+      add_child(world, root, child);
+    }
+  }
+  return root;
+}
+
+fn UguiBuilder::apply_style_class(self&, var world&: World, widget: WidgetId, class_name: str): bool {
+  // `class: card elevated;` applies each named class in order.
+  var any = false;
+  var start: usize = 0;
+  while (start < #class_name) {
+    while (start < #class_name && class_name[start] == ' ') {
+      start += 1;
+    }
+    let end = find_char(class_name, ' ', start) ?? #class_name;
+    if (end > start) {
+      any = self.apply_one_style_class(world, widget, class_name[start..end]) || any;
+    }
+    start = end;
+  }
+  return any;
+}
+
+fn UguiBuilder::apply_one_style_class(self&, var world&: World, widget: WidgetId, class_name: str): bool {
+  if (!widget.valid()) {
+    return false;
+  }
+  let sc& = self.find_style_class(class_name) else {
+    return false;
+  };
+
+  // Merge the class's base properties on top of the widget's current base
+  // style. The class wins for any property it explicitly sets; unspecified
+  // properties are left untouched.
+  var merged = world.get(kStyleC, widget)!.style;
+  self.apply_property_setters(sc.properties, merged);
+  set_style(world, widget, merged);
+
+  // Class state-blocks (`:hover { ... }` etc.) are appended as state
+  // overrides, as inline element state blocks are.
+  for (let sb& in sc.state_blocks) {
+    let state = lookup_widget_state(sb.state.as_str()) ?? WidgetState::None;
+    let override_style = self.parse_style(sb.properties);
+    add_state_override(world, widget, state, override_style, style_mask_of(sb.properties));
+  }
+  return true;
+}
+
+fn prop<'a>(node: &'a UguiNode, key: str): (&'a String)? => get_str(node.properties, key);
+
+// The first of two property names that is present.
+fn prop2<'a>(node: &'a UguiNode, key: str, fallback: str): (&'a String)? {
+  if (let v& = get_str(node.properties, key)) {
+    return v;
+  }
+  return get_str(node.properties, fallback);
+}
+
+fn UguiBuilder::build_node(var self&, var world&: World, var ctx&: WidgetContext, node&: UguiNode, var id_counter&: u32): WidgetId {
+  var widget = kNullWidget;
+
+  // Component instance: expand the template and build the result. The
+  // expanded tree may itself instantiate components; the depth guard catches
+  // (mutually) recursive definitions.
+  if (let comp& = get_str(self.components, node.type_.as_str())) {
+    if (self.expand_depth >= 32) {
+      eprintln(f"ultragui: component expansion too deep at '{node.type_}' line {node.source_line} (recursive component?)");
+      return kNullWidget;
+    }
+    let expanded = self.expand_component(comp, node);
+    self.expand_depth += 1;
+    let result = self.build_node(world, ctx, expanded, id_counter);
+    self.expand_depth -= 1;
+    return result;
+  }
+
+  let id = id_counter;
+  id_counter += 1;
+
+  let t = node.type_.as_str();
+  if (let factory& = get_str(self.factories, t)) {
+    widget = factory(world, node.name.clone());
+  } else if (t == "panel" || t == "div" || t == "container") {
+    widget = create_panel(world, id);
+  } else if (t == "text" || t == "label") {
+    widget = create_text(world, id);
+    if (let text& = prop2(node, "content", "text")) {
+      set_text(world, widget, text.as_str());
+    }
+  } else if (t == "button") {
+    widget = create_button(world, id);
+    if (let text& = prop2(node, "text", "label")) {
+      set_button_label(world, widget, text.as_str());
+    }
+  } else if (t == "modal" || t == "dialog") {
+    widget = create_modal(world, id);
+  } else if (t == "image" || t == "img") {
+    widget = create_image(world, id);
+  } else if (t == "scroll" || t == "scroll-view") {
+    widget = create_scroll_view(world, id);
+    world.get_var(kStyleC, widget)!.style.overflow = Overflow::Scroll;
+  } else if (t == "text-input" || t == "input") {
+    widget = create_text_input(world, id);
+    if (let text& = prop(node, "placeholder")) {
+      set_text_input_placeholder(world, widget, text.as_str());
+    }
+    if (let val& = prop(node, "value")) {
+      set_text_input_value(world, widget, val.as_str());
+    }
+  } else if (t == "checkbox") {
+    widget = create_checkbox(world, id);
+    if (let text& = prop2(node, "label", "text")) {
+      set_checkbox_label(world, widget, text.as_str());
+    }
+    if (let checked& = prop(node, "checked")) {
+      if (checked.as_str() == "true") {
+        set_checked(world, ctx, widget, true);
+      }
+    }
+  } else if (t == "slider" || t == "range") {
+    widget = create_slider(world, id);
+    if (let v& = prop(node, "min")) {
+      set_slider_min(world, widget, parse_float(v.as_str()));
+    }
+    if (let v& = prop(node, "max")) {
+      set_slider_max(world, widget, parse_float(v.as_str()));
+    }
+    if (let v& = prop(node, "value")) {
+      set_slider_value(world, widget, parse_float(v.as_str()));
+    }
+  } else if (t == "radio") {
+    widget = create_radio(world, id);
+    if (let text& = prop2(node, "label", "text")) {
+      set_radio_label(world, widget, text.as_str());
+    }
+    if (let group& = prop(node, "group")) {
+      set_radio_group(world, widget, group.as_str());
+    }
+    if (let checked& = prop(node, "checked")) {
+      if (checked.as_str() == "true") {
+        set_radio_selected(world, ctx, widget, true);
+      }
+    }
+  } else if (t == "toggle" || t == "switch") {
+    widget = create_toggle(world, id);
+    if (let checked& = prop(node, "checked")) {
+      if (checked.as_str() == "true") {
+        set_toggle_on(world, ctx, widget, true);
+      }
+    }
+  } else if (t == "dropdown" || t == "select") {
+    widget = create_dropdown(world, id);
+    var opts: List<String> = List();
+    for (let child_node& in node.children) {
+      if (let text& = prop2(child_node, "text", "label")) {
+        opts.push(text.clone());
+      } else if (child_node.name.len() != 0) {
+        opts.push(child_node.name.clone());
+      }
+    }
+    set_dropdown_options(world, widget, opts.as_slice());
+    if (let sel& = prop(node, "selected")) {
+      set_dropdown_selected(world, widget, @saturating_cast(i32, parse_float(sel.as_str())));
+    }
+    // Return early: option children are data, not child widgets
+    self.name_and_apply(world, ctx, widget, id, node);
+    return widget;
+  } else if (t == "context-menu") {
+    let menu = create_context_menu(world, id);
+    for (let child_node& in node.children) {
+      if (child_node.type_ == "separator") {
+        add_context_menu_separator(world, menu);
+      } else {
+        var label = child_node.name.clone();
+        if (let text& = prop2(child_node, "text", "label")) {
+          label = text.clone();
+        }
+        add_context_menu_item_without_action(world, menu, label);
+      }
+    }
+    widget = menu;
+    // Return early: item children are data, not child widgets
+    self.name_and_apply(world, ctx, widget, id, node);
+    return widget;
+  } else if (t == "rich-text" || t == "richtext") {
+    let rt = create_rich_text(world, id);
+    // Child "span" elements are TextSpan data, not child widgets
+    for (let child_node& in node.children) {
+      if (child_node.type_ == "span") {
+        add_rich_text_span(world, rt, span_of(child_node));
+      }
+    }
+    widget = rt;
+    // Return early: span children are data, not child widgets
+    self.name_and_apply(world, ctx, widget, id, node);
+    return widget;
+  } else {
+    // Unknown type: treat as panel
+    eprintln(f"ultragui: unknown element type '{node.type_}' at line {node.source_line}");
+    widget = create_panel(world, id);
+  }
+
+  self.name_and_apply(world, ctx, widget, id, node);
+
+  for (let child_node& in node.children) {
+    let child = self.build_node(world, ctx, child_node, id_counter);
+    if (child.valid()) {
+      add_child(world, widget, child);
+    }
+  }
+
+  return widget;
+}
+
+// The widget's id and name, then ApplyProperties.
+fn UguiBuilder::name_and_apply(var self&, var world&: World, var ctx&: WidgetContext, widget: WidgetId, id: u32, node&: UguiNode) {
+  {
+    var n& = world.get_var(kWidgetNode, widget)!;
+    n.id = id;
+    n.name = node.name.clone();
+  }
+  self.apply_properties(world, ctx, widget, node);
+}
+
+// AddContextMenuItem(menu, label, nullptr): an item with no action.
+fn add_context_menu_item_without_action(var world&: World, e: WidgetId, label: String) {
+  world.get_or_add(kContextMenuContent, e, ContextMenuContent {}).items.push(
+    ContextMenuItem { label, action: none, separator: false });
+  mark_dirty(world, e);
+}
+
+fn span_of(child_node&: UguiNode): TextSpan {
+  var span = TextSpan {};
+  if (let text& = prop2(child_node, "text", "content")) {
+    span.text = text.clone();
+  }
+  if (let color& = prop(child_node, "color")) {
+    span.color = parse_color(color.as_str());
+  }
+  if (let size& = prop(child_node, "font-size")) {
+    span.font_size = parse_float(size.as_str());
+  }
+  if (let weight& = prop(child_node, "font-weight")) {
+    if (let w = lookup_font_weight(weight.as_str())) {
+      span.font_weight = w;
+    }
+  }
+  if (let style& = prop(child_node, "font-style")) {
+    if (style.as_str() == "italic") {
+      span.font_style = FontStyle::Italic;
+    }
+  }
+  if (let dec& = prop(child_node, "text-decoration")) {
+    if (let d = parse_text_decoration(dec.as_str())) {
+      span.decoration = d;
+    }
+  }
+  return span;
+}
+
+fn UguiBuilder::apply_properties(var self&, var world&: World, var ctx&: WidgetContext, widget: WidgetId, node&: UguiNode) {
+  // Style class from `class: name;` first; inline properties below win.
+  if (let class_prop& = prop(node, "class")) {
+    let _ = self.apply_style_class(world, widget, class_prop.as_str());
+  }
+
+  // Inline properties on top of any class defaults. Properties not set
+  // inline keep whatever the class supplied.
+  var merged = world.get(kStyleC, widget)!.style;
+  self.apply_property_setters(node.properties, merged);
+  set_style(world, widget, merged);
+
+  // Per-widget font: `font: <name>` selects a face registered with
+  // register_font (e.g. "mono"). Sets the text/button font override; unknown
+  // names are left on the context default. font-size/weight/style still
+  // apply on top.
+  if (let font_prop& = prop(node, "font")) {
+    if (let font& = get_str(self.fonts, font_prop.as_str())) {
+      let handle: FontHandle = font;
+      if (var tc& = world.get_var(kTextContent, widget)) {
+        tc.font = handle;
+      }
+      if (var bc& = world.get_var(kButtonContent, widget)) {
+        bc.font = handle;
+      }
+    }
+  }
+
+  // Tooltip
+  if (let tooltip& = prop(node, "tooltip")) {
+    set_tooltip(world, widget, tooltip.as_str());
+  }
+
+  // Tab navigation
+  if (let tab& = prop(node, "tab-index")) {
+    world.get_var(kWidgetNode, widget)!.tab_index = @saturating_cast(i32, parse_float(tab.as_str()));
+  }
+
+  // State overrides
+  for (let sb& in node.state_blocks) {
+    let state = lookup_widget_state(sb.state.as_str()) ?? WidgetState::None;
+    let override_style = self.parse_style(sb.properties);
+    add_state_override(world, widget, state, override_style, style_mask_of(sb.properties));
+
+    // Transition
+    var trans = Transition {};
+    var has_transition = false;
+    if (let t& = get_str(sb.properties, "transition")) {
+      trans = parse_transition_shorthand(t.as_str());
+      has_transition = true;
+    }
+    if (let td& = get_str(sb.properties, "transition-duration")) {
+      trans.duration = parse_duration(td.as_str());
+      has_transition = true;
+    }
+    if (let te& = get_str(sb.properties, "transition-easing")) {
+      if (let e = lookup_easing(te.as_str())) {
+        trans.easing = e;
+      }
+    }
+    if (let tl& = get_str(sb.properties, "transition-delay")) {
+      trans.delay = parse_duration(tl.as_str());
+    }
+    if (let ss& = get_str(sb.properties, "spring-stiffness")) {
+      trans.spring_stiffness = parse_float(ss.as_str());
+    }
+    if (let sd& = get_str(sb.properties, "spring-damping")) {
+      trans.spring_damping = parse_float(sd.as_str());
+    }
+    if (let sm& = get_str(sb.properties, "spring-mass")) {
+      trans.spring_mass = parse_float(sm.as_str());
+    }
+
+    if (has_transition && state != WidgetState::None) {
+      add_state_transition(world, widget, state, trans);
+    }
+  }
+
+  // Stash the base style plus raw queries so reapply_media_queries can
+  // re-resolve them on resize.
+  if (node.media_queries.len() != 0) {
+    var ms = MediaStyle { base: world.get(kStyleC, widget)!.style };
+    ms.queries.reserve(node.media_queries.len());
+    for (let mq& in node.media_queries) {
+      ms.queries.push(MediaStyleQuery { condition: mq.condition.clone(), value: mq.value, properties: mq.properties.clone() });
+    }
+    world.add(kMediaStyle, widget, ms);
+    self.apply_media_style(world, widget);
+  }
+
+  // @keyframes blocks
+  for (let kb& in node.keyframe_blocks) {
+    if (ctx.animator == none || kb.stops.len() == 0) {
+      continue;
+    }
+
+    var anim = KeyframeAnimation {};
+    anim.widget_id = world.get(kWidgetNode, widget)!.id;
+
+    // Top-level properties
+    if (let d& = get_str(kb.properties, "duration")) {
+      anim.duration = parse_duration(d.as_str());
+    }
+    if (let l& = get_str(kb.properties, "loop")) {
+      anim.repeat_count = l.as_str() == "true" ? -1 : 1;
+    }
+    if (let a& = get_str(kb.properties, "alternate")) {
+      anim.alternate = a.as_str() == "true";
+    }
+
+    // Stops -> sorted keyframes. Two stops may share a percent, and which
+    // one the animator reaches first depends on how the sort left the tie,
+    // so this is intro_sort (std::sort's exact order), not any sort.
+    anim.keyframes.reserve(kb.stops.len());
+    for (let stop& in kb.stops) {
+      anim.keyframes.push(Keyframe { time: stop.percent, style: self.parse_style(stop.properties) });
+    }
+    intro_sort(anim.keyframes.as_slice_var(), fn(a&: Keyframe, b&: Keyframe): bool => a.time < b.time);
+
+    anim.active = true;
+    anim.start_time = 0.0;  // set when UIContext starts the animator
+    if (var animator& = ctx.animator) {
+      animator.start_animation(anim, 0.0);
+    }
+  }
+}
+
+fn UguiBuilder::apply_media_style(self&, var world&: World, widget: WidgetId) {
+  let ms& = world.get(kMediaStyle, widget) else {
+    return;
+  };
+
+  // Always start from the base: overrides whose condition no longer holds
+  // must fall away when the viewport shrinks/grows back.
+  var style = ms.base;
+  for (let q& in ms.queries) {
+    var matches = false;
+    if (q.condition == "min-width") {
+      matches = self.viewport_size_.x >= q.value;
+    } else if (q.condition == "max-width") {
+      matches = self.viewport_size_.x <= q.value;
+    } else if (q.condition == "min-height") {
+      matches = self.viewport_size_.y >= q.value;
+    } else if (q.condition == "max-height") {
+      matches = self.viewport_size_.y <= q.value;
+    }
+    if (!matches) {
+      continue;
+    }
+    self.apply_property_setters(q.properties, style);
+  }
+  set_style(world, widget, style);
+}
+
+fn UguiBuilder::reapply_media_queries(self&, var world&: World, root: WidgetId) {
+  if (!root.valid()) {
+    return;
+  }
+  if (world.has(kMediaStyle, root)) {
+    self.apply_media_style(world, root);
+  }
+  if (let h& = world.get(kHierarchy, root)) {
+    let kids = to_list(h.children.as_slice());
+    for (let child in kids) {
+      self.reapply_media_queries(world, child);
+    }
+  }
+}
+
+fn UguiBuilder::rebuild(var self&, var world&: World, var ctx&: WidgetContext, doc&: UguiDocument, existing_root: WidgetId): WidgetId {
+  // Simple rebuild: destroy the old tree and build the new one
+  if (existing_root.valid()) {
+    destroy_widget(world, existing_root);
+  }
+  return self.build(world, ctx, doc);
+}

@@ -1,0 +1,406 @@
+// tests/test_idl_components.cc: .ugui reusable components (parsing, prop
+// substitution, slots, imports), multi-class application, at-rules on nested
+// elements, pointer-events, flexbox properties, media query reapply.
+// Headless. Each C++ TEST is a function here, in the same order.
+
+module idl_components_test;
+
+import {List} from akikit::containers::list;
+import {get_str} from akikit::containers::hash_map;
+import {eprintln} from akikit::logging;
+import {delete_file, write_file} from akikit::filesystem::file_util;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {UguiBuilder} from ultragui::idl::builder;
+import {ParseError, UguiDocument, parse_ugui, parse_ugui_file} from ultragui::idl::parser;
+import {LayoutEngine, LayoutViewport} from ultragui::layout::layout;
+import {compute_widget_layout} from ultragui::layout::layout_tree;
+import {AlignContent, AlignSelf, FlexDirection, FlexWrap, PointerEvents} from ultragui::style::enums;
+import {LengthUnit} from ultragui::style::property_types;
+import {kTextContent} from ultragui::widgets::text;
+import {destroy_widget, hit_test, kHierarchy, kStyleC, kTransform, kWidgetNode, set_style} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {Expect} from support::expect;
+
+fn parse(var t&: Expect, src: str): UguiDocument {
+  var doc = UguiDocument {};
+  var errors: List<ParseError> = List();
+  let ok = parse_ugui(src, "test", doc, errors);
+  for (let e& in errors) {
+    eprintln(f"    parse error {e.file}:{e.line}: {e.message}");
+  }
+  t.that(ok, "parse");
+  return doc;
+}
+
+fn build_string(var t&: Expect, var world&: World, src: str): WidgetId {
+  let doc = parse(t, src);
+  var builder = UguiBuilder();
+  var ctx = WidgetContext::detached();
+  return builder.build(world, ctx, doc);
+}
+
+fn find_by_name(world&: World, root: WidgetId, name: str): WidgetId {
+  if (let n& = world.get(kWidgetNode, root)) {
+    if (n.name == name) {
+      return root;
+    }
+  }
+  if (let h& = world.get(kHierarchy, root)) {
+    for (let child in h.children) {
+      let hit = find_by_name(world, child, name);
+      if (hit.valid()) {
+        return hit;
+      }
+    }
+  }
+  return kNullWidget;
+}
+
+fn text_of(world&: World, e: WidgetId): str => world.get(kTextContent, e)!.text.as_str();
+
+fn component_parses_props_and_root(var t&: Expect) {
+  let doc = parse(t, r"""
+    component stat_row {
+      prop label: "HP";
+      prop value: 0;
+      panel row {
+        layout: row;
+        text lbl { text: $label; }
+        text val { text: $value; }
+      }
+    }
+""");
+  t.that(doc.components.len() == 1, "one component");
+  let c& = doc.components[0];
+  t.that(c.name == "stat_row", "component name");
+  t.that(c.props.len() == 2, "two props");
+  t.that(get_str(c.props, "label")!.as_str() == "HP", "prop label default");
+  t.that(get_str(c.props, "value")!.as_str() == "0", "prop value default");
+  t.that(c.root.type_ == "panel", "root type");
+  t.that(c.root.children.len() == 2, "root children");
+  t.that(get_str(c.root.children[0].properties, "text")!.as_str() == "$label", "unsubstituted text");
+}
+
+fn component_instance_substitutes_props(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    component stat_row {
+      prop label: "HP";
+      prop value: 0;
+      panel row {
+        text lbl { text: "$label: $value"; }
+      }
+    }
+    panel main {
+      stat_row mana { label: "Mana"; value: 42; }
+    }
+""");
+  t.that(root.valid(), "substitutes: root");
+  let lbl = find_by_name(world, root, "mana_lbl");
+  t.that(lbl.valid(), "substitutes: mana_lbl");
+  t.that(lbl.valid() && text_of(world, lbl) == "Mana: 42", "substitutes: text");
+  destroy_widget(world, root);
+}
+
+fn component_uses_prop_defaults(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    component stat_row {
+      prop label: "HP";
+      panel row { text lbl { text: $label; } }
+    }
+    panel main { stat_row hp { } }
+""");
+  let lbl = find_by_name(world, root, "hp_lbl");
+  t.that(lbl.valid(), "defaults: hp_lbl");
+  t.that(lbl.valid() && text_of(world, lbl) == "HP", "defaults: text");
+  destroy_widget(world, root);
+}
+
+fn component_root_takes_instance_name(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    component card { panel body { padding: 8; } }
+    panel main { card inventory { } }
+""");
+  t.that(find_by_name(world, root, "inventory").valid(), "instance name: inventory");
+  t.that(!find_by_name(world, root, "body").valid(), "instance name: no body");
+  destroy_widget(world, root);
+}
+
+fn component_slot_receives_instance_children(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    component card {
+      panel body {
+        text heading { text: "head"; }
+        slot { text fallback { text: "empty"; } }
+      }
+    }
+    panel main {
+      card filled { text extra { text: "custom"; } }
+      card empty { }
+    }
+""");
+  t.that(find_by_name(world, root, "extra").valid(), "slot: extra");
+  t.that(find_by_name(world, root, "empty_fallback").valid(), "slot: empty_fallback");
+  // The filled instance must not contain its fallback content
+  let filled = find_by_name(world, root, "filled");
+  t.that(!find_by_name(world, filled, "filled_fallback").valid(), "slot: no filled_fallback");
+  destroy_widget(world, root);
+}
+
+fn component_instance_overrides_root_style(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    component card { panel body { width: 100; height: 50; } }
+    panel main { card wide { width: 300; } }
+""");
+  let wide = find_by_name(world, root, "wide");
+  t.that(wide.valid(), "override: wide");
+  let s = world.get(kStyleC, wide)!.style;
+  t.that(s.width.value == 300.0, "override: width");
+  t.that(s.height.value == 50.0, "override: height");
+  destroy_widget(world, root);
+}
+
+fn component_implicit_name_prop(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    component tab { panel body { text lbl { text: $name; } } }
+    panel main { tab settings { } }
+""");
+  let lbl = find_by_name(world, root, "settings_lbl");
+  t.that(lbl.valid(), "implicit name: settings_lbl");
+  t.that(lbl.valid() && text_of(world, lbl) == "settings", "implicit name: text");
+  destroy_widget(world, root);
+}
+
+fn nested_components_expand(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    component icon { panel dot { width: 8; height: 8; } }
+    component row {
+      panel body { layout: row; icon marker { } }
+    }
+    panel main { row first { } }
+""");
+  t.that(find_by_name(world, root, "first_marker").valid(), "nested: first_marker");
+  destroy_widget(world, root);
+}
+
+fn recursive_component_does_not_hang(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    component loop { panel body { loop again { } } }
+    panel main { loop start { } }
+""");
+  // Expansion must terminate; whatever tree came out gets destroyed.
+  if (root.valid()) {
+    destroy_widget(world, root);
+  }
+}
+
+fn multiple_style_classes_apply_in_order(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    class base { width: 100; height: 40; }
+    class wide { width: 250; }
+    panel main {
+      panel pill { class: base wide; }
+    }
+""");
+  let pill = find_by_name(world, root, "pill");
+  t.that(pill.valid(), "classes: pill");
+  let s = world.get(kStyleC, pill)!.style;
+  t.that(s.width.value == 250.0, "classes: later class wins");
+  t.that(s.height.value == 40.0, "classes: height");
+  destroy_widget(world, root);
+}
+
+fn at_rules_parse_on_nested_elements(var t&: Expect) {
+  // Every depth parses @keyframes and @media, not just the root, and the
+  // widgets after them still land where they belong.
+  let doc = parse(t, r"""
+panel root {
+  panel card {
+    opacity: 0;
+    panel inner {
+      @media (max-width: 800) { width: 100; }
+    }
+    @keyframes fade {
+      duration: 0.8s;
+      0% { opacity: 0; }
+      100% { opacity: 1; }
+    }
+  }
+  text after { text: "x"; }
+}
+""");
+  t.that(doc.roots.len() == 1, "at-rules: one root");
+  let root& = doc.roots[0];
+  t.that(root.children.len() == 2, "at-rules: two children");
+  let card& = root.children[0];
+  t.that(card.name == "card", "at-rules: card");
+  t.that(card.children.len() == 1, "at-rules: card child");
+  t.that(card.children[0].media_queries.len() == 1, "at-rules: media query");
+  t.that(card.keyframe_blocks.len() == 1, "at-rules: keyframes");
+  t.that(card.keyframe_blocks[0].stops.len() == 2, "at-rules: stops");
+  t.that(root.children[1].name == "after", "at-rules: after");
+}
+
+fn pointer_events_none_is_not_hit(var t&: Expect, var world&: World) {
+  // A widget drawn over a button, as a drawn cursor is, lets the button take
+  // the click when it says pointer-events: none.
+  let root = build_string(t, world, r"""
+panel root {
+  width: 200; height: 100;
+  button under { width: 200; height: 100; text: "x"; }
+  panel over {
+    position: absolute; left: 0; top: 0; width: 200; height: 100;
+    pointer-events: none;
+  }
+}
+""");
+  var ctx = WidgetContext::detached();
+  var engine = LayoutEngine();
+  compute_widget_layout(world, ctx, root, LayoutViewport { width: 800.0, height: 600.0, scale: 1.0 }, engine);
+  let under = find_by_name(world, root, "under");
+  let over = find_by_name(world, root, "over");
+  t.that(hit_test(world, ctx, root, Vec2 { x: 50.0, y: 50.0 }) == under, "pointer-events none: under is hit");
+  // Without it, the overlay is what the pointer hits.
+  var s = world.get(kStyleC, over)!.style;
+  s.pointer_events = PointerEvents::Auto;
+  set_style(world, over, s);
+  t.that(hit_test(world, ctx, root, Vec2 { x: 50.0, y: 50.0 }) == over, "pointer-events auto: over is hit");
+  destroy_widget(world, root);
+}
+
+fn flexbox_properties_parse(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    panel main {
+      layout: row; flex-wrap: wrap; align-content: space-between;
+      row-gap: 8; column-gap: 20;
+      panel item { flex: 1; align-self: center; }
+      panel fixed { flex-basis: 200; flex-shrink: 0; }
+    }
+""");
+  let m = world.get(kStyleC, find_by_name(world, root, "main"))!.style;
+  t.that(m.flex_wrap == FlexWrap::Wrap, "flex: wrap");
+  t.that(m.align_content == AlignContent::SpaceBetween, "flex: align-content");
+  t.that(m.row_gap == 8.0, "flex: row-gap");
+  t.that(m.column_gap == 20.0, "flex: column-gap");
+
+  let item = world.get(kStyleC, find_by_name(world, root, "item"))!.style;
+  t.that(item.flex_grow == 1.0, "flex: grow");
+  t.that(item.flex_basis.unit == LengthUnit::Px, "flex: basis unit");
+  t.that(item.flex_basis.value == 0.0, "flex: basis 0");
+  t.that(item.align_self == AlignSelf::Center, "flex: align-self");
+
+  let fixed = world.get(kStyleC, find_by_name(world, root, "fixed"))!.style;
+  t.that(fixed.flex_basis.value == 200.0, "flex: basis 200");
+  t.that(fixed.flex_shrink == 0.0, "flex: shrink 0");
+  destroy_widget(world, root);
+}
+
+fn flex_wrap_lays_out_multiple_lines(var t&: Expect, var world&: World) {
+  let root = build_string(t, world, r"""
+    panel main {
+      layout: row; flex-wrap: wrap; width: 250; height: 300; row-gap: 10;
+      panel a { width: 100; height: 50; }
+      panel b { width: 100; height: 50; }
+      panel c { width: 100; height: 50; }
+    }
+""");
+  var ctx = WidgetContext::detached();
+  var engine = LayoutEngine();
+  compute_widget_layout(world, ctx, root, LayoutViewport { width: 800.0, height: 600.0, scale: 1.0 }, engine);
+
+  // 250px row fits two 100px items; the third wraps to a second line offset
+  // by height + row-gap.
+  let a = world.get(kTransform, find_by_name(world, root, "a"))!.rect;
+  let c = world.get(kTransform, find_by_name(world, root, "c"))!.rect;
+  t.that(a.y == c.y - 60.0, "wrap: second line y");
+  t.that(c.x == a.x, "wrap: second line x");
+  destroy_widget(world, root);
+}
+
+fn media_queries_reapply_on_viewport_change(var t&: Expect, var world&: World) {
+  let doc = parse(t, r"""
+    panel main {
+      layout: row; width: 600;
+      @media (max-width: 800) { layout: column; width: 300; }
+    }
+""");
+  var builder = UguiBuilder();
+  var ctx = WidgetContext::detached();
+  builder.set_viewport_size(Vec2 { x: 1280.0, y: 720.0 });
+  let root = builder.build(world, ctx, doc);
+  let main = find_by_name(world, root, "main");
+  t.that(main.valid(), "media: main");
+  t.that(world.get(kStyleC, main)!.style.flex_direction == FlexDirection::Row, "media: row at 1280");
+
+  // Shrink below the breakpoint: override kicks in
+  builder.set_viewport_size(Vec2 { x: 640.0, y: 720.0 });
+  builder.reapply_media_queries(world, root);
+  t.that(world.get(kStyleC, main)!.style.flex_direction == FlexDirection::Column, "media: column at 640");
+  t.that(world.get(kStyleC, main)!.style.width.value == 300.0, "media: width 300 at 640");
+
+  // Grow back: override falls away, base style returns
+  builder.set_viewport_size(Vec2 { x: 1280.0, y: 720.0 });
+  builder.reapply_media_queries(world, root);
+  t.that(world.get(kStyleC, main)!.style.flex_direction == FlexDirection::Row, "media: row again");
+  t.that(world.get(kStyleC, main)!.style.width.value == 600.0, "media: width 600 again");
+
+  destroy_widget(world, root);
+}
+
+fn import_merges_components_and_classes(var t&: Expect, var world&: World) {
+  let lib_path = "/tmp/ugui_test_import_lib.ugui";
+  let main_path = "/tmp/ugui_test_import_main.ugui";
+  var wrote: u32 = 0;
+  if (let _ = write_file(lib_path, r"""
+      import "ugui_test_import_main.ugui";  // cycle: must not hang
+      class accent { background: #ff0000; }
+      component chip { panel body { text lbl { text: $name; } } }
+""")) {
+    wrote += 1;
+  }
+  if (let _ = write_file(main_path, r"""
+      import "ugui_test_import_lib.ugui";
+      panel root { chip alpha { } }
+""")) {
+    wrote += 1;
+  }
+  t.that(wrote == 2, "import: write files");
+
+  var doc = UguiDocument {};
+  var errors: List<ParseError> = List();
+  t.that(parse_ugui_file(main_path, doc, errors), "import: parse");
+  t.that(doc.components.len() == 1, "import: one component");
+  t.that(doc.style_classes.len() == 1, "import: one class");
+
+  var builder = UguiBuilder();
+  var ctx = WidgetContext::detached();
+  let root = builder.build(world, ctx, doc);
+  t.that(find_by_name(world, root, "alpha_lbl").valid(), "import: alpha_lbl");
+  destroy_widget(world, root);
+
+  let _ = delete_file(lib_path);
+  let _ = delete_file(main_path);
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var world = World();
+  component_parses_props_and_root(t);
+  component_instance_substitutes_props(t, world);
+  component_uses_prop_defaults(t, world);
+  component_root_takes_instance_name(t, world);
+  component_slot_receives_instance_children(t, world);
+  component_instance_overrides_root_style(t, world);
+  component_implicit_name_prop(t, world);
+  nested_components_expand(t, world);
+  recursive_component_does_not_hang(t, world);
+  multiple_style_classes_apply_in_order(t, world);
+  at_rules_parse_on_nested_elements(t);
+  pointer_events_none_is_not_hit(t, world);
+  flexbox_properties_parse(t, world);
+  flex_wrap_lays_out_multiple_lines(t, world);
+  media_queries_reapply_on_viewport_change(t, world);
+  import_merges_components_and_classes(t, world);
+  return t.finish();
+}
