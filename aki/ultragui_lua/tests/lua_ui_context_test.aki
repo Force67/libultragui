@@ -25,7 +25,7 @@ import {UIConfig} from ultragui::ui_context;
 import {kImageContent} from ultragui::widgets::image;
 import {kTextContent} from ultragui::widgets::text;
 import {LuaBindings, lua_ui_context} from ultragui_lua::lua_ui_context;
-import {Expect} from support::expect;
+import {Expect} from ultragui_testing::expect;
 
 comptime let kFont: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
