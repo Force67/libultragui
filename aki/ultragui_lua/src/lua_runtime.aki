@@ -1,0 +1,1124 @@
+// ugui/scripting/lua_runtime.cc (and the Lua half of script_runtime.h): the
+// Lua 5.4 ScriptRuntime.
+//
+// Shape differences from the C++ (behavior is the C++'s):
+//
+// * LuaRuntime implements the ScriptRuntime capability; UIContext is
+//   `UIContext<_, _, LuaRuntime>`. Every method that can run Lua takes the
+//   World and the WidgetContext the script works on; the runtime keeps raw
+//   pointers to them only while Lua runs (nested calls save and restore
+//   them), where the C++ reached them through WidgetRegistry::Active().
+// * The Lua-only members: `register_function(name, f)` (RegisterFunction)
+//   takes a NativeFunction, an aki function of a LuaCall (lua_call), not an
+//   `int(lua_State*)`; `state()` is the lua_State. ScheduleTimer is
+//   `schedule_timer`.
+// * A native's argument check that fails returns a LuaRaise and the C entry
+//   point raises it after the native's frame has ended (see lua_call): no
+//   longjmp crosses aki code that owns anything.
+// * The Impl is a heap box whose address the Lua registry ("ugui_runtime")
+//   and the wired change handlers hold, as the C++ `Impl*` and `[&rt]`. The
+//   handlers wire_change_handlers stores in widgets point at it: drop the
+//   widgets (or their handlers) before the runtime, as in the C++.
+// * Output is the C++'s, on the same streams: "[ugui/lua] ..." through C's
+//   printf (stdout, buffered with Lua's own print), errors unbuffered to
+//   stderr, bytes as Lua holds them.
+// * Calls on a runtime that is not initialized (or shut down) do nothing and
+//   report failure where the C++ dereferences a null lua_State.
+
+module ultragui_lua::lua_runtime;
+
+import {List} from akikit::containers::list;
+import {HashMap} from akikit::containers::hash_map;
+import {Box} from akikit::memory::box;
+import {String, from_str} from akikit::strings::string;
+import {write} from akikit::os::sys;
+import {from_chars_u32} from ultragui::core::from_chars;
+import {clamp_min_max} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {open_url} from ultragui::platform::platform_open_url;
+import {ScriptRuntime} from ultragui::scripting::script_runtime;
+import {Cursor, Visibility} from ultragui::style::enums;
+import {Length} from ultragui::style::property_types;
+import {Style} from ultragui::style::style;
+import {set_button_label} from ultragui::widgets::button;
+import {CallbackEnv} from ultragui::widgets::callbacks;
+import {is_checked, set_checked, set_checkbox_change} from ultragui::widgets::checkbox;
+import {dropdown_selected, dropdown_selected_text, set_dropdown_change, set_dropdown_selected} from ultragui::widgets::dropdown;
+import {set_slider_change, set_slider_value, slider_max, slider_min, slider_value} from ultragui::widgets::slider;
+import {set_text} from ultragui::widgets::text;
+import {WidgetKind, clear_animation_style, kHierarchy, kStyleC, kWidgetNode, set_style} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {
+  LuaCall, LuaRaise, LuaText, c_ptr, c_string, push_c_text, text_at,
+} from ultragui_lua::lua_call;
+import {
+  LuaState, LuaCFunction,
+  kLuaOk, kLuaRegistryIndex, kLuaTFunction, kLuaTString,
+  luaL_newstate, lua_close, luaL_requiref, luaopen_base, luaopen_table, luaopen_string, luaopen_math,
+  kLuaTabLibName, kLuaStrLibName, kLuaMathLibName,
+  lua_pop, lua_pushlightuserdata, lua_setfield, lua_getfield, lua_touserdata, lua_upvalueindex,
+  luaL_loadbuffer, luaL_loadfile, lua_pcall, lua_tostring, lua_getglobal, lua_setglobal, lua_isfunction, lua_istable,
+  lua_newtable, lua_pushinteger, lua_pushboolean, lua_pushnumber, lua_pushcclosure, lua_pushcfunction, lua_pushnil,
+  lua_pushvalue, lua_rawgeti, lua_type, lua_gettop, luaL_ref, luaL_unref, lua_pushlstring, lua_error,
+  luaL_typeerror, luaL_argerror, lua_typename, lua_toboolean, lua_tolstring,
+} from ultragui_lua::sys::lua;
+
+extern fn printf(format: *const c_char, ...): i32;
+extern fn atof(s: *const c_char): f64;
+
+// ScriptRuntime::NativeFunction (Function<int(lua_State*)>): pushes its
+// results through the LuaCall and returns how many.
+pub type NativeFunction = own fn(&var LuaCall): i32 ! LuaRaise;
+
+// REGISTRY_KEY: where the Impl* lives in Lua's registry.
+comptime let kRegistryKey: str = "ugui_runtime\0";
+
+struct TimerEntry : Copy {
+  pub var fire_time: f64
+  pub var func_ref: i32  // LUA_REGISTRYINDEX reference
+}
+
+struct TweenEntry : Clone {
+  pub var widget_name: String
+  pub var property: String
+  pub var start_time: f64
+  pub var duration: f64
+  pub var from_num: f32
+  pub var to_num: f32
+  pub var from_r: f32
+  pub var from_g: f32
+  pub var from_b: f32
+  pub var from_a: f32
+  pub var to_r: f32
+  pub var to_g: f32
+  pub var to_b: f32
+  pub var to_a: f32
+  pub var is_color: bool
+  pub var easing: u8  // 0=linear, 1=ease-in, 2=ease-out, 3=ease-in-out
+}
+
+// ScriptRuntime::Impl
+pub struct LuaImpl {
+  pub unowned var l: *var LuaState = null
+  pub var widget_registry: HashMap<String, WidgetId> = HashMap()
+  pub var native_functions: List<Box<NativeFunction>> = List()
+  pub var timers: List<TimerEntry> = List()
+  pub var current_time: f64 = 0.0
+  pub var tweens: List<TweenEntry> = List()
+  // The World and WidgetContext (a WidgetContext<'_> behind a byte pointer)
+  // of the call into Lua that is running; null outside one.
+  pub unowned var world: *var World = null
+  pub unowned var ctx: *var u8 = null
+}
+
+// The Lua ScriptRuntime.
+pub struct LuaRuntime : ScriptRuntime {
+  var impl_: Box<LuaImpl>
+
+  pub fn LuaRuntime(): LuaRuntime => LuaRuntime { impl_: Box(LuaImpl {}) };
+
+  pub fn init(var self&): bool;
+  pub fn shutdown(var self&);
+  pub fn exec(var self&, var world&: World, var ctx&: WidgetContext, script: str, name: str): bool;
+  pub fn exec_file(var self&, var world&: World, var ctx&: WidgetContext, path: str): bool;
+  pub fn register_widget(var self&, world&: World, widget: WidgetId);
+  pub fn unregister_widget(var self&, world&: World, widget: WidgetId);
+  pub fn clear_widget_registry(var self&) {
+    self.impl_.get_var().widget_registry.clear();
+  }
+  pub fn call_handler(var self&, var world&: World, var ctx&: WidgetContext, func_name: str, widget: WidgetId): bool =>
+    unsafe impl_call_handler(self.raw(), world, ctx, func_name, widget);
+  pub fn find_registered_widget(self&, name: str): WidgetId => find_in_registry(self.impl_.get(), name);
+  pub fn sync_timer_clock(var self&, current_time: f64) {
+    self.impl_.get_var().current_time = current_time;
+  }
+  pub fn clear_timers_and_tweens(var self&);
+  pub fn update_timers(var self&, var world&: World, var ctx&: WidgetContext, current_time: f64);
+  pub fn wire_change_handlers(var self&, var world&: World, root: WidgetId);
+
+  // ScheduleTimer: run the Lua function `lua_func_ref` (a luaL_ref in the
+  // registry, which the runtime then owns) `delay_seconds` from the timer
+  // clock.
+  pub fn schedule_timer(var self&, delay_seconds: f64, lua_func_ref: i32) {
+    var i& = self.impl_.get_var();
+    i.timers.push(TimerEntry { fire_time: i.current_time + delay_seconds, func_ref: lua_func_ref });
+  }
+
+  // RegisterFunction: expose `func` to Lua as ugui.<name>. Nothing happens
+  // when the global `ugui` is not a table (the function is dropped).
+  pub fn register_function(var self&, name: str, func: NativeFunction);
+
+  // The lua_State (null before init and after shutdown).
+  pub fn state(self&): *var LuaState => self.impl_.get().l;
+
+  fn raw(var self&): *var LuaImpl {
+    var i& = self.impl_.get_var();
+    return unsafe (&raw var i);
+  }
+
+  fn ~LuaRuntime();
+}
+
+fn LuaRuntime::~LuaRuntime() {
+  // The C++ destructor deletes the Impl without closing the state; closing
+  // it frees what it holds.
+  self.shutdown();
+}
+
+// --- Entering and leaving Lua -------------------------------------------------
+
+struct Entered : Copy {
+  pub unowned var world: *var World
+  pub unowned var ctx: *var u8
+}
+
+unsafe fn enter(p: *var LuaImpl, var world&: World, var ctx&: WidgetContext): Entered {
+  unsafe {
+    let saved = Entered { world: (*p).world, ctx: (*p).ctx };
+    var w& = world;
+    var c& = ctx;
+    (*p).world = &raw var w;
+    (*p).ctx = &raw var c as *var u8;
+    return saved;
+  }
+}
+
+unsafe fn leave(p: *var LuaImpl, saved: Entered) {
+  unsafe {
+    (*p).world = saved.world;
+    (*p).ctx = saved.ctx;
+  }
+}
+
+// FromState
+unsafe fn impl_from_state(l: *var LuaState): *var LuaImpl {
+  unsafe {
+    lua_getfield(l, kLuaRegistryIndex, @ptr(kRegistryKey) as *const c_char);
+    let rt = lua_touserdata(l, -1) as *var LuaImpl;
+    lua_pop(l, 1);
+    return rt;
+  }
+}
+
+// --- Output ------------------------------------------------------------------
+
+// fprintf(stderr, ...): stderr is unbuffered, one write per message.
+fn err_write(var line&: List<u8>) {
+  var off: usize = 0;
+  while (off < line.len()) {
+    let n = unsafe write(2, @ptr(line.as_slice()[off..]) as *const u8, line.len() - off);
+    n <= 0 ? return;
+    off += n as usize;
+  }
+}
+
+fn push_bytes(var line&: List<u8>, b: &[u8]) {
+  for (let c in b) {
+    line.push(c);
+  }
+}
+
+// "%s" of a C string the way glibc prints it: "(null)" for nullptr.
+fn push_c_arg(var line&: List<u8>, p: *const c_char) {
+  if (p == null) {
+    push_bytes(line, "(null)" as &[u8]);
+    return;
+  }
+  let t = unsafe text_at(p);
+  push_bytes(line, t.bytes());
+}
+
+// fprintf(stderr, "<prefix>%s<mid>%s\n", a, b) for the runtime's messages.
+fn report2(prefix: str, a: *const c_char, mid: str, b: *const c_char) {
+  var line: List<u8> = List();
+  push_bytes(line, prefix as &[u8]);
+  push_c_arg(line, a);
+  push_bytes(line, mid as &[u8]);
+  push_c_arg(line, b);
+  line.push(10);
+  err_write(line);
+}
+
+fn report1(prefix: str, a: *const c_char, suffix: str) {
+  var line: List<u8> = List();
+  push_bytes(line, prefix as &[u8]);
+  push_c_arg(line, a);
+  push_bytes(line, suffix as &[u8]);
+  line.push(10);
+  err_write(line);
+}
+
+// --- Init / Shutdown ----------------------------------------------------------
+
+fn LuaRuntime::init(var self&): bool {
+  let p = self.raw();
+  unsafe {
+    let l = luaL_newstate();
+    (*p).l = l;
+    if (l == null) {
+      return false;
+    }
+
+    // Open safe standard libraries (no io/os for sandboxing)
+    luaL_requiref(l, c"_G", @c_fn(luaopen_base), 1);
+    lua_pop(l, 1);
+    luaL_requiref(l, @ptr("table\0") as *const c_char, @c_fn(luaopen_table), 1);
+    lua_pop(l, 1);
+    luaL_requiref(l, @ptr("string\0") as *const c_char, @c_fn(luaopen_string), 1);
+    lua_pop(l, 1);
+    luaL_requiref(l, @ptr("math\0") as *const c_char, @c_fn(luaopen_math), 1);
+    lua_pop(l, 1);
+
+    // Store impl in Lua's registry so static callbacks can find us
+    lua_pushlightuserdata(l, p as *var u8);
+    lua_setfield(l, kLuaRegistryIndex, @ptr(kRegistryKey) as *const c_char);
+
+    register_api(l);
+  }
+  return true;
+}
+
+fn LuaRuntime::shutdown(var self&) {
+  var i& = self.impl_.get_var();
+  if (i.l != null) {
+    unsafe lua_close(i.l);
+    i.l = null;
+  }
+  i.native_functions.clear();
+  i.widget_registry.clear();
+}
+
+// --- Exec ----------------------------------------------------------------------
+
+fn LuaRuntime::exec(var self&, var world&: World, var ctx&: WidgetContext, script: str, name: str): bool {
+  let p = self.raw();
+  let l = unsafe (*p).l;
+  l == null ? return false;
+  let src = c_string(script);
+  let chunk = c_string(name);
+  let saved = unsafe enter(p, world, ctx);
+  var ok = true;
+  unsafe {
+    if (luaL_loadbuffer(l, c_ptr(src), src.len() - 1, c_ptr(chunk)) != kLuaOk) {
+      report1("ugui/lua: load error: ", lua_tostring(l, -1), "");
+      lua_pop(l, 1);
+      ok = false;
+    } else if (lua_pcall(l, 0, 0, 0) != kLuaOk) {
+      report1("ugui/lua: runtime error: ", lua_tostring(l, -1), "");
+      lua_pop(l, 1);
+      ok = false;
+    }
+    leave(p, saved);
+  }
+  return ok;
+}
+
+fn LuaRuntime::exec_file(var self&, var world&: World, var ctx&: WidgetContext, path: str): bool {
+  let p = self.raw();
+  let l = unsafe (*p).l;
+  l == null ? return false;
+  let cpath = c_string(path);
+  let saved = unsafe enter(p, world, ctx);
+  var ok = true;
+  unsafe {
+    if (luaL_loadfile(l, c_ptr(cpath)) != kLuaOk) {
+      report2("ugui/lua: failed to load '", c_ptr(cpath), "': ", lua_tostring(l, -1));
+      lua_pop(l, 1);
+      ok = false;
+    } else if (lua_pcall(l, 0, 0, 0) != kLuaOk) {
+      report2("ugui/lua: error in '", c_ptr(cpath), "': ", lua_tostring(l, -1));
+      lua_pop(l, 1);
+      ok = false;
+    }
+    leave(p, saved);
+  }
+  return ok;
+}
+
+// --- Widget registry -----------------------------------------------------------
+
+fn find_in_registry(i&: LuaImpl, name: str): WidgetId {
+  if (let w& = i.widget_registry.get_as(name, fn(k&: String, q: str): bool => k.as_str() == q)) {
+    return w;
+  }
+  return kNullWidget;
+}
+
+fn LuaRuntime::register_widget(var self&, world&: World, widget: WidgetId) {
+  let n& = world.get(kWidgetNode, widget) else {
+    return;
+  };
+  if (!n.name.is_empty()) {
+    self.impl_.get_var().widget_registry.insert(n.name.clone(), widget);
+  }
+}
+
+fn LuaRuntime::unregister_widget(var self&, world&: World, widget: WidgetId) {
+  let n& = world.get(kWidgetNode, widget) else {
+    return;
+  };
+  if (!n.name.is_empty()) {
+    self.impl_.get_var().widget_registry.remove(n.name);
+  }
+}
+
+// --- Handlers ------------------------------------------------------------------
+
+// PushWidgetTable: the widget table with type-specific fields, so Lua
+// handlers get w.checked, w.selected, w.value.
+unsafe fn push_widget_table(l: *var LuaState, world&: World, widget: WidgetId) {
+  unsafe {
+    lua_newtable(l);
+    let node = world.get(kWidgetNode, widget);
+    if (let n& = node) {
+      push_c_text(l, n.name);
+    } else {
+      push_c_text(l, "");
+    }
+    lua_setfield(l, -2, c"name");
+    if (let n& = node) {
+      lua_pushinteger(l, n.id as i64);
+    } else {
+      lua_pushinteger(l, 0);
+    }
+    lua_setfield(l, -2, c"id");
+    let n& = node else {
+      return;
+    };
+    let kind = n.kind;
+
+    if (kind == WidgetKind::Checkbox) {
+      lua_pushboolean(l, is_checked(world, widget) ? 1 : 0);
+      lua_setfield(l, -2, c"checked");
+    }
+    if (kind == WidgetKind::Dropdown) {
+      lua_pushinteger(l, dropdown_selected(world, widget) as i64);
+      lua_setfield(l, -2, c"selected");
+      let text = dropdown_selected_text(world, widget);
+      push_c_text(l, text);
+      lua_setfield(l, -2, c"selected_text");
+    }
+    if (kind == WidgetKind::Slider) {
+      lua_pushnumber(l, slider_value(world, widget) as f64);
+      lua_setfield(l, -2, c"value");
+      lua_pushnumber(l, slider_min(world, widget) as f64);
+      lua_setfield(l, -2, c"min");
+      lua_pushnumber(l, slider_max(world, widget) as f64);
+      lua_setfield(l, -2, c"max");
+    }
+  }
+}
+
+// CallHandler, on the Impl (the wired change handlers call it too).
+unsafe fn impl_call_handler(p: *var LuaImpl, var world&: World, var ctx&: WidgetContext, func_name: str, widget: WidgetId): bool {
+  let l = unsafe (*p).l;
+  l == null ? return false;
+  let fname = c_string(func_name);
+  let saved = unsafe enter(p, world, ctx);
+  var ok = true;
+  unsafe {
+    lua_getglobal(l, c_ptr(fname));
+    if (!lua_isfunction(l, -1)) {
+      lua_pop(l, 1);
+      ok = false;
+    } else {
+      push_widget_table(l, world, widget);
+      if (lua_pcall(l, 1, 0, 0) != kLuaOk) {
+        report2("ugui/lua: error calling '", c_ptr(fname), "': ", lua_tostring(l, -1));
+        lua_pop(l, 1);
+        ok = false;
+      }
+    }
+    leave(p, saved);
+  }
+  return ok;
+}
+
+// --- Timers and tweens ---------------------------------------------------------
+
+fn apply_easing(t: f64, easing: u8): f64 {
+  switch (easing) {
+    case 1:
+      return t * t;  // ease-in
+    case 2:
+      return 1.0 - (1.0 - t) * (1.0 - t);  // ease-out
+    case 3:
+      if (t < 0.5) {
+        return 2.0 * t * t;
+      }
+      return 1.0 - ((-2.0 * t + 2.0) * (-2.0 * t + 2.0)) / 2.0;  // ease-in-out
+    default:
+      return t;  // linear
+  }
+}
+
+fn parse_easing(s: LuaText?): u8 {
+  let t = s else {
+    return 0;
+  };
+  if (t.eq_str("ease-in")) {
+    return 1;
+  }
+  if (t.eq_str("ease-out")) {
+    return 2;
+  }
+  if (t.eq_str("ease-in-out")) {
+    return 3;
+  }
+  return 0;
+}
+
+// Impl::ParseHexColor: (r, g, b, a) in 0..255, or none (outputs untouched).
+fn parse_hex_rgba(val: LuaText?): (f32, f32, f32, f32)? {
+  let v = val else {
+    return none;
+  };
+  if (v.len == 0 || v.bytes()[0] != '#' as u8) {
+    return none;
+  }
+  if (v.len != 7 && v.len != 9) {
+    return none;
+  }
+  var hex: u32 = 0;
+  from_chars_u32(v.ascii_run(1, 7), hex, 16);
+  let r = ((hex >> 16) & 0xFF) as f32;
+  let g = ((hex >> 8) & 0xFF) as f32;
+  let b = (hex & 0xFF) as f32;
+  var a: f32 = 255.0;
+  if (v.len == 9) {
+    var alpha: u32 = 0;
+    from_chars_u32(v.ascii_run(7, 9), alpha, 16);
+    a = alpha as f32;
+  }
+  return (r, g, b, a);
+}
+
+fn LuaRuntime::clear_timers_and_tweens(var self&) {
+  var i& = self.impl_.get_var();
+  // Release Lua references for pending timer callbacks.
+  if (i.l != null) {
+    for (let entry in i.timers.iter()) {
+      unsafe luaL_unref(i.l, kLuaRegistryIndex, entry.func_ref);
+    }
+  }
+  i.timers.clear();
+  i.tweens.clear();
+}
+
+// The tween's lerp of one color channel: static_cast<int>(a + (b - a) * t),
+// clamped. A NaN (zero duration at t = 0) converts to 0, as on aarch64.
+fn lerp_channel(a: f32, b: f32, t: f64): i32 =>
+  clamp_min_max(@saturating_cast(i32, a as f64 + (b - a) as f64 * t), 0, 255);
+
+fn hex2(var out&: String, v: i32) {
+  out.push_str(f"{v:02x}");
+}
+
+fn LuaRuntime::update_timers(var self&, var world&: World, var ctx&: WidgetContext, current_time: f64) {
+  let p = self.raw();
+  let l = unsafe (*p).l;
+  unsafe {
+    (*p).current_time = current_time;
+  }
+  // Process in a separate pass to avoid iterator invalidation if callbacks
+  // schedule more timers.
+  var ready: List<TimerEntry> = List();
+  unsafe {
+    var timers& = (*p).timers;
+    var i: usize = 0;
+    while (i < timers.len()) {
+      if (current_time >= timers[i].fire_time) {
+        ready.push(timers[i]);
+        let last = timers.len() - 1;
+        timers.swap(i, last);
+        timers.pop();
+      } else {
+        i += 1;
+      }
+    }
+  }
+  l == null ? return;
+
+  let saved = unsafe enter(p, world, ctx);
+  unsafe {
+    for (let entry in ready.iter()) {
+      lua_rawgeti(l, kLuaRegistryIndex, entry.func_ref as i64);
+      if (lua_pcall(l, 0, 0, 0) != kLuaOk) {
+        report1("ugui/lua: timer error: ", lua_tostring(l, -1), "");
+        lua_pop(l, 1);
+      }
+      luaL_unref(l, kLuaRegistryIndex, entry.func_ref);
+    }
+
+    // Process active tweens
+    var i: usize = 0;
+    while (i < (*p).tweens.len()) {
+      // A copy: the call below runs Lua, which may add or cancel tweens.
+      let tw = (*p).tweens[i].clone();
+      let elapsed = current_time - tw.start_time;
+      var t = elapsed / tw.duration;
+      if (t > 1.0) {
+        t = 1.0;
+      }
+      if (t < 0.0) {
+        t = 0.0;
+      }
+      t = apply_easing(t, tw.easing);
+
+      // Call ugui.set(widget, property, value) via the Lua API
+      lua_getglobal(l, c"ugui");
+      lua_getfield(l, -1, c"set");
+      push_c_text(l, tw.widget_name);
+      push_c_text(l, tw.property);
+
+      if (tw.is_color) {
+        let r = lerp_channel(tw.from_r, tw.to_r, t);
+        let g = lerp_channel(tw.from_g, tw.to_g, t);
+        let b = lerp_channel(tw.from_b, tw.to_b, t);
+        let a = lerp_channel(tw.from_a, tw.to_a, t);
+        var hex = from_str("#");
+        hex2(hex, r);
+        hex2(hex, g);
+        hex2(hex, b);
+        hex2(hex, a);
+        // snprintf into char[10]: at most 9 characters.
+        let n = hex.len() < 9 ? hex.len() : 9;
+        lua_pushlstring(l, @ptr(hex.as_str()) as *const c_char, n);
+      } else {
+        let v = tw.from_num + (tw.to_num - tw.from_num) * (t as f32);
+        lua_pushnumber(l, v as f64);
+      }
+
+      if (lua_pcall(l, 3, 0, 0) != kLuaOk) {
+        lua_pop(l, 1);
+      }
+      lua_pop(l, 1);  // pop ugui table
+
+      if (elapsed >= tw.duration) {
+        var tweens& = (*p).tweens;
+        if (i < tweens.len()) {
+          let last = tweens.len() - 1;
+          tweens.swap(i, last);
+          tweens.pop();
+        }
+      } else {
+        i += 1;
+      }
+    }
+    leave(p, saved);
+  }
+}
+
+// --- Change handlers -------------------------------------------------------------
+
+// The wired on_change: CallHandler("on_" + name, w), the name read when the
+// event fires, as the C++ lambda reads it.
+fn dispatch_change(p: *var LuaImpl, var env&: CallbackEnv, w: WidgetId) {
+  var handler = from_str("on_");
+  handler.push_str(env.world.get(kWidgetNode, w)!.name);
+  unsafe impl_call_handler(p, env.world, env.ctx, handler, w);
+}
+
+fn wire_recursive(p: *var LuaImpl, var world&: World, w: WidgetId) {
+  if (!w.valid()) {
+    return;
+  }
+  let n& = world.get(kWidgetNode, w) else {
+    return;
+  };
+  let named = !n.name.is_empty();
+  let kind = n.kind;
+  if (named) {
+    if (kind == WidgetKind::Dropdown) {
+      set_dropdown_change(world, w, own fn(env: &var CallbackEnv, index: i32, text: String) {
+        dispatch_change(p, env, w);
+      });
+    }
+    if (kind == WidgetKind::Checkbox) {
+      set_checkbox_change(world, w, own fn(env: &var CallbackEnv, checked: bool) {
+        dispatch_change(p, env, w);
+      });
+    }
+    if (kind == WidgetKind::Slider) {
+      set_slider_change(world, w, own fn(env: &var CallbackEnv, value: f32) {
+        dispatch_change(p, env, w);
+      });
+    }
+  }
+  let children = world.get(kHierarchy, w)!.children.clone();
+  for (let child in children.iter()) {
+    wire_recursive(p, world, child);
+  }
+}
+
+fn LuaRuntime::wire_change_handlers(var self&, var world&: World, root: WidgetId) {
+  wire_recursive(self.raw(), world, root);
+}
+
+// --- RegisterFunction ----------------------------------------------------------
+
+// The C function behind every registered native: upvalue 1 is the
+// NativeFunction's heap address.
+extern(longjmp) fn native_trampoline(l: *var LuaState): i32 {
+  let outcome = unsafe run_native(l);
+  if (let n = outcome) {
+    return n;
+  } else (let r) {
+    return unsafe raise(l, r);
+  }
+}
+
+unsafe fn run_native(l: *var LuaState): i32 ! LuaRaise {
+  unsafe {
+    let f = lua_touserdata(l, lua_upvalueindex(1)) as *const NativeFunction;
+    let p = impl_from_state(l);
+    if ((*p).world == null) {
+      return fail LuaRaise::Message("ugui/lua: a native function ran outside a call into the runtime");
+    }
+    var world& = *(*p).world;
+    var ctx& = *((*p).ctx as *var WidgetContext<'static>);
+    var call = LuaCall::make(world, ctx, l, p as *var u8);
+    return (*f)(call);
+  }
+}
+
+// Raises what a failed check returned, as luaL_check* would have.
+extern(longjmp) unsafe fn raise(l: *var LuaState, r: LuaRaise): i32 {
+  unsafe {
+    match (r) {
+      LuaRaise::Type(arg, tag) => {
+        return luaL_typeerror(l, arg, lua_typename(l, tag));
+      },
+      LuaRaise::NoInteger(arg) => {
+        return luaL_argerror(l, arg, c"number has no integer representation");
+      },
+      LuaRaise::Message(msg) => {
+        lua_pushlstring(l, @ptr(msg) as *const c_char, #msg);
+        return lua_error(l);
+      },
+    }
+  }
+}
+
+fn LuaRuntime::register_function(var self&, name: str, func: NativeFunction) {
+  let p = self.raw();
+  let l = unsafe (*p).l;
+  l == null ? return;
+  let cname = c_string(name);
+  unsafe {
+    lua_getglobal(l, c"ugui");
+    if (!lua_istable(l, -1)) {
+      lua_pop(l, 1);
+      return;
+    }
+    let boxed = Box(func);
+    let fp = boxed.as_ptr() as *var u8;
+    (*p).native_functions.push(boxed);
+    lua_pushlightuserdata(l, fp);
+    lua_pushcclosure(l, @c_fn(native_trampoline), 1);
+    lua_setfield(l, -2, c_ptr(cname));
+    lua_pop(l, 1);
+  }
+}
+
+// --- The ugui.* API ----------------------------------------------------------------
+
+// Runs a built-in with a LuaCall for the running call.
+unsafe fn run_builtin(l: *var LuaState, f: static fn(&var LuaCall): i32 ! LuaRaise): i32 ! LuaRaise {
+  unsafe {
+    let p = impl_from_state(l);
+    if ((*p).world == null) {
+      return fail LuaRaise::Message("ugui/lua: a native function ran outside a call into the runtime");
+    }
+    var world& = *(*p).world;
+    var ctx& = *((*p).ctx as *var WidgetContext<'static>);
+    var call = LuaCall::make(world, ctx, l, p as *var u8);
+    return f(call);
+  }
+}
+
+extern(longjmp) fn c_ugui_find(l: *var LuaState): i32 {
+  let r = unsafe run_builtin(l, ugui_find);
+  if (let n = r) {
+    return n;
+  } else (let e) {
+    return unsafe raise(l, e);
+  }
+}
+
+extern(longjmp) fn c_ugui_get(l: *var LuaState): i32 {
+  let r = unsafe run_builtin(l, ugui_get);
+  if (let n = r) {
+    return n;
+  } else (let e) {
+    return unsafe raise(l, e);
+  }
+}
+
+extern(longjmp) fn c_ugui_set(l: *var LuaState): i32 {
+  let r = unsafe run_builtin(l, ugui_set);
+  if (let n = r) {
+    return n;
+  } else (let e) {
+    return unsafe raise(l, e);
+  }
+}
+
+extern(longjmp) fn c_ugui_log(l: *var LuaState): i32 {
+  let r = unsafe run_builtin(l, ugui_log);
+  if (let n = r) {
+    return n;
+  } else (let e) {
+    return unsafe raise(l, e);
+  }
+}
+
+extern(longjmp) fn c_ugui_after(l: *var LuaState): i32 {
+  let r = unsafe run_builtin(l, ugui_after);
+  if (let n = r) {
+    return n;
+  } else (let e) {
+    return unsafe raise(l, e);
+  }
+}
+
+extern(longjmp) fn c_ugui_tween(l: *var LuaState): i32 {
+  let r = unsafe run_builtin(l, ugui_tween);
+  if (let n = r) {
+    return n;
+  } else (let e) {
+    return unsafe raise(l, e);
+  }
+}
+
+extern(longjmp) fn c_ugui_open_url(l: *var LuaState): i32 {
+  let r = unsafe run_builtin(l, ugui_open_url);
+  if (let n = r) {
+    return n;
+  } else (let e) {
+    return unsafe raise(l, e);
+  }
+}
+
+// RegisterApi
+unsafe fn register_api(l: *var LuaState) {
+  unsafe {
+    lua_newtable(l);
+
+    lua_pushcfunction(l, @c_fn(c_ugui_find));
+    lua_setfield(l, -2, c"find");
+
+    lua_pushcfunction(l, @c_fn(c_ugui_get));
+    lua_setfield(l, -2, c"get");
+
+    lua_pushcfunction(l, @c_fn(c_ugui_set));
+    lua_setfield(l, -2, c"set");
+
+    lua_pushcfunction(l, @c_fn(c_ugui_log));
+    lua_setfield(l, -2, c"log");
+
+    lua_pushcfunction(l, @c_fn(c_ugui_after));
+    lua_setfield(l, -2, c"after");
+
+    lua_pushcfunction(l, @c_fn(c_ugui_tween));
+    lua_setfield(l, -2, c"tween");
+
+    lua_pushcfunction(l, @c_fn(c_ugui_open_url));
+    lua_setfield(l, -2, c"open_url");
+
+    lua_setglobal(l, c"ugui");
+  }
+}
+
+fn impl_of(call&: LuaCall): *var LuaImpl => call.runtime_ptr() as *var LuaImpl;
+
+fn registered(call&: LuaCall, name: LuaText): WidgetId {
+  let s = name.to_string();
+  return find_in_registry(unsafe *impl_of(call), s);
+}
+
+// LuaUguiAfter
+fn ugui_after(var call&: LuaCall): i32 ! LuaRaise {
+  let p = impl_of(call);
+  let delay = try call.check_number(1);
+  try call.check_type(2, kLuaTFunction);
+  let l = call.state();
+  unsafe {
+    lua_pushvalue(l, 2);
+    let r = luaL_ref(l, kLuaRegistryIndex);
+    (*p).timers.push(TimerEntry { fire_time: (*p).current_time + delay, func_ref: r });
+  }
+  return 0;
+}
+
+// LuaUguiTween
+fn ugui_tween(var call&: LuaCall): i32 ! LuaRaise {
+  let p = impl_of(call);
+  let name = try call.check_text(1);
+  let prop = try call.check_text(2);
+
+  var tw = TweenEntry {
+    widget_name: name.to_string(),
+    property: prop.to_string(),
+    start_time: unsafe (*p).current_time,
+    duration: 0.0,
+    from_num: 0.0, to_num: 0.0,
+    from_r: 0.0, from_g: 0.0, from_b: 0.0, from_a: 0.0,
+    to_r: 0.0, to_g: 0.0, to_b: 0.0, to_a: 0.0,
+    is_color: false,
+    easing: 0,
+  };
+
+  if (call.type_of(3) == kLuaTString) {
+    tw.is_color = true;
+    if (let (r, g, b, a) = parse_hex_rgba(call.to_text(3))) {
+      tw.from_r = r;
+      tw.from_g = g;
+      tw.from_b = b;
+      tw.from_a = a;
+    }
+    let to = try call.check_text(4);
+    if (let (r, g, b, a) = parse_hex_rgba(to)) {
+      tw.to_r = r;
+      tw.to_g = g;
+      tw.to_b = b;
+      tw.to_a = a;
+    }
+    tw.duration = try call.check_number(5);
+    if (call.top() >= 6 && call.type_of(6) == kLuaTString) {
+      tw.easing = parse_easing(call.to_text(6));
+    }
+  } else {
+    tw.from_num = (try call.check_number(3)) as f32;
+    tw.to_num = (try call.check_number(4)) as f32;
+    tw.duration = try call.check_number(5);
+    if (call.top() >= 6 && call.type_of(6) == kLuaTString) {
+      tw.easing = parse_easing(call.to_text(6));
+    }
+  }
+
+  // Cancel existing tween on same widget+property
+  unsafe {
+    var tweens& = (*p).tweens;
+    var i: usize = 0;
+    while (i < tweens.len()) {
+      if (tweens[i].widget_name == tw.widget_name && tweens[i].property == tw.property) {
+        let last = tweens.len() - 1;
+        tweens.swap(i, last);
+        tweens.pop();
+      } else {
+        i += 1;
+      }
+    }
+    tweens.push(tw);
+  }
+  return 0;
+}
+
+// LuaUguiOpenUrl: Platform::OpenURL, the platform's (its open_url method)
+// when the context has one, else the default.
+fn ugui_open_url(var call&: LuaCall): i32 ! LuaRaise {
+  let url = try call.check_string(1);
+  if (var plat& = call.ctx.platform) {
+    plat.open_url(url);
+  } else {
+    open_url(url);
+  }
+  return 0;
+}
+
+// LuaUguiFind
+fn ugui_find(var call&: LuaCall): i32 ! LuaRaise {
+  let name = try call.check_text(1);
+  let w = registered(call, name);
+  let l = call.state();
+  let n& = (w.valid() ? call.world.get(kWidgetNode, w) : none) else {
+    unsafe lua_pushnil(l);
+    return 1;
+  };
+  unsafe {
+    lua_newtable(l);
+    push_c_text(l, n.name);
+    lua_setfield(l, -2, c"name");
+    lua_pushinteger(l, n.id as i64);
+    lua_setfield(l, -2, c"id");
+  }
+  return 1;
+}
+
+// LuaUguiGetProp
+fn ugui_get(var call&: LuaCall): i32 ! LuaRaise {
+  let name = try call.check_text(1);
+  let prop = try call.check_text(2);
+  let w = registered(call, name);
+  let l = call.state();
+  let sc& = (w.valid() ? call.world.get(kStyleC, w) : none) else {
+    unsafe lua_pushnil(l);
+    return 1;
+  };
+  let s& = sc.style;
+  unsafe {
+    if (prop.eq_str("opacity")) {
+      lua_pushnumber(l, s.opacity as f64);
+    } else if (prop.eq_str("visible")) {
+      lua_pushboolean(l, s.visibility == Visibility::Visible ? 1 : 0);
+    } else if (prop.eq_str("font-size")) {
+      lua_pushnumber(l, s.font_size as f64);
+    } else if (prop.eq_str("corner-radius")) {
+      lua_pushnumber(l, s.corner_radius as f64);
+    } else {
+      lua_pushnil(l);
+    }
+  }
+  return 1;
+}
+
+// The "#rrggbb" / "#rrggbbaa" a property takes: Color::FromHex, alpha
+// replaced with aa/255 when given. none when the text is neither.
+fn parse_color_prop(val: LuaText): Color? {
+  if (val.len == 0 || val.bytes()[0] != '#' as u8 || (val.len != 7 && val.len != 9)) {
+    return none;
+  }
+  var hex: u32 = 0;
+  from_chars_u32(val.ascii_run(1, 7), hex, 16);
+  var c = Color::from_hex(hex);
+  if (val.len == 9) {
+    var alpha: u32 = 0;
+    from_chars_u32(val.ascii_run(7, 9), alpha, 16);
+    c = c.with_alpha(alpha as f32 / 255.0);
+  }
+  return c;
+}
+
+// width/height from a string: atof, a Percent when it ends in '%'.
+fn parse_length_text(val: LuaText): Length {
+  let v = unsafe atof(val.ptr) as f32;
+  if (val.len > 1 && val.bytes()[val.len - 1] == '%' as u8) {
+    return Length::percent(v);
+  }
+  return Length::px(v);
+}
+
+// LuaUguiSetProp
+fn ugui_set(var call&: LuaCall): i32 ! LuaRaise {
+  let name = try call.check_text(1);
+  let prop = try call.check_text(2);
+
+  let w = registered(call, name);
+  let kind = if (let n& = (w.valid() ? call.world.get(kWidgetNode, w) : none)) { n.kind } else {
+    report1("ugui/lua: ugui.set: widget '", name.ptr, "' not found");
+    return 0;
+  };
+
+  var s: Style = call.world.get(kStyleC, w)!.style;
+
+  if (prop.eq_str("opacity")) {
+    s.opacity = (try call.check_number(3)) as f32;
+  } else if (prop.eq_str("visible")) {
+    s.visibility = call.to_boolean(3) ? Visibility::Visible : Visibility::Hidden;
+    set_style(call.world, w, s);
+    clear_animation_style(call.world, w);
+    return 0;
+  } else if (prop.eq_str("font-size")) {
+    s.font_size = (try call.check_number(3)) as f32;
+  } else if (prop.eq_str("corner-radius")) {
+    let r = (try call.check_number(3)) as f32;
+    s.corner_radius = r;
+    s.corner_radius_tl = r;
+    s.corner_radius_tr = r;
+    s.corner_radius_br = r;
+    s.corner_radius_bl = r;
+  } else if (prop.eq_str("color")) {
+    let val = try call.check_text(3);
+    if (let c = parse_color_prop(val)) {
+      s.text_color = c;
+    }
+  } else if (prop.eq_str("text-shadow-color")) {
+    let val = try call.check_text(3);
+    if (let c = parse_color_prop(val)) {
+      s.text_shadow_color = c;
+    }
+  } else if (prop.eq_str("shadow-color")) {
+    let val = try call.check_text(3);
+    if (let c = parse_color_prop(val)) {
+      s.shadow.color = c;
+    }
+  } else if (prop.eq_str("shadow-blur")) {
+    s.shadow.blur = (try call.check_number(3)) as f32;
+  } else if (prop.eq_str("cursor")) {
+    let val = try call.check_text(3);
+    if (val.eq_str("pointer")) {
+      s.cursor = Cursor::Pointer;
+    } else if (val.eq_str("text")) {
+      s.cursor = Cursor::Text;
+    } else if (val.eq_str("move")) {
+      s.cursor = Cursor::Move;
+    } else if (val.eq_str("not-allowed")) {
+      s.cursor = Cursor::NotAllowed;
+    } else {
+      s.cursor = Cursor::Default;
+    }
+  } else if (prop.eq_str("background")) {
+    let val = try call.check_text(3);
+    if (val.eq_str("transparent")) {
+      s.background = Color::transparent();
+    } else if (let c = parse_color_prop(val)) {
+      s.background = c;
+    }
+  } else if (prop.eq_str("width")) {
+    if (call.type_of(3) == kLuaTString) {
+      s.width = parse_length_text(call.to_text(3)!);
+    } else {
+      s.width = Length::px((try call.check_number(3)) as f32);
+    }
+  } else if (prop.eq_str("height")) {
+    if (call.type_of(3) == kLuaTString) {
+      s.height = parse_length_text(call.to_text(3)!);
+    } else {
+      s.height = Length::px((try call.check_number(3)) as f32);
+    }
+  } else if (prop.eq_str("selected")) {
+    if (kind == WidgetKind::Dropdown) {
+      set_dropdown_selected(call.world, w, (try call.check_integer(3)) as i32);
+      return 0;
+    }
+  } else if (prop.eq_str("checked")) {
+    if (kind == WidgetKind::Checkbox) {
+      set_checked(call.world, call.ctx, w, call.to_boolean(3));
+      return 0;
+    }
+  } else if (prop.eq_str("value")) {
+    if (kind == WidgetKind::Slider) {
+      set_slider_value(call.world, w, (try call.check_number(3)) as f32);
+      return 0;
+    }
+  } else if (prop.eq_str("text")) {
+    if (kind == WidgetKind::Text) {
+      let t = try call.check_string(3);
+      set_text(call.world, w, t);
+      clear_animation_style(call.world, w);
+      return 0;
+    }
+    if (kind == WidgetKind::Button) {
+      let t = try call.check_string(3);
+      set_button_label(call.world, w, t);
+      clear_animation_style(call.world, w);
+      return 0;
+    }
+  }
+
+  set_style(call.world, w, s);
+  // Cancel any active transition; otherwise animation_style_ overrides the
+  // base style and the change waits for the transition to end.
+  clear_animation_style(call.world, w);
+  return 0;
+}
+
+// LuaUguiLog: printf("[ugui/lua] %s\n", msg).
+fn ugui_log(var call&: LuaCall): i32 ! LuaRaise {
+  let msg = try call.check_text(1);
+  unsafe printf(c"[ugui/lua] %s\n", msg.ptr);
+  return 0;
+}
