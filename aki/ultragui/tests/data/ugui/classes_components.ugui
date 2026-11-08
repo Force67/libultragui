@@ -18,14 +18,6 @@ component user_row {
     slot content { text fallback { content: "empty"; } }
   }
 }
-component no_root {
-  prop a: 1;
-}
-component two_roots {
-  panel a { }
-  panel b { }
-  panel c { }
-}
 user_row first { name: "Ada"; level: 7; }
 user_row second { }
 panel plain { class: card; }

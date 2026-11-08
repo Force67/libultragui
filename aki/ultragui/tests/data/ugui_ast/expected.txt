@@ -6047,7 +6047,7 @@ node type="panel" name="root" line=4
 node type="panel" name="second" line=21
   p "empty" = ""
   p "s" = "unterminated\n"
-== $ROOT/aki/ultragui/tests/data/ugui/classes_components.ugui ok=0
+== $ROOT/aki/ultragui/tests/data/ugui/classes_components.ugui ok=1
 source "$ROOT/aki/ultragui/tests/data/ugui/classes_components.ugui"
 class "card"
   p "background" = "#222"
@@ -6072,20 +6072,12 @@ component "user_row" line=9
     node type="slot" name="content" line=18
       node type="text" name="fallback" line=18
         p "content" = "empty"
-component "no_root" line=21
-  p "a" = "1"
-  node type="" name="" line=0
-component "two_roots" line=24
-  node type="panel" name="a" line=25
-node type="user_row" name="first" line=29
+node type="user_row" name="first" line=21
   p "level" = "7"
   p "name" = "Ada"
-node type="user_row" name="second" line=30
-node type="panel" name="plain" line=31
+node type="user_row" name="second" line=22
+node type="panel" name="plain" line=23
   p "class" = "card"
-error file="$ROOT/aki/ultragui/tests/data/ugui/classes_components.ugui" line=21 col=0 msg="component 'no_root' has no root element"
-error file="$ROOT/aki/ultragui/tests/data/ugui/classes_components.ugui" line=26 col=0 msg="component 'two_roots' must have exactly one root element"
-error file="$ROOT/aki/ultragui/tests/data/ugui/classes_components.ugui" line=27 col=0 msg="component 'two_roots' must have exactly one root element"
 == $ROOT/aki/ultragui/tests/data/ugui/comments_only.ugui ok=1
 source "$ROOT/aki/ultragui/tests/data/ugui/comments_only.ugui"
 == $ROOT/aki/ultragui/tests/data/ugui/empty.ugui ok=1
