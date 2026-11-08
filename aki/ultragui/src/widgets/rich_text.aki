@@ -1,0 +1,220 @@
+// ugui/widgets/rich_text.{h,cc}: a rich-text widget (WidgetKind::RichText),
+// a generic widget carrying a RichTextContent (styled inline spans, font
+// override); spans lay out inline with wrapping. Behaviour: the RichText
+// arms in widgets::widget_vtable (draw + measure).
+//
+// Shape difference: the World comes first; set_rich_text_spans takes a
+// slice.
+
+module ultragui::widgets::rich_text;
+
+import {List} from akikit::containers::list;
+import {String} from akikit::strings::string;
+import {max_f32} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {FontStyle, FontWeight, TextDecoration, has_decoration} from ultragui::style::enums;
+import {FontHandle, TextEngine, TextRun, kInvalidFont} from ultragui::text::text_engine;
+import {WidgetKind, computed_style, kStyleC, kTransform, kWidgetNode, mark_dirty, ui_scale, widget_context_of} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// A styled inline text span within a rich-text widget.
+pub struct TextSpan : Clone {
+  pub var text: String = String()
+  pub var color: Color = Color::white()
+  pub var font_size: f32 = 0.0  // 0 = inherit from widget style
+  pub var font_weight: FontWeight = FontWeight::Regular
+  pub var font_style: FontStyle = FontStyle::Normal
+  pub var decoration: TextDecoration = TextDecoration::None
+}
+
+// Data for a rich-text widget.
+pub struct RichTextContent : Clone {
+  pub var spans: List<TextSpan> = List()
+  pub var font: FontHandle = kInvalidFont  // override; kInvalidFont -> context default
+}
+
+pub static let kRichTextContent: ComponentKey<RichTextContent> = ComponentKey();
+
+// A shaped and positioned span ready for rendering.
+struct ShapedSpan {
+  pub var run: TextRun
+  pub var color: Color
+  pub var decoration: TextDecoration
+  pub var font_size: f32  // for decoration thickness
+  pub var x: f32          // x position within the line
+  pub var y: f32          // y position (accumulated line offset)
+}
+
+// LayoutSpans: shape every span and lay them out inline with wrapping;
+// the total height. Uses the base style (not the computed one), as the C++.
+fn layout_spans(world&: World, var te&: TextEngine, base_fh: FontHandle, sc: f32, e: WidgetId,
+                var out&: List<ShapedSpan>, max_width: f32): f32 {
+  if (base_fh == kInvalidFont) {
+    return 0.0;
+  }
+  let c& = world.get(kRichTextContent, e)!;
+  let s& = world.get(kStyleC, e)!.style;
+  var line_x: f32 = 0.0;
+  var line_y: f32 = 0.0;
+  var line_height: f32 = 0.0;
+
+  for (let span in c.spans) {
+    let size = (span.font_size > 0.0 ? span.font_size : s.font_size) * sc;
+
+    var fh = base_fh;
+    if (span.font_weight != FontWeight::Regular || span.font_style != FontStyle::Normal) {
+      fh = te.resolve_font(base_fh, span.font_weight, span.font_style);
+    }
+
+    let run = te.shape(fh, span.text.as_str(), size, s.letter_spacing * sc, s.line_height_multiplier);
+
+    if (line_x > 0.0 && max_width > 0.0 && line_x + run.total_advance > max_width) {
+      line_y += line_height;
+      line_x = 0.0;
+      line_height = 0.0;
+    }
+
+    let advance = run.total_advance;
+    let height = run.line_height;
+    out.push(ShapedSpan { run, color: span.color, decoration: span.decoration, font_size: size, x: line_x, y: line_y });
+
+    line_x += advance;
+    line_height = max_f32(line_height, height);
+  }
+
+  return line_y + line_height;
+}
+
+// RichTextMeasure: the unwrapped extent of the spans.
+pub fn rich_text_measure(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  let c& = world.get(kRichTextContent, e) else {
+    return (0.0, 0.0);
+  };
+  let sc = ui_scale(world, ctx, e);
+  let wc& = widget_context_of(world, ctx, e) else {
+    return (0.0, 0.0);
+  };
+  let fh = c.font != kInvalidFont ? c.font : wc.default_font;
+  var te& = wc.text_engine else {
+    return (0.0, 0.0);
+  };
+  if (fh == kInvalidFont || c.spans.len() == 0) {
+    return (0.0, 0.0);
+  }
+
+  var shaped: List<ShapedSpan> = List();
+  let total_h = layout_spans(world, te, fh, sc, e, shaped, 1e6);  // measure no wrapping
+
+  var max_w: f32 = 0.0;
+  for (let ss in shaped) {
+    max_w = max_f32(max_w, ss.x + ss.run.total_advance);
+  }
+  return (max_w, total_h);
+}
+
+// RichTextDraw. PaintWidget already drew background / shadow / border.
+pub fn rich_text_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  let c& = world.get(kRichTextContent, e) else {
+    return;
+  };
+  if (c.spans.len() == 0) {
+    return;
+  }
+  let sc = ui_scale(world, ctx, e);
+  var s = computed_style(world, e);
+  s.scale(sc);
+  let alpha = s.opacity;
+
+  let content = world.get(kTransform, e)!.content_rect;
+
+  let wc& = widget_context_of(world, ctx, e) else {
+    return;
+  };
+  let fh = c.font != kInvalidFont ? c.font : wc.default_font;
+  var te& = wc.text_engine else {
+    return;
+  };
+
+  var shaped: List<ShapedSpan> = List();
+  let _ = layout_spans(world, te, fh, sc, e, shaped, content.w);
+  let atlas = te.atlas_texture();
+
+  for (let ss in shaped) {
+    let x = content.x + ss.x;
+    let y = content.y + ss.y;
+    let col = ss.color.with_alpha(ss.color.a * alpha);
+
+    renderer.draw_text(Vec2 { x, y }, ss.run, col, atlas);
+
+    if (ss.decoration != TextDecoration::None) {
+      let thickness = max_f32(1.0, ss.font_size / 14.0);
+      let baseline = y + ss.run.ascent;
+
+      if (has_decoration(ss.decoration, TextDecoration::Underline)) {
+        let line_y = baseline + ss.font_size * 0.15;
+        renderer.draw_rect(Rect { x, y: line_y, w: ss.run.total_advance, h: thickness }, col);
+      }
+      if (has_decoration(ss.decoration, TextDecoration::Strikethrough)) {
+        let line_y = baseline - ss.font_size * 0.3;
+        renderer.draw_rect(Rect { x, y: line_y, w: ss.run.total_advance, h: thickness }, col);
+      }
+    }
+  }
+}
+
+// CreateRichText: a widget tagged RichText with a RichTextContent.
+pub fn create_rich_text(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::RichText;
+  world.add(kRichTextContent, e, RichTextContent {});
+  return e;
+}
+
+fn is_rich_text(world&: World, e: WidgetId): bool => world.alive(e) && world.get(kWidgetNode, e)!.kind == WidgetKind::RichText;
+
+// SetRichTextSpans: replace all spans. No-op if `e` is not a rich-text
+// widget.
+pub fn set_rich_text_spans(var world&: World, e: WidgetId, spans&: [TextSpan]) {
+  if (!is_rich_text(world, e)) {
+    return;
+  }
+  var list: List<TextSpan> = List();
+  for (let span in spans) {
+    list.push(span.clone());
+  }
+  world.get_or_add(kRichTextContent, e, RichTextContent {}).spans = list;
+  mark_dirty(world, e);
+}
+
+// AddRichTextSpan. No-op if `e` is not a rich-text widget.
+pub fn add_rich_text_span(var world&: World, e: WidgetId, span&: TextSpan) {
+  if (!is_rich_text(world, e)) {
+    return;
+  }
+  world.get_or_add(kRichTextContent, e, RichTextContent {}).spans.push(span.clone());
+  mark_dirty(world, e);
+}
+
+// ClearRichTextSpans. No-op if `e` is not a rich-text widget.
+pub fn clear_rich_text_spans(var world&: World, e: WidgetId) {
+  if (!is_rich_text(world, e)) {
+    return;
+  }
+  world.get_or_add(kRichTextContent, e, RichTextContent {}).spans.clear();
+  mark_dirty(world, e);
+}
+
+// SetRichTextFont: the font every span is shaped with. No-op if `e` is not
+// a rich-text widget. Marks nothing dirty, as the C++.
+pub fn set_rich_text_font(var world&: World, e: WidgetId, font: FontHandle) {
+  if (!is_rich_text(world, e)) {
+    return;
+  }
+  world.get_or_add(kRichTextContent, e, RichTextContent {}).font = font;
+}

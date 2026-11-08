@@ -33,11 +33,13 @@ import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
 import {button_click, button_draw, button_measure} from ultragui::widgets::button;
 import {checkbox_click, checkbox_draw, checkbox_measure} from ultragui::widgets::checkbox;
+import {context_menu_click, context_menu_dismiss, context_menu_draw, context_menu_measure} from ultragui::widgets::context_menu;
 import {
   dropdown_click, dropdown_draw, dropdown_hit_test, dropdown_measure, dropdown_update,
 } from ultragui::widgets::dropdown;
 import {image_draw, image_measure} from ultragui::widgets::image;
 import {radio_click, radio_draw, radio_measure} from ultragui::widgets::radio;
+import {rich_text_draw, rich_text_measure} from ultragui::widgets::rich_text;
 import {
   scroll_view_draw, scroll_view_hit_test, scroll_view_layout, scroll_view_scroll, scroll_view_update,
 } from ultragui::widgets::scroll_view;
@@ -94,12 +96,20 @@ pub fn vt_draw(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: 
       dropdown_draw(world, ctx, e, renderer);
       true
     },
+    WidgetKind::RichText => {
+      rich_text_draw(world, ctx, e, renderer);
+      true
+    },
     WidgetKind::TextInput => {
       text_input_draw(world, ctx, e, renderer);
       true
     },
     WidgetKind::ScrollView => {
       scroll_view_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::ContextMenu => {
+      context_menu_draw(world, ctx, e, renderer);
       true
     },
     _ => false,
@@ -115,7 +125,9 @@ pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, 
   WidgetKind::Toggle => toggle_measure(world, ctx, e),
   WidgetKind::Slider => slider_measure(world, ctx, e),
   WidgetKind::Dropdown => dropdown_measure(world, ctx, e),
+  WidgetKind::RichText => rich_text_measure(world, ctx, e),
   WidgetKind::TextInput => text_input_measure(world, ctx, e),
+  WidgetKind::ContextMenu => context_menu_measure(world, ctx, e),
   _ => none,
 };
 
@@ -137,6 +149,7 @@ pub fn vt_on_click(kind: WidgetKind, var world&: World, var ctx&: WidgetContext,
   WidgetKind::Slider => slider_click(world, ctx, e),
   WidgetKind::Dropdown => dropdown_click(world, ctx, e),
   WidgetKind::TextInput => text_input_click(world, ctx, e),
+  WidgetKind::ContextMenu => context_menu_click(world, ctx, e),
   _ => none,
 };
 
@@ -207,5 +220,9 @@ pub fn vt_consumes_text_input(kind: WidgetKind, var world&: World, var ctx&: Wid
 
 // WidgetVTable::on_dismiss. False when the kind has no entry.
 pub fn vt_on_dismiss(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): bool => match (kind) {
+  WidgetKind::ContextMenu => {
+    context_menu_dismiss(world, ctx, e);
+    true
+  },
   _ => false,
 };
