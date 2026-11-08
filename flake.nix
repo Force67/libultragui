@@ -84,6 +84,8 @@
             # toolchain's libstdc++ for programs run from this shell, and the
             # FreeType and HarfBuzz the port's text engine links.
             export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.lib.getLib pkgs.freetype}/lib:${pkgs.lib.getLib pkgs.harfbuzz}/lib:$LD_LIBRARY_PATH"
+            # ultragui_lua (aki) links -llua.
+            export LD_LIBRARY_PATH="${pkgs.lib.getLib pkgs.lua5_4}/lib:$LD_LIBRARY_PATH"
             # DXVK-native has no default WSI; the D3D11 backend hands it a
             # GLFWwindow* as its HWND, so it has to use the GLFW backend.
             export DXVK_WSI_DRIVER=GLFW
