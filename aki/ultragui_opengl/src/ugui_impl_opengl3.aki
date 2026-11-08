@@ -1,0 +1,444 @@
+// ugui/backends/ugui_impl_opengl3.{h,cc}: OpenGL 3.3 core renderer backend for
+// ultragui, modeled on Dear ImGui's imgui_impl_opengl3.
+//
+// The HOST owns the window, GL context and presentation; this backend only
+// renders ultragui::DrawData into the currently bound framebuffer using its own
+// shaders and buffers. Typical per-frame use inside your own GL render loop:
+//
+//   gl.new_frame();
+//   // ... your scene rendering ...
+//   gl.render_draw_data(dd);   // ui on top, into the bound framebuffer
+//   // you present
+//
+// Font atlas: call update_font_atlas() whenever TextEngine::atlas_revision()
+// changes, passing TextEngine::atlas_pixels() and atlas_size().
+//
+// Shape differences from the C++ (behavior is the same):
+//
+// * The C++ namespace ugui::gl holds one file-static `State g`; here the state
+//   is a GlRenderer value: Init/Shutdown/NewFrame/UpdateFontAtlas/
+//   RenderDrawData/CreateTexture/UpdateTexture/DestroyTexture are its methods
+//   (init/shutdown/new_frame/update_font_atlas/render_draw_data/create_texture/
+//   update_texture/destroy_texture). texture_backend() is the GlRenderer itself,
+//   which implements TextureBackend: lend it with DynTextureBackend::of(r).
+// * `UpdateFontAtlas(pixels, width, height)` takes the pixels as `bytes`; an
+//   empty slice is the C++ nullptr and fails.
+// * GL entry points are loaded all at once through sys::gl::GlApi (see
+//   sys/gl.aki); the C++ resolves a smaller list for this backend, so a host
+//   loader that lacks glBufferSubData, glClear, ... (all GL 3.3 core) fails
+//   here and not in the C++.
+// * The shaders are the RHI's (ultragui_opengl::glsl), which differ from this
+//   file's C++ copies only in formatting and comments.
+
+module ultragui_opengl::ugui_impl_opengl3;
+
+import {eprintln} from akikit::logging;
+import {HashMap} from akikit::containers::hash_map;
+import ultragui::render::draw_data;
+import {DrawData, TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
+import {TextureBackend} from ultragui::render::texture_backend;
+import {Vertex2D} from ultragui::render::vertex;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {kQuadFragSrc, kQuadVertSrc, kTextFragSrc, kTextVertSrc} from ultragui_opengl::glsl;
+import {GlApi, kGlArrayBuffer, kGlBgra, kGlBlend, kGlClampToEdge, kGlCompileStatus, kGlCullFace, kGlDepthTest, kGlDynamicDraw,
+  kGlElementArrayBuffer, kGlFloat, kGlFragmentShader, kGlFuncAdd, kGlLinear, kGlLinkStatus, kGlNearest, kGlOne,
+  kGlOneMinusSrcAlpha, kGlR8, kGlRed, kGlRgba, kGlRgba8, kGlScissorTest, kGlSrcAlpha, kGlTexture0, kGlTexture2d,
+  kGlTextureMagFilter, kGlTextureMinFilter, kGlTextureWrapS, kGlTextureWrapT, kGlTriangles, kGlUnpackAlignment,
+  kGlUnsignedByte, kGlUnsignedInt, kGlVertexShader} from ultragui_opengl::sys::gl;
+
+extern fn strlen(s: *const c_char): usize;
+
+// InitInfo
+pub struct InitInfo {
+  // GL function loader, e.g. glfwGetProcAddress. The backend resolves the core
+  // 3.3 entry points it needs through this (it links no GL itself).
+  pub var get_proc_address: (extern fn(*const c_char): *var u8)? = none
+}
+
+// A host-created texture, plus what we need to re-upload it on UpdateTexture.
+struct UserTextureGl : Copy {
+  pub var tex: u32 = 0
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var internal: i32 = 0
+  pub var fmt: u32 = 0
+}
+
+struct State {
+  pub var gl: GlApi = GlApi::unloaded()
+  pub var vao: u32 = 0
+  pub var quad_vbo: u32 = 0
+  pub var quad_ibo: u32 = 0
+  pub var text_vbo: u32 = 0
+  pub var text_ibo: u32 = 0
+  pub var quad_prog: u32 = 0
+  pub var text_prog: u32 = 0
+  pub var quad_scale: i32 = -1
+  pub var quad_translate: i32 = -1
+  pub var quad_tex: i32 = -1
+  pub var text_scale: i32 = -1
+  pub var text_translate: i32 = -1
+  pub var text_tex: i32 = -1
+  pub var white: u32 = 0
+  pub var font: u32 = 0
+  pub var user_textures: HashMap<TextureId, UserTextureGl> = HashMap()
+  pub var next_user_id: TextureId = 1  // 0 = white, ~0 = font; user ids start at 1
+}
+
+// Map an RHIFormat to GL (byte formats only; float is unsupported here).
+fn rhi_format_to_gl(f: RhiFormat): (i32, u32) => match (f) {
+  RhiFormat::R8Unorm => (kGlR8 as i32, kGlRed),
+  RhiFormat::Bgra8Unorm => (kGlRgba8 as i32, kGlBgra),
+  _ => (kGlRgba8 as i32, kGlRgba),  // Rgba8Unorm, and Rgba32Float: unsupported; treat as RGBA8 bytes
+};
+
+fn log_text(log&: [u8; 1024]): str {
+  unsafe {
+    let p = @ptr(log[..]) as *const c_char;
+    return @str(p as *const c8, strlen(p));
+  }
+}
+
+fn pixel_ptr(pixels: bytes): *const u8 => #pixels == 0 ? null : unsafe @ptr(pixels) as *const u8;
+
+fn compile(gl&: GlApi, kind: u32, src: str): u32 {
+  let s = gl.create_shader(kind);
+  unsafe {
+    var text = @ptr(src) as *const c_char;
+    var length = #src as i32;
+    gl.shader_source(s, 1, &raw var text, &raw var length);
+  }
+  gl.compile_shader(s);
+  var ok: i32 = 0;
+  unsafe gl.get_shaderiv(s, kGlCompileStatus, &raw var ok);
+  if (ok == 0) {
+    var log = [0u8; 1024];
+    unsafe gl.get_shader_info_log(s, 1024, null, @ptr(log[..]) as *var c_char);
+    eprintln(f"ugui_impl_opengl3: shader compile failed: {log_text(log)}");
+  }
+  return s;
+}
+
+fn program(gl&: GlApi, vs_src: str, fs_src: str): u32 {
+  let vs = compile(gl, kGlVertexShader, vs_src);
+  let fs = compile(gl, kGlFragmentShader, fs_src);
+  let p = gl.create_program();
+  gl.attach_shader(p, vs);
+  gl.attach_shader(p, fs);
+  gl.link_program(p);
+  var ok: i32 = 0;
+  unsafe gl.get_programiv(p, kGlLinkStatus, &raw var ok);
+  if (ok == 0) {
+    eprintln("ugui_impl_opengl3: program link failed");
+  }
+  gl.delete_shader(vs);
+  gl.delete_shader(fs);
+  return p;
+}
+
+fn make_texture(gl&: GlApi, w: u32, h: u32, internal: i32, fmt: u32, px: bytes, filter: u32): u32 {
+  var t: u32 = 0;
+  unsafe gl.gen_textures(1, &raw var t);
+  gl.bind_texture(kGlTexture2d, t);
+  gl.pixel_storei(kGlUnpackAlignment, 1);
+  unsafe gl.tex_image2d(kGlTexture2d, 0, internal, w as i32, h as i32, 0, fmt, kGlUnsignedByte, pixel_ptr(px));
+  gl.tex_parameteri(kGlTexture2d, kGlTextureMinFilter, filter as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureMagFilter, filter as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureWrapS, kGlClampToEdge as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureWrapT, kGlClampToEdge as i32);
+  return t;
+}
+
+// Bind a VBO/IBO and (re)point the 9 Vertex2D attributes at it.
+fn bind_format(gl&: GlApi, vbo: u32, ibo: u32) {
+  gl.bind_buffer(kGlArrayBuffer, vbo);
+  let stride = @size_of(Vertex2D) as i32;
+  unsafe {
+    gl.enable_vertex_attrib_array(0);
+    gl.vertex_attrib_pointer(0, 2, kGlFloat, 0, stride, @offset_of(Vertex2D, pos) as *const u8);
+    gl.enable_vertex_attrib_array(1);
+    gl.vertex_attrib_pointer(1, 2, kGlFloat, 0, stride, @offset_of(Vertex2D, uv) as *const u8);
+    gl.enable_vertex_attrib_array(2);
+    gl.vertex_attrib_ipointer(2, 1, kGlUnsignedInt, stride, @offset_of(Vertex2D, color) as *const u8);
+    gl.enable_vertex_attrib_array(3);
+    gl.vertex_attrib_ipointer(3, 1, kGlUnsignedInt, stride, @offset_of(Vertex2D, color2) as *const u8);
+    gl.enable_vertex_attrib_array(4);
+    gl.vertex_attrib_ipointer(4, 1, kGlUnsignedInt, stride, @offset_of(Vertex2D, corner_radii) as *const u8);
+    gl.enable_vertex_attrib_array(5);
+    gl.vertex_attrib_pointer(5, 1, kGlFloat, 0, stride, @offset_of(Vertex2D, softness) as *const u8);
+    gl.enable_vertex_attrib_array(6);
+    gl.vertex_attrib_pointer(6, 2, kGlFloat, 0, stride, @offset_of(Vertex2D, half_size) as *const u8);
+    gl.enable_vertex_attrib_array(7);
+    gl.vertex_attrib_pointer(7, 1, kGlFloat, 0, stride, @offset_of(Vertex2D, border_width) as *const u8);
+    gl.enable_vertex_attrib_array(8);
+    gl.vertex_attrib_ipointer(8, 1, kGlUnsignedInt, stride, @offset_of(Vertex2D, border_color) as *const u8);
+  }
+  gl.bind_buffer(kGlElementArrayBuffer, ibo);
+}
+
+fn upload(gl&: GlApi, buf: u32, target: u32, data: *const u8, bytes: i64) {
+  gl.bind_buffer(target, buf);
+  unsafe gl.buffer_data(target, bytes, data, kGlDynamicDraw);
+}
+
+pub struct GlRenderer : TextureBackend {
+  var g: State
+
+  pub fn GlRenderer(): GlRenderer => GlRenderer { g: State {} };
+
+  // Compile shaders, create the VAO/buffers and the white fallback texture.
+  pub fn init(var self&, info&: InitInfo): bool;
+
+  // Release all backend GL objects (does not touch the host's GL context).
+  pub fn shutdown(var self&);
+
+  // Call once at the start of each frame, before render_draw_data.
+  pub fn new_frame(var self&) {}
+
+  // (Re)upload the glyph atlas (R8/alpha8, width*height bytes) as the font
+  // texture. Call from init and whenever TextEngine::atlas_revision() changed.
+  pub fn update_font_atlas(var self&, pixels: bytes, width: u32, height: u32): bool;
+
+  // Render `draw_data` into the currently bound framebuffer. Sets the GL state
+  // it needs (blend, scissor, no depth/cull); restore your own state afterwards
+  // if you render more.
+  pub fn render_draw_data(var self&, dd&: DrawData);
+
+  // --- Host texture API (for Image/SVG/Lottie/anim in draw-data mode) ---
+  //
+  // Create textures the backend can bind from draw commands. Hand the returned
+  // TextureId to ultragui via UIContext::set_texture_backend(). Byte formats
+  // (R8/RGBA8/BGRA8) only; the GL backend does not handle float textures.
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId;
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes);
+  pub fn destroy_texture(var self&, id: TextureId);
+}
+
+fn GlRenderer::init(var self&, info&: InitInfo): bool {
+  let loader = info.get_proc_address else { return false; };
+  let loaded = GlApi::load(fn(name: *const c_char): *var u8 => unsafe loader(name));
+  if (loaded == none) {
+    eprintln("ugui_impl_opengl3: failed to load GL functions");
+    return false;
+  }
+  var g& = self.g;
+  g.gl = loaded!;
+  let gl = g.gl;
+  g.quad_prog = program(gl, kQuadVertSrc, kQuadFragSrc);
+  g.text_prog = program(gl, kTextVertSrc, kTextFragSrc);
+  unsafe {
+    g.quad_scale = gl.get_uniform_location(g.quad_prog, c"u_scale");
+    g.quad_translate = gl.get_uniform_location(g.quad_prog, c"u_translate");
+    g.quad_tex = gl.get_uniform_location(g.quad_prog, c"tex_sampler");
+    g.text_scale = gl.get_uniform_location(g.text_prog, c"u_scale");
+    g.text_translate = gl.get_uniform_location(g.text_prog, c"u_translate");
+    g.text_tex = gl.get_uniform_location(g.text_prog, c"tex_sampler");
+  }
+  gl.use_program(g.quad_prog);
+  gl.uniform1i(g.quad_tex, 0);
+  gl.use_program(g.text_prog);
+  gl.uniform1i(g.text_tex, 0);
+
+  unsafe {
+    gl.gen_vertex_arrays(1, &raw var g.vao);
+    gl.gen_buffers(1, &raw var g.quad_vbo);
+    gl.gen_buffers(1, &raw var g.quad_ibo);
+    gl.gen_buffers(1, &raw var g.text_vbo);
+    gl.gen_buffers(1, &raw var g.text_ibo);
+  }
+
+  let white = [255u8; 4];
+  g.white = make_texture(gl, 1, 1, kGlRgba8 as i32, kGlRgba, white[..] as bytes, kGlLinear);
+  return true;
+}
+
+fn GlRenderer::shutdown(var self&) {
+  var g& = self.g;
+  let gl = g.gl;
+  unsafe {
+    if (g.vao != 0) {
+      gl.delete_vertex_arrays(1, &raw var g.vao);
+    }
+    var bufs = [g.quad_vbo, g.quad_ibo, g.text_vbo, g.text_ibo];
+    gl.delete_buffers(4, @ptr(bufs[..]) as *const u32);
+    // Each texture frees independently, so the map's order does not matter.
+    for (let (id, ut) in g.user_textures) {
+      if (ut.tex != 0) {
+        var tex = ut.tex;
+        gl.delete_textures(1, &raw var tex);
+      }
+    }
+    g.user_textures.clear();
+    if (g.white != 0) {
+      gl.delete_textures(1, &raw var g.white);
+    }
+    if (g.font != 0) {
+      gl.delete_textures(1, &raw var g.font);
+    }
+  }
+  if (g.quad_prog != 0) {
+    gl.delete_program(g.quad_prog);
+  }
+  if (g.text_prog != 0) {
+    gl.delete_program(g.text_prog);
+  }
+  self.g = State {};
+}
+
+fn GlRenderer::update_font_atlas(var self&, pixels: bytes, width: u32, height: u32): bool {
+  if (#pixels == 0 || width == 0 || height == 0) {
+    return false;
+  }
+  var g& = self.g;
+  let gl = g.gl;
+  if (g.font != 0) {
+    unsafe gl.delete_textures(1, &raw var g.font);
+  }
+  g.font = make_texture(gl, width, height, kGlR8 as i32, kGlRed, pixels, kGlNearest);
+  return g.font != 0;
+}
+
+fn GlRenderer::render_draw_data(var self&, dd&: DrawData) {
+  if (!dd.valid || dd.command_count() == 0) {
+    return;
+  }
+  if (dd.display_size.x <= 0.0 || dd.display_size.y <= 0.0) {
+    return;
+  }
+
+  let sx = dd.framebuffer_scale.x > 0.0 ? dd.framebuffer_scale.x : 1.0;
+  let sy = dd.framebuffer_scale.y > 0.0 ? dd.framebuffer_scale.y : 1.0;
+  let fbw = @saturating_cast(i32, dd.display_size.x * sx);
+  let fbh = @saturating_cast(i32, dd.display_size.y * sy);
+
+  var g& = self.g;
+  let gl = g.gl;
+  gl.enable(kGlBlend);
+  gl.blend_equation(kGlFuncAdd);
+  gl.blend_func_separate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
+  gl.disable(kGlDepthTest);
+  gl.disable(kGlCullFace);
+  gl.enable(kGlScissorTest);
+  gl.viewport(0, 0, fbw, fbh);
+  gl.active_texture(kGlTexture0);
+  gl.bind_vertex_array(g.vao);
+
+  unsafe {
+    upload(gl, g.quad_vbo, kGlArrayBuffer, @ptr(dd.quad_vertices) as *const u8,
+      (dd.quad_vertex_count() as usize * @size_of(Vertex2D)) as i64);
+    upload(gl, g.quad_ibo, kGlElementArrayBuffer, @ptr(dd.quad_indices) as *const u8, (dd.quad_index_count() as usize * 4) as i64);
+    upload(gl, g.text_vbo, kGlArrayBuffer, @ptr(dd.text_vertices) as *const u8,
+      (dd.text_vertex_count() as usize * @size_of(Vertex2D)) as i64);
+    upload(gl, g.text_ibo, kGlElementArrayBuffer, @ptr(dd.text_indices) as *const u8, (dd.text_index_count() as usize * 4) as i64);
+  }
+
+  // Projection: window coords -> NDC, flipping Y for GL's bottom-left origin.
+  let scale_x = 2.0 / dd.display_size.x;
+  let scale_y = -2.0 / dd.display_size.y;
+  gl.use_program(g.quad_prog);
+  gl.uniform2f(g.quad_scale, scale_x, scale_y);
+  gl.uniform2f(g.quad_translate, -1.0, 1.0);
+  gl.use_program(g.text_prog);
+  gl.uniform2f(g.text_scale, scale_x, scale_y);
+  gl.uniform2f(g.text_translate, -1.0, 1.0);
+
+  var bound_kind: i32 = -1;  // 0 quad, 1 text
+  var bound_prog: u32 = 0;
+  for (let i in 0..dd.command_count()) {
+    let c = dd.commands[i as usize];
+    if (c.elem_count == 0) {
+      continue;
+    }
+    // Widget::Paint emits backdrop blur as a white quad for backends that hold
+    // a blurred scene copy. This backend has none; skip it.
+    if (c.blur != 0.0) {
+      continue;
+    }
+
+    let prog = c.is_text ? g.text_prog : g.quad_prog;
+    if (prog != bound_prog) {
+      gl.use_program(prog);
+      bound_prog = prog;
+    }
+    var tex: u32 = 0;
+    if (c.is_text || c.texture_id == kFontTextureId) {
+      tex = g.font;
+    } else if (c.texture_id == kNullTextureId) {
+      tex = g.white;
+    } else {
+      tex = if (let ut = g.user_textures.get(c.texture_id)) { ut.tex } else { g.white };
+    }
+    gl.bind_texture(kGlTexture2d, tex);
+
+    let kind: i32 = c.is_text ? 1 : 0;
+    if (kind != bound_kind) {
+      if (kind != 0) {
+        bind_format(gl, g.text_vbo, g.text_ibo);
+      } else {
+        bind_format(gl, g.quad_vbo, g.quad_ibo);
+      }
+      bound_kind = kind;
+    }
+
+    // GL scissor: bottom-left origin, so flip Y.
+    var x = @saturating_cast(i32, c.clip_rect.x * sx);
+    var w = @saturating_cast(i32, c.clip_rect.w * sx);
+    var h = @saturating_cast(i32, c.clip_rect.h * sy);
+    var y = fbh - @saturating_cast(i32, (c.clip_rect.y + c.clip_rect.h) * sy);
+    if (x < 0) {
+      x = 0;
+    }
+    if (y < 0) {
+      y = 0;
+    }
+    if (w < 0) {
+      w = 0;
+    }
+    if (h < 0) {
+      h = 0;
+    }
+    gl.scissor(x, y, w, h);
+
+    unsafe gl.draw_elements(kGlTriangles, c.elem_count as i32, kGlUnsignedInt, (c.index_offset as usize * 4) as *const u8);
+  }
+}
+
+fn GlRenderer::create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter):
+  TextureId {
+  if (width == 0 || height == 0 || #pixels == 0) {
+    return kNullTextureId;
+  }
+  var g& = self.g;
+  let (internal, fmt) = rhi_format_to_gl(format);
+  let gl_filter = filter == RhiFilter::Nearest ? kGlNearest : kGlLinear;
+  let tex = make_texture(g.gl, width, height, internal, fmt, pixels, gl_filter);
+  if (tex == 0) {
+    return kNullTextureId;
+  }
+  let id = g.next_user_id;
+  g.next_user_id += 1;
+  g.user_textures.insert(id, UserTextureGl { tex, width, height, internal, fmt });
+  return id;
+}
+
+fn GlRenderer::update_texture(var self&, id: TextureId, pixels: bytes) {
+  var g& = self.g;
+  let ut = g.user_textures.get(id) else { return; };
+  if (#pixels == 0) {
+    return;
+  }
+  let gl = g.gl;
+  gl.bind_texture(kGlTexture2d, ut.tex);
+  gl.pixel_storei(kGlUnpackAlignment, 1);
+  unsafe gl.tex_image2d(kGlTexture2d, 0, ut.internal, ut.width as i32, ut.height as i32, 0, ut.fmt, kGlUnsignedByte,
+    pixel_ptr(pixels));
+}
+
+fn GlRenderer::destroy_texture(var self&, id: TextureId) {
+  var g& = self.g;
+  let ut = g.user_textures.remove(id) else { return; };
+  if (ut.tex != 0) {
+    var tex = ut.tex;
+    unsafe g.gl.delete_textures(1, &raw var tex);
+  }
+}
