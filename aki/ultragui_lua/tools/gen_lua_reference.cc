@@ -1,7 +1,8 @@
 // Records what the C++ Lua runtime prints and does to the widgets for each
 // scenario of tests/scenes_test.aki: the showcase's logic.lua and scenes, the
 // game overlay HUD, and tests/data/api.{ugui,lua} (every ugui.* function,
-// the audio and anim bindings, errors, timers and tweens). One file per
+// the audio and anim bindings, errors, timers and tweens); and
+// tests/data/lottie.lua for ultragui_lua_lottie's test. One file per
 // scenario, tests/data/expected/<name>.txt: stdout (unbuffered) and stderr
 // interleaved in program order, plus the driver's own lines (widget state
 // dumps). tests/scenes_test.aki runs the same steps and must print the same
@@ -24,6 +25,8 @@
 #include <ugui/idl/parser.h>
 #include <ugui/scripting/lua_anim.h>
 #include <ugui/scripting/lua_audio.h>
+#include <ugui/scripting/lua_lottie.h>
+#include <ugui/lottie/lottie.h>
 #include <ugui/scripting/lua_widgets.h>
 #include <ugui/scripting/script_runtime.h>
 #include <ugui/widgets/button.h>
@@ -334,6 +337,52 @@ static void RunScenario(const char* ugui_path, const char* lua_path,
   }
 }
 
+// tests/data/lottie.lua against api.ugui with the Lottie bindings (checked
+// by ultragui_lua_lottie's test): the script's output, then the image's state.
+static void RunLottie() {
+  World& world = *WidgetRegistry::Active();
+  UguiDocument doc;
+  Vector<ParseError> errors;
+  if (!ParseUguiFile("tests/data/api.ugui", doc, errors)) {
+    printf("parse failed\n");
+    return;
+  }
+  UguiBuilder builder;
+  wid root = builder.Build(doc);
+  ScriptRuntime rt;
+  printf("init %d\n", rt.Init() ? 1 : 0);
+  Vector<LottieAnimation*> anims;
+  RegisterLottieLua(
+      rt,
+      [&anims](const char* path, unsigned w, unsigned h) -> LottieAnimation* {
+        printf("loader %s %u %u\n", path, w, h);
+        auto* a = new LottieAnimation();
+        if (!a->Load(nullptr, path, w, h)) {
+          delete a;
+          return nullptr;
+        }
+        anims.push_back(a);
+        return a;
+      },
+      [&rt](const char* name) -> wid {
+        printf("find_widget %s\n", name);
+        return rt.FindRegisteredWidget(name);
+      });
+  RegisterWidgetTree(rt, root);
+  rt.Exec("LOTTIE_PATH = '../../examples/lottie_demo/anims/spinner.json'",
+          "setup");
+  printf("exec %d\n", rt.ExecFile("tests/data/lottie.lua") ? 1 : 0);
+  std::vector<wid> named;
+  CollectNamed(world, root, named);
+  for (wid w : named) printf("  %s\n", DumpLine(world, w).c_str());
+  rt.Shutdown();
+  DestroyWidget(world, root);
+  for (auto* a : anims) {
+    a->Unload();
+    delete a;
+  }
+}
+
 struct Scenario {
   const char* name;
   const char* ugui;
@@ -377,6 +426,17 @@ int main(int argc, char** argv) {
     dup2(fd, 2);
     close(fd);
     RunScenario(s.ugui, s.lua, s.api);
+    dup2(saved_out, 1);
+    dup2(saved_err, 2);
+    fprintf(stderr, "wrote %s\n", path.c_str());
+  }
+  {
+    std::string path = std::string(out_dir) + "/lottie.txt";
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    dup2(fd, 1);
+    dup2(fd, 2);
+    close(fd);
+    RunLottie();
     dup2(saved_out, 1);
     dup2(saved_err, 2);
     fprintf(stderr, "wrote %s\n", path.c_str());
