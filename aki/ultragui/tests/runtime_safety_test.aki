@@ -1,0 +1,183 @@
+// tests/test_runtime_safety.cc, except script_runtime_widget_registry_can_be_cleared,
+// which needs a runtime that registers widgets (Lua): ultragui_lua's tests
+// carry it.
+
+module runtime_safety_test;
+
+import {Atomic} from akikit::threading::atomic;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {WidgetState} from ultragui::style::enums;
+import {Style} from ultragui::style::style;
+import {create_button, kButtonContent, set_button_click, set_button_label} from ultragui::widgets::button;
+import {CallbackEnv} from ultragui::widgets::callbacks;
+import {create_checkbox, is_checked, set_checkbox_change, set_checked} from ultragui::widgets::checkbox;
+import {kAnimStyle, kStateStyle, kTooltip} from ultragui::widgets::components;
+import {create_image, kImageContent, set_image_texture} from ultragui::widgets::image;
+import {create_scroll_view, set_scroll_offset} from ultragui::widgets::scroll_view;
+import {create_text, kTextContent, set_text} from ultragui::widgets::text;
+import {
+  WidgetKind, add_child, add_state_override, clear_animation_style, click_widget, destroy_widget, hit_test,
+  input_to_layout_point, kWidgetNode, layout_widget, measure_widget, set_animation_style, set_tooltip, tooltip_text,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {ComponentKey} from ultragui::core::component_store;
+import {World} from ultragui::widgets::widget_registry;
+import {Expect} from support::expect;
+
+struct TestTag : Copy {
+  pub var v: i32
+}
+static let kTestTag: ComponentKey<TestTag> = ComponentKey();
+
+fn r(x: f32, y: f32, w: f32, h: f32): Rect => Rect { x, y, w, h };
+
+fn scrollview_hit_test_respects_scroll_offset(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let root = world.create(1);
+  let scroll = create_scroll_view(world, 2);
+  let child = world.create(3);
+  add_child(world, root, scroll);
+  add_child(world, scroll, child);
+
+  layout_widget(world, ctx, root, r(0.0, 0.0, 400.0, 400.0), r(0.0, 0.0, 400.0, 400.0));
+  layout_widget(world, ctx, scroll, r(0.0, 0.0, 200.0, 200.0), r(0.0, 0.0, 200.0, 200.0));
+  layout_widget(world, ctx, child, r(10.0, 80.0, 50.0, 40.0), r(10.0, 80.0, 50.0, 40.0));
+  set_scroll_offset(world, scroll, Vec2 { x: 0.0, y: 50.0 });
+
+  let hit = hit_test(world, ctx, root, Vec2 { x: 20.0, y: 40.0 });  // visual y-range 30..70
+  t.that(hit == child, "scrollview_hit_test_respects_scroll_offset");
+  destroy_widget(world, root);
+}
+
+fn widget_input_to_layout_point_accumulates_scroll_parents(var t&: Expect, var world&: World) {
+  let root = world.create(1);
+  let a = create_scroll_view(world, 2);
+  let b = create_scroll_view(world, 3);
+  let leaf = world.create(4);
+  add_child(world, root, a);
+  add_child(world, a, b);
+  add_child(world, b, leaf);
+  set_scroll_offset(world, a, Vec2 { x: 5.0, y: 10.0 });
+  set_scroll_offset(world, b, Vec2 { x: 0.0, y: 20.0 });
+
+  let p = input_to_layout_point(world, leaf, Vec2 { x: 1.0, y: 2.0 });
+  t.that(p.x == 6.0 && p.y == 32.0, "input_to_layout_point accumulates scroll parents");
+  destroy_widget(world, root);
+}
+
+fn component_store_add_get_remove(var t&: Expect, var world&: World) {
+  let w = world.create(1);
+  world.add(kTestTag, w, TestTag { v: 42 });
+  t.that(world.has(kTestTag, w), "has after add");
+  t.that(world.get(kTestTag, w)!.v == 42, "get after add");
+  world.add(kTestTag, w, TestTag { v: 7 });  // overwrite
+  t.that(world.get(kTestTag, w)!.v == 7, "add overwrites");
+  world.remove(kTestTag, w);
+  t.that(!world.has(kTestTag, w), "remove");
+  destroy_widget(world, w);
+}
+
+fn component_dropped_when_entity_released(var t&: Expect, var world&: World) {
+  let w = world.create(2);
+  let saved = w;
+  world.add(kTestTag, saved, TestTag { v: 99 });
+  t.that(world.has(kTestTag, saved), "has");
+  destroy_widget(world, w);
+  t.that(!world.alive(saved), "released handle is dead");
+  t.that(!world.has(kTestTag, saved), "component dropped with the entity");
+}
+
+fn tooltip_is_stored_as_component(var t&: Expect, var world&: World) {
+  let w = world.create(3);
+  t.that(tooltip_text(world, w).len() == 0, "no tooltip");
+  set_tooltip(world, w, "help");
+  t.that(tooltip_text(world, w) == "help", "tooltip text");
+  t.that(world.has(kTooltip, w), "tooltip component");
+  destroy_widget(world, w);
+}
+
+fn state_styles_and_anim_live_in_components(var t&: Expect, var world&: World) {
+  let w = world.create(4);
+  let override_style = Style {};
+  t.that(!world.has(kStateStyle, w), "plain widget has no StateStyle");
+  add_state_override(world, w, WidgetState::Hovered, override_style, 0);
+  t.that(world.has(kStateStyle, w), "StateStyle after an override");
+  t.that(!world.has(kAnimStyle, w), "plain widget has no AnimStyle");
+  set_animation_style(world, w, override_style);
+  t.that(world.has(kAnimStyle, w), "AnimStyle while animating");
+  clear_animation_style(world, w);
+  t.that(!world.has(kAnimStyle, w), "AnimStyle cleared");
+  destroy_widget(world, w);
+}
+
+fn image_is_a_generic_widget_with_component(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let img = create_image(world, 5);
+  t.that(world.get(kWidgetNode, img)!.kind == WidgetKind::Image, "image kind");
+  t.that(world.has(kImageContent, img), "ImageContent");
+  set_image_texture(world, img, 42, 64.0, 48.0);
+  let c = world.get(kImageContent, img)!;
+  t.that(c.texture == 42 && c.natural_w == 64.0, "image texture");
+  let (w, h) = measure_widget(world, ctx, img);
+  t.that(w == 64.0 && h == 48.0, "measure dispatches to the image");
+  destroy_widget(world, img);
+}
+
+fn text_is_a_generic_widget_with_component(var t&: Expect, var world&: World) {
+  let e = create_text(world, 6);
+  t.that(world.get(kWidgetNode, e)!.kind == WidgetKind::Text, "text kind");
+  t.that(world.has(kTextContent, e), "TextContent");
+  set_text(world, e, "hello");
+  t.that(world.get(kTextContent, e)!.text.as_str() == "hello", "text");
+  destroy_widget(world, e);
+}
+
+static let kClicks: Atomic<u32> = Atomic::<u32>(0);
+static let kChanges: Atomic<u32> = Atomic::<u32>(0);
+static let kLast: Atomic<u32> = Atomic::<u32>(0);
+
+fn button_click_dispatches_through_vtable(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let b = create_button(world, 7);
+  t.that(world.get(kWidgetNode, b)!.kind == WidgetKind::Button, "button kind");
+  set_button_label(world, b, "OK");
+  t.that(world.get(kButtonContent, b)!.label.as_str() == "OK", "label");
+  set_button_click(world, b, own fn(env: &var CallbackEnv) {
+    let _ = kClicks.fetch_add(1);
+  });
+  t.that(click_widget(world, ctx, b), "click handled");
+  t.eq_u32(kClicks.load(), 1, "handler ran once");
+  destroy_widget(world, b);
+}
+
+fn checkbox_toggles_and_fires_change_through_vtable(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let cb = create_checkbox(world, 8);
+  t.that(world.get(kWidgetNode, cb)!.kind == WidgetKind::Checkbox, "checkbox kind");
+  t.that(!is_checked(world, cb), "starts unchecked");
+  set_checkbox_change(world, cb, own fn(env: &var CallbackEnv, v: bool) {
+    let _ = kChanges.fetch_add(1);
+    kLast.store(v ? 1 : 0);
+  });
+  t.that(click_widget(world, ctx, cb), "click handled");
+  t.that(is_checked(world, cb), "toggled on");
+  t.that(kChanges.load() == 1 && kLast.load() == 1, "on_change fired with true");
+  set_checked(world, ctx, cb, false);  // programmatic: no on_change
+  t.that(!is_checked(world, cb), "set_checked off");
+  t.eq_u32(kChanges.load(), 1, "programmatic change fires nothing");
+  destroy_widget(world, cb);
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var world = World();
+  var ctx = WidgetContext::detached();
+  scrollview_hit_test_respects_scroll_offset(t, world, ctx);
+  widget_input_to_layout_point_accumulates_scroll_parents(t, world);
+  component_store_add_get_remove(t, world);
+  component_dropped_when_entity_released(t, world);
+  tooltip_is_stored_as_component(t, world);
+  state_styles_and_anim_live_in_components(t, world);
+  image_is_a_generic_widget_with_component(t, world, ctx);
+  text_is_a_generic_widget_with_component(t, world);
+  button_click_dispatches_through_vtable(t, world, ctx);
+  checkbox_toggles_and_fires_change_through_vtable(t, world, ctx);
+  return t.finish();
+}
