@@ -1,0 +1,14 @@
+# ugui/scripting/lua_lottie.{h,cc} in aki: the Lottie Lua bindings
+# (ugui.load_lottie, ugui.lottie_play, ...). A package of its own so a Lua
+# user who does not want Lottie does not link rlottie; it links what
+# ultragui_lua (Lua 5.4) and ultragui_lottie (rlottie) link. See ../PORTING.md.
+[package]
+name = "ultragui_lua_lottie"
+kind = "lib"
+version = "0.1.0"
+description = "libultragui's Lottie Lua bindings in aki"
+
+[dependencies]
+ultragui = { path = "../ultragui" }
+ultragui_lua = { path = "../ultragui_lua" }
+ultragui_lottie = { path = "../ultragui_lottie" }

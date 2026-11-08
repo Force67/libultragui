@@ -1,0 +1,145 @@
+// ugui/scripting/lua_lottie.{h,cc}: the Lottie Lua bindings
+// (ugui.load_lottie, ugui.lottie_play, ...).
+//
+// Shape differences from the C++ (behavior is the C++'s):
+//
+// * RegisterLottieLua's `Function` parameters are `own fn` hooks that also
+//   get the LuaCall (see ultragui_lua::lua_anim): `loader` is
+//   UIContext::LoadLottie, `find_widget` UIContext::FindWidgetEntity.
+// * The C++ LottieAnimation keeps the TextureBackend it was loaded with, and
+//   Stop() and Seek() render through it. The aki LottieAnimation takes the
+//   backend per call (ultragui_lottie), and the binding cannot reach the
+//   host's backend, so ugui.lottie_stop and ugui.lottie_seek call the hooks
+//   `stop` and `seek`, which run `anim.stop(backend)` / `anim.seek(p,
+//   backend)` with the backend the animation was loaded with.
+// * An animation reaches Lua as a light userdata of the address the loader
+//   returned; the host keeps the LottieAnimation there (boxed) while scripts
+//   may hold it, as in the C++.
+
+module ultragui_lua_lottie::lua_lottie;
+
+import {String} from akikit::strings::string;
+import {set_image_texture} from ultragui::widgets::image;
+import {LottieAnimation} from ultragui_lottie::lottie;
+import {LuaCall, LuaRaise} from ultragui_lua::lua_call;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {FindWidget} from ultragui_lua::lua_anim;
+
+// Function<LottieAnimation*(const char*, unsigned, unsigned)>: a loaded
+// animation the host owns, or null.
+pub type LottieLoader = own fn(&var LuaCall, String, u32, u32): *var LottieAnimation;
+// LottieAnimation::Stop() through the backend the animation was loaded with.
+pub type LottieStop = own fn(&var LuaCall, *var LottieAnimation): ();
+// LottieAnimation::Seek(progress) through that backend.
+pub type LottieSeek = own fn(&var LuaCall, *var LottieAnimation, f32): ();
+
+fn lottie_at(call&: LuaCall, arg: i32): *var LottieAnimation => unsafe (call.to_userdata(arg) as *var LottieAnimation);
+
+// RegisterLottieLua
+pub fn register_lottie_lua(var rt&: LuaRuntime, loader: LottieLoader, find_widget: FindWidget, stop: LottieStop, seek: LottieSeek) {
+  // ugui.LoadLottie(path, width, height) -> anim lightuserdata
+  rt.register_function("load_lottie", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let path = try call.check_string(1);
+    let w = (try call.check_integer(2)) as u32;
+    let h = (try call.check_integer(3)) as u32;
+    let anim = loader(call, path, w, h);
+    if (anim != null) {
+      call.push_light_userdata(unsafe (anim as *var u8));
+    } else {
+      call.push_nil();
+    }
+    return 1;
+  });
+
+  // ugui.lottie_play(anim)
+  rt.register_function("lottie_play", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    if (a != null) {
+      unsafe (*a).play();
+    }
+    return 0;
+  });
+
+  // ugui.lottie_pause(anim)
+  rt.register_function("lottie_pause", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    if (a != null) {
+      unsafe (*a).pause();
+    }
+    return 0;
+  });
+
+  // ugui.lottie_stop(anim)
+  rt.register_function("lottie_stop", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    if (a != null) {
+      stop(call, a);
+    }
+    return 0;
+  });
+
+  // ugui.lottie_loop(anim, bool)
+  rt.register_function("lottie_loop", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    if (a != null) {
+      unsafe (*a).set_loop(call.to_boolean(2));
+    }
+    return 0;
+  });
+
+  // ugui.lottie_speed(anim, speed)
+  rt.register_function("lottie_speed", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    if (a != null) {
+      let s = (try call.check_number(2)) as f32;
+      unsafe (*a).set_speed(s);
+    }
+    return 0;
+  });
+
+  // ugui.lottie_seek(anim, progress) -- 0.0 to 1.0
+  rt.register_function("lottie_seek", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    if (a != null) {
+      let p = (try call.check_number(2)) as f32;
+      seek(call, a, p);
+    }
+    return 0;
+  });
+
+  // ugui.lottie_playing(anim) -> bool
+  rt.register_function("lottie_playing", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    call.push_boolean(a != null && unsafe (*a).is_playing());
+    return 1;
+  });
+
+  // ugui.lottie_progress(anim) -> number
+  rt.register_function("lottie_progress", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    let p: f32 = a != null ? unsafe (*a).progress() : 0.0;
+    call.push_number(p as f64);
+    return 1;
+  });
+
+  // ugui.lottie_duration(anim) -> number (seconds)
+  rt.register_function("lottie_duration", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    call.push_number(a != null ? unsafe (*a).duration() : 0.0);
+    return 1;
+  });
+
+  // ugui.lottie_attach(anim, "widget_name") -- set texture on an Image widget
+  rt.register_function("lottie_attach", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = lottie_at(call, 1);
+    let name = try call.check_string(2);
+    if (a != null) {
+      let w = find_widget(call, name);
+      if (w.valid()) {
+        let (tex, aw, ah) = unsafe ((*a).texture(), (*a).width(), (*a).height());
+        set_image_texture(call.world, w, tex, aw as f32, ah as f32);
+      }
+    }
+    return 0;
+  });
+}

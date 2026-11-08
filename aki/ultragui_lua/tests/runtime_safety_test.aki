@@ -1,0 +1,71 @@
+// tests/test_runtime_safety.cc: the Lua runtime's case,
+// script_runtime_widget_registry_can_be_cleared (the other cases are the
+// core's). Plus what the C++ case implies about the registry: a name maps to
+// the widget registered last, unregistering forgets it, unnamed widgets are
+// never registered, and shutdown clears the registry.
+
+module runtime_safety_test;
+
+import {from_str} from akikit::strings::string;
+import {kNullWidget} from ultragui::core::handle;
+import {ScriptRuntime} from ultragui::scripting::script_runtime;
+import {destroy_widget, kWidgetNode} from ultragui::widgets::widget;
+import {World} from ultragui::widgets::widget_registry;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {Expect} from support::expect;
+
+// Through the capability, as UIContext<_, _, LuaRuntime> calls it.
+fn registry_cleared<S: ScriptRuntime>(var t&: Expect, var rt&: S) {
+  t.that(rt.init(), "init");
+
+  var world = World();
+  let w = world.create(1);
+  world.get_var(kWidgetNode, w)!.name = from_str("root");
+  rt.register_widget(world, w);
+  t.that(rt.find_registered_widget("root") == w, "registered");
+
+  rt.clear_widget_registry();
+  t.that(!rt.find_registered_widget("root").valid(), "cleared");
+
+  rt.shutdown();
+  destroy_widget(world, w);
+}
+
+fn registry_details(var t&: Expect) {
+  var rt = LuaRuntime();
+  t.that(rt.state() == null, "no state before init");
+  t.that(rt.init(), "init");
+  t.that(rt.state() != null, "state after init");
+
+  var world = World();
+  let a = world.create(1);
+  let b = world.create(2);
+  let c = world.create(3);
+  world.get_var(kWidgetNode, a)!.name = from_str("same");
+  world.get_var(kWidgetNode, b)!.name = from_str("same");
+  rt.register_widget(world, a);
+  rt.register_widget(world, b);
+  rt.register_widget(world, c);  // unnamed: ignored
+  t.that(rt.find_registered_widget("same") == b, "last registration wins");
+  t.that(rt.find_registered_widget("") == kNullWidget, "unnamed not registered");
+
+  rt.unregister_widget(world, a);  // erases by name, so b goes too
+  t.that(!rt.find_registered_widget("same").valid(), "unregister erases the name");
+
+  rt.register_widget(world, a);
+  rt.shutdown();
+  t.that(!rt.find_registered_widget("same").valid(), "shutdown clears the registry");
+  t.that(rt.state() == null, "no state after shutdown");
+
+  destroy_widget(world, a);
+  destroy_widget(world, b);
+  destroy_widget(world, c);
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var rt = LuaRuntime();
+  registry_cleared(t, rt);
+  registry_details(t);
+  return t.finish();
+}

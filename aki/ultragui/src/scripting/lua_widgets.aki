@@ -1,0 +1,32 @@
+// ugui/scripting/lua_widgets.{h,cc}: register every named widget of a tree
+// with a scripting runtime.
+//
+// It lives in the core, beside the ScriptRuntime capability, because it
+// only uses the capability and UIContext calls it whatever runtime it is
+// instantiated with (LoadUi, LoadUiString, set_root). The World is passed
+// (the C++ reached it through WidgetRegistry::Active()).
+
+module ultragui::scripting::lua_widgets;
+
+import {List} from akikit::containers::list;
+import {WidgetId} from ultragui::core::handle;
+import {ScriptRuntime} from ultragui::scripting::script_runtime;
+import {kHierarchy, kWidgetNode} from ultragui::widgets::widget;
+import {World} from ultragui::widgets::widget_registry;
+
+// RegisterWidgetTree: register all named widgets in a tree with `rt`.
+pub fn register_widget_tree<S: ScriptRuntime>(var rt&: S, world&: World, root: WidgetId) {
+  if (!root.valid()) {
+    return;
+  }
+  let n& = world.get(kWidgetNode, root) else {
+    return;
+  };
+  if (!n.name.is_empty()) {
+    rt.register_widget(world, root);
+  }
+  let children: List<WidgetId> = world.get(kHierarchy, root)!.children.clone();
+  for (let child in children.iter()) {
+    register_widget_tree(rt, world, child);
+  }
+}

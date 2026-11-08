@@ -1,0 +1,260 @@
+// No C++ counterpart: what a native `ugui.*` function sees of the Lua call
+// it serves. The C++ natives are `int(lua_State*)` functions that reach the
+// widgets through WidgetRegistry::Active() and raise argument errors with
+// luaL_check*, which longjmp out of them. Here a native is an aki function
+// that gets a LuaCall: the World and the WidgetContext the script runs with
+// (lent for the call, as a CallbackEnv is), and the argument checks and
+// pushes it needs. An argument check that fails returns a LuaRaise instead of
+// jumping; the native returns it (`try`), its frame ends and drops what it
+// holds, and the C entry point Lua called raises the very error luaL_check*
+// would have raised, from the same C function call, so the message is the
+// same ("bad argument #1 to 'set' (string expected, got no value)").
+//
+// Text comes out of Lua as the C++ reads it: a C string, cut at its first
+// NUL. `check_string`/`to_string`/`LuaText::owned` copy it into a String, replacing bytes that
+// are not UTF-8 with U+FFFD (aki's String is always UTF-8; the C++ keeps the
+// bytes); `check_text` keeps the raw bytes, valid while the value stays on
+// the Lua stack, for code that compares or prints them byte for byte.
+
+module ultragui_lua::lua_call;
+
+import {String} from akikit::strings::string;
+import {World} from ultragui::widgets::widget_registry;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {
+  LuaState, LuaInteger, LuaNumber,
+  kLuaTString, kLuaTNumber,
+  lua_tolstring, lua_tonumberx, lua_tointegerx, lua_isnumber, lua_type, lua_toboolean, lua_touserdata, lua_gettop,
+  lua_pushnil, lua_pushnumber, lua_pushinteger, lua_pushboolean, lua_pushlstring, lua_pushlightuserdata,
+} from ultragui_lua::sys::lua;
+
+// The error an argument check raises, as luaL_check* builds it.
+pub union LuaRaise : Copy {
+  // tag_error(L, arg, tag): "bad argument #arg to 'f' (<tag> expected, got <type>)".
+  Type(i32, i32),
+  // luaL_checkinteger on a number without an integer value.
+  NoInteger(i32),
+  // luaL_error-style: the message alone (a static C string, raised as a string error value).
+  Message(*const c_char),
+}
+
+// A Lua string's bytes, cut at the first NUL as a C string reads. Valid while
+// the value it came from stays on the Lua stack.
+pub struct LuaText : Copy {
+  pub unowned var ptr: *const c_char = null
+  pub var len: usize = 0
+
+  pub fn bytes(self&): &[u8] => unsafe @slice(self.ptr as *const u8, self.len);
+  // strcmp(text, s) == 0
+  pub fn eq_str(self&, s: str): bool;
+  // A String of the text, U+FFFD for each byte that is not UTF-8.
+  pub fn owned(self&): String;
+  // The bytes [a, b) up to the first byte that is not ASCII, as a str: what
+  // from_chars reads of a hex field (it stops at the first non-digit).
+  pub fn ascii_run(self&, a: usize, b: usize): str;
+}
+
+fn LuaText::eq_str(self&, s: str): bool {
+  if (self.len != #s) {
+    return false;
+  }
+  let b = self.bytes();
+  for (let i in 0..#s) {
+    if (b[i] != s[i] as u8) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn LuaText::owned(self&): String => lossy_utf8(self.bytes());
+
+fn LuaText::ascii_run(self&, a: usize, b: usize): str {
+  let bytes = self.bytes();
+  var end = a;
+  while (end < b && end < #bytes && bytes[end] < 0x80) {
+    end += 1;
+  }
+  return unsafe @str((self.ptr + a) as *const c8, end - a);
+}
+
+// strlen
+pub unsafe fn c_strlen(p: *const c_char): usize {
+  var n: usize = 0;
+  unsafe {
+    while (@read((p as *const u8) + n) != 0) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+// The C string at p (cut at its NUL) as a LuaText; empty for null.
+pub unsafe fn text_at(p: *const c_char): LuaText {
+  if (p == null) {
+    return LuaText {};
+  }
+  return LuaText { ptr: p, len: unsafe c_strlen(p) };
+}
+
+// Bytes to a String, each byte that starts no valid UTF-8 sequence as U+FFFD.
+pub fn lossy_utf8(b: &[u8]): String {
+  var out = String();
+  var i: usize = 0;
+  while (i < #b) {
+    let c = b[i];
+    var n: usize = 0;
+    if (c < 0x80) {
+      n = 1;
+    } else if (c >= 0xC2 && c <= 0xDF) {
+      n = 2;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+      n = 3;
+    } else if (c >= 0xF0 && c <= 0xF4) {
+      n = 4;
+    }
+    if (n != 0 && i + n <= #b && out.push_utf8(b[i..i + n] as bytes)) {
+      i += n;
+    } else {
+      out.push_char(0xFFFD as c32);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// A copy of s up to its first NUL, NUL-terminated: the `const char*` a C++
+// caller passes for an aki `str`.
+pub fn c_string(s: str): String {
+  var n: usize = 0;
+  while (n < #s && s[n] != '\0') {
+    n += 1;
+  }
+  var out = String();
+  out.reserve(n + 1);
+  out.push_str(s[..n]);
+  out.push_c8('\0');
+  return out;
+}
+
+pub fn c_ptr(s&: String): *const c_char => unsafe (@ptr(s.as_str()) as *const c_char);
+
+// One native call: the Lua state, and the World and WidgetContext the
+// script runs with.
+pub struct LuaCall<'w, 'a> {
+  pub var world: &'w var World
+  pub var ctx: &'w var WidgetContext<'a>
+  unowned var l: *var LuaState
+  unowned var rt: *var u8
+
+  // For the runtime's C entry points only.
+  pub unsafe fn make<'w, 'a>(world: &'w var World, ctx: &'w var WidgetContext<'a>, l: *var LuaState, rt: *var u8): LuaCall<'w, 'a> =>
+    LuaCall { world, ctx, l, rt };
+
+  // The lua_State (ScriptRuntime::state() during the call). Calling a Lua
+  // function that can raise through it from aki code is undefined: raise
+  // through the checks here.
+  pub fn state(self&): *var LuaState => self.l;
+  // The runtime's private state (lua_runtime's built-ins).
+  pub fn runtime_ptr(self&): *var u8 => self.rt;
+
+  // lua_gettop
+  pub fn top(self&): i32 => unsafe lua_gettop(self.l);
+  // lua_type
+  pub fn type_of(self&, arg: i32): i32 => unsafe lua_type(self.l, arg);
+
+  // luaL_checkstring (a number converts in place, as lua_tolstring does).
+  pub fn check_text(self&, arg: i32): LuaText ! LuaRaise;
+  pub fn check_string(self&, arg: i32): String ! LuaRaise {
+    let t = try self.check_text(arg);
+    return t.owned();
+  }
+  // luaL_checknumber
+  pub fn check_number(self&, arg: i32): LuaNumber ! LuaRaise;
+  // luaL_checkinteger
+  pub fn check_integer(self&, arg: i32): LuaInteger ! LuaRaise;
+  // luaL_checktype
+  pub fn check_type(self&, arg: i32, t: i32): () ! LuaRaise {
+    if (unsafe lua_type(self.l, arg) != t) {
+      return fail LuaRaise::Type(arg, t);
+    }
+  }
+
+  // lua_tostring: none where the C++ gets nullptr.
+  pub fn to_text(self&, arg: i32): LuaText? {
+    let p = unsafe lua_tolstring(self.l, arg, null);
+    p == null ? return none;
+    return unsafe text_at(p);
+  }
+  pub fn to_string(self&, arg: i32): String? {
+    let t = self.to_text(arg) else {
+      return none;
+    };
+    return t.owned();
+  }
+  // lua_tonumber, lua_toboolean, lua_isnumber, lua_isboolean, lua_touserdata
+  pub fn to_number(self&, arg: i32): LuaNumber => unsafe lua_tonumberx(self.l, arg, null);
+  pub fn to_boolean(self&, arg: i32): bool => unsafe lua_toboolean(self.l, arg) != 0;
+  pub fn is_number(self&, arg: i32): bool => unsafe lua_isnumber(self.l, arg) != 0;
+  pub fn is_boolean(self&, arg: i32): bool => unsafe lua_type(self.l, arg) == 1;
+  pub fn to_userdata(self&, arg: i32): *var u8 => unsafe lua_touserdata(self.l, arg);
+
+  pub fn push_nil(var self&) {
+    unsafe lua_pushnil(self.l);
+  }
+  pub fn push_number(var self&, n: LuaNumber) {
+    unsafe lua_pushnumber(self.l, n);
+  }
+  pub fn push_integer(var self&, n: LuaInteger) {
+    unsafe lua_pushinteger(self.l, n);
+  }
+  pub fn push_boolean(var self&, b: bool) {
+    unsafe lua_pushboolean(self.l, b ? 1 : 0);
+  }
+  // lua_pushstring(L, s.c_str()): up to the first NUL.
+  pub fn push_string(var self&, s: str) {
+    unsafe push_c_text(self.l, s);
+  }
+  pub fn push_light_userdata(var self&, p: *var u8) {
+    unsafe lua_pushlightuserdata(self.l, p);
+  }
+}
+
+fn LuaCall::check_text(self&, arg: i32): LuaText ! LuaRaise {
+  var len: usize = 0;
+  let p = unsafe lua_tolstring(self.l, arg, &raw var len);
+  if (p == null) {
+    return fail LuaRaise::Type(arg, kLuaTString);
+  }
+  return unsafe text_at(p);
+}
+
+fn LuaCall::check_number(self&, arg: i32): LuaNumber ! LuaRaise {
+  var isnum: i32 = 0;
+  let d = unsafe lua_tonumberx(self.l, arg, &raw var isnum);
+  if (isnum == 0) {
+    return fail LuaRaise::Type(arg, kLuaTNumber);
+  }
+  return d;
+}
+
+fn LuaCall::check_integer(self&, arg: i32): LuaInteger ! LuaRaise {
+  var isnum: i32 = 0;
+  let d = unsafe lua_tointegerx(self.l, arg, &raw var isnum);
+  if (isnum == 0) {
+    if (unsafe lua_isnumber(self.l, arg) != 0) {
+      return fail LuaRaise::NoInteger(arg);
+    }
+    return fail LuaRaise::Type(arg, kLuaTNumber);
+  }
+  return d;
+}
+
+// lua_pushstring(L, s) for an aki str: the bytes up to the first NUL.
+pub unsafe fn push_c_text(l: *var LuaState, s: str) {
+  var n: usize = 0;
+  while (n < #s && s[n] != '\0') {
+    n += 1;
+  }
+  unsafe lua_pushlstring(l, @ptr(s) as *const c_char, n);
+}

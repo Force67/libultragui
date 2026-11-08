@@ -1,0 +1,165 @@
+// No C++ counterpart: the Lua 5.4 C API (lua.h, lauxlib.h, lualib.h) that
+// ugui/scripting/lua_*.cc use, declared by hand. The macros those headers
+// define over the API (lua_pop, lua_newtable, lua_tostring, lua_pcall,
+// luaL_checkstring, lua_upvalueindex, ...) are aki functions here with the
+// macro's name in snake_case and the same expansion.
+//
+// Lua reports errors with longjmp. Every function marked "raises" below can
+// leave its caller that way when called inside a protected call: only an
+// `extern(longjmp) fn` may call one (language ADR 0090), and such a function
+// holds no value that needs a drop. Outside a protected call an error calls
+// the panic function and aborts, as in the C++.
+//
+// lua_State is opaque. LUA_REGISTRYINDEX assumes the 32-bit `int` every
+// supported target has (LUAI_MAXSTACK 1000000, luaconf.h).
+
+module ultragui_lua::sys::lua;
+
+pub extern type LuaState;
+
+pub type LuaStatePtr = *var LuaState;
+// lua_CFunction
+pub type LuaCFunction = extern fn(*var LuaState): i32;
+// lua_Number, lua_Integer (LUA_FLOAT_DOUBLE, LUA_INT_LONGLONG: the defaults).
+pub type LuaNumber = f64;
+pub type LuaInteger = i64;
+// lua_KContext (intptr_t: i64 on the 64-bit targets the port builds for) and lua_KFunction.
+pub type LuaKContext = i64;   // 64-bit targets only
+pub type LuaKFunction = extern fn(*var LuaState, i32, i64): i32;
+
+pub comptime let kLuaMaxStack: i32 = 1000000;
+pub comptime let kLuaRegistryIndex: i32 = -kLuaMaxStack - 1000;
+
+// Thread status (lua.h).
+pub comptime let kLuaOk: i32 = 0;
+pub comptime let kLuaYield: i32 = 1;
+pub comptime let kLuaErrRun: i32 = 2;
+pub comptime let kLuaErrSyntax: i32 = 3;
+pub comptime let kLuaErrMem: i32 = 4;
+pub comptime let kLuaErrErr: i32 = 5;
+pub comptime let kLuaErrFile: i32 = 6;   // LUA_ERRFILE (lauxlib.h)
+
+// Basic types (lua.h).
+pub comptime let kLuaTNone: i32 = -1;
+pub comptime let kLuaTNil: i32 = 0;
+pub comptime let kLuaTBoolean: i32 = 1;
+pub comptime let kLuaTLightUserdata: i32 = 2;
+pub comptime let kLuaTNumber: i32 = 3;
+pub comptime let kLuaTString: i32 = 4;
+pub comptime let kLuaTTable: i32 = 5;
+pub comptime let kLuaTFunction: i32 = 6;
+pub comptime let kLuaTUserdata: i32 = 7;
+pub comptime let kLuaTThread: i32 = 8;
+
+pub comptime let kLuaRidxGlobals: LuaInteger = 2;
+pub comptime let kLuaMultRet: i32 = -1;
+pub comptime let kLuaNoRef: i32 = -2;
+pub comptime let kLuaRefNil: i32 = -1;
+
+// --- lua.h -----------------------------------------------------------------
+
+pub extern("lua_close") fn lua_close(l: *var LuaState): ();
+pub extern("lua_gettop") fn lua_gettop(l: *var LuaState): i32;
+pub extern("lua_settop") fn lua_settop(l: *var LuaState, idx: i32): ();   // raises (closes to-be-closed)
+pub extern("lua_pushvalue") fn lua_pushvalue(l: *var LuaState, idx: i32): ();
+
+pub extern("lua_isnumber") fn lua_isnumber(l: *var LuaState, idx: i32): i32;
+pub extern("lua_isstring") fn lua_isstring(l: *var LuaState, idx: i32): i32;
+pub extern("lua_type") fn lua_type(l: *var LuaState, idx: i32): i32;
+pub extern("lua_typename") fn lua_typename(l: *var LuaState, tp: i32): *const c_char;
+
+pub extern("lua_tonumberx") fn lua_tonumberx(l: *var LuaState, idx: i32, isnum: *var i32): LuaNumber;
+pub extern("lua_tointegerx") fn lua_tointegerx(l: *var LuaState, idx: i32, isnum: *var i32): LuaInteger;
+pub extern("lua_toboolean") fn lua_toboolean(l: *var LuaState, idx: i32): i32;
+pub extern("lua_tolstring") fn lua_tolstring(l: *var LuaState, idx: i32, len: *var usize): *const c_char;   // raises (memory)
+pub extern("lua_touserdata") fn lua_touserdata(l: *var LuaState, idx: i32): *var u8;
+
+pub extern("lua_pushnil") fn lua_pushnil(l: *var LuaState): ();
+pub extern("lua_pushnumber") fn lua_pushnumber(l: *var LuaState, n: LuaNumber): ();
+pub extern("lua_pushinteger") fn lua_pushinteger(l: *var LuaState, n: LuaInteger): ();
+pub extern("lua_pushlstring") fn lua_pushlstring(l: *var LuaState, s: *const c_char, len: usize): *const c_char;   // raises (memory)
+pub extern("lua_pushstring") fn lua_pushstring(l: *var LuaState, s: *const c_char): *const c_char;   // raises (memory)
+pub extern("lua_pushcclosure") fn lua_pushcclosure(l: *var LuaState, f: LuaCFunction, n: i32): ();   // raises (memory)
+pub extern("lua_pushboolean") fn lua_pushboolean(l: *var LuaState, b: i32): ();
+pub extern("lua_pushlightuserdata") fn lua_pushlightuserdata(l: *var LuaState, p: *var u8): ();
+
+pub extern("lua_getglobal") fn lua_getglobal(l: *var LuaState, name: *const c_char): i32;   // raises (metamethods)
+pub extern("lua_getfield") fn lua_getfield(l: *var LuaState, idx: i32, k: *const c_char): i32;   // raises
+pub extern("lua_rawgeti") fn lua_rawgeti(l: *var LuaState, idx: i32, n: LuaInteger): i32;
+pub extern("lua_createtable") fn lua_createtable(l: *var LuaState, narr: i32, nrec: i32): ();   // raises (memory)
+
+pub extern("lua_setglobal") fn lua_setglobal(l: *var LuaState, name: *const c_char): ();   // raises
+pub extern("lua_setfield") fn lua_setfield(l: *var LuaState, idx: i32, k: *const c_char): ();   // raises
+
+pub extern("lua_callk") fn lua_callk(l: *var LuaState, nargs: i32, nresults: i32, ctx: LuaKContext, k: LuaKFunction?): ();   // raises
+pub extern("lua_pcallk") fn lua_pcallk(l: *var LuaState, nargs: i32, nresults: i32, errfunc: i32, ctx: LuaKContext, k: LuaKFunction?): i32;
+pub extern("lua_error") fn lua_error(l: *var LuaState): i32;   // raises, always
+
+// lua_upvalueindex(i)
+pub fn lua_upvalueindex(i: i32): i32 => kLuaRegistryIndex - i;
+
+// lua_pop(L, n)
+pub unsafe fn lua_pop(l: *var LuaState, n: i32) {
+  unsafe lua_settop(l, -n - 1);
+}
+
+// lua_newtable(L)
+pub unsafe fn lua_newtable(l: *var LuaState) {
+  unsafe lua_createtable(l, 0, 0);
+}
+
+// lua_pushcfunction(L, f)
+pub unsafe fn lua_pushcfunction(l: *var LuaState, f: LuaCFunction) {
+  unsafe lua_pushcclosure(l, f, 0);
+}
+
+// lua_tostring(L, i)
+pub unsafe fn lua_tostring(l: *var LuaState, idx: i32): *const c_char => unsafe lua_tolstring(l, idx, null);
+
+// lua_tonumber(L, i)
+pub unsafe fn lua_tonumber(l: *var LuaState, idx: i32): LuaNumber => unsafe lua_tonumberx(l, idx, null);
+
+// lua_pcall(L, n, r, f)
+pub unsafe fn lua_pcall(l: *var LuaState, nargs: i32, nresults: i32, errfunc: i32): i32 =>
+  unsafe lua_pcallk(l, nargs, nresults, errfunc, 0, none);
+
+// lua_isfunction, lua_istable, lua_isboolean, lua_isnone (type tests).
+pub unsafe fn lua_isfunction(l: *var LuaState, idx: i32): bool => unsafe lua_type(l, idx) == kLuaTFunction;
+pub unsafe fn lua_istable(l: *var LuaState, idx: i32): bool => unsafe lua_type(l, idx) == kLuaTTable;
+pub unsafe fn lua_isboolean(l: *var LuaState, idx: i32): bool => unsafe lua_type(l, idx) == kLuaTBoolean;
+pub unsafe fn lua_isnone(l: *var LuaState, idx: i32): bool => unsafe lua_type(l, idx) == kLuaTNone;
+
+// --- lauxlib.h ---------------------------------------------------------------
+
+pub extern("luaL_newstate") fn luaL_newstate(): *var LuaState;
+pub extern("luaL_requiref") fn luaL_requiref(l: *var LuaState, modname: *const c_char, openf: LuaCFunction, glb: i32): ();   // raises
+pub extern("luaL_loadbufferx") fn luaL_loadbufferx(l: *var LuaState, buff: *const c_char, sz: usize, name: *const c_char, mode: *const c_char): i32;
+pub extern("luaL_loadfilex") fn luaL_loadfilex(l: *var LuaState, filename: *const c_char, mode: *const c_char): i32;
+pub extern("luaL_ref") fn luaL_ref(l: *var LuaState, t: i32): i32;   // raises (memory)
+pub extern("luaL_unref") fn luaL_unref(l: *var LuaState, t: i32, r: i32): ();
+
+pub extern("luaL_checklstring") fn luaL_checklstring(l: *var LuaState, arg: i32, len: *var usize): *const c_char;   // raises
+pub extern("luaL_checknumber") fn luaL_checknumber(l: *var LuaState, arg: i32): LuaNumber;   // raises
+pub extern("luaL_checkinteger") fn luaL_checkinteger(l: *var LuaState, arg: i32): LuaInteger;   // raises
+pub extern("luaL_checktype") fn luaL_checktype(l: *var LuaState, arg: i32, t: i32): ();   // raises
+pub extern("luaL_argerror") fn luaL_argerror(l: *var LuaState, arg: i32, extramsg: *const c_char): i32;   // raises, always
+pub extern("luaL_typeerror") fn luaL_typeerror(l: *var LuaState, arg: i32, tname: *const c_char): i32;   // raises, always
+
+// luaL_loadbuffer(L, s, sz, n)
+pub unsafe fn luaL_loadbuffer(l: *var LuaState, buff: *const c_char, sz: usize, name: *const c_char): i32 =>
+  unsafe luaL_loadbufferx(l, buff, sz, name, null);
+
+// luaL_loadfile(L, f)
+pub unsafe fn luaL_loadfile(l: *var LuaState, filename: *const c_char): i32 => unsafe luaL_loadfilex(l, filename, null);
+
+// --- lualib.h ----------------------------------------------------------------
+
+pub extern("luaopen_base") fn luaopen_base(l: *var LuaState): i32;
+pub extern("luaopen_table") fn luaopen_table(l: *var LuaState): i32;
+pub extern("luaopen_string") fn luaopen_string(l: *var LuaState): i32;
+pub extern("luaopen_math") fn luaopen_math(l: *var LuaState): i32;
+
+// LUA_TABLIBNAME, LUA_STRLIBNAME, LUA_MATHLIBNAME
+pub comptime let kLuaTabLibName: str = "table";
+pub comptime let kLuaStrLibName: str = "string";
+pub comptime let kLuaMathLibName: str = "math";

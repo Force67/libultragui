@@ -1,0 +1,316 @@
+// The examples' Lua (examples/showcase/logic.lua and scenes/*.lua,
+// examples/game_overlay/hud.lua) and tests/data/api.lua (every ugui.*
+// function, the audio and anim bindings, argument errors, timers, tweens,
+// Exec errors, ScheduleTimer, RegisterFunction) run against the World built
+// from the matching .ugui, step for step as tools/gen_lua_reference.cc runs
+// them on the C++ runtime. Everything printed (Lua's print, ugui.log, the
+// runtime's errors, the driver's widget-state dumps) goes to one file, as
+// unbuffered stdout and stderr interleaved; it must equal the C++'s
+// tests/data/expected/<scenario>.txt byte for byte.
+
+module scenes_test;
+
+import {List} from akikit::containers::list;
+import {swap} from akikit::algorithm;
+import {Box} from akikit::memory::box;
+import {String, from_str} from akikit::strings::string;
+import {WidgetId} from ultragui::core::handle;
+import {VectorAnimation} from ultragui::anim::vector_animation;
+import {AudioBackend, SoundHandle} from ultragui::audio::audio_backend;
+import {UguiBuilder} from ultragui::idl::builder;
+import {ParseError, UguiDocument, parse_ugui_file} from ultragui::idl::parser;
+import {DynTextureBackend} from ultragui::render::texture_backend;
+import {kDefaultChunkName} from ultragui::scripting::script_runtime;
+import {register_widget_tree} from ultragui::scripting::lua_widgets;
+import {CallbackEnv, F32Handler} from ultragui::widgets::callbacks;
+import {DropdownChangeHandler, kDropdownContent, dropdown_selected_text} from ultragui::widgets::dropdown;
+import {kSliderContent} from ultragui::widgets::slider;
+import {WidgetKind, click_widget, destroy_widget, kWidgetNode} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {LuaCall, LuaRaise} from ultragui_lua::lua_call;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {register_audio_lua} from ultragui_lua::lua_audio;
+import {register_anim_lua} from ultragui_lua::lua_anim;
+import {kLuaRegistryIndex, luaL_loadbuffer, luaL_ref} from ultragui_lua::sys::lua;
+import {Tracker, b01, bits, collect_named, outln, run_captured, setup} from support::harness;
+
+// RecordingAudio of the driver.
+struct RecordingAudio : AudioBackend {
+  pub var next: SoundHandle = 1
+  pub var master: f32 = 1.0
+
+  pub fn init(var self&): bool => true;
+  pub fn shutdown(var self&) {}
+  pub fn is_initialized(self&): bool => true;
+  pub fn play(var self&, path: str, volume: f32, looping: bool): SoundHandle {
+    let l: i32 = looping ? 1 : 0;
+    outln(f"audio play {path} {bits(volume):08x} {l} -> {self.next}");
+    let h = self.next;
+    self.next += 1;
+    return h;
+  }
+  pub fn load(var self&, path: str): SoundHandle {
+    outln(f"audio load {path} -> {self.next}");
+    let h = self.next;
+    self.next += 1;
+    return h;
+  }
+  pub fn play_loaded(var self&, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle {
+    let l: i32 = looping ? 1 : 0;
+    outln(f"audio play_loaded {preloaded} {bits(volume):08x} {l} -> {self.next}");
+    let h = self.next;
+    self.next += 1;
+    return h;
+  }
+  pub fn stop(var self&, handle: SoundHandle) {
+    outln(f"audio stop {handle}");
+  }
+  pub fn is_playing(self&, handle: SoundHandle): bool {
+    outln(f"audio is_playing {handle}");
+    return handle == 1;
+  }
+  pub fn set_volume(var self&, handle: SoundHandle, volume: f32) {
+    outln(f"audio set_volume {handle} {bits(volume):08x}");
+  }
+  pub fn set_pan(var self&, handle: SoundHandle, pan: f32) {
+    outln(f"audio set_pan {handle} {bits(pan):08x}");
+  }
+  pub fn set_pitch(var self&, handle: SoundHandle, pitch: f32) {
+    outln(f"audio set_pitch {handle} {bits(pitch):08x}");
+  }
+  pub fn seek(var self&, handle: SoundHandle, seconds: f32) {
+    outln(f"audio seek {handle} {bits(seconds):08x}");
+  }
+  pub fn set_master_volume(var self&, volume: f32) {
+    outln(f"audio set_master_volume {bits(volume):08x}");
+    self.master = volume;
+  }
+  pub fn master_volume(self&): f32 {
+    outln("audio master_volume");
+    return self.master;
+  }
+  pub fn stop_all(var self&) {
+    outln("audio stop_all");
+  }
+  pub fn pause_all(var self&) {
+    outln("audio pause_all");
+  }
+  pub fn resume_all(var self&) {
+    outln("audio resume_all");
+  }
+}
+
+static let kUpdateTimes: [f64; 10] = [0.05, 0.1, 0.2, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0];
+
+// Fires a slider's on_change with its value, as the C++ driver calls
+// `c->on_change(c->value)`.
+fn fire_slider(var world&: World, var ctx&: WidgetContext, w: WidgetId) {
+  var slot: F32Handler? = none;
+  var value: f32 = 0.0;
+  if (var c& = world.get_var(kSliderContent, w)) {
+    swap(c.on_change, slot);
+    value = c.value;
+  }
+  if (let handler = slot) {
+    {
+      var env = CallbackEnv { world, ctx };
+      handler(env, value);
+    }
+    if (var c& = world.get_var(kSliderContent, w)) {
+      if (c.on_change == none) {
+        c.on_change = handler;
+      }
+    }
+  }
+}
+
+fn fire_dropdown(var world&: World, var ctx&: WidgetContext, w: WidgetId) {
+  var slot: DropdownChangeHandler? = none;
+  var selected: i32 = 0;
+  if (var c& = world.get_var(kDropdownContent, w)) {
+    swap(c.on_change, slot);
+    selected = c.selected;
+  }
+  if (let handler = slot) {
+    let text = dropdown_selected_text(world, w);
+    {
+      var env = CallbackEnv { world, ctx };
+      handler(env, selected, text);
+    }
+    if (var c& = world.get_var(kDropdownContent, w)) {
+      if (c.on_change == none) {
+        c.on_change = handler;
+      }
+    }
+  }
+}
+
+fn run_scenario(ugui_path: str, lua_path: str, api: bool) {
+  var world = World();
+  var ctx = WidgetContext::detached();
+  var doc = UguiDocument {};
+  var errors: List<ParseError> = List();
+  if (!parse_ugui_file(ugui_path, doc, errors)) {
+    outln("parse failed");
+    return;
+  }
+  var builder = UguiBuilder();
+  let root = builder.build(world, ctx, doc);
+
+  var tracker = Tracker {};
+  collect_named(world, root, tracker.widgets);
+
+  var rt = LuaRuntime();
+  outln(f"init {b01(rt.init())}");
+
+  var audio = RecordingAudio {};
+  var anims: List<Box<VectorAnimation>> = List();
+  if (api) {
+    rt.register_function("add", own fn(call: &var LuaCall): i32 ! LuaRaise {
+      let a = try call.check_number(1);
+      let b = try call.check_number(2);
+      call.push_number(a + b);
+      return 1;
+    });
+    unsafe register_audio_lua(rt, &raw var audio);
+    let anims_ptr = unsafe (&raw var anims);
+    let rt_ptr = unsafe (&raw var rt);
+    register_anim_lua(rt,
+      own fn(call: &var LuaCall, path: String, w: u32, h: u32): *var VectorAnimation {
+        outln(f"loader {path} {w} {h}");
+        var a = Box(VectorAnimation());
+        let none_backend: (&var DynTextureBackend)? = none;
+        if (!a.get_var().load(none_backend, path, w, h)) {
+          return null;
+        }
+        let p = unsafe (a.as_ptr() as *var VectorAnimation);
+        unsafe (*anims_ptr).push(a);
+        return p;
+      },
+      own fn(call: &var LuaCall, name: String): WidgetId {
+        outln(f"find_widget {name}");
+        return unsafe (*rt_ptr).find_registered_widget(name);
+      });
+  }
+
+  register_widget_tree(rt, world, root);
+  rt.wire_change_handlers(world, root);
+  rt.sync_timer_clock(0.0);
+  // Lua 5.4 seeds math.random per state from the clock and an address.
+  rt.exec(world, ctx, "math.randomseed(42)", "seed");
+  if (api) {
+    let ok = rt.exec(world, ctx, "ANIM_PATH = '../../examples/anim_demo/anims/spinner.uganim'", "setup");
+    outln(f"setup {b01(ok)}");
+  }
+  let ok = rt.exec_file(world, ctx, lua_path);
+  outln(f"exec {b01(ok)}");
+  outln("-- state");
+  tracker.full(world);
+
+  let named = tracker.widgets.clone();
+  for (let w in named.iter()) {
+    let n& = world.get(kWidgetNode, w)!;
+    let name = n.name.clone();
+    let kind = n.kind;
+    if (kind == WidgetKind::Checkbox) {
+      outln(f"click {name}");
+      click_widget(world, ctx, w);
+    } else if (kind == WidgetKind::Slider) {
+      outln(f"change {name}");
+      fire_slider(world, ctx, w);
+    } else if (kind == WidgetKind::Dropdown) {
+      outln(f"change {name}");
+      fire_dropdown(world, ctx, w);
+    }
+    var handler = from_str("on_");
+    handler.push_str(name);
+    let r = rt.call_handler(world, ctx, handler, w);
+    outln(f"call {handler} {b01(r)}");
+    tracker.changes(world);
+  }
+
+  for (let t in kUpdateTimes) {
+    outln(f"update {t:.2f}");
+    rt.update_timers(world, ctx, t);
+    tracker.changes(world);
+  }
+
+  if (api) {
+    outln(f"exec bad {b01(rt.exec(world, ctx, "x(", "bad"))}");
+    outln(f"exec boom {b01(rt.exec(world, ctx, "error('boom')", "boom"))}");
+    outln(f"exec default {b01(rt.exec(world, ctx, "print('default chunk')", kDefaultChunkName))}");
+    outln(f"execfile missing {b01(rt.exec_file(world, ctx, "tests/data/missing.lua"))}");
+    let l = rt.state();
+    let src = "print('scheduled', ugui.get('box', 'opacity'))";
+    let r = unsafe {
+      luaL_loadbuffer(l, @ptr(src) as *const c_char, #src, c"sched");
+      luaL_ref(l, kLuaRegistryIndex)
+    };
+    rt.sync_timer_clock(4.0);
+    rt.schedule_timer(0.5, r);
+    rt.exec(world, ctx, "ugui.after(0.25, function() print('after at 4.25') end)", "a");
+    rt.exec(world, ctx, "ugui.tween('box', 'opacity', 1, 0, 1.0)", "t");
+    outln("update 4.25");
+    rt.update_timers(world, ctx, 4.25);
+    tracker.changes(world);
+    outln("update 4.50");
+    rt.update_timers(world, ctx, 4.5);
+    tracker.changes(world);
+    rt.exec(world, ctx, "ugui.after(1, function() print('never') end)", "n");
+    rt.clear_timers_and_tweens();
+    outln("update 9.00");
+    rt.update_timers(world, ctx, 9.0);
+    tracker.changes(world);
+    rt.unregister_widget(world, tracker.widgets[1]);
+    rt.exec(world, ctx, "print('after unregister', ugui.find('title'))", "u");
+    rt.exec(world, ctx, "saved = ugui; ugui = 5", "s");
+    rt.register_function("zzz", own fn(call: &var LuaCall): i32 ! LuaRaise {
+      return 0;
+    });
+    rt.exec(world, ctx, "ugui = saved; print('zzz', ugui.zzz)", "s2");
+  }
+
+  rt.clear_timers_and_tweens();
+  rt.shutdown();
+  destroy_widget(world, root);
+  let none_backend: (&var DynTextureBackend)? = none;
+  for (var a& in anims) {
+    a.get_var().unload(none_backend);
+  }
+}
+
+struct Scenario : Copy {
+  pub let name: str
+  pub let ugui: str
+  pub let lua: str
+  pub let api: bool
+}
+
+static let kScenarios: [Scenario; 11] = [
+  Scenario { name: "api", ugui: "tests/data/api.ugui", lua: "tests/data/api.lua", api: true },
+  Scenario { name: "showcase", ugui: "../../examples/showcase/ui.ugui", lua: "../../examples/showcase/logic.lua", api: false },
+  Scenario { name: "cosmos", ugui: "../../examples/showcase/scenes/cosmos.ugui", lua: "../../examples/showcase/scenes/cosmos.lua", api: false },
+  Scenario { name: "dashboard", ugui: "../../examples/showcase/scenes/dashboard.ugui", lua: "../../examples/showcase/scenes/dashboard.lua", api: false },
+  Scenario { name: "glass", ugui: "../../examples/showcase/scenes/glass.ugui", lua: "../../examples/showcase/scenes/glass.lua", api: false },
+  Scenario { name: "meridian", ugui: "../../examples/showcase/scenes/meridian.ugui", lua: "../../examples/showcase/scenes/meridian.lua", api: false },
+  Scenario { name: "neon", ugui: "../../examples/showcase/scenes/neon.ugui", lua: "../../examples/showcase/scenes/neon.lua", api: false },
+  Scenario { name: "nerv", ugui: "../../examples/showcase/scenes/nerv.ugui", lua: "../../examples/showcase/scenes/nerv.lua", api: false },
+  Scenario { name: "rpg_menu", ugui: "../../examples/showcase/scenes/rpg_menu.ugui", lua: "../../examples/showcase/scenes/rpg_menu.lua", api: false },
+  Scenario { name: "terminal", ugui: "../../examples/showcase/scenes/terminal.ugui", lua: "../../examples/showcase/scenes/terminal.lua", api: false },
+  Scenario { name: "game_overlay", ugui: "../../examples/game_overlay/hud.ugui", lua: "../../examples/game_overlay/hud.lua", api: false },
+];
+
+pub fn main(): i32 {
+  setup();
+  var failures: u32 = 0;
+  for (let s in kScenarios) {
+    let ok = run_captured(s.name, f"tests/data/expected/{s.name}.txt", fn() {
+      run_scenario(s.ugui, s.lua, s.api);
+    });
+    if (!ok) {
+      failures += 1;
+    }
+  }
+  return failures == 0 ? 0 : 1;
+}

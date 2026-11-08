@@ -1,0 +1,118 @@
+// ugui/scripting/lua_audio.{h,cc}: the audio Lua bindings (ugui.play_sound,
+// ugui.stop_sound, ...).
+//
+// Shape difference from the C++ (behavior is the C++'s): RegisterAudioLua
+// captures an `AudioBackend&`; here the natives capture the backend's
+// address, so `register_audio_lua` is unsafe: the backend must stay at that
+// address while the runtime's Lua state is open (UIContext's AudioBackendBox,
+// as the C++ `*audio_`). Any AudioBackend type works (AudioBackendBox,
+// DynAudioBackend, a concrete engine).
+
+module ultragui_lua::lua_audio;
+
+import {AudioBackend, SoundHandle} from ultragui::audio::audio_backend;
+import {LuaCall, LuaRaise} from ultragui_lua::lua_call;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+
+// lua_isnumber(L, i) ? (f32)lua_tonumber(L, i) : 1.0f
+fn opt_volume(call&: LuaCall, arg: i32): f32 => call.is_number(arg) ? call.to_number(arg) as f32 : 1.0;
+
+// lua_isboolean(L, i) ? lua_toboolean(L, i) : false
+fn opt_loop(call&: LuaCall, arg: i32): bool => call.is_boolean(arg) ? call.to_boolean(arg) : false;
+
+// RegisterAudioLua
+pub unsafe fn register_audio_lua<A: AudioBackend>(var rt&: LuaRuntime, audio: *var A) {
+  // ugui.play_sound(path [, volume [, loop]]) -> handle
+  rt.register_function("play_sound", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let path = try call.check_string(1);
+    let volume = opt_volume(call, 2);
+    let looping = opt_loop(call, 3);
+    let h = unsafe (*audio).play(path, volume, looping);
+    call.push_integer(h as i64);
+    return 1;
+  });
+
+  // ugui.load_sound(path) -> handle
+  rt.register_function("load_sound", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let path = try call.check_string(1);
+    let h = unsafe (*audio).load(path);
+    call.push_integer(h as i64);
+    return 1;
+  });
+
+  // ugui.PlayLoaded(handle [, volume [, loop]]) -> new handle
+  rt.register_function("play_loaded", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let src = (try call.check_integer(1)) as SoundHandle;
+    let volume = opt_volume(call, 2);
+    let looping = opt_loop(call, 3);
+    let h = unsafe (*audio).play_loaded(src, volume, looping);
+    call.push_integer(h as i64);
+    return 1;
+  });
+
+  // ugui.stop_sound(handle)
+  rt.register_function("stop_sound", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let h = (try call.check_integer(1)) as SoundHandle;
+    unsafe (*audio).stop(h);
+    return 0;
+  });
+
+  // ugui.sound_playing(handle) -> bool
+  rt.register_function("sound_playing", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let h = (try call.check_integer(1)) as SoundHandle;
+    call.push_boolean(unsafe (*audio).is_playing(h));
+    return 1;
+  });
+
+  // ugui.sound_volume(handle, volume)
+  rt.register_function("sound_volume", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let h = (try call.check_integer(1)) as SoundHandle;
+    let vol = (try call.check_number(2)) as f32;
+    unsafe (*audio).set_volume(h, vol);
+    return 0;
+  });
+
+  // ugui.sound_pan(handle, pan)
+  rt.register_function("sound_pan", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let h = (try call.check_integer(1)) as SoundHandle;
+    let pan = (try call.check_number(2)) as f32;
+    unsafe (*audio).set_pan(h, pan);
+    return 0;
+  });
+
+  // ugui.sound_pitch(handle, pitch)
+  rt.register_function("sound_pitch", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let h = (try call.check_integer(1)) as SoundHandle;
+    let pitch = (try call.check_number(2)) as f32;
+    unsafe (*audio).set_pitch(h, pitch);
+    return 0;
+  });
+
+  // ugui.master_volume(volume) or ugui.master_volume() -> number
+  rt.register_function("master_volume", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    if (call.top() >= 1 && call.is_number(1)) {
+      unsafe (*audio).set_master_volume(call.to_number(1) as f32);
+      return 0;
+    }
+    call.push_number(unsafe (*audio).master_volume() as f64);
+    return 1;
+  });
+
+  // ugui.stop_all_sounds()
+  rt.register_function("stop_all_sounds", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    unsafe (*audio).stop_all();
+    return 0;
+  });
+
+  // ugui.pause_all_sounds()
+  rt.register_function("pause_all_sounds", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    unsafe (*audio).pause_all();
+    return 0;
+  });
+
+  // ugui.resume_all_sounds()
+  rt.register_function("resume_all_sounds", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    unsafe (*audio).resume_all();
+    return 0;
+  });
+}

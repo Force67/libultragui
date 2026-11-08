@@ -1,0 +1,210 @@
+// A copy of ultragui_lua/tests/support/harness.aki (keep them identical):
+// what tools/gen_lua_reference.cc prints about widgets, printed the same
+// way (C's unbuffered stdout, so Lua's print, the runtime's stderr lines and
+// these interleave in program order), and the capture of one scenario's
+// output into a file compared byte for byte with the C++'s.
+
+module support::harness;
+
+import {List} from akikit::containers::list;
+import {String, from_str} from akikit::strings::string;
+import {eprintln} from akikit::logging;
+import {read_bytes} from akikit::filesystem::file_util;
+import {WidgetId} from ultragui::core::handle;
+import {Color} from ultragui::core::color;
+import {kAnimStyle} from ultragui::widgets::components;
+import {kButtonContent} from ultragui::widgets::button;
+import {is_checked} from ultragui::widgets::checkbox;
+import {kDropdownContent, dropdown_selected_text} from ultragui::widgets::dropdown;
+import {kImageContent} from ultragui::widgets::image;
+import {kSliderContent} from ultragui::widgets::slider;
+import {kTextContent} from ultragui::widgets::text;
+import {WidgetKind, kHierarchy, kStyleC, kWidgetNode} from ultragui::widgets::widget;
+import {World} from ultragui::widgets::widget_registry;
+import {lossy_utf8} from ultragui_lua::lua_call;
+
+extern let stdout: *var u8;
+extern fn setvbuf(stream: *var u8, buf: *var u8, mode: i32, size: usize): i32;
+extern fn fwrite(p: *const u8, size: usize, n: usize, stream: *var u8): usize;
+extern fn dup(fd: i32): i32;
+extern fn dup2(fd: i32, fd2: i32): i32;
+extern fn close(fd: i32): i32;
+extern fn open(path: *const c_char, flags: i32, ...): i32;
+extern fn chdir(path: *const c_char): i32;
+
+comptime let kIoNbf: i32 = 2;           // _IONBF
+comptime let kOpenFlags: i32 = 0x241;   // O_WRONLY | O_CREAT | O_TRUNC (Linux)
+
+// printf("%s", s) on C's (unbuffered) stdout.
+pub fn out(s: str) {
+  unsafe fwrite(@ptr(s) as *const u8, 1, #s, stdout);
+}
+
+pub fn outln(s: str) {
+  out(s);
+  out("\n");
+}
+
+pub fn bits(v: f32): u32 => @bit_cast(u32, v);
+
+pub fn color_text(c: Color): String =>
+  from_str(f"{bits(c.r):08x},{bits(c.g):08x},{bits(c.b):08x},{bits(c.a):08x}");
+
+// DumpLine of the driver.
+pub fn dump_line(world&: World, w: WidgetId): String {
+  let n& = world.get(kWidgetNode, w)!;
+  let s = world.get(kStyleC, w)!.style;
+  let anim: i32 = world.has(kAnimStyle, w) ? 1 : 0;
+  var line = from_str(f"{n.name} k={n.kind as i32} op={bits(s.opacity):08x} vis={s.visibility as i32} fs={bits(s.font_size):08x} ");
+  line.push_str(f"cr={bits(s.corner_radius):08x},{bits(s.corner_radius_tl):08x},{bits(s.corner_radius_tr):08x},{bits(s.corner_radius_br):08x},{bits(s.corner_radius_bl):08x} ");
+  line.push_str(f"sb={bits(s.shadow.blur):08x} cur={s.cursor as i32} w={s.width.unit as i32}:{bits(s.width.value):08x} h={s.height.unit as i32}:{bits(s.height.value):08x} anim={anim}");
+  line.push_str(" tc=");
+  line.push_str(color_text(s.text_color));
+  line.push_str(" bg=");
+  line.push_str(color_text(s.background));
+  line.push_str(" sc=");
+  line.push_str(color_text(s.shadow.color));
+  line.push_str(" tsc=");
+  line.push_str(color_text(s.text_shadow_color));
+  if (let t& = world.get(kTextContent, w)) {
+    line.push_str(f" txt=\"{t.text}\"");
+  }
+  if (let b& = world.get(kButtonContent, w)) {
+    line.push_str(f" lbl=\"{b.label}\"");
+  }
+  if (n.kind == WidgetKind::Checkbox) {
+    line.push_str(is_checked(world, w) ? " chk=1" : " chk=0");
+  }
+  if (let d& = world.get(kDropdownContent, w)) {
+    line.push_str(f" sel={d.selected} \"{dropdown_selected_text(world, w)}\"");
+  }
+  if (let c& = world.get(kSliderContent, w)) {
+    line.push_str(f" val={bits(c.value):08x},{bits(c.min):08x},{bits(c.max):08x}");
+  }
+  if (let c& = world.get(kImageContent, w)) {
+    line.push_str(f" img={c.texture},{bits(c.natural_w):08x},{bits(c.natural_h):08x}");
+  }
+  return line;
+}
+
+pub fn collect_named(world&: World, w: WidgetId, var out_list&: List<WidgetId>) {
+  if (!w.valid()) {
+    return;
+  }
+  let n& = world.get(kWidgetNode, w) else {
+    return;
+  };
+  if (!n.name.is_empty()) {
+    out_list.push(w);
+  }
+  let kids = world.get(kHierarchy, w)!.children.clone();
+  for (let c in kids.iter()) {
+    collect_named(world, c, out_list);
+  }
+}
+
+pub struct Tracker {
+  pub var widgets: List<WidgetId> = List()
+  pub var last: List<String> = List()
+
+  pub fn full(var self&, world&: World) {
+    self.last.clear();
+    for (let w in self.widgets.iter()) {
+      let line = dump_line(world, w);
+      out("  ");
+      outln(line);
+      self.last.push(line);
+    }
+  }
+
+  pub fn changes(var self&, world&: World) {
+    for (let i in 0..self.widgets.len()) {
+      let line = dump_line(world, self.widgets[i]);
+      if (line != self.last[i]) {
+        out("  ");
+        outln(line);
+        self.last[i] = line;
+      }
+    }
+  }
+}
+
+pub fn b01(b: bool): i32 => b ? 1 : 0;
+
+// The first line where `got` and `want` differ, both sides, or none.
+fn first_difference(got: &[byte], want: &[byte]): String? {
+  var line: usize = 1;
+  var start: usize = 0;
+  var i: usize = 0;
+  while (i < #got && i < #want && got[i] == want[i]) {
+    if (got[i] == 10) {
+      line += 1;
+      start = i + 1;
+    }
+    i += 1;
+  }
+  if (i == #got && i == #want) {
+    return none;
+  }
+  var ge = start;
+  while (ge < #got && got[ge] != 10) {
+    ge += 1;
+  }
+  var we = start;
+  while (we < #want && want[we] != 10) {
+    we += 1;
+  }
+  let g = lossy_utf8(got[start..ge] as &[u8]);
+  let w = lossy_utf8(want[start..we] as &[u8]);
+  return from_str(f"line {line}:\n    got:  {g}\n    want: {w}");
+}
+
+// s with a NUL appended.
+pub fn c_text_of(s: str): String {
+  var out_s = from_str(s);
+  out_s.push_c8('\0');
+  return out_s;
+}
+
+// Enter the package directory (the scenarios' paths are relative to it) and
+// make C's stdout unbuffered, as the C++ driver does.
+pub fn setup() {
+  let dir = c_text_of(@package_dir());
+  unsafe chdir(@ptr(dir.as_str()) as *const c_char);
+  unsafe setvbuf(stdout, null, kIoNbf, 0);
+}
+
+// Runs `body` with stdout and stderr in one file, then compares the file
+// with `expected`; reports to the real stderr. True when equal.
+pub fn run_captured(name: str, expected: str, body: fn(): ()): bool {
+  let saved_out = unsafe dup(1);
+  let saved_err = unsafe dup(2);
+  let path = c_text_of(f"/tmp/ultragui_lua_test_{name}.txt");
+  let fd = unsafe open(@ptr(path.as_str()) as *const c_char, kOpenFlags, 420i32);
+  unsafe {
+    dup2(fd, 1);
+    dup2(fd, 2);
+    close(fd);
+  }
+  body();
+  unsafe {
+    dup2(saved_out, 1);
+    dup2(saved_err, 2);
+    close(saved_out);
+    close(saved_err);
+  }
+  let got = read_bytes(path.as_str()[..#path - 1]) else {
+    eprintln(f"FAILED: {name}: cannot read the output");
+    return false;
+  };
+  let want = read_bytes(expected) else {
+    eprintln(f"FAILED: {name}: cannot read {expected}");
+    return false;
+  };
+  if (let d = first_difference(got.as_slice(), want.as_slice())) {
+    eprintln(f"FAILED: {name}: output differs from the C++ at {d}");
+    return false;
+  }
+  eprintln(f"ok {name}");
+  return true;
+}
