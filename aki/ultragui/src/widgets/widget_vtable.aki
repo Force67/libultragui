@@ -32,13 +32,17 @@ import {WidgetKind} from ultragui::widgets::widget;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
 import {button_click, button_draw, button_measure} from ultragui::widgets::button;
+import {checkbox_click, checkbox_draw, checkbox_measure} from ultragui::widgets::checkbox;
 import {image_draw, image_measure} from ultragui::widgets::image;
+import {radio_click, radio_draw, radio_measure} from ultragui::widgets::radio;
 import {text_draw, text_measure} from ultragui::widgets::text;
+import {toggle_click, toggle_draw, toggle_measure, toggle_update} from ultragui::widgets::toggle;
 
 // WidgetVTable::custom_paint: paint_widget draws nothing itself and `draw`
 // paints the whole widget (kinds that fully own their visuals: slider,
 // toggle, scroll view).
 pub fn custom_paint(kind: WidgetKind): bool => match (kind) {
+  WidgetKind::Toggle => true,
   _ => false,
 };
 
@@ -57,6 +61,18 @@ pub fn vt_draw(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: 
       button_draw(world, ctx, e, renderer);
       true
     },
+    WidgetKind::Checkbox => {
+      checkbox_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Radio => {
+      radio_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Toggle => {
+      toggle_draw(world, ctx, e, renderer);
+      true
+    },
     _ => false,
   };
 
@@ -65,6 +81,9 @@ pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, 
   WidgetKind::Image => image_measure(world, ctx, e),
   WidgetKind::Text => text_measure(world, ctx, e),
   WidgetKind::Button => button_measure(world, ctx, e),
+  WidgetKind::Checkbox => checkbox_measure(world, ctx, e),
+  WidgetKind::Radio => radio_measure(world, ctx, e),
+  WidgetKind::Toggle => toggle_measure(world, ctx, e),
   _ => none,
 };
 
@@ -78,12 +97,19 @@ pub fn vt_hit_test(kind: WidgetKind, var world&: World, var ctx&: WidgetContext,
 // WidgetVTable::on_click
 pub fn vt_on_click(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): bool? => match (kind) {
   WidgetKind::Button => button_click(world, ctx, e),
+  WidgetKind::Checkbox => checkbox_click(world, ctx, e),
+  WidgetKind::Radio => radio_click(world, ctx, e),
+  WidgetKind::Toggle => toggle_click(world, ctx, e),
   _ => none,
 };
 
 // WidgetVTable::on_update. False when the kind has no entry.
 pub fn vt_on_update(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, dt: f64): bool =>
   match (kind) {
+    WidgetKind::Toggle => {
+      toggle_update(world, ctx, e, dt);
+      true
+    },
     _ => false,
   };
 
