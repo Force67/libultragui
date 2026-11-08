@@ -1,18 +1,30 @@
-// STUB (task A1): the part of ugui/widgets/scroll_view.{h,cc} that paint,
-// layout_tree, input and widget::input_to_layout_point call. The widget-kinds
-// port owns this module and replaces the file wholesale; the names here are
-// the ones it uses (ScrollViewContent, kScrollViewContent, scroll_offset).
+// ugui/widgets/scroll_view.{h,cc}: a scrollable container
+// (WidgetKind::ScrollView), a generic widget carrying a ScrollViewContent
+// (offset, momentum velocity, measured content size, deceleration). Content
+// may exceed the viewport; the view clips and translates its children.
+// Behaviour: the ScrollView arms in widgets::widget_vtable (custom paint:
+// draw + layout + scroll + hit-test + update).
+//
+// Shape difference: the World comes first in every function (the C++
+// ScrollOffset already took it).
 
 module ultragui::widgets::scroll_view;
 
+import {to_list} from akikit::containers::list;
+import {max_f32, clamp_min_max_f32} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
 import {ComponentKey} from ultragui::core::component_store;
-import {WidgetId} from ultragui::core::handle;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
 import {Vec2} from ultragui::core::math;
-import {WidgetKind, kWidgetNode} from ultragui::widgets::widget;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {WidgetKind, computed_style, hit_test, kHierarchy, kTransform, kWidgetNode, mark_dirty, mark_paint_dirty} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
 
-// Data for a scrollable container (WidgetKind::ScrollView).
-pub struct ScrollViewContent : Copy {
+// Data for a scroll view.
+pub struct ScrollViewContent : Copy, Equal {
   pub var offset: Vec2 = Vec2::zero()
   pub var velocity: Vec2 = Vec2::zero()
   pub var content_size: Vec2 = Vec2::zero()
@@ -21,13 +33,191 @@ pub struct ScrollViewContent : Copy {
 
 pub static let kScrollViewContent: ComponentKey<ScrollViewContent> = ComponentKey();
 
-// ScrollOffset: the scroll offset of a scroll view, or (0,0) if `e` is not one.
+// ScrollViewScroll: apply at once for a zero-latency feel, then kick the
+// velocity for momentum.
+pub fn scroll_view_scroll(var world&: World, var ctx&: WidgetContext, e: WidgetId, delta: Vec2): bool {
+  let c& = world.get_var(kScrollViewContent, e) else {
+    return false;
+  };
+  c.offset = c.offset + delta;
+  c.velocity = delta.scale(6.0);
+  mark_dirty(world, e);
+  return true;
+}
+
+// ScrollViewLayout: measure the content from the children's rects and clamp
+// the offset to it.
+pub fn scroll_view_layout(var world&: World, var ctx&: WidgetContext, e: WidgetId, rect: Rect, content_rect: Rect) {
+  if (!world.has(kScrollViewContent, e)) {
+    return;
+  }
+
+  // Total content size from children.
+  var size = Vec2 { x: 0.0, y: 0.0 };
+  for (let child in world.get(kHierarchy, e)!.children) {
+    let cr = world.get(kTransform, child)!.rect;
+    size.x = max_f32(size.x, cr.x + cr.w - content_rect.x);
+    size.y = max_f32(size.y, cr.y + cr.h - content_rect.y);
+  }
+
+  var c& = world.get_var(kScrollViewContent, e)!;
+  c.content_size = size;
+  let max_scroll_x = max_f32(0.0, c.content_size.x - content_rect.w);
+  let max_scroll_y = max_f32(0.0, c.content_size.y - content_rect.h);
+  c.offset.x = clamp_min_max_f32(c.offset.x, 0.0, max_scroll_x);
+  c.offset.y = clamp_min_max_f32(c.offset.y, 0.0, max_scroll_y);
+}
+
+// ScrollViewHitTest: children are drawn translated by the offset, so input
+// is translated back into their layout space.
+pub fn scroll_view_hit_test(var world&: World, var ctx&: WidgetContext, e: WidgetId, point: Vec2): WidgetId {
+  let rect = world.get(kTransform, e)!.rect;
+  let content_rect = world.get(kTransform, e)!.content_rect;
+  if (!rect.contains(point)) {
+    return kNullWidget;
+  }
+  var offset = Vec2::zero();
+  if (let c& = world.get(kScrollViewContent, e)) {
+    offset = c.offset;
+  }
+
+  if (content_rect.contains(point)) {
+    let child_point = point + offset;
+    let kids = to_list(world.get(kHierarchy, e)!.children.as_slice());
+    var i = kids.len();
+    while (i > 0) {
+      i -= 1;
+      let hit = hit_test(world, ctx, kids[i], child_point);
+      if (hit.valid()) {
+        return hit;
+      }
+    }
+  }
+  return e;
+}
+
+// ScrollViewUpdate: momentum, decayed per 60 fps frame so it feels the same
+// at any frame rate, clamped, and stopped at the edges.
+pub fn scroll_view_update(var world&: World, var ctx&: WidgetContext, e: WidgetId, dt: f64) {
+  let content = world.get(kTransform, e)!.content_rect;
+  let c& = world.get_var(kScrollViewContent, e) else {
+    return;
+  };
+
+  if (c.velocity.length_sq() > 0.5) {
+    // Vec2 operator* then operator+=: the product rounds on its own.
+    let step = c.velocity.scale(dt as f32);
+    c.offset = c.offset + step;
+
+    let decay = @pow(c.deceleration, (dt as f32) * 60.0);
+    c.velocity = c.velocity.scale(decay);
+
+    let max_scroll_x = max_f32(0.0, c.content_size.x - content.w);
+    let max_scroll_y = max_f32(0.0, c.content_size.y - content.h);
+    c.offset.x = clamp_min_max_f32(c.offset.x, 0.0, max_scroll_x);
+    c.offset.y = clamp_min_max_f32(c.offset.y, 0.0, max_scroll_y);
+
+    // Kill velocity at the edges to prevent jitter.
+    if (c.offset.y <= 0.0 || c.offset.y >= max_scroll_y) {
+      c.velocity.y = 0.0;
+    }
+    if (c.offset.x <= 0.0 || c.offset.x >= max_scroll_x) {
+      c.velocity.x = 0.0;
+    }
+
+    mark_paint_dirty(world, e);
+  } else {
+    c.velocity = Vec2::zero();
+  }
+}
+
+// ScrollViewDraw: the whole widget (custom paint): background and the
+// scrollbar indicator. As in the C++, the style is not ui-scaled here.
+pub fn scroll_view_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  let s = computed_style(world, e);
+  let rect = world.get(kTransform, e)!.rect;
+  let content = world.get(kTransform, e)!.content_rect;
+
+  if (s.background.a > 0.0) {
+    let radii = (s.corner_radius_tl > 0.0 || s.corner_radius_tr > 0.0 || s.corner_radius_br > 0.0 ||
+                 s.corner_radius_bl > 0.0) ?
+      pack_radii(s.corner_radius_tl, s.corner_radius_tr, s.corner_radius_br, s.corner_radius_bl) :
+      pack_radii_uniform(s.corner_radius);
+    renderer.draw_rect(rect, s.background.with_alpha(s.background.a * s.opacity), radii);
+  }
+
+  renderer.push_scissor(content);
+
+  // Scrollbar indicator.
+  var content_size = Vec2::zero();
+  var offset = Vec2::zero();
+  if (let c& = world.get(kScrollViewContent, e)) {
+    content_size = c.content_size;
+    offset = c.offset;
+  }
+  if (content_size.y > content.h) {
+    let visible_ratio = content.h / content_size.y;
+    let bar_height = max_f32(content.h * visible_ratio, 20.0);
+    let scroll_ratio = offset.y / (content_size.y - content.h);
+    let bar_y = content.y + scroll_ratio * (content.h - bar_height);
+
+    renderer.draw_rect(Rect { x: content.right() - 4.0, y: bar_y, w: 4.0, h: bar_height }, Color::rgba(1.0, 1.0, 1.0, 0.3),
+                       pack_radii_uniform(2.0));
+  }
+
+  renderer.pop_scissor();
+}
+
+// CreateScrollView: a widget tagged ScrollView with a ScrollViewContent.
+pub fn create_scroll_view(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::ScrollView;
+  world.add(kScrollViewContent, e, ScrollViewContent {});
+  return e;
+}
+
+fn is_scroll_view(world&: World, e: WidgetId): bool =>
+  world.alive(e) && world.get(kWidgetNode, e)!.kind == WidgetKind::ScrollView;
+
+// ScrollOffset: the scroll offset, (0,0) if `e` is not a scroll view. The
+// paint and layout passes translate descendants by it.
 pub fn scroll_offset(world&: World, e: WidgetId): Vec2 {
-  if (!world.alive(e) || world.get(kWidgetNode, e)!.kind != WidgetKind::ScrollView) {
+  if (!is_scroll_view(world, e)) {
     return Vec2::zero();
   }
   if (let c& = world.get(kScrollViewContent, e)) {
     return c.offset;
+  }
+  return Vec2::zero();
+}
+
+// SetScrollOffset. No-op if `e` is not a scroll view.
+pub fn set_scroll_offset(var world&: World, e: WidgetId, offset: Vec2) {
+  if (!is_scroll_view(world, e)) {
+    return;
+  }
+  world.get_or_add(kScrollViewContent, e, ScrollViewContent {}).offset = offset;
+  mark_dirty(world, e);
+}
+
+// ScrollBy: add to the scroll offset. No-op if `e` is not a scroll view.
+pub fn scroll_by(var world&: World, e: WidgetId, delta: Vec2) {
+  if (!is_scroll_view(world, e)) {
+    return;
+  }
+  var c& = world.get_or_add(kScrollViewContent, e, ScrollViewContent {});
+  c.offset = c.offset + delta;
+  mark_dirty(world, e);
+}
+
+// ScrollContentSize: the measured content size, (0,0) if `e` is not a
+// scroll view.
+pub fn scroll_content_size(world&: World, e: WidgetId): Vec2 {
+  if (!is_scroll_view(world, e)) {
+    return Vec2::zero();
+  }
+  if (let c& = world.get(kScrollViewContent, e)) {
+    return c.content_size;
   }
   return Vec2::zero();
 }

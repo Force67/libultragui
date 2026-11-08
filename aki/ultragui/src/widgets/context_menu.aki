@@ -1,0 +1,330 @@
+// ugui/widgets/context_menu.{h,cc}: a context menu (WidgetKind::ContextMenu),
+// a generic widget carrying a ContextMenuContent (items, visibility, hover),
+// shown as an overlay at the cursor and dismissed on an outside click or an
+// item pick. Behaviour: the ContextMenu arms in widgets::widget_vtable (draw
+// + measure + click + dismiss).
+//
+// Shape differences: the World comes first; ShowContextMenuAt and
+// HideContextMenu take the World, the WidgetContext and the overlay list
+// where the C++ takes a UIContext* (widgets::overlays says why). An item's
+// action is a widgets::callbacks::Action.
+
+module ultragui::widgets::context_menu;
+
+import {swap} from akikit::algorithm;
+import {List} from akikit::containers::list;
+import {String, from_str} from akikit::strings::string;
+import {max_f32} from ultragui::core::algorithm;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {EdgeInsets, Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii_uniform} from ultragui::render::vertex;
+import {Length} from ultragui::style::property_types;
+import {kInvalidFont} from ultragui::text::text_engine;
+import {Action, CallbackEnv} from ultragui::widgets::callbacks;
+import {Overlays} from ultragui::widgets::overlays;
+import {
+  WidgetKind, computed_style, input_to_layout_point, kStyleC, kTransform, kWidgetNode, mark_dirty, ui_scale,
+  widget_context_of,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// A single entry in a context menu. A separator is a thin divider with no
+// label or action.
+pub struct ContextMenuItem {
+  pub var label: String = String()
+  pub var action: Action? = none
+  pub var separator: bool = false
+}
+
+// Data for a context-menu widget.
+pub struct ContextMenuContent {
+  pub var items: List<ContextMenuItem> = List()
+  pub var visible: bool = false
+  pub var hover_index: i32 = -1
+}
+
+pub static let kContextMenuContent: ComponentKey<ContextMenuContent> = ComponentKey();
+
+comptime let kRowHPadding: f32 = 16.0;
+comptime let kSeparatorHeight: f32 = 1.0;
+comptime let kSeparatorPad: f32 = 4.0;
+
+// ContextMenuMeasure: the widest label plus row padding; rows and
+// separators stacked.
+pub fn context_menu_measure(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  let st& = world.get(kStyleC, e)!.style;
+  let sc = ui_scale(world, ctx, e);
+  let font_size = (st.font_size > 0.0 ? st.font_size : 14.0) * sc;
+  let letter_sp = st.letter_spacing * sc;
+  let row_height = font_size * 1.8;
+
+  var max_width: f32 = 0.0;
+  var total_height: f32 = 0.0;
+
+  if (let c& = world.get(kContextMenuContent, e)) {
+    // effective_font / text_engine: both come from the context.
+    var fh = kInvalidFont;
+    if (let wc& = widget_context_of(world, ctx, e)) {
+      fh = wc.default_font;
+    }
+    for (let item in c.items) {
+      if (item.separator) {
+        total_height += kSeparatorHeight + kSeparatorPad * 2.0;
+      } else {
+        total_height += row_height;
+        if (fh != kInvalidFont && !item.label.is_empty()) {
+          if (let wc& = widget_context_of(world, ctx, e)) {
+            if (var te& = wc.text_engine) {
+              let run = te.shape(fh, item.label.as_str(), font_size, letter_sp, st.line_height_multiplier);
+              max_width = max_f32(max_width, run.total_advance);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return (max_width + kRowHPadding * 2.0 + st.padding.horizontal(), total_height + st.padding.vertical());
+}
+
+// The height of item i: a separator's or a row's.
+fn item_height(item&: ContextMenuItem, row_height: f32): f32 =>
+  item.separator ? (kSeparatorHeight + kSeparatorPad * 2.0) : row_height;
+
+// The non-separator item under `mouse`, walking the rows from `top`.
+fn item_at(c&: ContextMenuContent, mouse: Vec2, rect: Rect, top: f32, row_height: f32): i32? {
+  var y = top;
+  let n = c.items.len() as i32;
+  for (let i in 0..n) {
+    let item& = c.items[i as usize];
+    let item_h = item_height(item, row_height);
+    if (!item.separator && mouse.y >= y && mouse.y < y + item_h && mouse.x >= rect.x && mouse.x <= rect.x + rect.w) {
+      return i;
+    }
+    y += item_h;
+  }
+  return none;
+}
+
+// The pointer in e's layout space, none without a context platform.
+fn layout_mouse(var world&: World, var ctx&: WidgetContext, e: WidgetId): Vec2? {
+  if (widget_context_of(world, ctx, e) == none) {
+    return none;
+  }
+  var mouse: Vec2? = none;
+  if (var p& = ctx.platform) {
+    mouse = p.input_queue().mouse_pos;
+  }
+  let m = mouse else {
+    return none;
+  };
+  return input_to_layout_point(world, e, m);
+}
+
+// ContextMenuDraw. PaintWidget already drew background / shadow / border.
+pub fn context_menu_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  if (!world.has(kContextMenuContent, e)) {
+    return;
+  }
+  // text_engine && effective_font: both from the context.
+  var ready = false;
+  if (let wc& = widget_context_of(world, ctx, e)) {
+    ready = wc.text_engine != none && wc.default_font != kInvalidFont;
+  }
+  if (!ready) {
+    return;
+  }
+
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+  let alpha = s.opacity;
+  let font_size = s.font_size > 0.0 ? s.font_size : 14.0;
+  let row_height = font_size * 1.8;
+
+  let rect = world.get(kTransform, e)!.rect;
+  let content = world.get(kTransform, e)!.content_rect;
+
+  // Determine the hover index from the mouse position.
+  var hover: i32 = -1;
+  if (let mouse = layout_mouse(world, ctx, e)) {
+    hover = item_at(world.get(kContextMenuContent, e)!, mouse, rect, content.y, row_height) ?? -1;
+  }
+  world.get_var(kContextMenuContent, e)!.hover_index = hover;
+
+  let text_color = s.text_color.with_alpha(s.text_color.a * alpha);
+  let highlight = s.text_color.with_alpha(0.10 * alpha);
+  let sep_color = s.text_color.with_alpha(0.18 * alpha);
+
+  let wc& = widget_context_of(world, ctx, e)!;
+  let fh = wc.default_font;
+  var te& = wc.text_engine!;
+  let atlas = te.atlas_texture();
+  let c& = world.get(kContextMenuContent, e)!;
+
+  var y = content.y;
+  let n = c.items.len() as i32;
+  for (let i in 0..n) {
+    let item& = c.items[i as usize];
+    if (item.separator) {
+      let sep_y = y + kSeparatorPad;
+      renderer.draw_rect(Rect { x: content.x + kRowHPadding * 0.5, y: sep_y, w: content.w - kRowHPadding, h: kSeparatorHeight },
+                         sep_color);
+      y += kSeparatorHeight + kSeparatorPad * 2.0;
+      continue;
+    }
+
+    if (i == c.hover_index) {
+      let row_radii = pack_radii_uniform(4.0);
+      renderer.draw_rect(Rect { x: content.x, y, w: content.w, h: row_height }, highlight, row_radii);
+    }
+
+    let run = te.shape(fh, item.label.as_str(), font_size, s.letter_spacing, s.line_height_multiplier);
+
+    let text_x = content.x + kRowHPadding;
+    let text_y = y + (row_height - run.line_height) * 0.5;
+
+    renderer.draw_text(Vec2 { x: text_x, y: text_y }, run, text_color, atlas);
+
+    y += row_height;
+  }
+}
+
+// ContextMenuClick: run the action of the item under the pointer. Consumes
+// the click even when no item is hit; false (not handled) without items or
+// a platform.
+pub fn context_menu_click(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool {
+  let empty = world.get(kContextMenuContent, e) == none || world.get(kContextMenuContent, e)!.items.len() == 0;
+  if (empty) {
+    return false;
+  }
+  let mouse = layout_mouse(world, ctx, e) else {
+    return false;
+  };
+
+  // Not ui-scaled, as the C++.
+  let s = computed_style(world, e);
+  let font_size = s.font_size > 0.0 ? s.font_size : 14.0;
+  let row_height = font_size * 1.8;
+
+  let rect = world.get(kTransform, e)!.rect;
+  let content = world.get(kTransform, e)!.content_rect;
+
+  let hit = item_at(world.get(kContextMenuContent, e)!, mouse, rect, content.y, row_height) else {
+    return true;  // consume the click even if nothing was hit
+  };
+  let index = hit as usize;
+  var slot: Action? = none;
+  if (var c& = world.get_var(kContextMenuContent, e)) {
+    swap(c.items[index].action, slot);
+  }
+  if (let action = slot) {
+    {
+      var env = CallbackEnv { world, ctx };
+      action(env);
+    }
+    if (var c& = world.get_var(kContextMenuContent, e)) {
+      if (index < c.items.len() && c.items[index].action == none && !c.items[index].separator) {
+        c.items[index].action = action;
+      }
+    }
+  }
+  return true;
+}
+
+// ContextMenuDismiss: hide and clear the hover.
+pub fn context_menu_dismiss(var world&: World, var ctx&: WidgetContext, e: WidgetId) {
+  let c& = world.get_var(kContextMenuContent, e) else {
+    return;
+  };
+  c.visible = false;
+  c.hover_index = -1;
+}
+
+// CreateContextMenu: a widget tagged ContextMenu with a ContextMenuContent.
+pub fn create_context_menu(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::ContextMenu;
+  world.add(kContextMenuContent, e, ContextMenuContent {});
+  return e;
+}
+
+fn is_context_menu(world&: World, e: WidgetId): bool {
+  if (let n& = world.get(kWidgetNode, e)) {
+    return n.kind == WidgetKind::ContextMenu;
+  }
+  return false;
+}
+
+// AddContextMenuItem: append an item with a label and action. No-op if `e`
+// is not a context menu.
+pub fn add_context_menu_item(var world&: World, e: WidgetId, label: str, action: Action) {
+  if (!is_context_menu(world, e)) {
+    return;
+  }
+  world.get_or_add(kContextMenuContent, e, ContextMenuContent {}).items.push(
+    ContextMenuItem { label: from_str(label), action, separator: false });
+  mark_dirty(world, e);
+}
+
+// AddContextMenuSeparator. No-op if `e` is not a context menu.
+pub fn add_context_menu_separator(var world&: World, e: WidgetId) {
+  if (!is_context_menu(world, e)) {
+    return;
+  }
+  world.get_or_add(kContextMenuContent, e, ContextMenuContent {}).items.push(
+    ContextMenuItem { label: String(), action: none, separator: true });
+  mark_dirty(world, e);
+}
+
+// ClearContextMenuItems. No-op if `e` is not a context menu.
+pub fn clear_context_menu_items(var world&: World, e: WidgetId) {
+  if (!is_context_menu(world, e)) {
+    return;
+  }
+  world.get_or_add(kContextMenuContent, e, ContextMenuContent {}).items.clear();
+  mark_dirty(world, e);
+}
+
+// ShowContextMenuAt: show the menu as an overlay at `position`, sized to fit
+// its items. Writes the style in place without marking it dirty, as the C++.
+pub fn show_context_menu_at(var world&: World, var ctx&: WidgetContext, var overlays&: Overlays, e: WidgetId, position: Vec2) {
+  if (!is_context_menu(world, e)) {
+    return;
+  }
+  world.get_or_add(kContextMenuContent, e, ContextMenuContent {}).visible = true;
+
+  // Register the overlay first so the widget is bound to the context
+  // (show attaches it); otherwise measuring runs without a text engine.
+  overlays.show(world, e, position);
+
+  {
+    var s& = world.get_var(kStyleC, e)!.style;
+    if (s.font_size <= 0.0) {
+      s.font_size = 13.0;
+    }
+  }
+
+  let (mw, mh) = context_menu_measure(world, ctx, e);
+  var s& = world.get_var(kStyleC, e)!.style;
+  s.width = Length::px(mw);
+  s.height = Length::px(mh);
+  s.margin = EdgeInsets::new(position.y, 0.0, 0.0, position.x);
+}
+
+// HideContextMenu: hide the menu and clear its hover state.
+pub fn hide_context_menu(var world&: World, var ctx&: WidgetContext, var overlays&: Overlays, e: WidgetId) {
+  if (!is_context_menu(world, e)) {
+    return;
+  }
+  var c& = world.get_or_add(kContextMenuContent, e, ContextMenuContent {});
+  if (!c.visible) {
+    return;
+  }
+  c.visible = false;
+  c.hover_index = -1;
+  overlays.hide(e);
+}

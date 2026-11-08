@@ -1,0 +1,50 @@
+// ugui/ui_context.{h,cc}, the overlay list only: UIContext::OverlayEntry,
+// overlays_, ShowOverlay and HideOverlay.
+//
+// Modal, context-menu and message-box functions take a `UIContext*` in the
+// C++ for exactly three things: ctx->world(), ctx->ShowOverlay/HideOverlay
+// and ctx->platform()->window_size(). Here they take the World and the
+// WidgetContext as every widget function does (the context's platform is the
+// UIContext's platform, as UIContext builds it), and this list for the
+// overlays. UIContext holds an `Overlays` as a field, lends it beside the
+// World, and walks `entries` where the C++ walks overlays_.
+
+module ultragui::widgets::overlays;
+
+import {List} from akikit::containers::list;
+import {erase_if} from ultragui::core::algorithm;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {set_context} from ultragui::widgets::widget;
+import {World} from ultragui::widgets::widget_registry;
+
+// UIContext::OverlayEntry
+pub struct OverlayEntry : Copy, Equal {
+  pub var widget: WidgetId
+  pub var position: Vec2
+}
+
+// The widgets floating above the normal widget tree, bottom to top.
+pub struct Overlays {
+  pub var entries: List<OverlayEntry> = List()
+
+  pub fn Overlays(): Overlays => Overlays {};
+
+  // ShowOverlay: show `widget` as an overlay at `position` (moving it to the
+  // top if it is already shown), attached to the context.
+  pub fn show(var self&, var world&: World, widget: WidgetId, position: Vec2);
+
+  // HideOverlay: remove `widget` from the overlays.
+  pub fn hide(var self&, widget: WidgetId);
+}
+
+fn Overlays::show(var self&, var world&: World, widget: WidgetId, position: Vec2) {
+  // Remove if already shown
+  self.hide(widget);
+  set_context(world, widget, true);
+  self.entries.push(OverlayEntry { widget, position });
+}
+
+fn Overlays::hide(var self&, widget: WidgetId) {
+  erase_if(self.entries, fn(entry&: OverlayEntry): bool => entry.widget == widget);
+}

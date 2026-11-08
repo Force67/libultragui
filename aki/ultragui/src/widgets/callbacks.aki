@@ -1,0 +1,54 @@
+// No C++ file: the shape of the callbacks widget components store
+// (Function<void()>, Function<void(bool)>, ... in the C++ headers).
+//
+// A C++ callback reaches the widgets through WidgetRegistry::Active() and
+// each widget's context pointer. Neither exists here, so every widget
+// callback takes a CallbackEnv first: the World and the WidgetContext the
+// event is being dispatched with, lent for the duration of the call. A
+// handler that captures a WidgetId (Copy) and acts through `env.world` /
+// `env.ctx` does what the C++ lambda capturing `self` did:
+//
+//   set_button_click(world, btn, own fn(env: &var CallbackEnv) {
+//     set_text(env.world, label, "clicked");
+//   });
+//
+// Why one struct and not two view parameters: a call through a function
+// value that takes `&var World` and `&var WidgetContext<'a>` is rejected
+// (akiko cannot tell the callee does not store one view in the other, see
+// PORTING.md pitfalls); one parameter that holds both has no such question.
+//
+// Calling a stored handler: the component's view borrows the World the
+// handler needs, so the caller swaps the handler out of its component, lets
+// go of the component, calls it, and puts it back if the component still
+// exists and the slot is still empty (a handler that installs a replacement
+// keeps the replacement; one that destroys its widget drops itself). The
+// C++ runs the std::function in place, where replacing or destroying it from
+// inside is undefined; for every other handler the two are the same.
+
+module ultragui::widgets::callbacks;
+
+import {String} from akikit::strings::string;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// The World and context a widget callback runs with.
+pub struct CallbackEnv<'w, 'a> {
+  pub var world: &'w var World
+  pub var ctx: &'w var WidgetContext<'a>
+}
+
+// Function<void()>: button clicks, context-menu actions, modal dismiss,
+// text-input cancel.
+pub type Action = own fn(&var CallbackEnv): ();
+
+// Function<void(bool)>: checkbox / radio / toggle on_change.
+pub type BoolHandler = own fn(&var CallbackEnv, bool): ();
+
+// Function<void(f32)>: slider on_change.
+pub type F32Handler = own fn(&var CallbackEnv, f32): ();
+
+// Function<void(const String&)>: text-input on_change / on_submit. The text
+// is a copy taken before the call, passed owned: akiko refuses a `str`
+// argument beside the CallbackEnv for the same reason as the two views
+// above (the callee might store the one in the other).
+pub type TextHandler = own fn(&var CallbackEnv, String): ();

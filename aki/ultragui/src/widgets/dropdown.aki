@@ -1,0 +1,433 @@
+// ugui/widgets/dropdown.{h,cc}: a dropdown/select (WidgetKind::Dropdown), a
+// generic widget carrying a DropdownContent (options, selection, open/hover
+// state, font, on_change). Behaviour: the Dropdown arms in
+// widgets::widget_vtable (draw + measure + hit-test + click + update).
+//
+// Shape differences: the World comes first; DropdownSelectedText returns a
+// copy (String), as the C++ did; on_change gets a copy of the option text.
+
+module ultragui::widgets::dropdown;
+
+import {swap} from akikit::algorithm;
+import {List, to_list} from akikit::containers::list;
+import {String} from akikit::strings::string;
+import {max_f32} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2, clamp} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii} from ultragui::render::vertex;
+import {FontHandle, kInvalidFont} from ultragui::text::text_engine;
+import {CallbackEnv} from ultragui::widgets::callbacks;
+import {
+  WidgetKind, computed_style, hit_test, input_to_layout_point, kHierarchy, kStyleC, kTransform, kWidgetNode, mark_dirty,
+  mark_paint_dirty, ui_scale, widget_context_of,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// Function<void(i32, const String&)>: the picked index and its text (a copy,
+// owned: a view argument beside the CallbackEnv is refused, see
+// widgets::callbacks).
+pub type DropdownChangeHandler = own fn(&var CallbackEnv, i32, String): ();
+
+// Data for a dropdown widget.
+pub struct DropdownContent {
+  pub var options: List<String> = List()
+  pub var selected: i32 = -1
+  pub var open: bool = false
+  pub var hover_index: i32 = -1
+  pub var font: FontHandle = kInvalidFont  // override; kInvalidFont -> context default
+  pub var on_change: DropdownChangeHandler? = none
+}
+
+pub static let kDropdownContent: ComponentKey<DropdownContent> = ComponentKey();
+
+comptime let kPlaceholder: str = "Select...";
+
+// The row height of the option list: the ui-scaled font size * 1.5.
+fn row_height_of(world&: World, ctx&: WidgetContext, e: WidgetId): f32 {
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+  return s.font_size * 1.5;
+}
+
+// DropdownHitTest: while open, the option list below counts as the widget.
+pub fn dropdown_hit_test(var world&: World, var ctx&: WidgetContext, e: WidgetId, point: Vec2): WidgetId {
+  var open_rows: usize = 0;
+  if (let c& = world.get(kDropdownContent, e)) {
+    if (c.open) {
+      open_rows = c.options.len();
+    }
+  }
+
+  // When open, expand the hit area to include the option list below.
+  if (open_rows != 0) {
+    let row_height = row_height_of(world, ctx, e);
+    let list_h = row_height * open_rows as f32;
+    let r = world.get(kTransform, e)!.rect;
+    let expanded = Rect { x: r.x, y: r.y, w: r.w, h: r.h + list_h };
+    if (expanded.contains(point)) {
+      return e;
+    }
+  }
+
+  // Default hit test (replicates hit_test's non-vtable path; calling
+  // hit_test on `e` would re-enter this entry and recurse forever).
+  if (!world.get(kTransform, e)!.rect.contains(point)) {
+    return kNullWidget;
+  }
+  let kids = to_list(world.get(kHierarchy, e)!.children.as_slice());
+  var i = kids.len();
+  while (i > 0) {
+    i -= 1;
+    let hit = hit_test(world, ctx, kids[i], point);
+    if (hit.valid()) {
+      return hit;
+    }
+  }
+  return e;
+}
+
+// DropdownClick: open when closed, close when the header is clicked open.
+pub fn dropdown_click(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool {
+  let c& = world.get_var(kDropdownContent, e) else {
+    return false;
+  };
+  c.open = !c.open;
+  mark_paint_dirty(world, e);
+  return true;
+}
+
+// DropdownUpdate: the first mouse press while open picks a row (if it is on
+// one), then closes the list.
+pub fn dropdown_update(var world&: World, var ctx&: WidgetContext, e: WidgetId, dt: f64) {
+  var option_count: usize = 0;
+  if (let c& = world.get(kDropdownContent, e)) {
+    if (!c.open) {
+      return;
+    }
+    option_count = c.options.len();
+  } else {
+    return;
+  }
+  if (option_count == 0) {
+    return;
+  }
+
+  // The first press of this frame's queue.
+  var press: Vec2? = none;
+  {
+    let wc& = widget_context_of(world, ctx, e) else {
+      return;
+    };
+    var p& = wc.platform else {
+      return;
+    };
+    let queue& = p.input_queue();
+    for (let i in 0..queue.button_count) {
+      let evt = queue.button_events[i];
+      if (!evt.pressed) {
+        continue;
+      }
+      press = evt.position;
+      break;
+    }
+  }
+  let position = press else {
+    return;
+  };
+
+  let row_height = row_height_of(world, ctx, e);
+  let r = world.get(kTransform, e)!.rect;
+  let list_top = r.y + r.h;
+  let list_bottom = list_top + row_height * option_count as f32;
+
+  let pos = input_to_layout_point(world, e, position);
+  var picked: i32? = none;
+  if (pos.y >= list_top && pos.y < list_bottom && pos.x >= r.x && pos.x <= r.x + r.w) {
+    let idx = @saturating_cast(i32, (pos.y - list_top) / row_height);
+    if (idx >= 0 && idx < option_count as i32) {
+      picked = idx;
+    }
+  }
+
+  if (let idx = picked) {
+    var c& = world.get_var(kDropdownContent, e)!;
+    c.selected = idx;
+    let text = c.options[idx as usize].clone();
+    var slot: DropdownChangeHandler? = none;
+    if (var c1& = world.get_var(kDropdownContent, e)) {
+      swap(c1.on_change, slot);
+    }
+    if (let handler = slot) {
+      {
+        var env = CallbackEnv { world, ctx };
+        handler(env, idx, text);
+      }
+      if (var c2& = world.get_var(kDropdownContent, e)) {
+        if (c2.on_change == none) {
+          c2.on_change = handler;
+        }
+      }
+    }
+  }
+  // Close on any click while open.
+  if (var c& = world.get_var(kDropdownContent, e)) {
+    c.open = false;
+  }
+  mark_paint_dirty(world, e);
+}
+
+comptime let kChevronWidth: f32 = 24.0;
+
+// DropdownMeasure: the widest option (or the placeholder) plus chevron and
+// padding.
+pub fn dropdown_measure(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  let st& = world.get(kStyleC, e)!.style;
+  let sc = ui_scale(world, ctx, e);
+  let font_size = st.font_size * sc;
+  let letter_sp = st.letter_spacing * sc;
+  let k_hpadding: f32 = 12.0;
+  let fallback = (kChevronWidth + k_hpadding * 2.0 + 60.0, font_size * 1.5 + st.padding.vertical());
+
+  let c& = world.get(kDropdownContent, e) else {
+    return fallback;
+  };
+  let wc& = widget_context_of(world, ctx, e) else {
+    return fallback;
+  };
+  let fh = c.font != kInvalidFont ? c.font : wc.default_font;
+  var te& = wc.text_engine else {
+    return fallback;
+  };
+  if (fh == kInvalidFont || c.options.len() == 0) {
+    return fallback;
+  }
+
+  var max_width: f32 = 0.0;
+  for (let opt in c.options) {
+    let run = te.shape(fh, opt.as_str(), font_size, letter_sp, st.line_height_multiplier);
+    max_width = max_f32(max_width, run.total_advance);
+  }
+
+  let ph_run = te.shape(fh, kPlaceholder, font_size, letter_sp, st.line_height_multiplier);
+  max_width = max_f32(max_width, ph_run.total_advance);
+
+  return (max_width + kChevronWidth + k_hpadding * 2.0 + st.padding.horizontal(), font_size * 1.5 + st.padding.vertical());
+}
+
+// DropdownDraw. PaintWidget already drew background / shadow / border.
+pub fn dropdown_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  if (!world.has(kDropdownContent, e)) {
+    return;
+  }
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+  let alpha = s.opacity;
+  let font_size = s.font_size;
+  let row_height = font_size * 1.5;
+  let k_hpadding: f32 = 8.0;
+
+  let rect = world.get(kTransform, e)!.rect;
+  let content = world.get(kTransform, e)!.content_rect;
+  let attached = widget_context_of(world, ctx, e) != none;
+
+  // Determine the hover index from the mouse position when open.
+  var hover_index: i32 = -1;
+  let open = world.get(kDropdownContent, e)!.open;
+  let option_count = world.get(kDropdownContent, e)!.options.len();
+  if (open && attached) {
+    var mouse: Vec2? = none;
+    if (var p& = ctx.platform) {
+      mouse = p.input_queue().mouse_pos;
+    }
+    if (let m = mouse) {
+      let mp = input_to_layout_point(world, e, m);
+      let list_top = rect.y + rect.h;
+      let list_bottom = list_top + row_height * option_count as f32;
+      if (mp.y >= list_top && mp.y < list_bottom && mp.x >= rect.x && mp.x <= rect.x + rect.w) {
+        hover_index = @saturating_cast(i32, (mp.y - list_top) / row_height);
+      }
+    }
+  }
+
+  // The C++ checks the text engine and font before it touches hover_index.
+  let wc& = widget_context_of(world, ctx, e) else {
+    return;
+  };
+  let c_font = world.get(kDropdownContent, e)!.font;
+  let fh = c_font != kInvalidFont ? c_font : wc.default_font;
+  var te& = wc.text_engine else {
+    return;
+  };
+  if (fh == kInvalidFont) {
+    return;
+  }
+  world.get_var(kDropdownContent, e)!.hover_index = hover_index;
+  let c& = world.get(kDropdownContent, e)!;
+
+  // --- Current selection text (or placeholder) ---
+  let has_selection = c.selected >= 0 && c.selected < c.options.len() as i32;
+  let display_text = has_selection ? c.options[c.selected as usize].as_str() : kPlaceholder;
+
+  let run = te.shape(fh, display_text, font_size, s.letter_spacing, s.line_height_multiplier);
+
+  let text_x = content.x + k_hpadding;
+  let text_y = content.y + (content.h - run.line_height) * 0.5;
+
+  let text_color = c.selected >= 0 ?
+    s.text_color.with_alpha(s.text_color.a * alpha) : s.text_color.with_alpha(s.text_color.a * alpha * 0.5);
+
+  let atlas = te.atlas_texture();
+  renderer.draw_text(Vec2 { x: text_x, y: text_y }, run, text_color, atlas);
+
+  // --- Chevron indicator on the right side ---
+  let chevron_x = content.x + content.w - kChevronWidth;
+  let chevron_cy = content.y + content.h * 0.5;
+  let chevron_size = font_size * 0.3;
+  let line_thickness = max_f32(1.5, font_size / 10.0);
+  let chevron_color = s.text_color.with_alpha(s.text_color.a * alpha * 0.7);
+
+  if (c.open) {
+    renderer.draw_rect(Rect { x: chevron_x + 2.0, y: chevron_cy - chevron_size * 0.3, w: chevron_size * 0.8, h: line_thickness },
+                       chevron_color);
+    renderer.draw_rect(Rect {
+                         x: chevron_x + 2.0 + chevron_size * 0.8, y: chevron_cy - chevron_size * 0.3, w: chevron_size * 0.8,
+                         h: line_thickness,
+                       }, chevron_color);
+  } else {
+    renderer.draw_rect(Rect {
+                         x: chevron_x + 2.0, y: chevron_cy - line_thickness * 0.5, w: chevron_size * 0.8, h: line_thickness,
+                       }, chevron_color);
+    renderer.draw_rect(Rect {
+                         x: chevron_x + 2.0 + chevron_size * 0.8, y: chevron_cy - line_thickness * 0.5, w: chevron_size * 0.8,
+                         h: line_thickness,
+                       }, chevron_color);
+  }
+
+  // --- Option list when open ---
+  if (!c.open || c.options.len() == 0) {
+    return;
+  }
+
+  let list_x = rect.x;
+  let list_y = rect.y + rect.h;
+  let list_w = rect.w;
+  let list_h = row_height * c.options.len() as f32;
+
+  let list_bg = s.background.a > 0.0 ?
+    s.background.with_alpha(clamp(s.background.a + 0.1, 0.0, 1.0) * alpha) : Color::rgba(0.12, 0.12, 0.2, 0.95 * alpha);
+  let list_radii = pack_radii(0.0, 0.0, s.corner_radius_br, s.corner_radius_bl);
+  renderer.draw_rect(Rect { x: list_x, y: list_y, w: list_w, h: list_h }, list_bg, list_radii);
+
+  if (s.border_color.a > 0.0 && s.border_width > 0.0) {
+    let border = s.border_color.with_alpha(s.border_color.a * alpha);
+    renderer.draw_bordered_rect(Rect { x: list_x, y: list_y, w: list_w, h: list_h }, Color::transparent(), border,
+                                s.border_width, list_radii);
+  }
+
+  let n = c.options.len() as i32;
+  for (let i in 0..n) {
+    let row_y = list_y + row_height * i as f32;
+
+    let is_hovered = i == c.hover_index;
+    let is_selected = i == c.selected;
+
+    if (is_hovered || is_selected) {
+      let highlight = is_hovered ? Color::rgba(1.0, 1.0, 1.0, 0.1 * alpha) : s.text_color.with_alpha(0.15 * alpha);
+      var row_radii: u32 = 0;
+      if (i == n - 1) {
+        row_radii = pack_radii(0.0, 0.0, s.corner_radius_br, s.corner_radius_bl);
+      }
+      renderer.draw_rect(Rect { x: list_x, y: row_y, w: list_w, h: row_height }, highlight, row_radii);
+    }
+
+    let opt_run = te.shape(fh, c.options[i as usize].as_str(), font_size, s.letter_spacing, s.line_height_multiplier);
+
+    let opt_x = list_x + k_hpadding + s.padding.left;
+    let opt_y = row_y + (row_height - opt_run.line_height) * 0.5;
+
+    let opt_color = s.text_color.with_alpha(s.text_color.a * alpha);
+    renderer.draw_text(Vec2 { x: opt_x, y: opt_y }, opt_run, opt_color, atlas);
+  }
+}
+
+// CreateDropdown: a widget tagged Dropdown with a DropdownContent.
+pub fn create_dropdown(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::Dropdown;
+  world.add(kDropdownContent, e, DropdownContent {});
+  return e;
+}
+
+fn is_dropdown(world&: World, e: WidgetId): bool {
+  if (let n& = world.get(kWidgetNode, e)) {
+    return n.kind == WidgetKind::Dropdown;
+  }
+  return false;
+}
+
+// SetDropdownOptions. No-op if `e` is not a dropdown.
+pub fn set_dropdown_options(var world&: World, e: WidgetId, options&: [String]) {
+  if (!is_dropdown(world, e)) {
+    return;
+  }
+  var list: List<String> = List();
+  for (let o in options) {
+    list.push(o.clone());
+  }
+  world.get_or_add(kDropdownContent, e, DropdownContent {}).options = list;
+  mark_dirty(world, e);
+}
+
+// SetDropdownSelected: clamped to [0, options-1], -1 when there are none.
+// No-op if `e` is not a dropdown. The clamp goes through f32, as the C++.
+pub fn set_dropdown_selected(var world&: World, e: WidgetId, index: i32) {
+  if (!is_dropdown(world, e)) {
+    return;
+  }
+  var c& = world.get_or_add(kDropdownContent, e, DropdownContent {});
+  if (c.options.len() == 0) {
+    c.selected = -1;
+  } else {
+    c.selected = @saturating_cast(i32, clamp(index as f32, 0.0, (c.options.len() as i32 - 1) as f32));
+  }
+  mark_dirty(world, e);
+}
+
+// DropdownSelected: -1 if none / not a dropdown.
+pub fn dropdown_selected(world&: World, e: WidgetId): i32 {
+  if (!is_dropdown(world, e)) {
+    return -1;
+  }
+  if (let c& = world.get(kDropdownContent, e)) {
+    return c.selected;
+  }
+  return -1;
+}
+
+// DropdownSelectedText: "" if none / not a dropdown.
+pub fn dropdown_selected_text(world&: World, e: WidgetId): String {
+  if (!is_dropdown(world, e)) {
+    return String();
+  }
+  let c& = world.get(kDropdownContent, e) else {
+    return String();
+  };
+  if (c.selected < 0 || c.selected >= c.options.len() as i32) {
+    return String();
+  }
+  return c.options[c.selected as usize].clone();
+}
+
+// SetDropdownChange: run with the new index and text when the user picks an
+// option. No-op if `e` is not a dropdown.
+pub fn set_dropdown_change(var world&: World, e: WidgetId, handler: DropdownChangeHandler) {
+  if (!is_dropdown(world, e)) {
+    return;
+  }
+  world.get_or_add(kDropdownContent, e, DropdownContent {}).on_change = handler;
+}

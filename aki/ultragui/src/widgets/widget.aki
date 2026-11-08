@@ -34,9 +34,9 @@ import {GradientType, PointerEvents, Visibility, WidgetState} from ultragui::sty
 import {Style, StyleOverride, resolve_style} from ultragui::style::style;
 import {Transition} from ultragui::style::transition;
 import {AnimStyle, StateStyle, StateTransitionRule, Tooltip, kAnimStyle, kStateStyle, kTooltip} from ultragui::widgets::components;
+import {scroll_offset} from ultragui::widgets::scroll_view;
 import {WidgetContext} from ultragui::widgets::widget_context;
 import {World} from ultragui::widgets::widget_registry;
-import {scroll_offset} from ultragui::widgets::scroll_view;
 import {
   custom_paint, vt_draw, vt_consumes_text_input, vt_hit_test, vt_measure, vt_on_char_input, vt_on_click, vt_on_dismiss, vt_on_key_down,
   vt_on_layout, vt_on_scroll, vt_on_update,
@@ -369,6 +369,18 @@ pub fn mark_paint_dirty(var world&: World, e: WidgetId) {
   }
 }
 
+// InputToLayoutPoint: a point in screen space moved into e's layout space,
+// adding the offset of every scroll view above it.
+pub fn input_to_layout_point(world&: World, e: WidgetId, point: Vec2): Vec2 {
+  var out = point;
+  var p = world.get(kHierarchy, e)!.parent;
+  while (p.valid()) {
+    out = out + scroll_offset(world, p);  // (0,0) for non-scroll-view ancestors
+    p = world.get(kHierarchy, p)!.parent;
+  }
+  return out;
+}
+
 // HitTest: the topmost widget under `point` in e's subtree, or the null
 // handle. Hidden, collapsed and pointer-events: none widgets take no hits,
 // and neither does anything under them.
@@ -557,18 +569,6 @@ pub fn paint_widget_styled(var world&: World, var ctx&: WidgetContext, e: Widget
 }
 
 // --- Layout bridge -----------------------------------------------------------------
-
-// InputToLayoutPoint: a window point in the widget's layout space, adding
-// every scroll-view ancestor's offset.
-pub fn input_to_layout_point(world&: World, e: WidgetId, point: Vec2): Vec2 {
-  var pt = point;
-  var p = world.get(kHierarchy, e)!.parent;
-  while (p.valid()) {
-    pt = pt + scroll_offset(world, p);  // (0,0) for non-scroll-view ancestors
-    p = world.get(kHierarchy, p)!.parent;
-  }
-  return pt;
-}
 
 pub fn populate_layout_node(world&: World, e: WidgetId, var node&: LayoutNode) {
   let t& = world.get(kTransform, e)!;

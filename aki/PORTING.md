@@ -26,6 +26,7 @@ aki/
   ultragui_audio/        miniaudio AudioBackend (csrc/ugui_ma.c shim)
   ultragui_lottie/       rlottie from third_party via c_sources; tools/gen_reference.cc + gen_tables.py
   ultragui_video/        pl_mpeg via [build.implement]; tools/{gen_reference,recording_rhi}.cc + gen_tables.py
+    tools/gen_widget_reference.cc  the same for the widget kinds (links a host-platform libultragui.a)
   tools/golden/          draw-data golden harness (C++ side), see its README
   tools/xshot.sh         screenshots of windowed backends under Xvfb
 ```
@@ -121,7 +122,9 @@ package), **gone** (no counterpart, reason given).
 | widgets/widget_vtable.{h,cc} | ultragui::widgets::widget_vtable | ported (match dispatch, arms added per kind) |
 | widgets/widget_tree.{h,cc} | ultragui::widgets::widget_tree | ported |
 | widgets/panel.{h,cc} | ultragui::widgets::panel | ported (no vtable arms: the C++ has none) |
-| widgets/{text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | next (widgets/scroll_view.aki is a stub with scroll_offset only; the kinds port replaces it) |
+| widgets/{text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | ported, every vtable arm in; draw entries now run on the real renderer2d |
+| (callbacks in widget components) | ultragui::widgets::callbacks | ported: CallbackEnv + handler types, see below |
+| ui_context.{h,cc}: OverlayEntry, overlays_, ShowOverlay, HideOverlay | ultragui::widgets::overlays (`Overlays`) | ported; UIContext holds one, see below |
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} (+ sys::yoga) | ported (test_layout_retained.cc ported) |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder | next (consumes idl::parser's AST) |
@@ -129,7 +132,7 @@ package), **gone** (no counterpart, reason given).
 | anim/json.{h,cc} | ultragui::anim::json | ported |
 | anim/anim_types.h, anim_parser.cc, anim_eval.cc, anim_render.cc | ultragui::anim::{anim_types,anim_parser,anim_eval,anim_render} | ported (rendered frames byte-identical to the C++: 330 frame hashes) |
 | anim/vector_animation.{h,cc} | ultragui::anim::vector_animation | ported (backend passed per call, see below) |
-| ui_context.{h,cc} | ultragui::ui_context | next |
+| ui_context.{h,cc} | ultragui::ui_context | next (its overlay list is widgets::overlays) |
 | lottie/lottie.{h,cc} | ultragui_lottie::lottie (+ sys::rlottie) | ported (pkg:ultragui_lottie; backend passed per call, see "Backends held by value") |
 | video/video.{h,cc} | ultragui_video::video (+ sys::pl_mpeg) | ported (pkg:ultragui_video; RHI passed per call; audio bridge included) |
 | backends/ugui_impl_vulkan.* | | pkg:ultragui_vulkan |
@@ -617,6 +620,56 @@ maps and pass `texture_backend.as_dyn()` / the Rhi on each `update`.
   `-includestddef.h -includestdio.h` (the header expects its includer to have
   them); it depends on `ultragui_audio` for the miniaudio binding and
   implementation (the audio bridge uses `ma_pcm_rb` and a playback device).
+### Widget callbacks — `ultragui::widgets::callbacks`
+
+A C++ widget callback (`Function<void()>`, `Function<void(bool)>`, ...)
+reached the widgets through `WidgetRegistry::Active()` and each widget's
+context pointer. Here every widget callback takes a `CallbackEnv` first: the
+World and the WidgetContext the event is dispatched with, lent for the call.
+
+```aki
+pub struct CallbackEnv<'w, 'a> { pub var world: &'w var World  pub var ctx: &'w var WidgetContext<'a> }
+pub type Action = own fn(&var CallbackEnv): ();                  // Function<void()>
+pub type BoolHandler = own fn(&var CallbackEnv, bool): ();       // checkbox / radio / toggle
+pub type F32Handler = own fn(&var CallbackEnv, f32): ();         // slider
+pub type TextHandler = own fn(&var CallbackEnv, String): ();     // text input change / submit (owned copy)
+// per kind: DropdownChangeHandler (i32, String), HistoryHandler (): String,
+// MessageBoxResultHandler (MessageBoxResult)
+
+set_button_click(world, btn, own fn(env: &var CallbackEnv) {
+  set_text(env.world, label, "clicked");                 // captures are Copy ids
+  set_checked(env.world, env.ctx, box, true);
+});
+```
+
+Calling one (every kind does it this way; copy it for a host component):
+swap the handler out of its component inside an `if (var c& = world.get_var(..))`
+block, call it with `var env = CallbackEnv { world, ctx };` in its own block,
+then put it back if the component still exists and the slot is still empty
+(a handler that installed a replacement keeps it; one that destroyed its
+widget drops itself). The C++ runs the std::function in place, where both of
+those are undefined. Text arguments are owned copies taken before the call.
+The script runtime's `wire_change_handlers` builds these handlers; its Lua
+call gets `env.world` and `env.ctx`.
+
+### Overlays — `ultragui::widgets::overlays`
+
+```aki
+pub struct OverlayEntry : Copy, Equal { pub var widget: WidgetId  pub var position: Vec2 }
+pub struct Overlays {
+  pub var entries: List<OverlayEntry>                                  // overlays_, bottom to top
+  pub fn show(var self&, var world&: World, widget: WidgetId, position: Vec2);  // ShowOverlay (hide, set_context, push)
+  pub fn hide(var self&, widget: WidgetId);                            // HideOverlay
+}
+```
+
+UIContext holds an `Overlays` field and lends it beside the World and the
+WidgetContext. The functions that took a `UIContext*` take those three:
+`show_modal(world, ctx, overlays, e)`, `hide_modal`, `show_context_menu_at(world,
+ctx, overlays, e, pos)`, `hide_context_menu`, `show_message_box`,
+`dismiss_message_box(world, ctx, overlays, e, result)`. The viewport size the
+message box centres in is `ctx.platform`'s `window_size()` (UIContext's
+platform, as its widget context is built); (0,0) for a context without one.
 
 ## Fidelity
 
@@ -694,6 +747,18 @@ so bit-exact tables are aarch64's.
   it away: every line is drawn left-aligned, whatever max_width says.
 - Renderer2D's gradient cache keys collide as the C++ ones do (the
   multi-stop hash XORs shifted fields; a collision reuses the texture).
+- Widget kinds, all as the C++ does them: checkbox and radio measure their
+  box from the unscaled font size (1.2x) but draw it at 1.0x of the scaled
+  one; the scroll view draws without ui scale; the context menu's click
+  hit-tests rows with the unscaled style while its draw uses the scaled one;
+  the dropdown measures with 12 px side padding but draws with 8, and dims
+  the label only when `selected < 0`; the dropdown and scroll-view hit tests
+  skip the hidden/collapsed check of hit_test's default path;
+  show_context_menu_at and show_message_box write the style without
+  mark_dirty; set_rich_text_font marks nothing dirty; the radio and slider
+  setters do not check the kind; text-input Up applies the history text
+  unless it is empty and equal to the current text; Ctrl+V does not reset
+  the caret blink; set_dropdown_selected clamps through f32.
 
 ### Shape differences (not behavior)
 
@@ -728,6 +793,19 @@ so bit-exact tables are aarch64's.
 - TextEngine takes the dpi scale and the Rhi as arguments; runs share glyphs.
 - SetWidgetVTable (no users) and run-time vtable install are gone.
 - Calls into a TextEngine before `init()` are no-ops where the C++ crashes.
+- Widget creators and setters take the World first (`create_button(world, id)`,
+  `set_text(world, e, "...")`); those that change state through
+  set_widget_state take the context too (`set_checked(world, ctx, e, v)`,
+  `set_radio_selected`, `set_toggle_on`). String parameters are `str`,
+  `Vector<String>` parameters slices (`set_dropdown_options(world, e,
+  list.as_slice())`), String results owned copies.
+- Widget callbacks get a CallbackEnv (above), and may replace or destroy
+  their own widget safely.
+- A text-input char event whose code point has no UTF-8 form (a surrogate,
+  above U+10FFFF) inserts nothing: aki's String is always valid UTF-8. The
+  C++ inserts the bytes its encoder makes.
+- Modal and message box build the backdrop and button row as CreatePanel(0)
+  written out (a widget tagged Panel), not through widgets::panel.
 
 ## Pitfalls and compiler workarounds (akiko 0.7.0)
 
@@ -766,6 +844,16 @@ so bit-exact tables are aarch64's.
   Write through a view (`for (var b& in list)`) or the index (`list[j].f = x`).
 - Integer `+ - *` stop on overflow; hashes need the wrapping forms
   (`h = h *% 1099511628211`). Shifts drop shifted-out bits unchecked.
+- **A call through a function value with two view arguments** that name no
+  common lifetime (`&var World`, `&var WidgetContext<'a>`) is "cannot store a
+  view of 'world' through 'ctx'", and so is a `str` beside a view-holding
+  argument. Pass one struct that holds both views (CallbackEnv), and text
+  owned (`String`).
+- **Taking a value out of a component**: `replace(c.slot, none)`, or a
+  `swap` through a `let c& = world.get_var(..) else {..}` binding, keeps the
+  World borrowed as long as the taken value lives. Swap into a local inside
+  `if (var c& = world.get_var(k, e)) { swap(c.slot, local); }` and the borrow
+  ends with the block.
 - C `long` differs per OS: use `CLong`/`CULong` from `ultragui::sys::c_long`
   (one module per OS under `os/`; each OS table in aki.toml needs its own
   directory, they cannot share one). Check Windows layouts with
