@@ -1,0 +1,1103 @@
+// ugui/idl/parser.{h,cc}: the .ugui tokenizer and recursive-descent parser
+// producing the AST the builder consumes (builder.cc is a later port).
+//
+// Differences in shape (not behavior):
+//
+// * The nested AST types are module-level structs with a `Ugui` prefix:
+//   UguiNode::StateBlock -> UguiStateBlock, ::KeyframeBlock -> UguiKeyframeBlock
+//   (with ::Stop -> UguiKeyframeStop), ::MediaQuery -> UguiMediaQuery,
+//   UguiDocument::StyleClass -> UguiStyleClass, ::Component -> UguiComponent.
+//   `UguiNode::type` is `type_` (`type` is a keyword).
+// * `ParseUgui(source, len, filename, doc, errors)` is `parse_ugui(source:
+//   str, filename: str, ...)`; the file entry point reads UTF-8 text.
+// * A byte that starts no token and is not ASCII (one the lexer turns into a
+//   kError token) becomes one token holding the whole UTF-8 sequence; the C++
+//   makes one token per byte, which a String cannot hold. Columns count bytes
+//   as in the C++.
+// * A file that is not valid UTF-8 is an error "file is not valid UTF-8"; the
+//   C++ parses whatever bytes it reads.
+// * Import path resolution (ParentPath, JoinPath, LexicallyNormal,
+//   WeaklyCanonical) is the C++ POSIX code over akikit's `real_path`. On
+//   Windows the separator test also accepts '\\' and '/' joins as the C++
+//   does, but the canonical form comes from the same prefix algorithm instead
+//   of _fullpath.
+
+module ultragui::idl::parser;
+
+import {List} from akikit::containers::list;
+import {HashMap} from akikit::containers::hash_map;
+import {String, from_str} from akikit::strings::string;
+import {path_exists, read_bytes, real_path} from akikit::filesystem::file_util;
+import {utf8_view} from akikit::text::code_point_validation;
+import {from_chars_f32} from ultragui::core::from_chars;
+
+// ---------------------------------------------------------------------------
+// AST
+// ---------------------------------------------------------------------------
+
+// A `:hover { ... }` block: the state name and its property overrides.
+pub struct UguiStateBlock : Clone {
+  pub var state: String = String()  // "hover", "pressed", "focused", etc.
+  pub var properties: HashMap<String, String> = HashMap()
+}
+
+pub struct UguiKeyframeStop : Clone {
+  pub var percent: f32 = 0.0  // 0.0-1.0
+  pub var properties: HashMap<String, String> = HashMap()
+}
+
+pub struct UguiKeyframeBlock : Clone {
+  pub var name: String = String()
+  pub var properties: HashMap<String, String> = HashMap()  // duration, loop, alternate, easing
+  pub var stops: List<UguiKeyframeStop> = List()
+}
+
+pub struct UguiMediaQuery : Clone {
+  pub var condition: String = String()  // e.g., "min-width", "max-width", "min-height", "max-height"
+  pub var value: f32 = 0.0  // e.g., 800
+  pub var properties: HashMap<String, String> = HashMap()  // style overrides when condition matches
+}
+
+// AST node representing an element in a .ugui file.
+//
+//   panel main_menu {
+//     layout: column;
+//     background: #1a1a2e;
+//
+//     button btn_play {
+//       text: "Play";
+//       :hover { background: #e94560; }
+//     }
+//   }
+pub struct UguiNode : Clone {
+  pub var type_: String = String()  // "panel", "button", "text", "image", etc.
+  pub var name: String = String()   // User-defined identifier
+  pub var properties: HashMap<String, String> = HashMap()
+  pub var state_blocks: List<UguiStateBlock> = List()
+  pub var keyframe_blocks: List<UguiKeyframeBlock> = List()
+  pub var media_queries: List<UguiMediaQuery> = List()
+  pub var children: List<UguiNode> = List()
+  pub var source_line: u32 = 0
+}
+
+// Top-level `class <name> { property: value; ... }` blocks, referenced by
+// widgets via `class:` and applied as style overrides.
+pub struct UguiStyleClass : Clone {
+  pub var name: String = String()
+  pub var properties: HashMap<String, String> = HashMap()
+  pub var state_blocks: List<UguiStateBlock> = List()
+}
+
+// Top-level `component <name> { prop <p>: <default>; <root element> }`
+// blocks. A `slot { ... }` marks where instance children go.
+pub struct UguiComponent : Clone {
+  pub var name: String = String()
+  pub var props: HashMap<String, String> = HashMap()  // declared prop name -> default value
+  pub var root: UguiNode = UguiNode {}
+  pub var source_line: u32 = 0
+}
+
+// Parsed .ugui document
+pub struct UguiDocument : Clone {
+  pub var roots: List<UguiNode> = List()
+  pub var source_path: String = String()
+  pub var style_classes: List<UguiStyleClass> = List()
+  pub var components: List<UguiComponent> = List()
+  // `import "other.ugui";` paths, relative to this file. Imports merge the
+  // other file's components and style classes, not its root widgets.
+  pub var imports: List<String> = List()
+}
+
+// Parse error info
+pub struct ParseError : Clone {
+  pub var message: String = String()
+  pub var file: String = String()
+  pub var line: u32 = 0
+  pub var column: u32 = 0
+}
+
+// ---------------------------------------------------------------------------
+// Lexer
+// ---------------------------------------------------------------------------
+
+enum TokenType as u8 {
+  Identifier,
+  String,    // "quoted string"
+  Number,
+  HexColor,  // #RRGGBB or #RRGGBBAA
+  Colon,
+  Semicolon,
+  LBrace,
+  RBrace,
+  At,        // @
+  Eof,
+  Error,
+}
+
+struct Token : Clone {
+  pub var type_: TokenType
+  pub var value: String
+  pub var line: u32
+  pub var col: u32
+}
+
+fn token(type_: TokenType, value: str, line: u32, col: u32): Token =>
+  Token { type_, value: from_str(value), line, col };
+
+// The C locale's isspace/isdigit/isalpha/isalnum/isxdigit.
+fn is_space(c: c8): bool => c == ' ' || c == '\t' || c == '\n' || c == '\x0b' || c == '\x0c' || c == '\r';
+fn is_digit(c: c8): bool => c is '0'..='9';
+fn is_alpha(c: c8): bool => c is 'a'..='z' | 'A'..='Z';
+fn is_alnum(c: c8): bool => is_alpha(c) || is_digit(c);
+fn is_xdigit(c: c8): bool => c is '0'..='9' | 'a'..='f' | 'A'..='F';
+
+struct Lexer<'a> {
+  let src: str<'a>
+  var pos: usize = 0
+  var line: u32 = 1
+  var col: u32 = 1
+
+  fn of(src: str<'a>): Lexer<'a> => Lexer { src, pos: 0, line: 1, col: 1 };
+
+  fn advance(var self&) {
+    if (self.pos < #self.src) {
+      if (self.src[self.pos] == '\n') {
+        self.line += 1;
+        self.col = 1;
+      } else {
+        self.col += 1;
+      }
+      self.pos += 1;
+    }
+  }
+
+  fn at(self&, i: usize): c8 => self.src[i];
+
+  fn next(var self&): Token;
+  fn skip_whitespace_and_comments(var self&);
+  fn lex_string(var self&, line: u32, col: u32): Token;
+  fn lex_hex_color(var self&, line: u32, col: u32): Token;
+  fn lex_number(var self&, line: u32, col: u32): Token;
+  fn lex_identifier(var self&, line: u32, col: u32): Token;
+}
+
+fn Lexer::skip_whitespace_and_comments(var self&) {
+  while (self.pos < #self.src) {
+    if (is_space(self.at(self.pos))) {
+      self.advance();
+    } else if (self.pos + 1 < #self.src && self.at(self.pos) == '/' && self.at(self.pos + 1) == '/') {
+      while (self.pos < #self.src && self.at(self.pos) != '\n') {
+        self.advance();
+      }
+    } else if (self.pos + 1 < #self.src && self.at(self.pos) == '/' && self.at(self.pos + 1) == '*') {
+      self.advance();
+      self.advance();
+      while (self.pos + 1 < #self.src && !(self.at(self.pos) == '*' && self.at(self.pos + 1) == '/')) {
+        self.advance();
+      }
+      self.advance();
+      self.advance();
+    } else {
+      break;
+    }
+  }
+}
+
+fn Lexer::next(var self&): Token {
+  self.skip_whitespace_and_comments();
+
+  if (self.pos >= #self.src) {
+    return token(TokenType::Eof, "", self.line, self.col);
+  }
+
+  let c = self.at(self.pos);
+  let tok_line = self.line;
+  let tok_col = self.col;
+
+  if (c == '{') {
+    self.advance();
+    return token(TokenType::LBrace, "{", tok_line, tok_col);
+  }
+  if (c == '}') {
+    self.advance();
+    return token(TokenType::RBrace, "}", tok_line, tok_col);
+  }
+  if (c == ':') {
+    self.advance();
+    return token(TokenType::Colon, ":", tok_line, tok_col);
+  }
+  if (c == ';') {
+    self.advance();
+    return token(TokenType::Semicolon, ";", tok_line, tok_col);
+  }
+  if (c == '@') {
+    self.advance();
+    return token(TokenType::At, "@", tok_line, tok_col);
+  }
+
+  if (c == '"') {
+    return self.lex_string(tok_line, tok_col);
+  }
+
+  if (c == '#') {
+    return self.lex_hex_color(tok_line, tok_col);
+  }
+
+  if (is_digit(c) || (c == '-' && self.pos + 1 < #self.src && is_digit(self.at(self.pos + 1))) || c == '.') {
+    return self.lex_number(tok_line, tok_col);
+  }
+
+  if (is_alpha(c) || c == '_' || c == '-' || c == '$') {
+    return self.lex_identifier(tok_line, tok_col);
+  }
+
+  // Any other byte is a kError token of its own. A multi-byte UTF-8
+  // character stays whole (see the header).
+  let start = self.pos;
+  self.advance();
+  while (self.pos < #self.src && (self.at(self.pos) as u8 & 0xC0) == 0x80) {
+    self.advance();
+  }
+  return token(TokenType::Error, self.src[start..self.pos], tok_line, tok_col);
+}
+
+fn Lexer::lex_string(var self&, line: u32, col: u32): Token {
+  self.advance();  // skip opening "
+  var val = String();
+  // Runs between escapes are copied whole, so multi-byte characters survive.
+  var run = self.pos;
+  while (self.pos < #self.src && self.at(self.pos) != '"') {
+    if (self.at(self.pos) == '\\' && self.pos + 1 < #self.src) {
+      val.push_str(self.src[run..self.pos]);
+      self.advance();
+      let e = self.at(self.pos);
+      if (e == 'n') {
+        val.push_c8('\n');
+      } else if (e == 't') {
+        val.push_c8('\t');
+      } else if (e == '"') {
+        val.push_c8('"');
+      } else if (e == '\\') {
+        val.push_c8('\\');
+      } else {
+        // Any other escaped character stands for itself; a multi-byte one
+        // starts the next run.
+        run = self.pos;
+        self.advance();
+        continue;
+      }
+      self.advance();
+      run = self.pos;
+    } else {
+      self.advance();
+    }
+  }
+  val.push_str(self.src[run..self.pos]);
+  if (self.pos < #self.src) {
+    self.advance();  // skip closing "
+  }
+  return Token { type_: TokenType::String, value: val, line, col };
+}
+
+fn Lexer::lex_hex_color(var self&, line: u32, col: u32): Token {
+  self.advance();  // skip #
+  var val = from_str("#");
+  while (self.pos < #self.src && is_xdigit(self.at(self.pos))) {
+    val.push_c8(self.at(self.pos));
+    self.advance();
+  }
+  return Token { type_: TokenType::HexColor, value: val, line, col };
+}
+
+fn Lexer::lex_number(var self&, line: u32, col: u32): Token {
+  var val = String();
+  if (self.at(self.pos) == '-') {
+    val.push_c8('-');
+    self.advance();
+  }
+  while (self.pos < #self.src && (is_digit(self.at(self.pos)) || self.at(self.pos) == '.')) {
+    val.push_c8(self.at(self.pos));
+    self.advance();
+  }
+  // Unit suffix: px, %, vw, vh, ms, s, fr
+  if (self.pos < #self.src) {
+    let c = self.at(self.pos);
+    let has_next = self.pos + 1 < #self.src;
+    if (c == '%') {
+      val.push_c8('%');
+      self.advance();
+    } else if (has_next && c == 'p' && self.at(self.pos + 1) == 'x') {
+      val.push_str("px");
+      self.advance();
+      self.advance();
+    } else if (has_next && c == 'v' && self.at(self.pos + 1) == 'w') {
+      val.push_str("vw");
+      self.advance();
+      self.advance();
+    } else if (has_next && c == 'v' && self.at(self.pos + 1) == 'h') {
+      val.push_str("vh");
+      self.advance();
+      self.advance();
+    } else if (has_next && c == 'm' && self.at(self.pos + 1) == 's') {
+      val.push_str("ms");
+      self.advance();
+      self.advance();
+    } else if (c == 's' && (!has_next || !is_alpha(self.at(self.pos + 1)))) {
+      val.push_c8('s');
+      self.advance();
+    } else if (has_next && c == 'f' && self.at(self.pos + 1) == 'r') {
+      val.push_str("fr");
+      self.advance();
+      self.advance();
+    }
+  }
+  return Token { type_: TokenType::Number, value: val, line, col };
+}
+
+fn Lexer::lex_identifier(var self&, line: u32, col: u32): Token {
+  var val = String();
+  // `$prop` references inside component bodies lex as one identifier
+  if (self.pos < #self.src && self.at(self.pos) == '$') {
+    val.push_c8('$');
+    self.advance();
+  }
+  while (self.pos < #self.src && (is_alnum(self.at(self.pos)) || self.at(self.pos) == '_' || self.at(self.pos) == '-')) {
+    val.push_c8(self.at(self.pos));
+    self.advance();
+  }
+  return Token { type_: TokenType::Identifier, value: val, line, col };
+}
+
+// ---------------------------------------------------------------------------
+// Recursive descent parser
+// ---------------------------------------------------------------------------
+
+fn token_name(type_: TokenType): str => match (type_) {
+  TokenType::Identifier => "identifier",
+  TokenType::String => "string",
+  TokenType::Number => "number",
+  TokenType::HexColor => "hex color",
+  TokenType::Colon => "':'",
+  TokenType::Semicolon => "';'",
+  TokenType::LBrace => "'{'",
+  TokenType::RBrace => "'}'",
+  TokenType::At => "'@'",
+  TokenType::Eof => "EOF",
+  TokenType::Error => "error",
+};
+
+// The C++ Parser keeps a pointer to the caller's error list; here the errors
+// are the parser's own until `parse` is done and the caller takes them.
+struct Parser<'a> {
+  var lexer: Lexer<'a>
+  var current: Token
+  let file: String
+  pub var errors: List<ParseError> = List()
+
+  fn of(src: str<'a>, file: str): Parser<'a> {
+    var lexer = Lexer::of(src);
+    let first = lexer.next();
+    return Parser { lexer, current: first, file: from_str(file), errors: List() };
+  }
+
+  fn advance(var self&) {
+    self.current = self.lexer.next();
+  }
+
+  fn is_type(self&, type_: TokenType): bool => self.current.type_ == type_;
+
+  // current is an identifier with exactly this text.
+  fn is_word(self&, word: str): bool => self.current.type_ == TokenType::Identifier && self.current.value == word;
+
+  // current ends a `{ ... }` body: '}' or end of input.
+  fn at_body_end(self&): bool => self.current.type_ == TokenType::RBrace || self.current.type_ == TokenType::Eof;
+
+  fn parse(var self&, var doc&: UguiDocument): bool;
+  fn parse_style_class(var self&): UguiStyleClass;
+  fn parse_component(var self&): UguiComponent;
+  fn parse_import(var self&): String;
+  fn expect(var self&, type_: TokenType): Token;
+  fn error(var self&, msg: str);
+  fn parse_element(var self&): UguiNode;
+  fn parse_element_body(var self&, node: UguiNode): UguiNode;
+  fn parse_state_block(var self&): UguiStateBlock;
+  fn parse_keyframe_block_inner(var self&): UguiKeyframeBlock;
+  fn parse_media_query(var self&): UguiMediaQuery;
+  fn parse_value(var self&): String;
+}
+
+fn Parser::parse(var self&, var doc&: UguiDocument): bool {
+  doc.source_path = self.file.clone();
+
+  while (self.current.type_ != TokenType::Eof) {
+    // Top-level `class` blocks are style class declarations, not widgets.
+    if (self.is_word("class")) {
+      let sc = self.parse_style_class();
+      if (!sc.name.is_empty()) {
+        doc.style_classes.push(sc);
+      }
+      continue;
+    }
+    if (self.is_word("component")) {
+      let comp = self.parse_component();
+      if (!comp.name.is_empty()) {
+        doc.components.push(comp);
+      }
+      continue;
+    }
+    if (self.is_word("import")) {
+      let path = self.parse_import();
+      if (!path.is_empty()) {
+        doc.imports.push(path);
+      }
+      continue;
+    }
+    let node = self.parse_element();
+    if (node.type_.is_empty()) {
+      break;
+    }
+    doc.roots.push(node);
+  }
+
+  return self.errors.is_empty();
+}
+
+fn Parser::parse_style_class(var self&): UguiStyleClass {
+  var sc = UguiStyleClass {};
+  self.advance();  // skip 'class' identifier
+  if (self.current.type_ != TokenType::Identifier) {
+    self.error("expected class name after 'class'");
+    return sc;
+  }
+  sc.name = self.current.value.clone();
+  self.advance();
+  self.expect(TokenType::LBrace);
+  while (!self.at_body_end()) {
+    if (self.current.type_ == TokenType::Colon) {
+      sc.state_blocks.push(self.parse_state_block());
+    } else if (self.current.type_ == TokenType::Identifier) {
+      let id = self.current.clone();
+      self.advance();
+      if (self.current.type_ == TokenType::Colon) {
+        self.advance();  // skip ':'
+        let value = self.parse_value();
+        if (self.current.type_ == TokenType::Semicolon) {
+          self.advance();
+        }
+        sc.properties.insert(id.value, value);
+      } else {
+        self.advance();
+      }
+    } else {
+      self.advance();
+    }
+  }
+  if (self.current.type_ == TokenType::RBrace) {
+    self.advance();
+  }
+  return sc;
+}
+
+// component = 'component' name '{' ('prop' name [':' value] ';')* element '}'
+fn Parser::parse_component(var self&): UguiComponent {
+  var comp = UguiComponent {};
+  comp.source_line = self.current.line;
+  self.advance();  // skip 'component'
+  if (self.current.type_ != TokenType::Identifier) {
+    self.error("expected component name after 'component'");
+    return comp;
+  }
+  comp.name = self.current.value.clone();
+  self.advance();
+  self.expect(TokenType::LBrace);
+
+  var has_root = false;
+  while (!self.at_body_end()) {
+    if (self.is_word("prop")) {
+      self.advance();  // skip 'prop'
+      if (self.current.type_ != TokenType::Identifier) {
+        self.error("expected prop name after 'prop'");
+        continue;
+      }
+      let prop_name = self.current.value.clone();
+      self.advance();
+      var default_value = String();
+      if (self.current.type_ == TokenType::Colon) {
+        self.advance();
+        default_value = self.parse_value();
+      }
+      if (self.current.type_ == TokenType::Semicolon) {
+        self.advance();
+      }
+      comp.props.insert(prop_name, default_value);
+    } else if (self.current.type_ == TokenType::Identifier) {
+      let el = self.parse_element();
+      if (has_root) {
+        self.errors.push(ParseError {
+          message: f"component '{comp.name}' must have exactly one root element",
+          file: self.file.clone(),
+          line: el.source_line,
+          column: 0,
+        });
+      } else {
+        comp.root = el;
+        has_root = true;
+      }
+    } else {
+      self.advance();
+    }
+  }
+  if (self.current.type_ == TokenType::RBrace) {
+    self.advance();
+  }
+  if (!has_root) {
+    self.errors.push(ParseError {
+      message: f"component '{comp.name}' has no root element",
+      file: self.file.clone(),
+      line: comp.source_line,
+      column: 0,
+    });
+  }
+  return comp;
+}
+
+// import = 'import' string ';'
+fn Parser::parse_import(var self&): String {
+  self.advance();  // skip 'import'
+  var path = String();
+  if (self.current.type_ == TokenType::String) {
+    path = self.current.value.clone();
+    self.advance();
+  } else {
+    self.error("expected \"path\" after 'import'");
+  }
+  if (self.current.type_ == TokenType::Semicolon) {
+    self.advance();
+  }
+  return path;
+}
+
+fn Parser::expect(var self&, type_: TokenType): Token {
+  if (self.current.type_ != type_) {
+    self.error(f"expected {token_name(type_)}, got '{self.current.value}'");
+    return token(TokenType::Error, "", self.current.line, self.current.col);
+  }
+  let tok = self.current.clone();
+  self.advance();
+  return tok;
+}
+
+fn Parser::error(var self&, msg: str) {
+  self.errors.push(ParseError {
+    message: from_str(msg),
+    file: self.file.clone(),
+    line: self.current.line,
+    column: self.current.col,
+  });
+  // Recovery: skip to next '}' or EOF
+  while (!self.at_body_end()) {
+    self.advance();
+  }
+}
+
+// element = identifier [identifier] '{' (property | state_block | at_rule
+//           | element)* '}'
+fn Parser::parse_element(var self&): UguiNode {
+  var node = UguiNode {};
+  node.source_line = self.current.line;
+
+  let type_tok = self.expect(TokenType::Identifier);
+  node.type_ = type_tok.value;
+
+  // Optional name
+  if (self.current.type_ == TokenType::Identifier) {
+    node.name = self.current.value.clone();
+    self.advance();
+  }
+
+  return self.parse_element_body(node);
+}
+
+// The '{' ... '}' of an element, at any depth: children go through here
+// too, so @media and @keyframes work on nested widgets the same as on the
+// root.
+fn Parser::parse_element_body(var self&, node_in: UguiNode): UguiNode {
+  var node = node_in;
+  self.expect(TokenType::LBrace);
+
+  while (!self.at_body_end()) {
+    if (self.current.type_ == TokenType::At) {
+      self.advance();  // skip '@'
+      if (self.is_word("media")) {
+        node.media_queries.push(self.parse_media_query());
+      } else {
+        node.keyframe_blocks.push(self.parse_keyframe_block_inner());
+      }
+    } else if (self.current.type_ == TokenType::Colon) {
+      // State block: :hover { ... }
+      node.state_blocks.push(self.parse_state_block());
+    } else if (self.current.type_ == TokenType::Identifier) {
+      // A property (identifier: value;) or a child element.
+      let id = self.current.clone();
+      self.advance();
+      if (self.current.type_ == TokenType::Colon) {
+        self.advance();  // skip ':'
+        let value = self.parse_value();
+        if (self.current.type_ == TokenType::Semicolon) {
+          self.advance();
+        }
+        node.properties.insert(id.value, value);
+      } else if (self.current.type_ == TokenType::LBrace || self.current.type_ == TokenType::Identifier) {
+        var child = UguiNode {};
+        child.source_line = id.line;
+        child.type_ = id.value;
+        if (self.current.type_ == TokenType::Identifier) {
+          child.name = self.current.value.clone();
+          self.advance();
+        }
+        node.children.push(self.parse_element_body(child));
+      } else {
+        self.error(f"unexpected token after identifier '{id.value}'");
+      }
+    } else {
+      self.error(f"unexpected token '{self.current.value}'");
+      self.advance();
+    }
+  }
+
+  if (self.current.type_ == TokenType::RBrace) {
+    self.advance();
+  }
+  return node;
+}
+
+// state_block = ':' identifier '{' (property)* '}'
+fn Parser::parse_state_block(var self&): UguiStateBlock {
+  var sb = UguiStateBlock {};
+  self.advance();  // skip ':'
+  sb.state = self.current.value.clone();
+  self.advance();  // state name
+  self.expect(TokenType::LBrace);
+
+  while (!self.at_body_end()) {
+    if (self.current.type_ == TokenType::Identifier) {
+      let key = self.current.value.clone();
+      self.advance();
+      self.expect(TokenType::Colon);
+      let val = self.parse_value();
+      if (self.current.type_ == TokenType::Semicolon) {
+        self.advance();
+      }
+      sb.properties.insert(key, val);
+    } else {
+      self.advance();
+    }
+  }
+  if (self.current.type_ == TokenType::RBrace) {
+    self.advance();
+  }
+  return sb;
+}
+
+// @keyframes name { properties; percent% { props } ... }
+// Called when '@' has already been consumed by the caller.
+fn Parser::parse_keyframe_block_inner(var self&): UguiKeyframeBlock {
+  var kb = UguiKeyframeBlock {};
+
+  // Expect "keyframes" identifier (current should be it)
+  if (!self.is_word("keyframes")) {
+    self.error("expected 'keyframes' after '@'");
+    return kb;
+  }
+  self.advance();  // skip "keyframes"
+
+  // Animation name
+  if (self.current.type_ == TokenType::Identifier) {
+    kb.name = self.current.value.clone();
+    self.advance();
+  }
+
+  self.expect(TokenType::LBrace);
+
+  while (!self.at_body_end()) {
+    if (self.current.type_ == TokenType::Number && self.current.value.as_str()[#self.current.value - 1] == '%') {
+      // Percentage keyframe stop: e.g. 50% { opacity: 0.6; }
+      var stop = UguiKeyframeStop {};
+      let pval = self.current.value.as_str();
+      stop.percent = 0.0;
+      from_chars_f32(pval[..#pval - 1], stop.percent);
+      stop.percent /= 100.0;
+      self.advance();
+      self.expect(TokenType::LBrace);
+
+      while (!self.at_body_end()) {
+        if (self.current.type_ == TokenType::Identifier) {
+          let key = self.current.value.clone();
+          self.advance();
+          self.expect(TokenType::Colon);
+          let val = self.parse_value();
+          if (self.current.type_ == TokenType::Semicolon) {
+            self.advance();
+          }
+          stop.properties.insert(key, val);
+        } else {
+          self.advance();
+        }
+      }
+      if (self.current.type_ == TokenType::RBrace) {
+        self.advance();
+      }
+      kb.stops.push(stop);
+    } else if (self.current.type_ == TokenType::Identifier) {
+      // Top-level property: duration, loop, alternate, easing
+      let key = self.current.value.clone();
+      self.advance();
+      self.expect(TokenType::Colon);
+      let val = self.parse_value();
+      if (self.current.type_ == TokenType::Semicolon) {
+        self.advance();
+      }
+      kb.properties.insert(key, val);
+    } else {
+      self.advance();
+    }
+  }
+  if (self.current.type_ == TokenType::RBrace) {
+    self.advance();
+  }
+  return kb;
+}
+
+// @media (condition: value) { property: value; ... }
+// Called when '@' has already been consumed and current is "media".
+fn Parser::parse_media_query(var self&): UguiMediaQuery {
+  var mq = UguiMediaQuery {};
+  self.advance();  // skip "media"
+
+  // Tokens until '{'; '(' ')' are not lexer tokens (Error) and colons inside
+  // the condition are Colon. Skip them.
+  while (self.current.type_ != TokenType::LBrace && self.current.type_ != TokenType::Eof) {
+    if (self.current.type_ == TokenType::Identifier) {
+      if (mq.condition.is_empty()) {
+        mq.condition = self.current.value.clone();
+      }
+    } else if (self.current.type_ == TokenType::Number) {
+      var v: f32 = 0.0;
+      from_chars_f32(self.current.value.as_str(), v);
+      mq.value = v;
+    }
+    // Skip Colon, Error ('(' and ')'), and anything else
+    self.advance();
+  }
+
+  // Parse property overrides inside braces
+  if (self.current.type_ == TokenType::LBrace) {
+    self.advance();  // skip '{'
+    while (!self.at_body_end()) {
+      if (self.current.type_ == TokenType::Identifier) {
+        let key = self.current.value.clone();
+        self.advance();
+        if (self.current.type_ == TokenType::Colon) {
+          self.advance();  // skip ':'
+          let val = self.parse_value();
+          if (self.current.type_ == TokenType::Semicolon) {
+            self.advance();
+          }
+          mq.properties.insert(key, val);
+        }
+      } else {
+        self.advance();
+      }
+    }
+    if (self.current.type_ == TokenType::RBrace) {
+      self.advance();
+    }
+  }
+
+  return mq;
+}
+
+// value = (identifier | string | number | hex_color)+
+fn Parser::parse_value(var self&): String {
+  var val = String();
+  while (self.current.type_ != TokenType::Semicolon && !self.at_body_end()) {
+    if (!val.is_empty()) {
+      val.push_c8(' ');
+    }
+    val.push_str(self.current.value.as_str());
+    self.advance();
+  }
+  return val;
+}
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+// The std::filesystem operations import resolution needs (parent_path,
+// operator/, weakly_canonical), spelled out so import paths resolve and
+// report identically in every configuration. POSIX follows libstdc++
+// exactly.
+
+fn is_separator(c: c8): bool {
+  if (comptime @target_os() == "windows") {
+    return c == '/' || c == '\\';
+  }
+  return c == '/';
+}
+
+fn is_absolute_path(p: str): bool {
+  if (comptime @target_os() == "windows") {
+    return #p >= 3 && p[1] == ':' && is_separator(p[2]);
+  }
+  return #p > 0 && p[0] == '/';
+}
+
+// Everything up to the end of the second-to-last element: "a/b/c" -> "a/b",
+// "a/b/" -> "a/b", "/x" -> "/", "x" -> "", "/" -> "/".
+fn parent_path<'a>(p: str<'a>): str<'a> {
+  var end = #p;
+  while (end > 0 && is_separator(p[end - 1])) {
+    end -= 1;
+  }
+  if (end == 0) {
+    return p;  // "" or only separators: no relative path
+  }
+  if (end < #p) {
+    return p[..end];  // last element is the empty one
+  }
+  while (end > 0 && !is_separator(p[end - 1])) {
+    end -= 1;  // drop the filename
+  }
+  if (end == 0) {
+    return p[..0];
+  }
+  var keep = end;
+  while (keep > 0 && is_separator(p[keep - 1])) {
+    keep -= 1;
+  }
+  return keep == 0 ? p[..1] : p[..keep];
+}
+
+// operator/: an absolute rhs replaces, otherwise a separator is added unless
+// lhs is empty or already ends in one.
+fn join_path(lhs: str, rhs: str): String {
+  if (is_absolute_path(rhs) || #lhs == 0) {
+    return from_str(rhs);
+  }
+  var out = from_str(lhs);
+  if (!is_separator(lhs[#lhs - 1])) {
+    out.push_c8('/');
+  }
+  out.push_str(rhs);
+  return out;
+}
+
+// Splits into elements the way std::filesystem::path iterates: the root "/",
+// each filename, and an empty trailing element for a trailing separator.
+fn path_elements<'a>(p: str<'a>): List<str<'a>> {
+  var elements = List::<str<'a>>();
+  var i: usize = 0;
+  if (#p > 0 && p[0] == '/') {
+    elements.push(p[..1]);
+    while (i < #p && p[i] == '/') {
+      i += 1;
+    }
+  }
+  while (i < #p) {
+    let start = i;
+    while (i < #p && p[i] != '/') {
+      i += 1;
+    }
+    elements.push(p[start..i]);
+    while (i < #p && p[i] == '/') {
+      i += 1;
+    }
+    if (i == #p && p[i - 1] == '/') {
+      elements.push(p[..0]);
+    }
+  }
+  return elements;
+}
+
+// std::filesystem::path::lexically_normal.
+fn lexically_normal(p: str): String {
+  var only_roots = true;
+  for (let c in p) {
+    if (c != '/') {
+      only_roots = false;
+      break;
+    }
+  }
+  if (only_roots) {
+    return from_str(p);  // "" or only roots
+  }
+  let elements = path_elements(p);
+  let absolute = elements.len() > 0 && elements[0] == "/";
+  var out = List::<str>();
+  var trailing = false;
+  for (let i in (absolute ? 1 : 0)..elements.len()) {
+    let e = elements[i];
+    let last = i + 1 == elements.len();
+    if (#e == 0) {
+      trailing = out.len() > 0;
+    } else if (e == ".") {
+      trailing = last ? out.len() > 0 : trailing;
+    } else if (e == "..") {
+      if (out.len() > 0 && out[out.len() - 1] != "..") {
+        out.pop();
+        trailing = out.len() > 0;
+      } else if (!absolute) {
+        out.push(e);
+        trailing = false;
+      }
+    } else {
+      out.push(e);
+      trailing = false;
+    }
+  }
+  var result = absolute ? from_str("/") : String();
+  for (let i in 0..out.len()) {
+    if (i > 0) {
+      result.push_c8('/');
+    }
+    result.push_str(out[i]);
+  }
+  if (trailing && out.len() > 0 && out[out.len() - 1] != "..") {
+    result.push_c8('/');
+  }
+  if (result.is_empty()) {
+    result = from_str(".");
+  }
+  return result;
+}
+
+// std::filesystem::weakly_canonical: the longest existing prefix made
+// canonical, the rest appended and lexically normalized. none where std
+// reports an error (the caller then falls back to the plain path).
+fn weakly_canonical(p: str): String? {
+  let elements = path_elements(p);
+  var result = String();
+  var i: usize = 0;
+  while (i < elements.len()) {
+    let candidate = join_path(result.as_str(), elements[i]);
+    if (!path_exists(candidate.as_str())) {
+      break;
+    }
+    result = candidate;
+    i += 1;
+  }
+  if (!result.is_empty()) {
+    let real = real_path(result.as_str()) else {
+      return none;
+    };
+    result = real;
+  }
+  while (i < elements.len()) {
+    result = join_path(result.as_str(), elements[i]);
+    i += 1;
+  }
+  return lexically_normal(result.as_str());
+}
+
+// ---------------------------------------------------------------------------
+// Import resolution
+// ---------------------------------------------------------------------------
+
+// Merge each imported file's components and style classes into `doc` before
+// its own definitions, so the importer wins on name clashes. Root widgets of
+// imports are ignored. `visited` holds canonical paths on the import chain to
+// break cycles.
+fn resolve_imports(var doc&: UguiDocument, var errors&: List<ParseError>, var visited&: List<String>) {
+  if (doc.imports.is_empty()) {
+    return;
+  }
+
+  let base = from_str(parent_path(doc.source_path.as_str()));
+
+  var imported_components = List::<UguiComponent>();
+  var imported_classes = List::<UguiStyleClass>();
+
+  for (let i in 0..doc.imports.len()) {
+    let joined = join_path(base.as_str(), doc.imports[i].as_str());
+    let key = weakly_canonical(joined.as_str()) ?? joined.clone();
+
+    var seen = false;
+    for (let v& in visited) {
+      if (v.as_str() == key.as_str()) {
+        seen = true;
+        break;
+      }
+    }
+    if (seen) {
+      continue;  // already imported somewhere up the chain
+    }
+    visited.push(key.clone());
+
+    var sub = UguiDocument {};
+    parse_ugui_file_inner(key.as_str(), sub, errors, visited);
+    for (var c& in sub.components) {
+      imported_components.push(c.clone());
+    }
+    for (var sc& in sub.style_classes) {
+      imported_classes.push(sc.clone());
+    }
+  }
+
+  for (let c& in doc.components) {
+    imported_components.push(c.clone());
+  }
+  doc.components = imported_components;
+
+  for (let sc& in doc.style_classes) {
+    imported_classes.push(sc.clone());
+  }
+  doc.style_classes = imported_classes;
+}
+
+fn parse_ugui_file_inner(path: str, var out_doc&: UguiDocument, var out_errors&: List<ParseError>, var visited&: List<String>): bool {
+  let bytes = read_bytes(path) else {
+    out_errors.push(ParseError { message: from_str("failed to open file"), file: from_str(path), line: 0, column: 0 });
+    return false;
+  };
+  let text = utf8_view(bytes.as_slice()) else {
+    out_errors.push(ParseError { message: from_str("file is not valid UTF-8"), file: from_str(path), line: 0, column: 0 });
+    return false;
+  };
+
+  var parser = Parser::of(text, path);
+  parser.parse(out_doc);
+  for (var e& in parser.errors) {
+    out_errors.push(e.clone());
+  }
+  // The C++ parser appends to the caller's list and judges that whole list.
+  let ok = out_errors.is_empty();
+  resolve_imports(out_doc, out_errors, visited);
+  return ok && out_errors.is_empty();
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// Parse a .ugui file from source text. True on success; on failure, errors
+// are populated. `filename` names the file in errors and is the base for
+// `import` paths.
+pub fn parse_ugui(source: str, filename: str, var out_doc&: UguiDocument, var out_errors&: List<ParseError>): bool {
+  var parser = Parser::of(source, filename);
+  parser.parse(out_doc);
+  for (var e& in parser.errors) {
+    out_errors.push(e.clone());
+  }
+  let ok = out_errors.is_empty();  // as in the C++, the caller's whole list
+  var visited = List::<String>();
+  resolve_imports(out_doc, out_errors, visited);
+  return ok && out_errors.is_empty();
+}
+
+// Parse from file path.
+pub fn parse_ugui_file(path: str, var out_doc&: UguiDocument, var out_errors&: List<ParseError>): bool {
+  var visited = List::<String>();
+  visited.push(weakly_canonical(path) ?? from_str(path));
+  return parse_ugui_file_inner(path, out_doc, out_errors, visited);
+}
