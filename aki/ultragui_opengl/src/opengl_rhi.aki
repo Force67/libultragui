@@ -1,0 +1,1212 @@
+// ugui/rhi/opengl/opengl_rhi.cc: the OpenGL 3.3 core RHI.
+//
+// Shape differences from the C++ (behavior is the same):
+//
+// * The C++ RHI is one class whose .cc is swapped at link time; this is
+//   OpenGlRhi, a type implementing the Rhi capability. Like the C++ it keeps
+//   its state in a separate heap object (GlImpl in a Box): the framebuffer
+//   resize callback reaches the state through the module static
+//   `s_rhi_instance`, so its address must not change when the OpenGlRhi
+//   value moves.
+// * The window is RhiConfig::native_window (a GLFWwindow*, from
+//   Platform::native_handle()) instead of config.platform->native_handle().
+// * GL entry points are fields of `GlApi` (sys::gl) instead of file-static
+//   function pointers; they are loaded through glfwGetProcAddress with a
+//   dlsym fallback on libGL.so.1 (Linux), as in load_gl_functions().
+// * The shaders are in ultragui_opengl::glsl; the shader source goes to GL
+//   with its length instead of relying on a NUL terminator.
+// * Vertex-array identity for the per-frame vertex dedup is the slice's data
+//   pointer, as the C++ compares the `const Vertex2D*` it was handed.
+
+module ultragui_opengl::opengl_rhi;
+
+import {Box} from akikit::memory::box;
+import {eprintln, println} from akikit::logging;
+import {max} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {Vertex2D} from ultragui::render::vertex;
+import {glfw_get_framebuffer_size, glfw_get_proc_address, glfw_get_window_size, glfw_make_context_current,
+  glfw_set_framebuffer_size_callback, glfw_swap_buffers, glfw_swap_interval, GlfwWindow} from ultragui_glfw::sys::glfw;
+import {kQuadFragSrc, kQuadVertSrc, kTextFragSrc, kTextVertSrc, kVideoFragSrc, kVideoVertSrc} from ultragui_opengl::glsl;
+import {GlApi, kGlArrayBuffer, kGlBgra, kGlBlend, kGlClampToEdge, kGlColorAttachment0, kGlColorBufferBit, kGlCompileStatus,
+  kGlDynamicDraw, kGlElementArrayBuffer, kGlExtensions, kGlFragmentShader, kGlFramebuffer, kGlFramebufferComplete,
+  kGlFramebufferSrgb, kGlFuncAdd, kGlLinear, kGlLinkStatus, kGlNearest, kGlNumExtensions, kGlOne, kGlOneMinusSrcAlpha,
+  kGlR8, kGlRed, kGlRenderer, kGlRgba, kGlRgba8, kGlScissorTest, kGlSkipDecodeExt, kGlSrcAlpha, kGlSrgb8Alpha8,
+  kGlTexture0, kGlTexture1, kGlTexture2, kGlTexture2d, kGlTextureMagFilter, kGlTextureMinFilter, kGlTextureSrgbDecodeExt,
+  kGlTextureWrapS, kGlTextureWrapT, kGlTriangles, kGlUnpackAlignment, kGlUnsignedByte, kGlUnsignedInt, kGlVersion,
+  kGlVertexShader, kGlFloat} from ultragui_opengl::sys::gl;
+
+extern fn dlopen(name: *const c_char, flags: i32): *var u8;
+extern fn dlsym(handle: *var u8, name: *const c_char): *var u8;
+extern fn strlen(s: *const c_char): usize;
+
+comptime let kRtldLazy: i32 = 1;
+
+// ---------------------------------------------------------------------------
+// GL function loading
+// ---------------------------------------------------------------------------
+
+// load_gl_functions()'s `static void* libgl`.
+static var libgl: *var u8 = null;
+
+// glfwGetProcAddress may return NULL for legacy GL 1.x functions on some
+// drivers. Fall back to dlsym from libGL.so.1 for those (Linux only).
+fn load_proc(name: *const c_char): *var u8 {
+  unsafe {
+    var p = glfw_get_proc_address(name);
+    if (comptime @target_os() == "linux") {
+      if (libgl == null) {
+        libgl = dlopen(c"libGL.so.1", kRtldLazy);
+      }
+      if (p == null && libgl != null) {
+        p = dlsym(libgl, name);
+      }
+    }
+    return p;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shader compilation helpers
+// ---------------------------------------------------------------------------
+
+// A GL info log (NUL-terminated C string in `log`) as text.
+fn log_text(log&: [u8; 1024]): str {
+  unsafe {
+    let p = @ptr(log[..]) as *const c_char;
+    return @str(p as *const c8, strlen(p));
+  }
+}
+
+fn compile_shader(gl&: GlApi, kind: u32, src: str): u32 {
+  let shader = gl.create_shader(kind);
+  unsafe {
+    var text = @ptr(src) as *const c_char;
+    var length = #src as i32;
+    gl.shader_source(shader, 1, &raw var text, &raw var length);
+  }
+  gl.compile_shader(shader);
+
+  var success: i32 = 0;
+  unsafe gl.get_shaderiv(shader, kGlCompileStatus, &raw var success);
+  if (success == 0) {
+    var log = [0u8; 1024];
+    unsafe gl.get_shader_info_log(shader, 1024, null, @ptr(log[..]) as *var c_char);
+    eprintln(f"ultragui: shader compile error:\n{log_text(log)}");
+    gl.delete_shader(shader);
+    return 0;
+  }
+  return shader;
+}
+
+fn compile_program(gl&: GlApi, vs_src: str, fs_src: str): u32 {
+  let vs = compile_shader(gl, kGlVertexShader, vs_src);
+  if (vs == 0) {
+    return 0;
+  }
+
+  let fs = compile_shader(gl, kGlFragmentShader, fs_src);
+  if (fs == 0) {
+    gl.delete_shader(vs);
+    return 0;
+  }
+
+  var prog = gl.create_program();
+  gl.attach_shader(prog, vs);
+  gl.attach_shader(prog, fs);
+  gl.link_program(prog);
+
+  var success: i32 = 0;
+  unsafe gl.get_programiv(prog, kGlLinkStatus, &raw var success);
+  if (success == 0) {
+    var log = [0u8; 1024];
+    unsafe gl.get_program_info_log(prog, 1024, null, @ptr(log[..]) as *var c_char);
+    eprintln(f"ultragui: program link error:\n{log_text(log)}");
+    gl.delete_program(prog);
+    prog = 0;
+  }
+
+  gl.delete_shader(vs);
+  gl.delete_shader(fs);
+  return prog;
+}
+
+// ---------------------------------------------------------------------------
+// RHI::Impl
+// ---------------------------------------------------------------------------
+
+// RHI::Impl::MAX_TEXTURES
+comptime let kMaxTextures: u32 = 256;
+
+struct TextureSlot : Copy {
+  pub var texture: u32 = 0
+  pub var fbo: u32 = 0  // only for render targets
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var pixel_size: u32 = 0
+  pub var in_use: bool = false
+  pub var is_render_target: bool = false
+  pub var internal_format: u32 = 0
+  pub var data_format: u32 = 0
+  pub var data_type: u32 = 0
+}
+
+// GLFW's dpi_scale: framebuffer pixels over window units.
+fn dpi_of(window: *var GlfwWindow): f32 {
+  var fw: i32 = 0;
+  var fh: i32 = 0;
+  var ww: i32 = 0;
+  var wh: i32 = 0;
+  unsafe {
+    glfw_get_framebuffer_size(window, &raw var fw, &raw var fh);
+    glfw_get_window_size(window, &raw var ww, &raw var wh);
+  }
+  return ww > 0 ? fw as f32 / ww as f32 : 1.0;
+}
+
+struct GlImpl {
+  pub unowned var window_: *var GlfwWindow = null
+  pub var gl: GlApi = GlApi::unloaded()
+  pub var dpi_scale_: f32 = 1.0
+  pub var vsync_: bool = true
+  pub var srgb_decode_control_: bool = false  // EXT_texture_sRGB_decode present
+  pub var embedded_: bool = false
+
+  // Shader programs
+  pub var quad_program_: u32 = 0
+  pub var text_program_: u32 = 0
+  pub var video_program_: u32 = 0  // lazy-created
+
+  // Uniform locations: quad program
+  pub var quad_u_scale_: i32 = -1
+  pub var quad_u_translate_: i32 = -1
+  pub var quad_u_tex_: i32 = -1
+
+  // Uniform locations: text program
+  pub var text_u_scale_: i32 = -1
+  pub var text_u_translate_: i32 = -1
+  pub var text_u_tex_: i32 = -1
+
+  // Uniform locations: video program
+  pub var video_u_y_: i32 = -1
+  pub var video_u_cb_: i32 = -1
+  pub var video_u_cr_: i32 = -1
+
+  // Shared VAO (vertex format is identical for quad and text)
+  pub var vao_: u32 = 0
+
+  // Video VAO (empty: vertices generated from gl_VertexID)
+  pub var video_vao_: u32 = 0
+
+  // Quad pipeline dynamic vertex/index buffers
+  pub var vertex_buf_: u32 = 0
+  pub var vertex_capacity_: u32 = 0
+  pub var vertex_write_pos_: u32 = 0
+
+  pub var index_buf_: u32 = 0
+  pub var index_capacity_: u32 = 0
+  pub var index_write_pos_: u32 = 0
+
+  // Text pipeline separate buffers
+  pub var text_vertex_buf_: u32 = 0
+  pub var text_vertex_capacity_: u32 = 0
+  pub var text_vertex_write_pos_: u32 = 0
+
+  pub var text_index_buf_: u32 = 0
+  pub var text_index_capacity_: u32 = 0
+  pub var text_index_write_pos_: u32 = 0
+
+  // Vertex dedup tracking (same pattern as Vulkan backend)
+  pub unowned var last_quad_verts_: *const u8 = null
+  pub var last_quad_vert_count_: u32 = 0
+  pub var last_quad_vb_offset_: u32 = 0  // byte offset
+
+  pub unowned var last_text_verts_: *const u8 = null
+  pub var last_text_vert_count_: u32 = 0
+  pub var last_text_vb_offset_: u32 = 0
+
+  // Texture slots
+  pub var textures_: [TextureSlot; 256] = [TextureSlot {}; 256]
+  pub var white_texture_: RhiTextureHandle = kInvalidTexture
+
+  // Offscreen state
+  pub var active_offscreen_target_: RhiTextureHandle = kInvalidTexture
+  pub var offscreen_display_size_: Vec2 = Vec2 {}
+  pub var frame_active_: bool = false
+
+  pub var swapchain_width_: u32 = 0
+  pub var swapchain_height_: u32 = 0
+
+  // Current projection (cached for program switches)
+  pub var proj_scale_: [f32; 2] = [0.0; 2]
+  pub var proj_translate_: [f32; 2] = [0.0; 2]
+}
+
+// ---------------------------------------------------------------------------
+// Static instance for framebuffer resize callback
+// ---------------------------------------------------------------------------
+
+static var s_rhi_instance: *var GlImpl = null;
+
+// The resize callback: recomputes dpi_scale_ from the window.
+extern fn framebuffer_size_callback(window: *var GlfwWindow, w: i32, h: i32) {
+  unsafe {
+    if (s_rhi_instance == null) {
+      return;
+    }
+    var inst& = *s_rhi_instance;
+    inst.dpi_scale_ = dpi_of(inst.window_);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Vertex format binding
+// ---------------------------------------------------------------------------
+
+// `base_offset` is where this batch's vertices start in the streaming buffer.
+// Every attribute pointer needs it. Without it, a frame that uploads more than
+// one distinct vertex array, such as an offscreen pass before the main pass,
+// draws every later batch from the first batch's vertices.
+fn GlImpl::bind_vertex_format(self&, vbo: u32, ibo: u32, base_offset: u32) {
+  let gl& = self.gl;
+  gl.bind_buffer(kGlArrayBuffer, vbo);
+  let base = base_offset as usize;
+  let stride = @size_of(Vertex2D) as i32;
+
+  unsafe {
+    // 0: pos (2xfloat, offset 0)
+    gl.enable_vertex_attrib_array(0);
+    gl.vertex_attrib_pointer(0, 2, kGlFloat, 0, stride, (base + @offset_of(Vertex2D, pos)) as *const u8);
+    // 1: uv (2xfloat, offset 8)
+    gl.enable_vertex_attrib_array(1);
+    gl.vertex_attrib_pointer(1, 2, kGlFloat, 0, stride, (base + @offset_of(Vertex2D, uv)) as *const u8);
+    // 2: color (1xuint, offset 16): integer attribute
+    gl.enable_vertex_attrib_array(2);
+    gl.vertex_attrib_ipointer(2, 1, kGlUnsignedInt, stride, (base + @offset_of(Vertex2D, color)) as *const u8);
+    // 3: color2 (1xuint, offset 20)
+    gl.enable_vertex_attrib_array(3);
+    gl.vertex_attrib_ipointer(3, 1, kGlUnsignedInt, stride, (base + @offset_of(Vertex2D, color2)) as *const u8);
+    // 4: corner_radii (1xuint, offset 24)
+    gl.enable_vertex_attrib_array(4);
+    gl.vertex_attrib_ipointer(4, 1, kGlUnsignedInt, stride, (base + @offset_of(Vertex2D, corner_radii)) as *const u8);
+    // 5: softness (1xfloat, offset 28)
+    gl.enable_vertex_attrib_array(5);
+    gl.vertex_attrib_pointer(5, 1, kGlFloat, 0, stride, (base + @offset_of(Vertex2D, softness)) as *const u8);
+    // 6: half_size (2xfloat, offset 32)
+    gl.enable_vertex_attrib_array(6);
+    gl.vertex_attrib_pointer(6, 2, kGlFloat, 0, stride, (base + @offset_of(Vertex2D, half_size)) as *const u8);
+    // 7: border_width (1xfloat, offset 40)
+    gl.enable_vertex_attrib_array(7);
+    gl.vertex_attrib_pointer(7, 1, kGlFloat, 0, stride, (base + @offset_of(Vertex2D, border_width)) as *const u8);
+    // 8: border_color (1xuint, offset 44)
+    gl.enable_vertex_attrib_array(8);
+    gl.vertex_attrib_ipointer(8, 1, kGlUnsignedInt, stride, (base + @offset_of(Vertex2D, border_color)) as *const u8);
+  }
+
+  gl.bind_buffer(kGlElementArrayBuffer, ibo);
+}
+
+// ---------------------------------------------------------------------------
+// Projection helper
+// ---------------------------------------------------------------------------
+
+fn GlImpl::set_projection(var self&, program: u32, win_w: f32, win_h: f32) {
+  // OpenGL NDC: Y-up. We want screen coordinates (Y-down), so flip Y.
+  self.proj_scale_[0] = 2.0 / win_w;
+  self.proj_scale_[1] = -2.0 / win_h;
+  self.proj_translate_[0] = -1.0;
+  self.proj_translate_[1] = 1.0;
+
+  let u_scale = program == self.quad_program_ ? self.quad_u_scale_ : self.text_u_scale_;
+  let u_translate = program == self.quad_program_ ? self.quad_u_translate_ : self.text_u_translate_;
+
+  self.gl.uniform2f(u_scale, self.proj_scale_[0], self.proj_scale_[1]);
+  self.gl.uniform2f(u_translate, self.proj_translate_[0], self.proj_translate_[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Buffer capacity helpers
+// ---------------------------------------------------------------------------
+
+// Grows the buffer `buf` (bound to `target`) to hold `needed` elements of
+// `stride` bytes; the four ensure_*_capacity functions of the C++ differ only
+// in these arguments (floor 16384 vertices / 32768 indices).
+fn GlImpl::ensure_capacity(var self&, buf: u32, capacity: u32, needed: u32, floor: u32, target: u32, stride: usize):
+  (u32, u32)? {
+  if (capacity >= needed) {
+    return none;
+  }
+
+  var new_cap = max(needed, capacity * 2);
+  new_cap = max(new_cap, floor);
+
+  var id = buf;
+  if (id == 0) {
+    unsafe self.gl.gen_buffers(1, &raw var id);
+  }
+
+  self.gl.bind_buffer(target, id);
+  unsafe self.gl.buffer_data(target, (new_cap as usize * stride) as i64, null, kGlDynamicDraw);
+  return (id, new_cap);
+}
+
+fn GlImpl::ensure_vertex_capacity(var self&, needed: u32) {
+  if (let (id, cap) = self.ensure_capacity(self.vertex_buf_, self.vertex_capacity_, needed, 16384, kGlArrayBuffer,
+      @size_of(Vertex2D))) {
+    self.vertex_buf_ = id;
+    self.vertex_capacity_ = cap;
+  }
+}
+
+fn GlImpl::ensure_index_capacity(var self&, needed: u32) {
+  if (let (id, cap) = self.ensure_capacity(self.index_buf_, self.index_capacity_, needed, 32768, kGlElementArrayBuffer, 4)) {
+    self.index_buf_ = id;
+    self.index_capacity_ = cap;
+  }
+}
+
+fn GlImpl::ensure_text_vertex_capacity(var self&, needed: u32) {
+  if (let (id, cap) = self.ensure_capacity(self.text_vertex_buf_, self.text_vertex_capacity_, needed, 16384, kGlArrayBuffer,
+      @size_of(Vertex2D))) {
+    self.text_vertex_buf_ = id;
+    self.text_vertex_capacity_ = cap;
+  }
+}
+
+fn GlImpl::ensure_text_index_capacity(var self&, needed: u32) {
+  if (let (id, cap) = self.ensure_capacity(self.text_index_buf_, self.text_index_capacity_, needed, 32768,
+      kGlElementArrayBuffer, 4)) {
+    self.text_index_buf_ = id;
+    self.text_index_capacity_ = cap;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+fn pixel_ptr(pixels: bytes): *const u8 => #pixels == 0 ? null : unsafe @ptr(pixels) as *const u8;
+
+fn c_str(p: *const u8): str {
+  unsafe {
+    return p == null ? "" : @str(p as *const c8, strlen(p as *const c_char));
+  }
+}
+
+fn GlImpl::init(var self&, config&: RhiConfig): bool {
+  self.window_ = unsafe (config.native_window as *var GlfwWindow);
+  self.vsync_ = config.vsync;
+  self.embedded_ = config.embedded;
+
+  unsafe glfw_make_context_current(self.window_);
+
+  let loaded = GlApi::load(load_proc) else { return false; };
+  self.gl = loaded;
+  let gl = self.gl;
+
+  // Print GL version
+  let version_p = unsafe gl.get_string(kGlVersion);
+  let renderer_p = unsafe gl.get_string(kGlRenderer);
+  let version = version_p != null ? c_str(version_p) : "unknown";
+  let renderer = renderer_p != null ? c_str(renderer_p) : "unknown";
+  println(f"ultragui: OpenGL {version} ({renderer})");
+
+  {
+    var count: i32 = 0;
+    unsafe gl.get_integerv(kGlNumExtensions, &raw var count);
+    for (let i in 0..count) {
+      let ext = unsafe gl.get_stringi(kGlExtensions, i as u32);
+      if (ext != null && c_str(ext) == "GL_EXT_texture_sRGB_decode") {
+        self.srgb_decode_control_ = true;
+        break;
+      }
+    }
+    if (!self.srgb_decode_control_) {
+      eprintln("ultragui: no EXT_texture_sRGB_decode; offscreen render targets will render darker than on other backends");
+    }
+  }
+
+  // Compute DPI scale
+  self.dpi_scale_ = dpi_of(self.window_);
+
+  // Framebuffer resize callback. Skipped in embedded mode so we don't clobber
+  // the host's own callback; dpi is recomputed each BeginFrame instead.
+  if (!self.embedded_) {
+    unsafe {
+      var inst& = self;
+      s_rhi_instance = &raw var inst;
+      let _ = glfw_set_framebuffer_size_callback(self.window_, @c_fn(framebuffer_size_callback));
+    }
+  }
+
+  // GL state
+  gl.enable(kGlBlend);
+  gl.blend_func_separate(kGlSrcAlpha, kGlOneMinusSrcAlpha, kGlOne, kGlOneMinusSrcAlpha);
+  gl.blend_equation(kGlFuncAdd);
+  gl.enable(kGlFramebufferSrgb);
+  gl.enable(kGlScissorTest);
+  gl.pixel_storei(kGlUnpackAlignment, 1);
+
+  // Compile shader programs
+  self.quad_program_ = compile_program(gl, kQuadVertSrc, kQuadFragSrc);
+  if (self.quad_program_ == 0) {
+    return false;
+  }
+
+  self.text_program_ = compile_program(gl, kTextVertSrc, kTextFragSrc);
+  if (self.text_program_ == 0) {
+    return false;
+  }
+
+  // Get uniform locations
+  unsafe {
+    self.quad_u_scale_ = gl.get_uniform_location(self.quad_program_, c"u_scale");
+    self.quad_u_translate_ = gl.get_uniform_location(self.quad_program_, c"u_translate");
+    self.quad_u_tex_ = gl.get_uniform_location(self.quad_program_, c"tex_sampler");
+
+    self.text_u_scale_ = gl.get_uniform_location(self.text_program_, c"u_scale");
+    self.text_u_translate_ = gl.get_uniform_location(self.text_program_, c"u_translate");
+    self.text_u_tex_ = gl.get_uniform_location(self.text_program_, c"tex_sampler");
+  }
+
+  // Set texture unit 0 for both programs
+  gl.use_program(self.quad_program_);
+  gl.uniform1i(self.quad_u_tex_, 0);
+  gl.use_program(self.text_program_);
+  gl.uniform1i(self.text_u_tex_, 0);
+
+  // Create VAO
+  unsafe gl.gen_vertex_arrays(1, &raw var self.vao_);
+  gl.bind_vertex_array(self.vao_);
+
+  // Create initial buffers
+  unsafe {
+    gl.gen_buffers(1, &raw var self.vertex_buf_);
+    gl.gen_buffers(1, &raw var self.index_buf_);
+    gl.gen_buffers(1, &raw var self.text_vertex_buf_);
+    gl.gen_buffers(1, &raw var self.text_index_buf_);
+  }
+
+  // Allocate initial buffer storage
+  let vertex_stride = @size_of(Vertex2D);
+  self.vertex_capacity_ = 16384;
+  gl.bind_buffer(kGlArrayBuffer, self.vertex_buf_);
+  unsafe gl.buffer_data(kGlArrayBuffer, (self.vertex_capacity_ as usize * vertex_stride) as i64, null, kGlDynamicDraw);
+
+  self.index_capacity_ = 32768;
+  gl.bind_buffer(kGlElementArrayBuffer, self.index_buf_);
+  unsafe gl.buffer_data(kGlElementArrayBuffer, (self.index_capacity_ as usize * 4) as i64, null, kGlDynamicDraw);
+
+  self.text_vertex_capacity_ = 16384;
+  gl.bind_buffer(kGlArrayBuffer, self.text_vertex_buf_);
+  unsafe gl.buffer_data(kGlArrayBuffer, (self.text_vertex_capacity_ as usize * vertex_stride) as i64, null, kGlDynamicDraw);
+
+  self.text_index_capacity_ = 32768;
+  gl.bind_buffer(kGlElementArrayBuffer, self.text_index_buf_);
+  unsafe gl.buffer_data(kGlElementArrayBuffer, (self.text_index_capacity_ as usize * 4) as i64, null, kGlDynamicDraw);
+
+  // Create white 1x1 fallback texture
+  let white_pixel = [255u8; 4];
+  self.white_texture_ = self.create_texture(1, 1, RhiFormat::Rgba8Unorm, white_pixel[..] as bytes, RhiFilter::Nearest);
+  if (self.white_texture_ == kInvalidTexture) {
+    return false;
+  }
+
+  // Swap interval (host controls presentation in embedded mode)
+  if (!self.embedded_) {
+    unsafe glfw_swap_interval(self.vsync_ ? 1 : 0);
+  }
+
+  // Get initial framebuffer size
+  {
+    var fw: i32 = 0;
+    var fh: i32 = 0;
+    unsafe glfw_get_framebuffer_size(self.window_, &raw var fw, &raw var fh);
+    self.swapchain_width_ = fw as u32;
+    self.swapchain_height_ = fh as u32;
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
+fn GlImpl::shutdown(var self&) {
+  unsafe {
+    s_rhi_instance = null;
+  }
+
+  // Destroy textures
+  for (let i in 0..kMaxTextures) {
+    if (self.textures_[i as usize].in_use) {
+      self.destroy_texture(i);
+    }
+  }
+
+  let gl = self.gl;
+  unsafe {
+    if (self.vertex_buf_ != 0) {
+      gl.delete_buffers(1, &raw var self.vertex_buf_);
+    }
+    if (self.index_buf_ != 0) {
+      gl.delete_buffers(1, &raw var self.index_buf_);
+    }
+    if (self.text_vertex_buf_ != 0) {
+      gl.delete_buffers(1, &raw var self.text_vertex_buf_);
+    }
+    if (self.text_index_buf_ != 0) {
+      gl.delete_buffers(1, &raw var self.text_index_buf_);
+    }
+
+    if (self.vao_ != 0) {
+      gl.delete_vertex_arrays(1, &raw var self.vao_);
+    }
+    if (self.video_vao_ != 0) {
+      gl.delete_vertex_arrays(1, &raw var self.video_vao_);
+    }
+  }
+
+  if (self.quad_program_ != 0) {
+    gl.delete_program(self.quad_program_);
+  }
+  if (self.text_program_ != 0) {
+    gl.delete_program(self.text_program_);
+  }
+  if (self.video_program_ != 0) {
+    gl.delete_program(self.video_program_);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Frame lifecycle
+// ---------------------------------------------------------------------------
+
+fn GlImpl::acquire_frame(var self&): bool {
+  if (self.frame_active_) {
+    return true;
+  }
+
+  // Reset write positions
+  self.vertex_write_pos_ = 0;
+  self.index_write_pos_ = 0;
+  self.text_vertex_write_pos_ = 0;
+  self.text_index_write_pos_ = 0;
+
+  // Reset dedup tracking
+  self.last_quad_verts_ = null;
+  self.last_quad_vert_count_ = 0;
+  self.last_text_verts_ = null;
+  self.last_text_vert_count_ = 0;
+
+  self.frame_active_ = true;
+  return true;
+}
+
+fn GlImpl::begin_frame(var self&, clear_color: Color): bool {
+  if (!self.acquire_frame()) {
+    return false;
+  }
+
+  let gl = self.gl;
+
+  // Update framebuffer size (and dpi, since the resize callback is not
+  // installed in embedded mode).
+  {
+    var fw: i32 = 0;
+    var fh: i32 = 0;
+    unsafe glfw_get_framebuffer_size(self.window_, &raw var fw, &raw var fh);
+    self.swapchain_width_ = fw as u32;
+    self.swapchain_height_ = fh as u32;
+    if (self.embedded_) {
+      self.dpi_scale_ = dpi_of(self.window_);
+    }
+  }
+
+  // Bind the default framebuffer
+  gl.bind_framebuffer(kGlFramebuffer, 0);
+
+  // Set viewport and scissor to full framebuffer
+  gl.viewport(0, 0, self.swapchain_width_ as i32, self.swapchain_height_ as i32);
+  gl.scissor(0, 0, self.swapchain_width_ as i32, self.swapchain_height_ as i32);
+
+  // GL_FRAMEBUFFER_SRGB makes GL encode the clear for us, matching how Vulkan
+  // and D3D11 treat a clear value. In embedded mode the host owns the clear,
+  // so we draw on top of its content.
+  if (!self.embedded_) {
+    gl.clear_color(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+    gl.clear(kGlColorBufferBit);
+  }
+
+  // Activate quad program and set projection
+  gl.use_program(self.quad_program_);
+  gl.bind_vertex_array(self.vao_);
+
+  let win_w = self.swapchain_width_ as f32 / self.dpi_scale_;
+  let win_h = self.swapchain_height_ as f32 / self.dpi_scale_;
+  self.set_projection(self.quad_program_, win_w, win_h);
+
+  return true;
+}
+
+fn GlImpl::end_frame(var self&) {
+  // In embedded mode the host presents (swaps buffers) after compositing.
+  if (!self.embedded_) {
+    unsafe glfw_swap_buffers(self.window_);
+  }
+  self.frame_active_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// Scissor
+// ---------------------------------------------------------------------------
+
+fn GlImpl::set_scissor(var self&, rect: Rect) {
+  let offscreen = self.active_offscreen_target_ != kInvalidTexture;
+  let scale = offscreen ? 1.0 : self.dpi_scale_;
+  let fb_h = offscreen ? self.offscreen_display_size_.y : self.swapchain_height_ as f32;
+
+  // OpenGL scissor origin is bottom-left; UI coords have origin top-left.
+  let x = @saturating_cast(i32, rect.x * scale);
+  let w = @saturating_cast(i32, rect.w * scale);
+  let h = @saturating_cast(i32, rect.h * scale);
+  let y = @saturating_cast(i32, fb_h - (rect.y * scale + h as f32));
+
+  self.gl.scissor(x, y, w, h);
+}
+
+fn GlImpl::reset_scissor(var self&) {
+  if (self.active_offscreen_target_ != kInvalidTexture) {
+    let slot = self.textures_[self.active_offscreen_target_ as usize];
+    self.gl.scissor(0, 0, slot.width as i32, slot.height as i32);
+  } else {
+    self.gl.scissor(0, 0, self.swapchain_width_ as i32, self.swapchain_height_ as i32);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+
+fn GlImpl::draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return;
+  }
+
+  let gl = self.gl;
+  gl.use_program(self.quad_program_);
+  gl.bind_vertex_array(self.vao_);
+
+  // Vertex dedup: Renderer2D passes the same vertex array for every batch
+  // in a frame, with different index slices.
+  let vptr = unsafe @ptr(vertices) as *const u8;
+  var vb_byte_offset: u32 = 0;
+  if (vptr == self.last_quad_verts_ && vertex_count == self.last_quad_vert_count_) {
+    vb_byte_offset = self.last_quad_vb_offset_;
+  } else {
+    self.ensure_vertex_capacity(self.vertex_write_pos_ + vertex_count);
+    vb_byte_offset = self.vertex_write_pos_ * @size_of(Vertex2D) as u32;
+
+    gl.bind_buffer(kGlArrayBuffer, self.vertex_buf_);
+    unsafe gl.buffer_sub_data(kGlArrayBuffer, vb_byte_offset as i64, (vertex_count as usize * @size_of(Vertex2D)) as i64, vptr);
+
+    self.last_quad_verts_ = vptr;
+    self.last_quad_vert_count_ = vertex_count;
+    self.last_quad_vb_offset_ = vb_byte_offset;
+    self.vertex_write_pos_ += vertex_count;
+  }
+
+  // Indices are always different per batch: always append
+  self.ensure_index_capacity(self.index_write_pos_ + index_count);
+  let ib_byte_offset = self.index_write_pos_ * 4;
+
+  gl.bind_buffer(kGlElementArrayBuffer, self.index_buf_);
+  unsafe gl.buffer_sub_data(kGlElementArrayBuffer, ib_byte_offset as i64, (index_count as usize * 4) as i64,
+    @ptr(indices) as *const u8);
+  self.index_write_pos_ += index_count;
+
+  // Bind texture
+  let tex = texture != kInvalidTexture ? texture : self.white_texture_;
+  if (tex < kMaxTextures && self.textures_[tex as usize].in_use) {
+    gl.active_texture(kGlTexture0);
+    gl.bind_texture(kGlTexture2d, self.textures_[tex as usize].texture);
+  }
+
+  // Set up vertex format with the correct VBO offset
+  self.bind_vertex_format(self.vertex_buf_, self.index_buf_, vb_byte_offset);
+
+  // Set projection uniforms (in case program was switched)
+  gl.uniform2f(self.quad_u_scale_, self.proj_scale_[0], self.proj_scale_[1]);
+  gl.uniform2f(self.quad_u_translate_, self.proj_translate_[0], self.proj_translate_[1]);
+
+  // Draw
+  unsafe gl.draw_elements(kGlTriangles, index_count as i32, kGlUnsignedInt, ib_byte_offset as usize as *const u8);
+}
+
+fn GlImpl::draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return;
+  }
+
+  let gl = self.gl;
+
+  // Switch to text program
+  gl.use_program(self.text_program_);
+  gl.bind_vertex_array(self.vao_);
+
+  // Set projection on text program (use display_size for offscreen support)
+  let ds = self.display_size();
+  self.set_projection(self.text_program_, ds.x, ds.y);
+
+  // Vertex dedup (same pattern)
+  let vptr = unsafe @ptr(vertices) as *const u8;
+  var vb_byte_offset: u32 = 0;
+  if (vptr == self.last_text_verts_ && vertex_count == self.last_text_vert_count_) {
+    vb_byte_offset = self.last_text_vb_offset_;
+  } else {
+    self.ensure_text_vertex_capacity(self.text_vertex_write_pos_ + vertex_count);
+    vb_byte_offset = self.text_vertex_write_pos_ * @size_of(Vertex2D) as u32;
+
+    gl.bind_buffer(kGlArrayBuffer, self.text_vertex_buf_);
+    unsafe gl.buffer_sub_data(kGlArrayBuffer, vb_byte_offset as i64, (vertex_count as usize * @size_of(Vertex2D)) as i64, vptr);
+
+    self.last_text_verts_ = vptr;
+    self.last_text_vert_count_ = vertex_count;
+    self.last_text_vb_offset_ = vb_byte_offset;
+    self.text_vertex_write_pos_ += vertex_count;
+  }
+
+  // Append indices
+  self.ensure_text_index_capacity(self.text_index_write_pos_ + index_count);
+  let ib_byte_offset = self.text_index_write_pos_ * 4;
+
+  gl.bind_buffer(kGlElementArrayBuffer, self.text_index_buf_);
+  unsafe gl.buffer_sub_data(kGlElementArrayBuffer, ib_byte_offset as i64, (index_count as usize * 4) as i64,
+    @ptr(indices) as *const u8);
+  self.text_index_write_pos_ += index_count;
+
+  // Bind atlas texture
+  if (atlas_texture < kMaxTextures && self.textures_[atlas_texture as usize].in_use) {
+    gl.active_texture(kGlTexture0);
+    gl.bind_texture(kGlTexture2d, self.textures_[atlas_texture as usize].texture);
+  }
+
+  // Set up vertex format with text buffers
+  self.bind_vertex_format(self.text_vertex_buf_, self.text_index_buf_, vb_byte_offset);
+
+  // Draw
+  unsafe gl.draw_elements(kGlTriangles, index_count as i32, kGlUnsignedInt, ib_byte_offset as usize as *const u8);
+
+  // Switch back to quad program
+  gl.use_program(self.quad_program_);
+  gl.uniform2f(self.quad_u_scale_, self.proj_scale_[0], self.proj_scale_[1]);
+  gl.uniform2f(self.quad_u_translate_, self.proj_translate_[0], self.proj_translate_[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Texture management
+// ---------------------------------------------------------------------------
+
+// The first free texture slot, kInvalidTexture when all are in use.
+fn GlImpl::find_free_slot(self&): RhiTextureHandle {
+  for (let i in 0..kMaxTextures) {
+    if (!self.textures_[i as usize].in_use) {
+      return i;
+    }
+  }
+  return kInvalidTexture;
+}
+
+fn GlImpl::create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter):
+  RhiTextureHandle {
+  // Find a free slot
+  let handle = self.find_free_slot();
+  if (handle == kInvalidTexture) {
+    return kInvalidTexture;
+  }
+
+  var internal_format = kGlRgba8;
+  var data_format = kGlRgba;
+  let data_type = kGlUnsignedByte;
+  var pixel_size: u32 = 4;
+
+  match (format) {
+    RhiFormat::Rgba8Unorm => {
+      internal_format = kGlRgba8;
+      data_format = kGlRgba;
+      pixel_size = 4;
+    },
+    RhiFormat::Bgra8Unorm => {
+      internal_format = kGlRgba8;
+      data_format = kGlBgra;
+      pixel_size = 4;
+    },
+    RhiFormat::R8Unorm => {
+      internal_format = kGlR8;
+      data_format = kGlRed;
+      pixel_size = 1;
+    },
+    _ => {
+      return kInvalidTexture;
+    },
+  }
+
+  let gl = self.gl;
+  var texture: u32 = 0;
+  unsafe gl.gen_textures(1, &raw var texture);
+  gl.bind_texture(kGlTexture2d, texture);
+
+  // Set filtering
+  let mag_filter = filter == RhiFilter::Nearest ? kGlNearest : kGlLinear;
+  let min_filter = filter == RhiFilter::Nearest ? kGlNearest : kGlLinear;
+  gl.tex_parameteri(kGlTexture2d, kGlTextureMagFilter, mag_filter as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureMinFilter, min_filter as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureWrapS, kGlClampToEdge as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureWrapT, kGlClampToEdge as i32);
+
+  // Upload pixel data
+  unsafe gl.tex_image2d(kGlTexture2d, 0, internal_format as i32, width as i32, height as i32, 0, data_format, data_type,
+    pixel_ptr(pixels));
+
+  self.textures_[handle as usize] = TextureSlot {
+    texture,
+    fbo: 0,
+    width,
+    height,
+    pixel_size,
+    in_use: true,
+    is_render_target: false,
+    internal_format,
+    data_format,
+    data_type,
+  };
+
+  return handle;
+}
+
+fn GlImpl::update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use) {
+    return;
+  }
+
+  let slot = self.textures_[handle as usize];
+  self.gl.bind_texture(kGlTexture2d, slot.texture);
+  unsafe self.gl.tex_sub_image2d(kGlTexture2d, 0, 0, 0, slot.width as i32, slot.height as i32, slot.data_format,
+    slot.data_type, pixel_ptr(pixels));
+}
+
+fn GlImpl::destroy_texture(var self&, handle: RhiTextureHandle) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use) {
+    return;
+  }
+  if (self.textures_[handle as usize].is_render_target) {
+    self.destroy_render_target(handle);
+    return;
+  }
+  var slot = self.textures_[handle as usize];
+  if (slot.texture != 0) {
+    unsafe self.gl.delete_textures(1, &raw var slot.texture);
+  }
+  self.textures_[handle as usize] = TextureSlot {};
+}
+
+// ---------------------------------------------------------------------------
+// Offscreen render targets
+// ---------------------------------------------------------------------------
+
+fn GlImpl::create_render_target(var self&, width: u32, height: u32): RhiTextureHandle {
+  // Find a free slot
+  let handle = self.find_free_slot();
+  if (handle == kInvalidTexture) {
+    return kInvalidTexture;
+  }
+
+  let gl = self.gl;
+  var slot = TextureSlot {};
+
+  // A render target holds sRGB-encoded bytes, like every other texture the
+  // quad shader samples. sRGB storage makes GL_FRAMEBUFFER_SRGB encode on
+  // write. Sampling must then skip GL's decode, which leaves srgb_to_linear()
+  // in the shader as the only one. EXT_texture_sRGB_decode is what skips it;
+  // without the extension, fall back to RGBA8, which neither encodes nor
+  // decodes.
+  unsafe gl.gen_textures(1, &raw var slot.texture);
+  gl.bind_texture(kGlTexture2d, slot.texture);
+  unsafe gl.tex_image2d(kGlTexture2d, 0, (self.srgb_decode_control_ ? kGlSrgb8Alpha8 : kGlRgba8) as i32, width as i32,
+    height as i32, 0, kGlRgba, kGlUnsignedByte, null);
+  if (self.srgb_decode_control_) {
+    gl.tex_parameteri(kGlTexture2d, kGlTextureSrgbDecodeExt, kGlSkipDecodeExt as i32);
+  }
+  gl.tex_parameteri(kGlTexture2d, kGlTextureMagFilter, kGlLinear as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureMinFilter, kGlLinear as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureWrapS, kGlClampToEdge as i32);
+  gl.tex_parameteri(kGlTexture2d, kGlTextureWrapT, kGlClampToEdge as i32);
+
+  // Create FBO
+  unsafe gl.gen_framebuffers(1, &raw var slot.fbo);
+  gl.bind_framebuffer(kGlFramebuffer, slot.fbo);
+  gl.framebuffer_texture2d(kGlFramebuffer, kGlColorAttachment0, kGlTexture2d, slot.texture, 0);
+
+  let status = gl.check_framebuffer_status(kGlFramebuffer);
+  if (status != kGlFramebufferComplete) {
+    eprintln(f"ultragui: framebuffer incomplete (0x{status:x})");
+    unsafe {
+      gl.delete_framebuffers(1, &raw var slot.fbo);
+      gl.delete_textures(1, &raw var slot.texture);
+    }
+    gl.bind_framebuffer(kGlFramebuffer, 0);
+    return kInvalidTexture;
+  }
+
+  // Restore default framebuffer
+  gl.bind_framebuffer(kGlFramebuffer, 0);
+
+  slot.width = width;
+  slot.height = height;
+  slot.pixel_size = 4;
+  slot.internal_format = kGlRgba8;
+  slot.data_format = kGlRgba;
+  slot.data_type = kGlUnsignedByte;
+  slot.in_use = true;
+  slot.is_render_target = true;
+  self.textures_[handle as usize] = slot;
+
+  return handle;
+}
+
+fn GlImpl::destroy_render_target(var self&, handle: RhiTextureHandle) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use || !self.textures_[handle as usize].is_render_target) {
+    return;
+  }
+
+  var slot = self.textures_[handle as usize];
+  unsafe {
+    if (slot.fbo != 0) {
+      self.gl.delete_framebuffers(1, &raw var slot.fbo);
+    }
+    if (slot.texture != 0) {
+      self.gl.delete_textures(1, &raw var slot.texture);
+    }
+  }
+  self.textures_[handle as usize] = TextureSlot {};
+}
+
+fn GlImpl::begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool {
+  if (target >= kMaxTextures || !self.textures_[target as usize].in_use || !self.textures_[target as usize].is_render_target) {
+    return false;
+  }
+
+  let slot = self.textures_[target as usize];
+  let gl = self.gl;
+
+  self.active_offscreen_target_ = target;
+  self.offscreen_display_size_ = Vec2 { x: slot.width as f32, y: slot.height as f32 };
+
+  gl.bind_framebuffer(kGlFramebuffer, slot.fbo);
+  gl.viewport(0, 0, slot.width as i32, slot.height as i32);
+  gl.scissor(0, 0, slot.width as i32, slot.height as i32);
+
+  gl.clear_color(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+  gl.clear(kGlColorBufferBit);
+
+  // Set up quad program with offscreen projection
+  gl.use_program(self.quad_program_);
+  gl.bind_vertex_array(self.vao_);
+  self.set_projection(self.quad_program_, slot.width as f32, slot.height as f32);
+
+  return true;
+}
+
+fn GlImpl::end_offscreen(var self&, target: RhiTextureHandle) {
+  if (self.active_offscreen_target_ == kInvalidTexture) {
+    return;
+  }
+
+  self.active_offscreen_target_ = kInvalidTexture;
+  let gl = self.gl;
+
+  // Restore default framebuffer
+  gl.bind_framebuffer(kGlFramebuffer, 0);
+  gl.viewport(0, 0, self.swapchain_width_ as i32, self.swapchain_height_ as i32);
+  gl.scissor(0, 0, self.swapchain_width_ as i32, self.swapchain_height_ as i32);
+
+  // Restore screen projection
+  let win_w = self.swapchain_width_ as f32 / self.dpi_scale_;
+  let win_h = self.swapchain_height_ as f32 / self.dpi_scale_;
+  gl.use_program(self.quad_program_);
+  self.set_projection(self.quad_program_, win_w, win_h);
+}
+
+// ---------------------------------------------------------------------------
+// Video pipeline (YCbCr -> RGBA)
+// ---------------------------------------------------------------------------
+
+fn GlImpl::ensure_video_program(var self&): bool {
+  if (self.video_program_ != 0) {
+    return true;
+  }
+
+  let gl = self.gl;
+  self.video_program_ = compile_program(gl, kVideoVertSrc, kVideoFragSrc);
+  if (self.video_program_ == 0) {
+    return false;
+  }
+
+  unsafe {
+    self.video_u_y_ = gl.get_uniform_location(self.video_program_, c"tex_y");
+    self.video_u_cb_ = gl.get_uniform_location(self.video_program_, c"tex_cb");
+    self.video_u_cr_ = gl.get_uniform_location(self.video_program_, c"tex_cr");
+  }
+
+  // Set texture units
+  gl.use_program(self.video_program_);
+  gl.uniform1i(self.video_u_y_, 0);
+  gl.uniform1i(self.video_u_cb_, 1);
+  gl.uniform1i(self.video_u_cr_, 2);
+
+  // Create empty VAO for video (no vertex attributes: gl_VertexID only)
+  unsafe gl.gen_vertex_arrays(1, &raw var self.video_vao_);
+
+  return true;
+}
+
+fn GlImpl::in_use_texture(self&, handle: RhiTextureHandle): bool =>
+  handle < kMaxTextures && self.textures_[handle as usize].in_use;
+
+fn GlImpl::convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle,
+  cr: RhiTextureHandle) {
+  if (!self.ensure_video_program()) {
+    return;
+  }
+  if (!self.in_use_texture(target) || !self.textures_[target as usize].is_render_target) {
+    return;
+  }
+  if (!self.in_use_texture(y)) {
+    return;
+  }
+  if (!self.in_use_texture(cb)) {
+    return;
+  }
+  if (!self.in_use_texture(cr)) {
+    return;
+  }
+
+  let slot = self.textures_[target as usize];
+  let gl = self.gl;
+
+  // Bind the render target FBO
+  gl.bind_framebuffer(kGlFramebuffer, slot.fbo);
+  gl.viewport(0, 0, slot.width as i32, slot.height as i32);
+  gl.scissor(0, 0, slot.width as i32, slot.height as i32);
+
+  // Disable blending for opaque video
+  gl.disable(kGlBlend);
+
+  // Bind video program
+  gl.use_program(self.video_program_);
+  gl.bind_vertex_array(self.video_vao_);
+
+  // Bind Y, Cb, Cr textures to units 0, 1, 2
+  gl.active_texture(kGlTexture0);
+  gl.bind_texture(kGlTexture2d, self.textures_[y as usize].texture);
+  gl.active_texture(kGlTexture1);
+  gl.bind_texture(kGlTexture2d, self.textures_[cb as usize].texture);
+  gl.active_texture(kGlTexture2);
+  gl.bind_texture(kGlTexture2d, self.textures_[cr as usize].texture);
+
+  // Draw fullscreen triangle (3 vertices, no VBO)
+  gl.draw_arrays(kGlTriangles, 0, 3);
+
+  // Restore state
+  gl.active_texture(kGlTexture0);
+  gl.enable(kGlBlend);
+
+  // Restore the quad program and default framebuffer
+  gl.bind_framebuffer(kGlFramebuffer, 0);
+  gl.viewport(0, 0, self.swapchain_width_ as i32, self.swapchain_height_ as i32);
+  gl.scissor(0, 0, self.swapchain_width_ as i32, self.swapchain_height_ as i32);
+
+  gl.use_program(self.quad_program_);
+  gl.bind_vertex_array(self.vao_);
+}
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+fn GlImpl::display_size(self&): Vec2 {
+  if (self.active_offscreen_target_ != kInvalidTexture) {
+    return self.offscreen_display_size_;
+  }
+  return Vec2 { x: self.swapchain_width_ as f32 / self.dpi_scale_, y: self.swapchain_height_ as f32 / self.dpi_scale_ };
+}
+
+// ---------------------------------------------------------------------------
+// RHI forwarding methods (PIMPL)
+// ---------------------------------------------------------------------------
+
+pub struct OpenGlRhi : Rhi {
+  var impl_: Box<GlImpl>
+
+  pub fn OpenGlRhi(): OpenGlRhi => OpenGlRhi { impl_: Box(GlImpl {}) };
+
+  pub fn init(var self&, config&: RhiConfig): bool => self.impl_.get_var().init(config);
+  pub fn shutdown(var self&) {
+    self.impl_.get_var().shutdown();
+  }
+  pub fn begin_frame(var self&, clear_color: Color): bool => self.impl_.get_var().begin_frame(clear_color);
+  pub fn end_frame(var self&) {
+    self.impl_.get_var().end_frame();
+  }
+  pub fn set_scissor(var self&, rect: Rect) {
+    self.impl_.get_var().set_scissor(rect);
+  }
+  pub fn reset_scissor(var self&) {
+    self.impl_.get_var().reset_scissor();
+  }
+
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+    self.impl_.get_var().draw_triangles(vertices, indices, texture);
+  }
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+    self.impl_.get_var().draw_text_triangles(vertices, indices, atlas_texture);
+  }
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter):
+    RhiTextureHandle => self.impl_.get_var().create_texture(width, height, format, pixels, filter);
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+    self.impl_.get_var().update_texture(handle, pixels);
+  }
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {
+    self.impl_.get_var().destroy_texture(handle);
+  }
+
+  pub fn acquire_frame(var self&): bool => self.impl_.get_var().acquire_frame();
+
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle =>
+    self.impl_.get_var().create_render_target(width, height);
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {
+    self.impl_.get_var().destroy_render_target(handle);
+  }
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool =>
+    self.impl_.get_var().begin_offscreen(target, clear_color);
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {
+    self.impl_.get_var().end_offscreen(target);
+  }
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle,
+    cr: RhiTextureHandle) {
+    self.impl_.get_var().convert_video_frame(target, y, cb, cr);
+  }
+
+  pub fn display_size(self&): Vec2 => self.impl_.get().display_size();
+  pub fn dpi_scale(self&): f32 => self.impl_.get().dpi_scale_;
+}

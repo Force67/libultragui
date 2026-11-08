@@ -1,0 +1,11 @@
+// The OpenGL backends of libultragui, ported from ugui/rhi/opengl/opengl_rhi.cc
+// and ugui/backends/ugui_impl_opengl3.{h,cc}. Import from the modules directly:
+//   ultragui_opengl::opengl_rhi          OpenGlRhi, the Rhi over a GLFW window
+//   ultragui_opengl::ugui_impl_opengl3   GlRenderer, draw data into the host's GL context
+//   ultragui_opengl::glsl                the GLSL 3.30 shaders both use
+//   ultragui_opengl::sys::gl             the GL entry points (generated)
+// ../PORTING.md is the map and the contract.
+
+module ultragui_opengl;
+
+pub fn version(): str => @package_version();
