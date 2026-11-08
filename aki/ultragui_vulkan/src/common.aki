@@ -1,0 +1,25 @@
+// No C++ counterpart: what vulkan_rhi.cc and ugui_impl_vulkan.cc each spell
+// out the same way, written once: the colour subresource range and the
+// Vertex2D vertex attributes of the 2D pipelines.
+
+module ultragui_vulkan::common;
+
+import {Vertex2D} from ultragui::render::vertex;
+import * from ultragui_vulkan::sys::vulkan;
+
+// {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}
+pub fn color_range(): VkImageSubresourceRange =>
+  VkImageSubresourceRange { aspect_mask: kVkImageAspectColorBit, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+
+// The Vertex2D vertex layout both 2D pipelines read.
+pub fn vertex_attributes(): [VkVertexInputAttributeDescription; 9] => [
+  VkVertexInputAttributeDescription { location: 0, binding: 0, format: kVkFormatR32g32Sfloat, offset: @offset_of(Vertex2D, pos) as u32 },
+  VkVertexInputAttributeDescription { location: 1, binding: 0, format: kVkFormatR32g32Sfloat, offset: @offset_of(Vertex2D, uv) as u32 },
+  VkVertexInputAttributeDescription { location: 2, binding: 0, format: kVkFormatR32Uint, offset: @offset_of(Vertex2D, color) as u32 },
+  VkVertexInputAttributeDescription { location: 3, binding: 0, format: kVkFormatR32Uint, offset: @offset_of(Vertex2D, color2) as u32 },
+  VkVertexInputAttributeDescription { location: 4, binding: 0, format: kVkFormatR32Uint, offset: @offset_of(Vertex2D, corner_radii) as u32 },
+  VkVertexInputAttributeDescription { location: 5, binding: 0, format: kVkFormatR32Sfloat, offset: @offset_of(Vertex2D, softness) as u32 },
+  VkVertexInputAttributeDescription { location: 6, binding: 0, format: kVkFormatR32g32Sfloat, offset: @offset_of(Vertex2D, half_size) as u32 },
+  VkVertexInputAttributeDescription { location: 7, binding: 0, format: kVkFormatR32Sfloat, offset: @offset_of(Vertex2D, border_width) as u32 },
+  VkVertexInputAttributeDescription { location: 8, binding: 0, format: kVkFormatR32Uint, offset: @offset_of(Vertex2D, border_color) as u32 },
+];

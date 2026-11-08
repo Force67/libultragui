@@ -1,0 +1,685 @@
+// ugui/backends/ugui_impl_vulkan.{h,cc}: the Vulkan renderer backend for
+// hosts that own the device, modeled on Dear ImGui's imgui_impl_vulkan.
+//
+// The HOST owns everything: VkInstance/VkDevice/VkQueue, the swapchain, the
+// render pass, the per-frame command buffer, and presentation. This backend
+// only creates its pipelines/descriptors/vertex buffers and records
+// ultragui's draw data into a command buffer YOU hand it, inside a render
+// pass YOU began. Per frame, inside your own render loop:
+//
+//   vkb.new_frame();
+//   let dd = ui.render_draw_data();             // produce geometry
+//   // ... your scene rendering ...
+//   vkCmdBeginRenderPass(cmd, ...);             // your pass
+//   vkb.render_draw_data(dd, cmd);              // ui on top
+//   vkCmdEndRenderPass(cmd);
+//
+// Font atlas: call update_font_atlas() whenever TextEngine::atlas_revision()
+// changes (it grows as glyphs are shaped), passing TextEngine::atlas_pixels().
+//
+// Shape differences from the C++:
+// * The C++ keeps the backend in a file-level global (`Backend g`) behind
+//   free functions in namespace ugui::vk. Here it is a value, VulkanBackend,
+//   whose methods are those functions; a host keeps one per device.
+// * texture_backend() returned a TextureBackend& forwarding to the free
+//   functions; VulkanBackend implements TextureBackend itself, so the host
+//   lends it with DynTextureBackend::of(backend).
+// * `pixels` shorter than the texture uploads what it holds and zeros the
+//   rest (the C++ reads past it); empty `pixels` is the C++ nullptr.
+
+module ultragui_vulkan::ugui_impl_vulkan;
+
+import {List} from akikit::containers::list;
+import {HashMap} from akikit::containers::hash_map;
+import {eprintln} from akikit::logging;
+import {String} from akikit::strings::string;
+import {max_f32} from ultragui::core::algorithm;
+import {DrawData, TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
+import {TextureBackend} from ultragui::render::texture_backend;
+import {Vertex2D} from ultragui::render::vertex;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {color_range, vertex_attributes} from ultragui_vulkan::common;
+import {shader_code} from ultragui_vulkan::shaders;
+import * from ultragui_vulkan::sys::vulkan;
+
+extern fn memcpy(dst: *var u8, src: *const u8, n: usize): *var u8;
+extern fn memset(dst: *var u8, c: i32, n: usize): *var u8;
+
+// Everything the backend needs from the host's Vulkan setup. Mirrors
+// ImGui_ImplVulkan_InitInfo.
+pub struct InitInfo {
+  pub unowned var instance: VkInstance = null
+  pub unowned var physical_device: VkPhysicalDevice = null
+  pub unowned var device: VkDevice = null
+  pub var queue_family: u32 = 0
+  pub unowned var queue: VkQueue = null
+  pub var descriptor_pool: VkDescriptorPool = 0  // host-owned, big enough
+  pub var render_pass: VkRenderPass = 0          // pass cmds record into
+  pub var subpass: u32 = 0
+  pub var frames_in_flight: u32 = 2  // ring size for per-frame vertex/index buffers
+  pub var msaa_samples: VkSampleCountFlagBits = 1  // VK_SAMPLE_COUNT_1_BIT
+  pub var pipeline_cache: VkPipelineCache = 0
+  pub unowned var allocator: *const VkAllocationCallbacks = null
+
+  // Directory containing ultragui's compiled SPIR-V (quad.vert.spv,
+  // quad.frag.spv, text.vert.spv, text.frag.spv), the same shaders the Vulkan
+  // RHI uses. Empty for the C++ nullptr (the current directory).
+  pub var shader_dir: String = String()
+}
+
+struct GpuBuffer : Copy {
+  pub var buffer: VkBuffer = 0
+  pub var memory: VkDeviceMemory = 0
+  pub var capacity: u64 = 0
+}
+
+struct FrameBuffers : Copy {
+  pub var quad_vtx: GpuBuffer = GpuBuffer {}
+  pub var quad_idx: GpuBuffer = GpuBuffer {}
+  pub var text_vtx: GpuBuffer = GpuBuffer {}
+  pub var text_idx: GpuBuffer = GpuBuffer {}
+}
+
+struct Texture : Copy {
+  pub var image: VkImage = 0
+  pub var memory: VkDeviceMemory = 0
+  pub var view: VkImageView = 0
+  pub var set: VkDescriptorSet = 0
+}
+
+// A host-created texture, plus what we need to re-upload it on update_texture.
+struct UserTexture : Copy {
+  pub var tex: Texture = Texture {}
+  pub var fmt: VkFormat = kVkFormatUndefined
+  pub var pixel_size: u32 = 0
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var sampler: VkSampler = 0
+}
+
+// RhiFormatToVk: the format and its bytes per pixel.
+fn rhi_format_to_vk(f: RhiFormat): (VkFormat, u32) => match (f) {
+  RhiFormat::R8Unorm => (kVkFormatR8Unorm, 1),
+  RhiFormat::Bgra8Unorm => (kVkFormatB8g8r8a8Unorm, 4),
+  RhiFormat::Rgba32Float => (kVkFormatR32g32b32a32Sfloat, 16),
+  RhiFormat::Rgba8Unorm => (kVkFormatR8g8b8a8Unorm, 4),
+};
+
+// The C++ `Backend g`.
+pub struct VulkanBackend : TextureBackend {
+  var info: InitInfo = InitInfo {}
+  var set_layout: VkDescriptorSetLayout = 0
+  var pipeline_layout: VkPipelineLayout = 0
+  var quad_pipeline: VkPipeline = 0
+  var text_pipeline: VkPipeline = 0
+  var linear_sampler: VkSampler = 0
+  var nearest_sampler: VkSampler = 0
+  var white: Texture = Texture {}
+  var font: Texture = Texture {}
+  var font_revision: u32 = 0xFFFF_FFFF
+  var user_textures: HashMap<TextureId, UserTexture> = HashMap()
+  var next_user_id: TextureId = 1  // 0 = white, ~0 = font; user ids start at 1
+  var frames: List<FrameBuffers> = List()
+  var frame_index: u32 = 0
+
+  pub fn VulkanBackend(): VulkanBackend => VulkanBackend {};
+
+  // Create pipelines, descriptor set layout, sampler and per-frame buffers.
+  // Returns false on failure. Does not touch the swapchain.
+  pub fn init(var self&, info: InitInfo): bool;
+
+  // Destroy all backend Vulkan objects. Does not destroy host-owned handles.
+  pub fn shutdown(var self&);
+
+  // Call once at the start of each frame, before render_draw_data.
+  pub fn new_frame(var self&) {
+    self.frame_index = (self.frame_index + 1) % self.info.frames_in_flight;
+  }
+
+  // (Re)upload the glyph atlas as the backend's font texture. Call after
+  // init and whenever TextEngine::atlas_revision() changed. `pixels` is
+  // R8/alpha8, width*height bytes (TextEngine::atlas_pixels()/atlas_size()).
+  pub fn update_font_atlas(var self&, pixels: &[u8], width: u32, height: u32): bool;
+
+  // Record draw commands for `draw_data` into `command_buffer`. Must be
+  // called inside a render pass compatible with InitInfo::render_pass that
+  // the host already began on this command buffer.
+  pub fn render_draw_data(var self&, dd&: DrawData, command_buffer: VkCommandBuffer);
+
+  // --- Host texture API (for Image/SVG/Lottie/anim in draw-data mode) ---
+  //
+  // Textures the backend can bind from draw commands. Hand the backend to
+  // ultragui as its TextureBackend so LoadSvg/LoadUi route through here.
+  // These ids live in the backend's own space, distinct from kNullTextureId
+  // (white) and kFontTextureId (atlas).
+
+  // Upload pixels and return a bindable id. kNullTextureId on failure.
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId;
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes);
+  pub fn destroy_texture(var self&, id: TextureId);
+}
+
+fn VulkanBackend::find_memory_type(self&, type_filter: u32, props: u32): u32 {
+  var mp = VkPhysicalDeviceMemoryProperties {};
+  unsafe vk_get_physical_device_memory_properties(self.info.physical_device, &raw var mp);
+  for (let i in 0..mp.memory_type_count) {
+    if ((type_filter & (1u32 << i)) != 0 && (mp.memory_types[i as usize].property_flags & props) == props) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+fn VulkanBackend::create_buffer(self&, size: u64, usage: u32, props: u32): GpuBuffer {
+  var out = GpuBuffer {};
+  let ci = VkBufferCreateInfo { size, usage, sharing_mode: kVkSharingModeExclusive };
+  let _ = unsafe vk_create_buffer(self.info.device, &raw ci, self.info.allocator, &raw var out.buffer);
+  var reqs = VkMemoryRequirements {};
+  unsafe vk_get_buffer_memory_requirements(self.info.device, out.buffer, &raw var reqs);
+  let ai = VkMemoryAllocateInfo {
+    allocation_size: reqs.size,
+    memory_type_index: self.find_memory_type(reqs.memory_type_bits, props),
+  };
+  unsafe {
+    let _ = vk_allocate_memory(self.info.device, &raw ai, self.info.allocator, &raw var out.memory);
+    let _ = vk_bind_buffer_memory(self.info.device, out.buffer, out.memory, 0);
+  }
+  out.capacity = size;
+  return out;
+}
+
+fn VulkanBackend::destroy_buffer(self&, var b&: GpuBuffer) {
+  unsafe {
+    if (b.buffer != 0) {
+      vk_destroy_buffer(self.info.device, b.buffer, self.info.allocator);
+    }
+    if (b.memory != 0) {
+      vk_free_memory(self.info.device, b.memory, self.info.allocator);
+    }
+  }
+  b = GpuBuffer {};
+}
+
+// Copies `n` bytes of `src` (zeros past its `src_len`) into `memory` from
+// its start, through a mapping.
+fn VulkanBackend::write_memory(self&, memory: VkDeviceMemory, src: *const u8, src_len: usize, n: u64) {
+  var dst: *var u8 = null;
+  unsafe {
+    let _ = vk_map_memory(self.info.device, memory, 0, n, 0, &raw var dst);
+    let k = src_len < n as usize ? src_len : n as usize;
+    if (k > 0) {
+      let _ = memcpy(dst, src, k);
+    }
+    if (k < n as usize) {
+      let _ = memset(dst + k, 0, n as usize - k);
+    }
+    vk_unmap_memory(self.info.device, memory);
+  }
+}
+
+// Upload `bytes` from `src` into a host-visible buffer, growing it if needed.
+fn VulkanBackend::upload_buffer(self&, var b&: GpuBuffer, usage: u32, src: *const u8, bytes: u64) {
+  if (bytes == 0) {
+    return;
+  }
+  if (b.capacity < bytes) {
+    self.destroy_buffer(b);
+    let cap = bytes < 4096 ? 4096u64 : bytes;  // Max<VkDeviceSize>(bytes, 4096)
+    b = self.create_buffer(cap, usage, kVkMemoryPropertyHostVisibleBit | kVkMemoryPropertyHostCoherentBit);
+  }
+  self.write_memory(b.memory, src, bytes as usize, bytes);
+}
+
+fn VulkanBackend::load_shader(self&, name: str): VkShaderModule {
+  let dir = #self.info.shader_dir != 0 ? self.info.shader_dir.as_str() : ".";
+  let code = shader_code(dir, name);
+  if (code.len() == 0) {
+    eprintln(f"ugui_impl_vulkan: missing shader {dir}/{name}");
+    return kVkNullHandle;
+  }
+  let ci = VkShaderModuleCreateInfo { code_size: code.len(), code: unsafe (@ptr(code.as_slice()) as *const u32) };
+  var m: VkShaderModule = kVkNullHandle;
+  let _ = unsafe vk_create_shader_module(self.info.device, &raw ci, self.info.allocator, &raw var m);
+  return m;
+}
+
+fn VulkanBackend::create_pipeline(self&, vert: str, frag: str): VkPipeline {
+  let vs = self.load_shader(vert);
+  let fs = self.load_shader(frag);
+  if (vs == 0 || fs == 0) {
+    return kVkNullHandle;
+  }
+
+  let stages = [
+    VkPipelineShaderStageCreateInfo { stage: kVkShaderStageVertexBit, module_: vs, name: c"main" },
+    VkPipelineShaderStageCreateInfo { stage: kVkShaderStageFragmentBit, module_: fs, name: c"main" },
+  ];
+
+  let binding = VkVertexInputBindingDescription { binding: 0, stride: @size_of(Vertex2D) as u32, input_rate: kVkVertexInputRateVertex };
+  let attrs = vertex_attributes();
+
+  let vin = VkPipelineVertexInputStateCreateInfo {
+    vertex_binding_description_count: 1,
+    vertex_binding_descriptions: unsafe (&raw binding),
+    vertex_attribute_description_count: 9,
+    vertex_attribute_descriptions: @ptr(attrs[..]),
+  };
+  let ia = VkPipelineInputAssemblyStateCreateInfo { topology: kVkPrimitiveTopologyTriangleList };
+  let vp = VkPipelineViewportStateCreateInfo { viewport_count: 1, scissor_count: 1 };
+  let rs = VkPipelineRasterizationStateCreateInfo {
+    polygon_mode: kVkPolygonModeFill,
+    line_width: 1.0,
+    cull_mode: kVkCullModeNone,
+    front_face: kVkFrontFaceCounterClockwise,
+  };
+  let ms = VkPipelineMultisampleStateCreateInfo { rasterization_samples: self.info.msaa_samples };
+
+  let ba = VkPipelineColorBlendAttachmentState {
+    blend_enable: kVkTrue,
+    src_color_blend_factor: kVkBlendFactorSrcAlpha,
+    dst_color_blend_factor: kVkBlendFactorOneMinusSrcAlpha,
+    color_blend_op: kVkBlendOpAdd,
+    src_alpha_blend_factor: kVkBlendFactorOne,
+    dst_alpha_blend_factor: kVkBlendFactorOneMinusSrcAlpha,
+    alpha_blend_op: kVkBlendOpAdd,
+    color_write_mask: kVkColorComponentRBit | kVkColorComponentGBit | kVkColorComponentBBit | kVkColorComponentABit,
+  };
+  let cb = VkPipelineColorBlendStateCreateInfo { attachment_count: 1, attachments: unsafe (&raw ba) };
+
+  let dyn: [VkDynamicState; 2] = [kVkDynamicStateViewport, kVkDynamicStateScissor];
+  let ds = VkPipelineDynamicStateCreateInfo { dynamic_state_count: 2, dynamic_states: @ptr(dyn[..]) };
+
+  let pi = VkGraphicsPipelineCreateInfo {
+    stage_count: 2,
+    stages: @ptr(stages[..]),
+    vertex_input_state: unsafe (&raw vin),
+    input_assembly_state: unsafe (&raw ia),
+    viewport_state: unsafe (&raw vp),
+    rasterization_state: unsafe (&raw rs),
+    multisample_state: unsafe (&raw ms),
+    color_blend_state: unsafe (&raw cb),
+    dynamic_state: unsafe (&raw ds),
+    layout: self.pipeline_layout,
+    render_pass: self.info.render_pass,
+    subpass: self.info.subpass,
+  };
+
+  var pipeline: VkPipeline = kVkNullHandle;
+  unsafe {
+    let _ = vk_create_graphics_pipelines(self.info.device, self.info.pipeline_cache, 1, &raw pi, self.info.allocator, &raw var pipeline);
+    vk_destroy_shader_module(self.info.device, vs, self.info.allocator);
+    vk_destroy_shader_module(self.info.device, fs, self.info.allocator);
+  }
+  return pipeline;
+}
+
+fn image_barrier(image: VkImage, old_layout: u32, new_layout: u32, src_access: u32, dst_access: u32): VkImageMemoryBarrier =>
+  VkImageMemoryBarrier {
+    old_layout,
+    new_layout,
+    src_queue_family_index: kVkQueueFamilyIgnored,
+    dst_queue_family_index: kVkQueueFamilyIgnored,
+    image,
+    subresource_range: color_range(),
+    src_access_mask: src_access,
+    dst_access_mask: dst_access,
+  };
+
+// OneTimeSubmit with the upload MakeTexture records: copy `staging` into
+// `image` (w x h), with the layout transitions around it.
+fn VulkanBackend::submit_upload(self&, staging: VkBuffer, image: VkImage, w: u32, h: u32) {
+  let pci = VkCommandPoolCreateInfo { queue_family_index: self.info.queue_family, flags: kVkCommandPoolCreateTransientBit };
+  var pool: VkCommandPool = 0;
+  let _ = unsafe vk_create_command_pool(self.info.device, &raw pci, self.info.allocator, &raw var pool);
+  let cai = VkCommandBufferAllocateInfo { command_pool: pool, level: kVkCommandBufferLevelPrimary, command_buffer_count: 1 };
+  var cmd: VkCommandBuffer = null;
+  let bi = VkCommandBufferBeginInfo { flags: kVkCommandBufferUsageOneTimeSubmitBit };
+  unsafe {
+    let _ = vk_allocate_command_buffers(self.info.device, &raw cai, &raw var cmd);
+    let _ = vk_begin_command_buffer(cmd, &raw bi);
+  }
+
+  var b = image_barrier(image, kVkImageLayoutUndefined, kVkImageLayoutTransferDstOptimal, 0, kVkAccessTransferWriteBit);
+  unsafe vk_cmd_pipeline_barrier(cmd, kVkPipelineStageTopOfPipeBit, kVkPipelineStageTransferBit, 0, 0, null, 0, null, 1, &raw b);
+  let region = VkBufferImageCopy {
+    image_subresource: VkImageSubresourceLayers { aspect_mask: kVkImageAspectColorBit, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+    image_extent: VkExtent3D { width: w, height: h, depth: 1 },
+  };
+  unsafe vk_cmd_copy_buffer_to_image(cmd, staging, image, kVkImageLayoutTransferDstOptimal, 1, &raw region);
+  b.old_layout = kVkImageLayoutTransferDstOptimal;
+  b.new_layout = kVkImageLayoutShaderReadOnlyOptimal;
+  b.src_access_mask = kVkAccessTransferWriteBit;
+  b.dst_access_mask = kVkAccessShaderReadBit;
+  unsafe vk_cmd_pipeline_barrier(cmd, kVkPipelineStageTransferBit, kVkPipelineStageFragmentShaderBit, 0, 0, null, 0, null, 1, &raw b);
+
+  let c = cmd;
+  let si = VkSubmitInfo { command_buffer_count: 1, command_buffers: unsafe (&raw c) };
+  unsafe {
+    let _ = vk_end_command_buffer(cmd);
+    let _ = vk_queue_submit(self.info.queue, 1, &raw si, kVkNullHandle);
+    let _ = vk_queue_wait_idle(self.info.queue);
+    vk_destroy_command_pool(self.info.device, pool, self.info.allocator);
+  }
+}
+
+// Create a sampled texture from CPU pixels (RGBA8 or R8) + its descriptor set.
+fn VulkanBackend::make_texture(self&, w: u32, h: u32, fmt: VkFormat, pixel_size: u32, pixels: bytes, sampler: VkSampler): Texture {
+  var t = Texture {};
+  let size = w as u64 * h as u64 * pixel_size as u64;
+
+  var staging = self.create_buffer(size, kVkBufferUsageTransferSrcBit, kVkMemoryPropertyHostVisibleBit | kVkMemoryPropertyHostCoherentBit);
+  self.write_memory(staging.memory, unsafe (@ptr(pixels) as *const u8), #pixels, size);
+
+  let ici = VkImageCreateInfo {
+    image_type: kVkImageType2d,
+    extent: VkExtent3D { width: w, height: h, depth: 1 },
+    mip_levels: 1,
+    array_layers: 1,
+    format: fmt,
+    tiling: kVkImageTilingOptimal,
+    initial_layout: kVkImageLayoutUndefined,
+    usage: kVkImageUsageTransferDstBit | kVkImageUsageSampledBit,
+    samples: kVkSampleCount1Bit,
+  };
+  let _ = unsafe vk_create_image(self.info.device, &raw ici, self.info.allocator, &raw var t.image);
+
+  var reqs = VkMemoryRequirements {};
+  unsafe vk_get_image_memory_requirements(self.info.device, t.image, &raw var reqs);
+  let ai = VkMemoryAllocateInfo {
+    allocation_size: reqs.size,
+    memory_type_index: self.find_memory_type(reqs.memory_type_bits, kVkMemoryPropertyDeviceLocalBit),
+  };
+  unsafe {
+    let _ = vk_allocate_memory(self.info.device, &raw ai, self.info.allocator, &raw var t.memory);
+    let _ = vk_bind_image_memory(self.info.device, t.image, t.memory, 0);
+  }
+
+  self.submit_upload(staging.buffer, t.image, w, h);
+  self.destroy_buffer(staging);
+
+  let vci = VkImageViewCreateInfo { image: t.image, view_type: kVkImageViewType2d, format: fmt, subresource_range: color_range() };
+  let _ = unsafe vk_create_image_view(self.info.device, &raw vci, self.info.allocator, &raw var t.view);
+
+  let dai = VkDescriptorSetAllocateInfo {
+    descriptor_pool: self.info.descriptor_pool,
+    descriptor_set_count: 1,
+    set_layouts: unsafe (&raw self.set_layout),
+  };
+  let _ = unsafe vk_allocate_descriptor_sets(self.info.device, &raw dai, &raw var t.set);
+
+  let dii = VkDescriptorImageInfo { image_layout: kVkImageLayoutShaderReadOnlyOptimal, image_view: t.view, sampler };
+  let wd = VkWriteDescriptorSet {
+    dst_set: t.set,
+    dst_binding: 0,
+    descriptor_count: 1,
+    descriptor_type: kVkDescriptorTypeCombinedImageSampler,
+    image_info: unsafe (&raw dii),
+  };
+  unsafe vk_update_descriptor_sets(self.info.device, 1, &raw wd, 0, null);
+  return t;
+}
+
+fn VulkanBackend::free_texture(self&, var t&: Texture) {
+  unsafe {
+    if (t.view != 0) {
+      vk_destroy_image_view(self.info.device, t.view, self.info.allocator);
+    }
+    if (t.image != 0) {
+      vk_destroy_image(self.info.device, t.image, self.info.allocator);
+    }
+    if (t.memory != 0) {
+      vk_free_memory(self.info.device, t.memory, self.info.allocator);
+    }
+  }
+  t = Texture {};
+}
+
+fn VulkanBackend::make_sampler(self&, filter: u32): VkSampler {
+  let s = VkSamplerCreateInfo {
+    mag_filter: filter,
+    min_filter: filter,
+    address_mode_u: kVkSamplerAddressModeClampToEdge,
+    address_mode_v: kVkSamplerAddressModeClampToEdge,
+    address_mode_w: kVkSamplerAddressModeClampToEdge,
+  };
+  var out: VkSampler = kVkNullHandle;
+  let _ = unsafe vk_create_sampler(self.info.device, &raw s, self.info.allocator, &raw var out);
+  return out;
+}
+
+fn VulkanBackend::init(var self&, info: InitInfo): bool {
+  self.info = info;
+  if (self.info.frames_in_flight < 1) {
+    self.info.frames_in_flight = 2;
+  }
+
+  let b = VkDescriptorSetLayoutBinding {
+    binding: 0,
+    descriptor_type: kVkDescriptorTypeCombinedImageSampler,
+    descriptor_count: 1,
+    stage_flags: kVkShaderStageFragmentBit,
+  };
+  let lci = VkDescriptorSetLayoutCreateInfo { binding_count: 1, bindings: unsafe (&raw b) };
+  if (unsafe vk_create_descriptor_set_layout(self.info.device, &raw lci, self.info.allocator, &raw var self.set_layout) != kVkSuccess) {
+    return false;
+  }
+
+  let pcr = VkPushConstantRange { stage_flags: kVkShaderStageVertexBit, offset: 0, size: (@size_of(f32) * 4) as u32 };
+  let plci = VkPipelineLayoutCreateInfo {
+    set_layout_count: 1,
+    set_layouts: unsafe (&raw self.set_layout),
+    push_constant_range_count: 1,
+    push_constant_ranges: unsafe (&raw pcr),
+  };
+  if (unsafe vk_create_pipeline_layout(self.info.device, &raw plci, self.info.allocator, &raw var self.pipeline_layout) != kVkSuccess) {
+    return false;
+  }
+
+  self.linear_sampler = self.make_sampler(kVkFilterLinear);
+  self.nearest_sampler = self.make_sampler(kVkFilterNearest);
+
+  self.quad_pipeline = self.create_pipeline("quad.vert.spv", "quad.frag.spv");
+  self.text_pipeline = self.create_pipeline("text.vert.spv", "text.frag.spv");
+  if (self.quad_pipeline == 0 || self.text_pipeline == 0) {
+    return false;
+  }
+
+  let white: [u8; 4] = [0xFF; 4];
+  self.white = self.make_texture(1, 1, kVkFormatR8g8b8a8Unorm, 4, white[..] as bytes, self.linear_sampler);
+
+  self.frames = List();
+  for (let i in 0..self.info.frames_in_flight) {
+    self.frames.push(FrameBuffers {});
+  }
+  return true;
+}
+
+fn VulkanBackend::shutdown(var self&) {
+  if (self.info.device == null) {
+    return;
+  }
+  let _ = unsafe vk_device_wait_idle(self.info.device);
+  for (let i in 0..self.frames.len()) {
+    var f = self.frames[i];
+    self.destroy_buffer(f.quad_vtx);
+    self.destroy_buffer(f.quad_idx);
+    self.destroy_buffer(f.text_vtx);
+    self.destroy_buffer(f.text_idx);
+  }
+  self.frames.clear();
+  // Each texture frees independently, so the map's order does not matter.
+  var users: List<UserTexture> = List();
+  for (let (id, ut) in self.user_textures) {
+    users.push(ut);
+  }
+  for (var ut& in users) {
+    self.free_texture(ut.tex);
+  }
+  self.user_textures.clear();
+  var font = self.font;
+  self.free_texture(font);
+  var white = self.white;
+  self.free_texture(white);
+  unsafe {
+    if (self.quad_pipeline != 0) {
+      vk_destroy_pipeline(self.info.device, self.quad_pipeline, self.info.allocator);
+    }
+    if (self.text_pipeline != 0) {
+      vk_destroy_pipeline(self.info.device, self.text_pipeline, self.info.allocator);
+    }
+    if (self.pipeline_layout != 0) {
+      vk_destroy_pipeline_layout(self.info.device, self.pipeline_layout, self.info.allocator);
+    }
+    if (self.set_layout != 0) {
+      vk_destroy_descriptor_set_layout(self.info.device, self.set_layout, self.info.allocator);
+    }
+    if (self.linear_sampler != 0) {
+      vk_destroy_sampler(self.info.device, self.linear_sampler, self.info.allocator);
+    }
+    if (self.nearest_sampler != 0) {
+      vk_destroy_sampler(self.info.device, self.nearest_sampler, self.info.allocator);
+    }
+  }
+  self = VulkanBackend {};
+}
+
+fn VulkanBackend::update_font_atlas(var self&, pixels: &[u8], width: u32, height: u32): bool {
+  if (#pixels == 0 || width == 0 || height == 0) {
+    return false;
+  }
+  let _ = unsafe vk_device_wait_idle(self.info.device);
+  var font = self.font;
+  self.free_texture(font);
+  self.font = self.make_texture(width, height, kVkFormatR8Unorm, 1, pixels as bytes, self.nearest_sampler);
+  return self.font.image != kVkNullHandle;
+}
+
+fn VulkanBackend::render_draw_data(var self&, dd&: DrawData, cmd: VkCommandBuffer) {
+  if (!dd.valid || dd.command_count() == 0) {
+    return;
+  }
+  if (dd.display_size.x <= 0.0 || dd.display_size.y <= 0.0) {
+    return;
+  }
+
+  let fi = self.frame_index as usize;
+  var fb = self.frames[fi];
+  let vsz = @size_of(Vertex2D) as u64;
+  let isz = @size_of(u32) as u64;
+  self.upload_buffer(fb.quad_vtx, kVkBufferUsageVertexBufferBit, unsafe (@ptr(dd.quad_vertices) as *const u8), dd.quad_vertex_count() as u64 * vsz);
+  self.upload_buffer(fb.quad_idx, kVkBufferUsageIndexBufferBit, unsafe (@ptr(dd.quad_indices) as *const u8), dd.quad_index_count() as u64 * isz);
+  self.upload_buffer(fb.text_vtx, kVkBufferUsageVertexBufferBit, unsafe (@ptr(dd.text_vertices) as *const u8), dd.text_vertex_count() as u64 * vsz);
+  self.upload_buffer(fb.text_idx, kVkBufferUsageIndexBufferBit, unsafe (@ptr(dd.text_indices) as *const u8), dd.text_index_count() as u64 * isz);
+  self.frames[fi] = fb;
+
+  let sx: f32 = dd.framebuffer_scale.x > 0.0 ? dd.framebuffer_scale.x : 1.0;
+  let sy: f32 = dd.framebuffer_scale.y > 0.0 ? dd.framebuffer_scale.y : 1.0;
+
+  let vp = VkViewport { x: 0.0, y: 0.0, width: dd.display_size.x * sx, height: dd.display_size.y * sy, max_depth: 1.0 };
+  unsafe vk_cmd_set_viewport(cmd, 0, 1, &raw vp);
+
+  let push: [f32; 4] = [2.0 / dd.display_size.x, 2.0 / dd.display_size.y, -1.0, -1.0];
+  unsafe vk_cmd_push_constants(cmd, self.pipeline_layout, kVkShaderStageVertexBit, 0, @size_of([f32; 4]) as u32, @ptr(push[..]) as *const u8);
+
+  var bound_pipeline: VkPipeline = kVkNullHandle;
+  for (let c in dd.commands) {
+    if (c.elem_count == 0) {
+      continue;
+    }
+    // Widget::Paint emits backdrop blur as a white quad for backends that
+    // hold a blurred scene copy. This backend has none; skip it.
+    if (c.blur != 0.0) {
+      continue;
+    }
+
+    let want = c.is_text ? self.text_pipeline : self.quad_pipeline;
+    if (want != bound_pipeline) {
+      unsafe vk_cmd_bind_pipeline(cmd, kVkPipelineBindPointGraphics, want);
+      bound_pipeline = want;
+    }
+
+    var set: VkDescriptorSet = 0;
+    if (c.is_text || c.texture_id == kFontTextureId) {
+      set = self.font.set;
+    } else if (c.texture_id == kNullTextureId) {
+      set = self.white.set;
+    } else {
+      if (let ut& = self.user_textures.get(c.texture_id)) {
+        set = ut.tex.set;
+      } else {
+        set = self.white.set;
+      }
+    }
+    if (set == kVkNullHandle) {
+      set = self.white.set;
+    }
+    unsafe vk_cmd_bind_descriptor_sets(cmd, kVkPipelineBindPointGraphics, self.pipeline_layout, 0, 1, &raw set, 0, null);
+
+    // Scissor in framebuffer pixels, clamped to >= 0.
+    let x0 = max_f32(0.0, c.clip_rect.x) * sx;
+    let y0 = max_f32(0.0, c.clip_rect.y) * sy;
+    let x1 = max_f32(0.0, c.clip_rect.x + c.clip_rect.w) * sx;
+    let y1 = max_f32(0.0, c.clip_rect.y + c.clip_rect.h) * sy;
+    let scissor = VkRect2D {
+      offset: VkOffset2D { x: @saturating_cast(i32, x0), y: @saturating_cast(i32, y0) },
+      extent: VkExtent2D { width: @saturating_cast(u32, max_f32(0.0, x1 - x0)), height: @saturating_cast(u32, max_f32(0.0, y1 - y0)) },
+    };
+    unsafe vk_cmd_set_scissor(cmd, 0, 1, &raw scissor);
+
+    let vb = c.is_text ? fb.text_vtx : fb.quad_vtx;
+    let ib = c.is_text ? fb.text_idx : fb.quad_idx;
+    if (vb.buffer == 0 || ib.buffer == 0) {
+      continue;
+    }
+    let zero: u64 = 0;
+    unsafe {
+      vk_cmd_bind_vertex_buffers(cmd, 0, 1, &raw vb.buffer, &raw zero);
+      vk_cmd_bind_index_buffer(cmd, ib.buffer, 0, kVkIndexTypeUint32);
+      vk_cmd_draw_indexed(cmd, c.elem_count, 1, c.index_offset, 0, 0);
+    }
+  }
+}
+
+fn VulkanBackend::create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+  if (self.info.device == null || width == 0 || height == 0 || #pixels == 0) {
+    return kNullTextureId;
+  }
+  var ut = UserTexture { width, height };
+  ut.sampler = filter == RhiFilter::Nearest ? self.nearest_sampler : self.linear_sampler;
+  let (fmt, pixel_size) = rhi_format_to_vk(format);
+  ut.fmt = fmt;
+  ut.pixel_size = pixel_size;
+  ut.tex = self.make_texture(width, height, ut.fmt, ut.pixel_size, pixels, ut.sampler);
+  if (ut.tex.image == kVkNullHandle) {
+    return kNullTextureId;
+  }
+  let id = self.next_user_id;
+  self.next_user_id += 1;
+  self.user_textures.insert(id, ut);
+  return id;
+}
+
+fn VulkanBackend::update_texture(var self&, id: TextureId, pixels: bytes) {
+  let found = self.user_textures.get(id) else {
+    return;
+  };
+  if (#pixels == 0) {
+    return;
+  }
+  var ut = found;
+  // Re-upload by rebuilding the image in place (the id and map entry persist).
+  let _ = unsafe vk_device_wait_idle(self.info.device);
+  self.free_texture(ut.tex);
+  ut.tex = self.make_texture(ut.width, ut.height, ut.fmt, ut.pixel_size, pixels, ut.sampler);
+  self.user_textures.insert(id, ut);
+}
+
+fn VulkanBackend::destroy_texture(var self&, id: TextureId) {
+  let found = self.user_textures.get(id) else {
+    return;
+  };
+  var ut = found;
+  let _ = unsafe vk_device_wait_idle(self.info.device);
+  self.free_texture(ut.tex);
+  let _ = self.user_textures.remove(id);
+}

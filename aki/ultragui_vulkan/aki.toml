@@ -1,0 +1,21 @@
+# ultragui's Vulkan backends, ported to aki: the windowed RHI
+# (ugui/rhi/vulkan/vulkan_rhi.{h,cc}) and the draw-data renderer for hosts that
+# own the device (ugui/backends/ugui_impl_vulkan.{h,cc}), over a Vulkan binding
+# generated from vulkan.h (tools/gen_vk_binding.py). See ../PORTING.md.
+[package]
+name = "ultragui_vulkan"
+kind = "lib"
+version = "0.1.0"
+description = "libultragui's Vulkan RHI and draw-data renderer in aki"
+
+[dependencies]
+ultragui = { path = "../ultragui" }
+ultragui_glfw = { path = "../ultragui_glfw" }
+
+[build]
+link = ["-lvulkan"]
+
+# Take the SPIR-V from the copies in shaders/ embedded at build time instead
+# of reading <shader_dir>/*.spv at run time (shaders/README.md).
+[features.embed_shaders]
+default = false
