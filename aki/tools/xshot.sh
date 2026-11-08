@@ -5,10 +5,11 @@
 # and stop the program. For checking the GPU backends on a machine without a
 # display. Run it from the repository root; it enters the nix dev shell itself.
 #
-# XSHOT_KEYS="2 space" presses those keys (xdotool key names) in the window,
-# one after another, starting XSHOT_KEYS_AT seconds after launch (default:
-# half of <seconds>); each is held 0.5 s so programs that poll glfwGetKey
-# see it.
+# XSHOT_KEYS="2 space click:449,645" presses those keys (xdotool key names)
+# in the window, one after another, starting XSHOT_KEYS_AT seconds after
+# launch (default: half of <seconds>); each is held 0.5 s so programs that
+# poll glfwGetKey see it. `click:X,Y` moves the pointer there and clicks the
+# left button (held 0.3 s).
 set -eu
 out=$1; secs=$2; shift 2
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -27,7 +28,12 @@ exec xvfb-run -a -s "-screen 0 1280x720x24" \
     if [ -n "$XSHOT_KEYS" ]; then
       sleep "$XSHOT_KEYS_AT"
       for k in $XSHOT_KEYS; do
-        "$XSHOT_XDOTOOL" keydown "$k"; sleep 0.5; "$XSHOT_XDOTOOL" keyup "$k"; sleep 1
+        case "$k" in
+          click:*) xy=${k#click:}
+                   "$XSHOT_XDOTOOL" mousemove "${xy%,*}" "${xy#*,}"; sleep 0.5
+                   "$XSHOT_XDOTOOL" mousedown 1; sleep 0.3; "$XSHOT_XDOTOOL" mouseup 1; sleep 1 ;;
+          *) "$XSHOT_XDOTOOL" keydown "$k"; sleep 0.5; "$XSHOT_XDOTOOL" keyup "$k"; sleep 1 ;;
+        esac
       done
       sleep "$((XSHOT_SECS - XSHOT_KEYS_AT))"
     else

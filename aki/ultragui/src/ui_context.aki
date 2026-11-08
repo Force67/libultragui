@@ -30,12 +30,17 @@
 //   ConvertFrame where the C++ asks the video players, and shut down where
 //   the C++ deletes them.
 // * The script runtime's hooks into UIContext (the C++ Init registers
-//   RegisterAnimLua & co. with lambdas capturing `this`): `script_host()`
-//   lends a ScriptHost (anim loading, widget lookup by name, extensions)
-//   beside the World and the WidgetContext, see ScriptHost.
+//   RegisterAnimLua & co. with lambdas capturing `this`): every call that
+//   can run a script lends a ScriptHost (anim loading, widget lookup by
+//   name, the Rhi, texture sink and audio, extensions) in the
+//   WidgetContext, and `with_host` lends one directly; the bindings
+//   themselves are registered through `add_script_init`, run right after
+//   the runtime's init (ultragui_lua::lua_ui_context).
+// * PaintCallback gets a PaintEnv: the renderer and the Rhi, plus the
+//   World, widget context, root and time a C++ callback reads through the
+//   `&ui` it captures.
 // * The audio backend is an owned AudioBackendBox (`set_audio(box)`), silent
 //   by default; UIContext inits and shuts it down as the C++ does.
-// * PaintCallback is `own fn(&var Renderer2D, &var R): ()`.
 // * The animator's apply/done callbacks are collected and applied after
 //   Animator::update returns (a closure cannot lend the World twice); they
 //   only write the widgets' animation styles, in the same order.
