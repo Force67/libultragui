@@ -1,0 +1,303 @@
+// examples/embed_gl/main.cc: embedding sample. The host creates the window
+// and the GL 3.3 context and draws its own animated background every frame;
+// ultragui attaches to that window (external_window) and composites its UI
+// on top with the OpenGL RHI (embedded: the host clears and presents).
+//
+// Shape differences (not behavior):
+// * The C++ loads its GL entry points into file-static function pointers
+//   (GL_PROCS); here they are a HostGl table of the same entry points,
+//   loaded through glfwGetProcAddress.
+// * The click lambda reads the clicked widget's name from the World; router
+//   handlers get no World here, so it compares the clicked widget with the
+//   widget named btn_hello, looked up once after the UI is loaded (the only
+//   widget of that name).
+// * The C++ UIContext has the Lua runtime linked; nothing here runs a
+//   script, so the port uses NoScript.
+
+module ultragui_embed_gl;
+
+import {eprintln, println} from akikit::logging;
+import {path_exists} from akikit::filesystem::file_util;
+import {String, from_str} from akikit::strings::string;
+import {Atomic} from akikit::threading::atomic;
+import {WidgetId} from ultragui::core::handle;
+import {MouseButton} from ultragui::input::input_queue;
+import {NoScript} from ultragui::scripting::script_runtime;
+import {UIConfig, UIContext} from ultragui::ui_context;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {
+  glfw_create_window, glfw_destroy_window, glfw_get_framebuffer_size, glfw_get_proc_address, glfw_get_time,
+  glfw_init, glfw_make_context_current, glfw_swap_buffers, glfw_swap_interval, glfw_terminate, glfw_window_hint,
+  glfw_window_should_close, kGlfwClientApi, kGlfwContextVersionMajor, kGlfwContextVersionMinor, kGlfwOpenglApi,
+  kGlfwOpenglCoreProfile, kGlfwOpenglForwardCompat, kGlfwOpenglProfile, kGlfwSrgbCapable, kGlfwTrue,
+} from ultragui_glfw::sys::glfw;
+import {OpenGlRhi} from ultragui_opengl::opengl_rhi;
+
+// Minimal GL loader (the GL 3.3 core entry points this host uses).
+comptime let kGlTriangles: u32 = 0x0004;
+comptime let kGlFragmentShader: u32 = 0x8B30;
+comptime let kGlVertexShader: u32 = 0x8B31;
+comptime let kGlCompileStatus: u32 = 0x8B81;
+comptime let kGlLinkStatus: u32 = 0x8B82;
+
+struct HostGl : Copy {
+  pub let viewport: extern fn(i32, i32, i32, i32): ()
+  pub let create_shader: extern fn(u32): u32
+  pub let shader_source: extern fn(u32, i32, *const *const c_char, *const i32): ()
+  pub let compile_shader: extern fn(u32): ()
+  pub let get_shaderiv: extern fn(u32, u32, *var i32): ()
+  pub let get_shader_info_log: extern fn(u32, i32, *var i32, *var c_char): ()
+  pub let create_program: extern fn(): u32
+  pub let attach_shader: extern fn(u32, u32): ()
+  pub let link_program: extern fn(u32): ()
+  pub let get_programiv: extern fn(u32, u32, *var i32): ()
+  pub let delete_shader: extern fn(u32): ()
+  pub let use_program: extern fn(u32): ()
+  pub let gen_vertex_arrays: extern fn(i32, *var u32): ()
+  pub let bind_vertex_array: extern fn(u32): ()
+  pub let get_uniform_location: extern fn(u32, *const c_char): i32
+  pub let uniform1f: extern fn(i32, f32): ()
+  pub let draw_arrays: extern fn(u32, i32, i32): ()
+}
+
+// glfwGetProcAddress(name) as a function of type F; none if GLFW lacks it.
+fn proc<F>(name: *const c_char): F? {
+  var p = unsafe glfw_get_proc_address(name);
+  if (p == null) {
+    return none;
+  }
+  return unsafe @read(&raw var p as *const F);
+}
+
+// LoadGL
+fn load_gl(): HostGl? {
+  let viewport = proc::<extern fn(i32, i32, i32, i32): ()>(c"glViewport") else {
+    return none;
+  };
+  let create_shader = proc::<extern fn(u32): u32>(c"glCreateShader") else {
+    return none;
+  };
+  let shader_source = proc::<extern fn(u32, i32, *const *const c_char, *const i32): ()>(c"glShaderSource") else {
+    return none;
+  };
+  let compile_shader = proc::<extern fn(u32): ()>(c"glCompileShader") else {
+    return none;
+  };
+  let get_shaderiv = proc::<extern fn(u32, u32, *var i32): ()>(c"glGetShaderiv") else {
+    return none;
+  };
+  let get_shader_info_log = proc::<extern fn(u32, i32, *var i32, *var c_char): ()>(c"glGetShaderInfoLog") else {
+    return none;
+  };
+  let create_program = proc::<extern fn(): u32>(c"glCreateProgram") else {
+    return none;
+  };
+  let attach_shader = proc::<extern fn(u32, u32): ()>(c"glAttachShader") else {
+    return none;
+  };
+  let link_program = proc::<extern fn(u32): ()>(c"glLinkProgram") else {
+    return none;
+  };
+  let get_programiv = proc::<extern fn(u32, u32, *var i32): ()>(c"glGetProgramiv") else {
+    return none;
+  };
+  let delete_shader = proc::<extern fn(u32): ()>(c"glDeleteShader") else {
+    return none;
+  };
+  let use_program = proc::<extern fn(u32): ()>(c"glUseProgram") else {
+    return none;
+  };
+  let gen_vertex_arrays = proc::<extern fn(i32, *var u32): ()>(c"glGenVertexArrays") else {
+    return none;
+  };
+  let bind_vertex_array = proc::<extern fn(u32): ()>(c"glBindVertexArray") else {
+    return none;
+  };
+  let get_uniform_location = proc::<extern fn(u32, *const c_char): i32>(c"glGetUniformLocation") else {
+    return none;
+  };
+  let uniform1f = proc::<extern fn(i32, f32): ()>(c"glUniform1f") else {
+    return none;
+  };
+  let draw_arrays = proc::<extern fn(u32, i32, i32): ()>(c"glDrawArrays") else {
+    return none;
+  };
+  return HostGl {
+    viewport, create_shader, shader_source, compile_shader, get_shaderiv, get_shader_info_log, create_program, attach_shader, link_program, get_programiv, delete_shader, use_program, gen_vertex_arrays, bind_vertex_array, get_uniform_location, uniform1f, draw_arrays,
+  };
+}
+
+// A NUL-terminated copy of s, for GL.
+fn c_text(s: str): String {
+  var out = from_str(s);
+  out.push_c8('\0');
+  return out;
+}
+
+fn compile_shader(gl&: HostGl, kind: u32, src: str): u32 {
+  let text = c_text(src);
+  let s = unsafe (gl.create_shader)(kind);
+  let p = unsafe (@ptr(text.as_str()) as *const c_char);
+  unsafe (gl.shader_source)(s, 1, &raw p, null);
+  unsafe (gl.compile_shader)(s);
+  var ok: i32 = 0;
+  unsafe (gl.get_shaderiv)(s, kGlCompileStatus, &raw var ok);
+  if (ok == 0) {
+    var log: [u8; 1024] = [0; 1024];
+    unsafe (gl.get_shader_info_log)(s, 1024, null, &raw var log as *var c_char);
+    var n: usize = 0;
+    while (n < 1024 && log[n] != 0) {
+      n += 1;
+    }
+    var msg = String();
+    let _ = msg.push_utf8(log[..n] as bytes);
+    eprintln(f"embed_gl: shader compile failed: {msg}");
+  }
+  return s;
+}
+
+// Host's own pipeline: a fullscreen animated gradient.
+comptime let kHostVert: str = "#version 330 core\nout vec2 v_uv;\nvoid main() {\n  vec2 verts[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));\n  vec2 p = verts[gl_VertexID];\n  v_uv = p * 0.5 + 0.5;\n  gl_Position = vec4(p, 0.0, 1.0);\n}";
+
+comptime let kHostFrag: str = "#version 330 core\nin vec2 v_uv;\nuniform float u_time;\nout vec4 frag;\nvoid main() {\n  vec3 c = 0.5 + 0.5 * cos(u_time + v_uv.xyx * 3.0 + vec3(0.0, 2.0, 4.0));\n  frag = vec4(c * 0.22, 1.0);  // dim so the UI reads clearly on top\n}";
+
+comptime let kUi: str = r"""
+panel root {
+  width: 100vw; height: 100vh;
+  layout: column; justify: center; align: center;
+
+  panel card {
+    layout: column; gap: 10; padding: 28;
+    background: #14142899; corner-radius: 18;
+    border-color: #ffffff20; border-width: 1;
+    shadow-color: #00000080; shadow-blur: 28; shadow-y: 10;
+
+    text title { text: "ultragui, embedded"; font-size: 22; color: #ffffff; }
+    text sub {
+      text: "The window, GL context, and animated background are the host's.";
+      font-size: 13; color: #a8a8c8;
+    }
+    button btn_hello {
+      text: "Click me"; background: #4a4aff; color: #ffffff;
+      corner-radius: 8; padding: 10 20; cursor: pointer;
+    }
+  }
+}
+""";
+
+fn find_font(): str<'static>? {
+  let candidates = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+  ];
+  for (let c in candidates) {
+    if (path_exists(c)) {
+      return c;
+    }
+  }
+  return none;
+}
+
+pub fn main(): i32 {
+  if (unsafe glfw_init() == 0) {
+    eprintln("embed_gl: glfwInit failed");
+    return 1;
+  }
+
+  // Host creates a GL 3.3 core window (must match what the RHI expects).
+  unsafe {
+    glfw_window_hint(kGlfwClientApi, kGlfwOpenglApi);
+    glfw_window_hint(kGlfwContextVersionMajor, 3);
+    glfw_window_hint(kGlfwContextVersionMinor, 3);
+    glfw_window_hint(kGlfwOpenglProfile, kGlfwOpenglCoreProfile);
+    glfw_window_hint(kGlfwOpenglForwardCompat, kGlfwTrue);
+    glfw_window_hint(kGlfwSrgbCapable, kGlfwTrue);
+  }
+
+  let win = unsafe glfw_create_window(1280, 800, c"ultragui embedded (host owns the GL pipeline)", null, null);
+  if (win == null) {
+    eprintln("embed_gl: window creation failed");
+    unsafe glfw_terminate();
+    return 1;
+  }
+  unsafe glfw_make_context_current(win);
+  unsafe glfw_swap_interval(1);
+
+  let gl = load_gl() else {
+    eprintln("embed_gl: failed to load GL functions");
+    return 1;
+  };
+
+  let prog = unsafe (gl.create_program)();
+  let vs = compile_shader(gl, kGlVertexShader, kHostVert);
+  let fs = compile_shader(gl, kGlFragmentShader, kHostFrag);
+  unsafe (gl.attach_shader)(prog, vs);
+  unsafe (gl.attach_shader)(prog, fs);
+  unsafe (gl.link_program)(prog);
+  var linked: i32 = 0;
+  unsafe (gl.get_programiv)(prog, kGlLinkStatus, &raw var linked);
+  if (linked == 0) {
+    eprintln("embed_gl: host program link failed");
+  }
+  unsafe (gl.delete_shader)(vs);
+  unsafe (gl.delete_shader)(fs);
+  let u_time = unsafe (gl.get_uniform_location)(prog, c"u_time");
+  var vao: u32 = 0;
+  unsafe (gl.gen_vertex_arrays)(1, &raw var vao);
+
+  // ultragui attaches to the host's window and context.
+  var ui = UIContext::<GlfwPlatform, OpenGlRhi, NoScript>(GlfwPlatform(), OpenGlRhi(), NoScript());
+  let cfg = UIConfig {
+    external_window: unsafe (win as *var u8),  // do not create a window
+    embedded: true,                            // host clears + presents
+    width: 1280,
+    height: 800,
+  };
+  if (!ui.init(cfg)) {
+    eprintln("embed_gl: ui.Init failed");
+    return 1;
+  }
+
+  if (let font = find_font()) {
+    ui.set_default_font(ui.load_font(font));
+  } else {
+    eprintln("embed_gl: no system font found; text will be blank");
+  }
+  let _ = ui.load_ui_string(kUi, "embed");
+
+  let button: WidgetId = ui.find_widget("btn_hello");
+  let clicks = Atomic::<i32>(0);
+  ui.input.set_on_click(own fn(w: WidgetId, b: MouseButton) {
+    if (button.valid() && w == button) {
+      let n = clicks.fetch_add(1) + 1;
+      println(f"embed_gl: button clicked ({n})");
+    }
+  });
+
+  while (unsafe glfw_window_should_close(win) == 0) {
+    var fbw: i32 = 0;
+    var fbh: i32 = 0;
+    unsafe glfw_get_framebuffer_size(win, &raw var fbw, &raw var fbh);
+
+    // 1. Host renders its own scene.
+    unsafe (gl.viewport)(0, 0, fbw, fbh);
+    unsafe (gl.use_program)(prog);
+    unsafe (gl.uniform1f)(u_time, unsafe glfw_get_time() as f32);
+    unsafe (gl.bind_vertex_array)(vao);
+    unsafe (gl.draw_arrays)(kGlTriangles, 0, 3);
+
+    // 2. ultragui composites on top.
+    ui.update();
+
+    // 3. Host presents.
+    unsafe glfw_swap_buffers(win);
+  }
+
+  ui.shutdown();
+  unsafe glfw_destroy_window(win);
+  unsafe glfw_terminate();
+  return 0;
+}
