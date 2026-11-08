@@ -282,6 +282,54 @@ fn playback(root: str, var out&: String) {
 }
 
 // ---------------------------------------------------------------------------
+// Mutated documents: Fuzz() in the C++ tool.
+
+fn fuzz(pkg: str, var out&: String) {
+  let all = read_file(f"{pkg}/tests/data/anim_fuzz/cases.txt")!;
+  let sep = "\n=====CASE=====\n";
+  var rest = all.as_str();
+  var idx: u32 = 0;
+  while (true) {
+    var end = #rest;
+    var next = #rest;
+    var found = false;
+    var i: usize = 0;
+    while (i + #sep <= #rest) {
+      if (rest[i..i + #sep] == sep) {
+        end = i;
+        next = i + #sep;
+        found = true;
+        break;
+      }
+      i += 1;
+    }
+    var doc = AnimDocument {};
+    let ok = parse_anim_data(rest[..end], doc);
+    var h: u64 = 0;
+    var tracks: usize = 0;
+    var kfs: usize = 0;
+    for (let l& in doc.layers) {
+      tracks += l.tracks.len();
+      for (let tr& in l.tracks) {
+        kfs += tr.keyframes.len();
+      }
+    }
+    if (ok) {
+      var pixels = filled(40 * 30 * 4usize, 0u8);
+      render_anim_frame(doc, 0.37 * doc.duration, pixels.as_slice_var(), 40, 30);
+      h = fnv(pixels.as_slice());
+    }
+    let loopn = doc.looping ? 1i32 : 0i32;
+    out.push_str(f"FUZZ {idx} ok={(ok ? 1i32 : 0i32)} layers={doc.layers.len()} tracks={tracks} kfs={kfs} w={b32(doc.width):08x} h={b32(doc.height):08x} dur={b32(doc.duration):08x} ver={doc.version} loop={loopn} 0x{h:016x}\n");
+    idx += 1;
+    if (!found) {
+      break;
+    }
+    rest = rest[next..];
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 fn first_line(s: str): str {
   for (let i in 0..#s) {
@@ -357,17 +405,20 @@ pub fn main(): i32 {
     }
   }
   playback(root, got);
+  fuzz(pkg.as_str(), got);
 
   // Compare line by line.
   var a = got.as_str();
   var b = reference.as_str();
   var line_no: u32 = 1;
   var same = true;
-  while ((#a > 0 || #b > 0) && same) {
+  var shown: u32 = 0;
+  while ((#a > 0 || #b > 0) && shown < 8) {
     let la = first_line(a);
     let lb = first_line(b);
     if (la != lb) {
       same = false;
+      shown += 1;
       eprintln(f"line {line_no} differs");
       eprintln(f"  aki: {la}");
       eprintln(f"  c++: {lb}");

@@ -19,6 +19,7 @@ aki/
     os/<os>/ultragui/sys/c_long.aki   C `long` per target OS (CLong, CULong)
     tests/*_test.aki     one program per test; tests/support/ shared helpers
     tools/gen_reference.cc  prints C++-computed reference values for the tests
+    tools/gen_anim_reference.cc, gen_ugui_ast.sh (+ dump_ugui.cc, gen_*_fuzz.py)  anim and .ugui parser references
     tools/gen_svg_reference.cc, gen_svg_table.py, gen_svg_corpus.py
                          SVG pixel hashes from the C++ -> tests/support/svg_corpus.aki
     tests/data/svg/      the SVG corpus (@embed'ed by tests/support/svg_corpus.aki)
@@ -503,6 +504,11 @@ so bit-exact tables are aarch64's.
   (ParentPath, JoinPath, LexicallyNormal, WeaklyCanonical) with akikit's
   `real_path`/`path_exists`; Windows uses the same prefix algorithm (the C++
   calls `_fullpath` there).
+- NOT kept, on purpose: the C++ `render_anim_frame` caches parsed path layers
+  in a thread_local map keyed by the *address* of `AnimLayer::path_data`, so
+  a document allocated at a freed document's address renders the old paths.
+  The port parses a path layer each frame (what the cache returns when it is
+  right); the reference tool leaks its documents so the C++ never hits it.
 - VectorAnimation of a looping document with duration 0 spins forever in
   `update` (`while (t >= dur) t -= dur`), as the C++.
 - JSON numbers go through C `strtod`, so "-inf", "-nan(12)" and hex floats

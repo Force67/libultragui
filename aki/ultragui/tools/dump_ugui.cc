@@ -6,6 +6,7 @@
 //     ugui/idl/parser.cc ugui/core/from_chars.cc -o /tmp/dump_ugui
 //   /tmp/dump_ugui --root <repo> file.ugui...     # parse files, one dump each
 //   /tmp/dump_ugui --text 'source text'           # parse text as "<text>"
+//   /tmp/dump_ugui --cases cases.txt              # fuzz cases: one "CASE n bytes hash" line each
 //
 // The format is the one Dump in aki/ultragui/tests/idl_parser_test.aki
 // writes: property maps in ascending key order, strings with backslash,
@@ -15,6 +16,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <string>
@@ -118,10 +120,61 @@ static void Dump(const char* label, bool ok, const UguiDocument& doc, const Vect
     printf("error file=%s line=%u col=%u msg=%s\n", P(e.file).c_str(), e.line, e.column, Q(e.message).c_str());
 }
 
+static unsigned long long Fnv(const std::string& s) {
+  unsigned long long h = 1469598103934665603ull;
+  for (unsigned char c : s) {
+    h ^= c;
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+// Cases file: sources separated by lines holding exactly "=====CASE=====".
+// Each is parsed as text named "<case N>"; its dump goes through a temp file
+// and only its length and FNV-1a hash are printed.
+static void Cases(const char* path) {
+  FILE* f = fopen(path, "rb");
+  if (!f) { perror(path); exit(1); }
+  std::string all;
+  char buf[4096];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof buf, f)) > 0) all.append(buf, n);
+  fclose(f);
+  const std::string sep = "\n=====CASE=====\n";
+  size_t pos = 0;
+  int idx = 0;
+  while (pos <= all.size()) {
+    size_t end = all.find(sep, pos);
+    std::string src = all.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    std::string name = "<case " + std::to_string(idx) + ">";
+    UguiDocument doc;
+    Vector<ParseError> errors;
+    bool ok = ParseUgui(src.data(), src.size(), name.c_str(), doc, errors);
+    fflush(stdout);
+    FILE* tmp = tmpfile();
+    int saved = dup(1);
+    dup2(fileno(tmp), 1);
+    Dump(name.c_str(), ok, doc, errors);
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    std::string out;
+    rewind(tmp);
+    while ((n = fread(buf, 1, sizeof buf, tmp)) > 0) out.append(buf, n);
+    fclose(tmp);
+    printf("CASE %d %zu 0x%016llx\n", idx, out.size(), Fnv(out));
+    ++idx;
+    if (end == std::string::npos) break;
+    pos = end + sep.size();
+  }
+}
+
 int main(int argc, char** argv) {
   bool text = false;
   for (int i = 1; i < argc; ++i) {
-    if (!strcmp(argv[i], "--root") && i + 1 < argc) {
+    if (!strcmp(argv[i], "--cases") && i + 1 < argc) {
+      Cases(argv[++i]);
+    } else if (!strcmp(argv[i], "--root") && i + 1 < argc) {
       g_root = argv[++i];
     } else if (!strcmp(argv[i], "--text")) {
       text = true;

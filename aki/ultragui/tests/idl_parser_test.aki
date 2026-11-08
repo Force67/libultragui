@@ -115,6 +115,70 @@ fn hand_checked(var t&: Expect) {
   t.that(doc3.imports.len() == 1 && doc3.style_classes.len() == 1, "import: list and classes");
 }
 
+fn fnv(s: str): u64 {
+  var h: u64 = 1469598103934665603;
+  for (let c in s) {
+    h = h ^ (c as u64);
+    h = h *% 1099511628211;
+  }
+  return h;
+}
+
+// The mutated-source cases: parse each as text "<case N>" and compare the
+// length and FNV-1a hash of its dump with the C++ parser's (expected.txt in
+// tests/data/ugui_fuzz, "CASE n bytes 0xhash"). Cases are separated by lines
+// holding "=====CASE=====".
+fn fuzz_cases(pkg: str, var t&: Expect) {
+  let cases = read_file(f"{pkg}/tests/data/ugui_fuzz/cases.txt")!;
+  let expected = read_file(f"{pkg}/tests/data/ugui_fuzz/expected.txt")!;
+  let sep = "\n=====CASE=====\n";
+  var lines = expected.as_str();
+  var rest = cases.as_str();
+  var idx: u32 = 0;
+  var bad: u32 = 0;
+  while (true) {
+    var end = #rest;
+    var next = #rest;
+    var found = false;
+    var i: usize = 0;
+    while (i + #sep <= #rest) {
+      if (rest[i..i + #sep] == sep) {
+        end = i;
+        next = i + #sep;
+        found = true;
+        break;
+      }
+      i += 1;
+    }
+    let src = rest[..end];
+    let name = f"<case {idx}>";
+    var doc = UguiDocument {};
+    var errors = List::<ParseError>();
+    let ok = parse_ugui(src, name.as_str(), doc, errors);
+    let text = dump(name.as_str(), ok, doc, errors, "");
+    let want = first_line(lines);
+    lines = lines[#want..];
+    if (#lines > 0) {
+      lines = lines[1..];
+    }
+    let h = fnv(text.as_str());
+    let got = f"CASE {idx} {text.len()} 0x{h:016x}";
+    if (got.as_str() != want) {
+      bad += 1;
+      if (bad <= 5) {
+        eprintln(f"fuzz case {idx} differs: aki {got}, c++ {want}");
+      }
+    }
+    idx += 1;
+    if (!found) {
+      break;
+    }
+    rest = rest[next..];
+  }
+  t.that(bad == 0, f"{bad} of {idx} fuzz cases differ from the C++ parser");
+  t.that(idx >= 900, f"ran {idx} fuzz cases");
+}
+
 pub fn main(): i32 {
   var t = Expect();
   hand_checked(t);
@@ -124,6 +188,7 @@ pub fn main(): i32 {
     return 1;
   };
   let root = parent(parent(pkg.as_str()));
+  fuzz_cases(pkg.as_str(), t);
   let expected = read_file(f"{pkg}/tests/data/ugui_ast/expected.txt") else {
     eprintln("cannot read expected.txt");
     return 1;

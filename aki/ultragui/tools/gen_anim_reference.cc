@@ -164,7 +164,11 @@ static void LayerDump(const AnimLayer& l, int depth, const char* name) {
 
 static void Document(const std::string& name, const std::string& src, const std::string& text,
                      std::vector<AnimDocument>& keep) {
-  AnimDocument doc;
+  // Documents are never freed: render_anim_frame caches parsed path layers by
+  // the address of AnimLayer::path_data, so a later document allocated at a
+  // freed one's address would render the earlier document's paths (a C++ bug
+  // the aki port deliberately does not have).
+  AnimDocument& doc = *new AnimDocument();
   bool ok = parse_anim_data(text.data(), text.size(), doc);
   printf("ANIMDOC %s %s ok=%d version=%u w=%08x h=%08x dur=%08x loop=%d layers=%zu\n", name.c_str(), src.c_str(), ok ? 1 : 0,
          doc.version, Bits(doc.width), Bits(doc.height), Bits(doc.duration), doc.loop ? 1 : 0, doc.layers.size());
@@ -286,6 +290,38 @@ static void Playback(const std::string& root) {
   }
 }
 
+// Mutated documents: parse result, counts and one rendered frame each. The
+// cases file separates sources with lines holding "=====CASE=====".
+static void Fuzz(const std::string& root) {
+  std::string all = ReadFile(root + "/aki/ultragui/tests/data/anim_fuzz/cases.txt");
+  const std::string sep = "\n=====CASE=====\n";
+  size_t pos = 0;
+  int idx = 0;
+  while (pos <= all.size()) {
+    size_t end = all.find(sep, pos);
+    std::string src = all.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    AnimDocument& doc = *new AnimDocument();  // leaked on purpose, see Document()
+    bool ok = parse_anim_data(src.data(), src.size(), doc);
+    unsigned long long h = 0;
+    size_t tracks = 0, kfs = 0;
+    for (auto& l : doc.layers) {
+      tracks += l.tracks.size();
+      for (auto& t : l.tracks) kfs += t.keyframes.size();
+    }
+    if (ok) {
+      std::vector<u8> pixels(40 * 30 * 4);
+      render_anim_frame(doc, 0.37f * doc.duration, pixels.data(), 40, 30);
+      h = Fnv(pixels.data(), pixels.size());
+    }
+    printf("FUZZ %d ok=%d layers=%zu tracks=%zu kfs=%zu w=%08x h=%08x dur=%08x ver=%u loop=%d 0x%016llx\n", idx, ok ? 1 : 0,
+           doc.layers.size(), tracks, kfs, Bits(doc.width), Bits(doc.height), Bits(doc.duration), doc.version,
+           doc.loop ? 1 : 0, h);
+    ++idx;
+    if (end == std::string::npos) break;
+    pos = end + sep.size();
+  }
+}
+
 int main(int argc, char** argv) {
   std::string root = argc > 1 ? argv[1] : ".";
   JsonCases();
@@ -306,5 +342,6 @@ int main(int argc, char** argv) {
   for (const char* b : bad)
     Document(std::string("bad") + std::to_string(i++), "inline:" + Hex(b, strlen(b)), b, keep);
   Playback(root);
+  Fuzz(root);
   return 0;
 }
