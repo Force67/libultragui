@@ -1,0 +1,33 @@
+// STUB (task A1): the part of ugui/widgets/scroll_view.{h,cc} that paint,
+// layout_tree, input and widget::input_to_layout_point call. The widget-kinds
+// port owns this module and replaces the file wholesale; the names here are
+// the ones it uses (ScrollViewContent, kScrollViewContent, scroll_offset).
+
+module ultragui::widgets::scroll_view;
+
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {WidgetKind, kWidgetNode} from ultragui::widgets::widget;
+import {World} from ultragui::widgets::widget_registry;
+
+// Data for a scrollable container (WidgetKind::ScrollView).
+pub struct ScrollViewContent : Copy {
+  pub var offset: Vec2 = Vec2::zero()
+  pub var velocity: Vec2 = Vec2::zero()
+  pub var content_size: Vec2 = Vec2::zero()
+  pub var deceleration: f32 = 0.88
+}
+
+pub static let kScrollViewContent: ComponentKey<ScrollViewContent> = ComponentKey();
+
+// ScrollOffset: the scroll offset of a scroll view, or (0,0) if `e` is not one.
+pub fn scroll_offset(world&: World, e: WidgetId): Vec2 {
+  if (!world.alive(e) || world.get(kWidgetNode, e)!.kind != WidgetKind::ScrollView) {
+    return Vec2::zero();
+  }
+  if (let c& = world.get(kScrollViewContent, e)) {
+    return c.offset;
+  }
+  return Vec2::zero();
+}
