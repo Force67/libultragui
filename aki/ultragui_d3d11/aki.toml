@@ -21,7 +21,6 @@ ultragui_glfw = { path = "../ultragui_glfw" }
 [build.os.linux]
 c_sources = ["csrc/d3dcompile_abi.c"]
 link = ["-ldxvk_d3d11", "-ldxvk_dxgi"]
-sources = ["os/linux"]
 
 [build.os.windows]
 link = ["-ld3d11", "-ldxgi", "-luser32"]

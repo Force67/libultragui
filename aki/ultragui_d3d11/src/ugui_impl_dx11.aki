@@ -36,7 +36,7 @@ module ultragui_d3d11::ugui_impl_dx11;
 
 import {eprintln} from akikit::logging;
 import {HashMap} from akikit::containers::hash_map;
-import {DrawData, TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
+import {DrawCmd, DrawData, TextureId, kFontTextureId, kNullTextureId} from ultragui::render::draw_data;
 import {TextureBackend} from ultragui::render::texture_backend;
 import {Vertex2D} from ultragui::render::vertex;
 import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
@@ -69,12 +69,10 @@ import {Device, DeviceContext, Unknown, add_ref, context_draw_indexed, context_d
 extern fn memcpy(dst: *var u8, src: *const u8, n: usize): *var u8;
 
 // SafeRelease: releases and clears.
-fn safe_release(p: *var *var Unknown) {
-  unsafe {
-    if (*p != null) {
-      release(*p);
-      *p = null;
-    }
+fn safe_release(var p&: *var Unknown) {
+  if (p != null) {
+    unsafe release(p);
+    p = null;
   }
 }
 
@@ -102,20 +100,20 @@ struct Geometry : Copy {
 }
 
 struct Backend {
-  pub var device: *var Device = null
-  pub var context: *var DeviceContext = null
-  pub var quad_vs: *var Unknown = null
-  pub var text_vs: *var Unknown = null
+  pub unowned var device: *var Device = null
+  pub unowned var context: *var DeviceContext = null
+  pub unowned var quad_vs: *var Unknown = null
+  pub unowned var text_vs: *var Unknown = null
   pub var linear_target: PixelShaders = PixelShaders {}  // for an sRGB render target
   pub var encoding: PixelShaders = PixelShaders {}       // for any other; compiled when first needed
   pub var encoding_failed: bool = false
-  pub var layout: *var Unknown = null
-  pub var projection: *var Unknown = null
-  pub var blend: *var Unknown = null
-  pub var raster: *var Unknown = null
-  pub var depth: *var Unknown = null
-  pub var linear: *var Unknown = null
-  pub var nearest: *var Unknown = null
+  pub unowned var layout: *var Unknown = null
+  pub unowned var projection: *var Unknown = null
+  pub unowned var blend: *var Unknown = null
+  pub unowned var raster: *var Unknown = null
+  pub unowned var depth: *var Unknown = null
+  pub unowned var linear: *var Unknown = null
+  pub unowned var nearest: *var Unknown = null
   pub var white: Texture = Texture {}
   pub var font: Texture = Texture {}
   pub var quads: Geometry = Geometry {}
@@ -174,7 +172,7 @@ fn make_texture(g&: Backend, width: u32, height: u32, format: RhiFormat, pixels:
   }
   if (!check(unsafe device_create_shader_resource_view(g.device, made.texture, null, &raw var made.srv),
       "CreateShaderResourceView")) {
-    safe_release(&raw var made.texture);
+    safe_release(made.texture);
     return none;
   }
   made.width = width;
@@ -187,15 +185,15 @@ fn make_texture(g&: Backend, width: u32, height: u32, format: RhiFormat, pixels:
 fn free_texture(t: Texture) {
   var srv = t.srv;
   var tex = t.texture;
-  safe_release(&raw var srv);
-  safe_release(&raw var tex);
+  safe_release(srv);
+  safe_release(tex);
 }
 
 // MakeVertexShader(source, out, with_layout): the layout, when asked for, goes
 // to `layout_out`.
-fn make_vertex_shader(g&: Backend, source: str, out: *var *var Unknown, layout_out: *var *var Unknown, with_layout: bool): bool {
+fn make_vertex_shader(device: *var Device, source: str, out: *var *var Unknown, layout_out: *var *var Unknown, with_layout: bool): bool {
   let code = compile_hlsl(source, "VSMain", "vs_5_0") else { return false; };
-  if (!check(unsafe device_create_vertex_shader(g.device, @ptr(code.as_slice()) as *const u8, code.len(), null, out),
+  if (!check(unsafe device_create_vertex_shader(device, @ptr(code.as_slice()) as *const u8, code.len(), null, out),
       "CreateVertexShader")) {
     return false;
   }
@@ -204,7 +202,7 @@ fn make_vertex_shader(g&: Backend, source: str, out: *var *var Unknown, layout_o
   }
   // Vertex2D, as the quad and text shaders read it.
   let layout = vertex_input_layout();
-  return check(unsafe device_create_input_layout(g.device, @ptr(layout[..]) as *const InputElementDesc, 9,
+  return check(unsafe device_create_input_layout(device, @ptr(layout[..]) as *const InputElementDesc, 9,
     @ptr(code.as_slice()) as *const u8, code.len(), layout_out), "CreateInputLayout");
 }
 
@@ -220,13 +218,13 @@ fn make_pixel_shaders(g&: Backend, encode: bool): PixelShaders? {
   }
   let text_code = compile_hlsl(text_hlsl(), "PSMain", "ps_5_0", use);
   if (text_code == none) {
-    safe_release(&raw var out.quad);
+    safe_release(out.quad);
     return none;
   }
   let tc = text_code!;
   if (!check(unsafe device_create_pixel_shader(g.device, @ptr(tc.as_slice()) as *const u8, tc.len(), null, &raw var out.text),
       "CreatePixelShader")) {
-    safe_release(&raw var out.quad);
+    safe_release(out.quad);
     return none;
   }
   return out;
@@ -339,7 +337,7 @@ fn reserve(device: *var Device, buffer: *var *var Unknown, capacity: *var u32, c
     while (grown < count) {
       grown *= 2;
     }
-    safe_release(buffer);
+    safe_release(*buffer);
     *capacity = 0;
     let desc = BufferDesc {
       byte_width: grown * stride,
@@ -414,34 +412,34 @@ struct SavedState {
   pub var scissors: [D3dRect; 16] = [D3dRect { left: 0, top: 0, right: 0, bottom: 0 }; 16]
   pub var viewports: [Viewport; 16] = [Viewport { top_left_x: 0.0, top_left_y: 0.0, width: 0.0, height: 0.0, min_depth: 0.0,
     max_depth: 0.0 }; 16]
-  pub var raster: *var Unknown = null
-  pub var blend: *var Unknown = null
+  pub unowned var raster: *var Unknown = null
+  pub unowned var blend: *var Unknown = null
   pub var blend_factor: [f32; 4] = [0.0; 4]
   pub var sample_mask: u32 = 0
-  pub var depth: *var Unknown = null
+  pub unowned var depth: *var Unknown = null
   pub var stencil_ref: u32 = 0
-  pub var ps_srv: *var Unknown = null
-  pub var ps_samplers: [*var Unknown; 2] = [null, null]
-  pub var ps: *var Unknown = null
-  pub var vs: *var Unknown = null
-  pub var gs: *var Unknown = null
-  pub var hs: *var Unknown = null
-  pub var ds: *var Unknown = null
-  pub var ps_instances: [*var Unknown; 256] = [null; 256]
-  pub var vs_instances: [*var Unknown; 256] = [null; 256]
-  pub var gs_instances: [*var Unknown; 256] = [null; 256]
+  pub unowned var ps_srv: *var Unknown = null
+  pub unowned var ps_samplers: [*var Unknown; 2] = [null, null]
+  pub unowned var ps: *var Unknown = null
+  pub unowned var vs: *var Unknown = null
+  pub unowned var gs: *var Unknown = null
+  pub unowned var hs: *var Unknown = null
+  pub unowned var ds: *var Unknown = null
+  pub unowned var ps_instances: [*var Unknown; 256] = [null; 256]
+  pub unowned var vs_instances: [*var Unknown; 256] = [null; 256]
+  pub unowned var gs_instances: [*var Unknown; 256] = [null; 256]
   pub var ps_instance_count: u32 = 256
   pub var vs_instance_count: u32 = 256
   pub var gs_instance_count: u32 = 256
-  pub var vs_constants: *var Unknown = null
+  pub unowned var vs_constants: *var Unknown = null
   pub var topology: u32 = 0
-  pub var index_buffer: *var Unknown = null
+  pub unowned var index_buffer: *var Unknown = null
   pub var index_format: u32 = 0
   pub var index_offset: u32 = 0
-  pub var vertex_buffer: *var Unknown = null
+  pub unowned var vertex_buffer: *var Unknown = null
   pub var vertex_stride: u32 = 0
   pub var vertex_offset: u32 = 0
-  pub var layout: *var Unknown = null
+  pub unowned var layout: *var Unknown = null
 }
 
 fn save(c: *var DeviceContext, var s&: SavedState) {
@@ -488,30 +486,30 @@ fn restore(c: *var DeviceContext, var s&: SavedState) {
   }
 
   // The getters each took a reference.
-  safe_release(&raw var s.raster);
-  safe_release(&raw var s.blend);
-  safe_release(&raw var s.depth);
-  safe_release(&raw var s.ps_srv);
-  safe_release(&raw var s.ps_samplers[0]);
-  safe_release(&raw var s.ps_samplers[1]);
-  safe_release(&raw var s.ps);
-  safe_release(&raw var s.vs);
-  safe_release(&raw var s.gs);
-  safe_release(&raw var s.hs);
-  safe_release(&raw var s.ds);
+  safe_release(s.raster);
+  safe_release(s.blend);
+  safe_release(s.depth);
+  safe_release(s.ps_srv);
+  safe_release(s.ps_samplers[0]);
+  safe_release(s.ps_samplers[1]);
+  safe_release(s.ps);
+  safe_release(s.vs);
+  safe_release(s.gs);
+  safe_release(s.hs);
+  safe_release(s.ds);
   for (let i in 0..s.ps_instance_count as usize) {
-    safe_release(&raw var s.ps_instances[i]);
+    safe_release(s.ps_instances[i]);
   }
   for (let i in 0..s.vs_instance_count as usize) {
-    safe_release(&raw var s.vs_instances[i]);
+    safe_release(s.vs_instances[i]);
   }
   for (let i in 0..s.gs_instance_count as usize) {
-    safe_release(&raw var s.gs_instances[i]);
+    safe_release(s.gs_instances[i]);
   }
-  safe_release(&raw var s.vs_constants);
-  safe_release(&raw var s.index_buffer);
-  safe_release(&raw var s.vertex_buffer);
-  safe_release(&raw var s.layout);
+  safe_release(s.vs_constants);
+  safe_release(s.index_buffer);
+  safe_release(s.vertex_buffer);
+  safe_release(s.layout);
 }
 
 fn bind_geometry(context: *var DeviceContext, geometry: Geometry) {
@@ -579,8 +577,8 @@ fn Dx11Renderer::init(var self&, device: *var Device, context: *var DeviceContex
   }
   let white_pixel = [255u8; 4];
   var g& = self.g;
-  var ok = make_vertex_shader(g, quad_hlsl(), &raw var g.quad_vs, &raw var g.layout, true)
-    && make_vertex_shader(g, text_hlsl(), &raw var g.text_vs, &raw var g.layout, false);
+  var ok = unsafe make_vertex_shader(device, quad_hlsl(), &raw var g.quad_vs, &raw var g.layout, true)
+    && make_vertex_shader(device, text_hlsl(), &raw var g.text_vs, &raw var g.layout, false);
   if (ok) {
     if (let ps = make_pixel_shaders(g, false)) {
       g.linear_target = ps;
@@ -613,23 +611,23 @@ fn Dx11Renderer::shutdown(var self&) {
   g.textures.clear();
   free_texture(g.white);
   free_texture(g.font);
-  safe_release(&raw var g.quads.vertices);
-  safe_release(&raw var g.quads.indices);
-  safe_release(&raw var g.text.vertices);
-  safe_release(&raw var g.text.indices);
-  safe_release(&raw var g.quad_vs);
-  safe_release(&raw var g.text_vs);
-  safe_release(&raw var g.linear_target.quad);
-  safe_release(&raw var g.linear_target.text);
-  safe_release(&raw var g.encoding.quad);
-  safe_release(&raw var g.encoding.text);
-  safe_release(&raw var g.layout);
-  safe_release(&raw var g.projection);
-  safe_release(&raw var g.blend);
-  safe_release(&raw var g.raster);
-  safe_release(&raw var g.depth);
-  safe_release(&raw var g.linear);
-  safe_release(&raw var g.nearest);
+  safe_release(g.quads.vertices);
+  safe_release(g.quads.indices);
+  safe_release(g.text.vertices);
+  safe_release(g.text.indices);
+  safe_release(g.quad_vs);
+  safe_release(g.text_vs);
+  safe_release(g.linear_target.quad);
+  safe_release(g.linear_target.text);
+  safe_release(g.encoding.quad);
+  safe_release(g.encoding.text);
+  safe_release(g.layout);
+  safe_release(g.projection);
+  safe_release(g.blend);
+  safe_release(g.raster);
+  safe_release(g.depth);
+  safe_release(g.linear);
+  safe_release(g.nearest);
   unsafe {
     if (g.context != null) {
       release(g.context);
