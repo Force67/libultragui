@@ -68,6 +68,8 @@ pub extern("glfwSetClipboardString") fn glfw_set_clipboard_string(window: *var G
 pub extern("glfwMakeContextCurrent") fn glfw_make_context_current(window: *var GlfwWindow): ();
 pub extern("glfwSwapBuffers") fn glfw_swap_buffers(window: *var GlfwWindow): ();
 pub extern("glfwSwapInterval") fn glfw_swap_interval(interval: i32): ();
+// GLFWglproc is a function pointer; the GL loaders want it as an address.
+pub extern("glfwGetProcAddress") fn glfw_get_proc_address(name: *const c_char): *var u8;
 
 // The set*Callback functions return the previous callback, which may be null.
 pub extern("glfwSetCursorPosCallback") fn glfw_set_cursor_pos_callback(window: *var GlfwWindow,

@@ -1,0 +1,19 @@
+// The D3D11/DXGI declarations of sys::d3d11 and sys::d3d11_vtbl against the
+// C headers: every struct size, field offset, constant and vtable slot used,
+// as recorded by tools/gen_d3d_layout.py from the Windows SDK / DXVK-native
+// headers the C++ includes.
+
+module d3d11_layout_test;
+
+import {Expect} from support::expect;
+import {entries} from support::d3d_layout_table;
+
+pub fn main(): i32 {
+  var t = Expect();
+  let all = entries();
+  for (let e& in all) {
+    t.that(e.got == e.want, f"{e.name}: got {e.got}, the header says {e.want}");
+  }
+  t.that(all.len() > 200, "table is populated");
+  return t.finish();
+}

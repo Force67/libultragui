@@ -1,0 +1,13 @@
+// The Direct3D 11 backends of libultragui, ported from ugui/rhi/d3d11/ and
+// ugui/backends/ugui_impl_{dx11,win32}.{h,cc}. Import from the modules directly:
+//   ultragui_d3d11::d3d11_rhi            D3d11Rhi, the Rhi over a GLFW window
+//   ultragui_d3d11::ugui_impl_dx11       Dx11Renderer, draw data into the host's device
+//   ultragui_d3d11::ugui_impl_win32      (Windows) window messages as input for the host platform
+//   ultragui_d3d11::d3d_shader_compiler  compile_hlsl: HLSL to DXBC through D3DCompile, loaded by name
+//   ultragui_d3d11::hlsl_embedded        the HLSL sources (shaders/hlsl)
+//   ultragui_d3d11::sys::{d3d11, d3d11_vtbl}  the D3D11/DXGI declarations (COM through vtables)
+// ../PORTING.md is the map and the contract.
+
+module ultragui_d3d11;
+
+pub fn version(): str => @package_version();

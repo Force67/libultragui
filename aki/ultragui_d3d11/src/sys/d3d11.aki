@@ -1,0 +1,280 @@
+// No C++ counterpart: the Direct3D 11 / DXGI declarations the D3D11 RHI,
+// ugui_impl_dx11 and the shader compiler use, written by hand against the
+// headers the C++ includes (the Windows SDK's, and DXVK-native's on Linux; they
+// agree on every layout here). The C++ uses the C-style COM interface
+// (CINTERFACE / COBJMACROS) so one call style covers both; so does this:
+// every interface is a pointer to a struct whose first field is a pointer to a
+// vtable of function pointers (sys::d3d11_vtbl). Constants keep the SDK's
+// names without the D3D11_ prefix, as `kD3d11...`/`kDxgi...`.
+//
+// tests/d3d11_layout_test.aki checks every struct size and field offset, every
+// constant and every vtable slot used against what the C headers say
+// (tools/gen_d3d_layout.cc).
+//
+// A COM object is `ComObject`, an opaque pointee; `*var ComObject` is any
+// interface pointer. HRESULT is i32; BOOL is i32.
+
+module ultragui_d3d11::sys::d3d11;
+
+pub extern type ComObject;
+
+pub type Hresult = i32;
+
+pub fn failed(hr: Hresult): bool => hr < 0;
+pub fn succeeded(hr: Hresult): bool => hr >= 0;
+
+pub extern struct Guid {
+  pub var data1: u32
+  pub var data2: u16
+  pub var data3: u16
+  pub var data4: [u8; 8]
+}
+
+// IID_ID3D11Texture2D, IID_IDXGIDevice, IID_IDXGIFactory
+pub static let kIidTexture2d: Guid = Guid { data1: 0x6f15aaf2, data2: 0xd208, data3: 0x4e89,
+  data4: [0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c] };
+pub static let kIidDxgiDevice: Guid = Guid { data1: 0x54ec77fa, data2: 0x1377, data3: 0x44e6,
+  data4: [0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c] };
+pub static let kIidDxgiFactory: Guid = Guid { data1: 0x7b7166ec, data2: 0x21c7, data3: 0x44ae,
+  data4: [0xb2, 0x1a, 0xc9, 0xae, 0x32, 0x1a, 0xe3, 0x69] };
+
+// --- Enums used as plain u32 constants ---------------------------------------
+
+pub comptime let kD3dDriverTypeHardware: u32 = 1;
+pub comptime let kD3dFeatureLevel11_0: u32 = 0xb000;
+pub comptime let kD3dFeatureLevel11_1: u32 = 0xb100;
+pub comptime let kD3d11SdkVersion: u32 = 7;
+
+pub comptime let kDxgiFormatUnknown: u32 = 0;
+pub comptime let kDxgiFormatR32G32Float: u32 = 16;
+pub comptime let kDxgiFormatR32Float: u32 = 41;
+pub comptime let kDxgiFormatR32Uint: u32 = 42;
+pub comptime let kDxgiFormatR8G8B8A8Typeless: u32 = 27;
+pub comptime let kDxgiFormatR8G8B8A8Unorm: u32 = 28;
+pub comptime let kDxgiFormatR8G8B8A8UnormSrgb: u32 = 29;
+pub comptime let kDxgiFormatR8Unorm: u32 = 61;
+pub comptime let kDxgiFormatB8G8R8A8Unorm: u32 = 87;
+pub comptime let kDxgiFormatB8G8R8X8Unorm: u32 = 88;
+pub comptime let kDxgiFormatB8G8R8A8UnormSrgb: u32 = 91;
+pub comptime let kDxgiFormatB8G8R8X8UnormSrgb: u32 = 93;
+
+pub comptime let kDxgiUsageRenderTargetOutput: u32 = 0x20;
+pub comptime let kDxgiSwapEffectDiscard: u32 = 0;
+
+pub comptime let kUsageDefault: u32 = 0;
+pub comptime let kUsageDynamic: u32 = 2;
+
+pub comptime let kBindVertexBuffer: u32 = 0x1;
+pub comptime let kBindIndexBuffer: u32 = 0x2;
+pub comptime let kBindConstantBuffer: u32 = 0x4;
+pub comptime let kBindShaderResource: u32 = 0x8;
+pub comptime let kBindRenderTarget: u32 = 0x20;
+
+pub comptime let kCpuAccessWrite: u32 = 0x10000;
+
+pub comptime let kMapWriteDiscard: u32 = 4;
+pub comptime let kMapWriteNoOverwrite: u32 = 5;
+
+pub comptime let kInputPerVertexData: u32 = 0;
+
+pub comptime let kBlendOne: u32 = 2;
+pub comptime let kBlendSrcAlpha: u32 = 5;
+pub comptime let kBlendInvSrcAlpha: u32 = 6;
+pub comptime let kBlendOpAdd: u32 = 1;
+pub comptime let kColorWriteEnableAll: u8 = 15;
+
+pub comptime let kFillSolid: u32 = 3;
+pub comptime let kCullNone: u32 = 1;
+
+pub comptime let kDepthWriteMaskAll: u32 = 1;
+pub comptime let kComparisonNever: u32 = 1;
+pub comptime let kComparisonAlways: u32 = 8;
+pub comptime let kStencilOpKeep: u32 = 1;
+
+pub comptime let kFilterMinMagMipPoint: u32 = 0;
+pub comptime let kFilterMinMagMipLinear: u32 = 0x15;
+pub comptime let kTextureAddressClamp: u32 = 3;
+// FLT_MAX
+pub comptime let kFloat32Max: f32 = 3.402823466e+38;
+
+pub comptime let kSrvDimensionTexture2d: u32 = 4;
+pub comptime let kRtvDimensionTexture2d: u32 = 4;
+
+pub comptime let kPrimitiveTopologyUndefined: u32 = 0;
+pub comptime let kPrimitiveTopologyTriangleList: u32 = 4;
+
+pub comptime let kViewportAndScissorrectObjectCountPerPipeline: u32 = 16;
+
+// --- Structs -----------------------------------------------------------------
+
+pub extern struct DxgiSampleDesc {
+  pub var count: u32
+  pub var quality: u32
+}
+
+pub extern struct DxgiRational {
+  pub var numerator: u32
+  pub var denominator: u32
+}
+
+pub extern struct DxgiModeDesc {
+  pub var width: u32
+  pub var height: u32
+  pub var refresh_rate: DxgiRational
+  pub var format: u32
+  pub var scanline_ordering: u32
+  pub var scaling: u32
+}
+
+pub extern struct DxgiSwapChainDesc {
+  pub var buffer_desc: DxgiModeDesc
+  pub var sample_desc: DxgiSampleDesc
+  pub var buffer_usage: u32
+  pub var buffer_count: u32
+  pub var output_window: *var u8
+  pub var windowed: i32
+  pub var swap_effect: u32
+  pub var flags: u32
+}
+
+pub extern struct BufferDesc {
+  pub var byte_width: u32
+  pub var usage: u32
+  pub var bind_flags: u32
+  pub var cpu_access_flags: u32
+  pub var misc_flags: u32
+  pub var structure_byte_stride: u32
+}
+
+pub extern struct Texture2dDesc {
+  pub var width: u32
+  pub var height: u32
+  pub var mip_levels: u32
+  pub var array_size: u32
+  pub var format: u32
+  pub var sample_desc: DxgiSampleDesc
+  pub var usage: u32
+  pub var bind_flags: u32
+  pub var cpu_access_flags: u32
+  pub var misc_flags: u32
+}
+
+pub extern struct SubresourceData {
+  pub var sys_mem: *const u8
+  pub var sys_mem_pitch: u32
+  pub var sys_mem_slice_pitch: u32
+}
+
+pub extern struct MappedSubresource {
+  pub var data: *var u8
+  pub var row_pitch: u32
+  pub var depth_pitch: u32
+}
+
+// D3D11_SHADER_RESOURCE_VIEW_DESC: the union is as large as its largest member
+// (4 u32); the Texture2D member uses the first two.
+pub extern struct ShaderResourceViewDesc {
+  pub var format: u32
+  pub var view_dimension: u32
+  pub var most_detailed_mip: u32
+  pub var mip_levels: u32
+  pub var pad0: u32
+  pub var pad1: u32
+}
+
+// D3D11_RENDER_TARGET_VIEW_DESC: union of up to 3 u32; Texture2D uses MipSlice.
+pub extern struct RenderTargetViewDesc {
+  pub var format: u32
+  pub var view_dimension: u32
+  pub var mip_slice: u32
+  pub var pad0: u32
+  pub var pad1: u32
+}
+
+pub extern struct InputElementDesc {
+  pub var semantic_name: *const c_char
+  pub var semantic_index: u32
+  pub var format: u32
+  pub var input_slot: u32
+  pub var aligned_byte_offset: u32
+  pub var input_slot_class: u32
+  pub var instance_data_step_rate: u32
+}
+
+pub extern struct RenderTargetBlendDesc {
+  pub var blend_enable: i32
+  pub var src_blend: u32
+  pub var dest_blend: u32
+  pub var blend_op: u32
+  pub var src_blend_alpha: u32
+  pub var dest_blend_alpha: u32
+  pub var blend_op_alpha: u32
+  pub var render_target_write_mask: u8
+}
+
+pub extern struct BlendDesc {
+  pub var alpha_to_coverage_enable: i32
+  pub var independent_blend_enable: i32
+  pub var render_target: [RenderTargetBlendDesc; 8]
+}
+
+pub extern struct RasterizerDesc {
+  pub var fill_mode: u32
+  pub var cull_mode: u32
+  pub var front_counter_clockwise: i32
+  pub var depth_bias: i32
+  pub var depth_bias_clamp: f32
+  pub var slope_scaled_depth_bias: f32
+  pub var depth_clip_enable: i32
+  pub var scissor_enable: i32
+  pub var multisample_enable: i32
+  pub var antialiased_line_enable: i32
+}
+
+pub extern struct DepthStencilopDesc {
+  pub var stencil_fail_op: u32
+  pub var stencil_depth_fail_op: u32
+  pub var stencil_pass_op: u32
+  pub var stencil_func: u32
+}
+
+pub extern struct DepthStencilDesc {
+  pub var depth_enable: i32
+  pub var depth_write_mask: u32
+  pub var depth_func: u32
+  pub var stencil_enable: i32
+  pub var stencil_read_mask: u8
+  pub var stencil_write_mask: u8
+  pub var front_face: DepthStencilopDesc
+  pub var back_face: DepthStencilopDesc
+}
+
+pub extern struct SamplerDesc {
+  pub var filter: u32
+  pub var address_u: u32
+  pub var address_v: u32
+  pub var address_w: u32
+  pub var mip_lod_bias: f32
+  pub var max_anisotropy: u32
+  pub var comparison_func: u32
+  pub var border_color: [f32; 4]
+  pub var min_lod: f32
+  pub var max_lod: f32
+}
+
+pub extern struct Viewport {
+  pub var top_left_x: f32
+  pub var top_left_y: f32
+  pub var width: f32
+  pub var height: f32
+  pub var min_depth: f32
+  pub var max_depth: f32
+}
+
+// D3D11_RECT is RECT: four LONGs (32-bit), left/top/right/bottom.
+pub extern struct D3dRect {
+  pub var left: i32
+  pub var top: i32
+  pub var right: i32
+  pub var bottom: i32
+}

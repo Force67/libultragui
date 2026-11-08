@@ -1,0 +1,202 @@
+// ugui/rhi/d3d11/d3d_shader_compiler.{h,cc}: HLSL to DXBC through a D3DCompile
+// loaded at run time.
+//
+// D3D11 consumes DXBC, which dxc no longer emits, so the backend compiles the
+// HLSL at startup. Windows keeps that compiler in d3dcompiler_47.dll, Linux in
+// vkd3d-utils. Loading it by name avoids an import lib and vkd3d's headers. Shared
+// by the D3D11 RHI and the ugui_impl_dx11 draw-data backend.
+//
+// Shape differences from the C++:
+// * The result is `List<u8>?` (none on failure) instead of a bool and an
+//   out-parameter; `defines` is a slice of macro names, each defined as 1
+//   (at most 8 are used, as the C++ array holds).
+// * The `static PFN_D3DCompile_ugui s_D3DCompile` is a module static.
+// * On Linux the call into vkd3d and its blob go through csrc/d3dcompile_abi.c,
+//   because vkd3d's COM surface is ms_abi on x86-64 and aki cannot spell that
+//   (the C++ writes the attribute); on aarch64 the shim is a plain call. The
+//   Windows build calls D3DCompile and the blob directly. Not run on x86-64
+//   Linux (this port was built on aarch64).
+
+module ultragui_d3d11::d3d_shader_compiler;
+
+import {eprintln} from akikit::logging;
+import {List} from akikit::containers::list;
+import {String, with_nul} from akikit::strings::string;
+import {Hresult} from ultragui_d3d11::sys::d3d11;
+
+// D3D_SHADER_MACRO
+extern struct ShaderMacro {
+  pub var name: *const c_char
+  pub var definition: *const c_char
+}
+
+pub type PfnD3dCompile = extern fn(*const u8, usize, *const c_char, *const ShaderMacro, *var u8, *const c_char, *const c_char,
+  u32, u32, *var *var u8, *var *var u8): Hresult;
+
+// kMaxDefines
+comptime let kMaxDefines: usize = 8;
+
+// Loading by name.
+extern fn strlen(s: *const c_char): usize;
+extern fn dlopen(name: *const c_char, flags: i32): *var u8;
+extern fn dlsym(handle: *var u8, name: *const c_char): *var u8;
+extern fn LoadLibraryA(name: *const c_char): *var u8;
+extern fn GetProcAddress(library: *var u8, name: *const c_char): *var u8;
+comptime let kRtldLazy: i32 = 1;
+
+// Linux: the ABI shim.
+extern("ugui_d3dcompile") fn shim_d3dcompile(f: *var u8, source: *const u8, source_len: usize, name: *const c_char,
+  macros: *const ShaderMacro, include: *var u8, entry: *const c_char, target: *const c_char, flags1: u32, flags2: u32,
+  blob: *var *var u8, errors: *var *var u8): Hresult;
+extern("ugui_blob_data") fn shim_blob_data(blob: *var u8): *var u8;
+extern("ugui_blob_size") fn shim_blob_size(blob: *var u8): usize;
+extern("ugui_blob_release") fn shim_blob_release(blob: *var u8): ();
+
+// Windows: ID3D10Blob's vtable (the SDK's), called directly.
+extern struct BlobVtbl {
+  pub var query_interface: extern fn(*var Blob, *const u8, *var *var u8): Hresult
+  pub var add_ref: extern fn(*var Blob): u32
+  pub var release: extern fn(*var Blob): u32
+  pub var get_buffer_pointer: extern fn(*var Blob): *var u8
+  pub var get_buffer_size: extern fn(*var Blob): usize
+}
+extern struct Blob {
+  pub var vtbl: *const BlobVtbl
+}
+
+static var s_d3dcompile: *var u8 = null;
+
+fn load_d3dcompile(): bool {
+  unsafe {
+    if (s_d3dcompile != null) {
+      return true;
+    }
+    if (comptime @target_os() == "windows") {
+      var lib = LoadLibraryA(c"d3dcompiler_47.dll");
+      if (lib == null) {
+        lib = LoadLibraryA(c"d3dcompiler_43.dll");
+      }
+      if (lib == null) {
+        eprintln("ultragui-d3d11: failed to load d3dcompiler");
+        return false;
+      }
+      s_d3dcompile = GetProcAddress(lib, c"D3DCompile");
+    } else {
+      var lib = dlopen(c"libvkd3d-utils.so.1", kRtldLazy);
+      if (lib == null) {
+        lib = dlopen(c"libvkd3d-utils.so", kRtldLazy);
+      }
+      if (lib == null) {
+        eprintln("ultragui-d3d11: failed to load libvkd3d-utils.so");
+        return false;
+      }
+      s_d3dcompile = dlsym(lib, c"D3DCompile");
+    }
+    if (s_d3dcompile == null) {
+      eprintln("ultragui-d3d11: D3DCompile not found");
+      return false;
+    }
+    return true;
+  }
+}
+
+// The blob comes from whichever compiler is in use (see the header comment).
+unsafe fn blob_data(blob: *var u8): *var u8 {
+  unsafe {
+    if (comptime @target_os() == "windows") {
+      let b = blob as *var Blob;
+      return ((*(*b).vtbl).get_buffer_pointer)(b);
+    }
+    return shim_blob_data(blob);
+  }
+}
+
+unsafe fn blob_size(blob: *var u8): usize {
+  unsafe {
+    if (comptime @target_os() == "windows") {
+      let b = blob as *var Blob;
+      return ((*(*b).vtbl).get_buffer_size)(b);
+    }
+    return shim_blob_size(blob);
+  }
+}
+
+unsafe fn blob_release(blob: *var u8) {
+  unsafe {
+    if (comptime @target_os() == "windows") {
+      let b = blob as *var Blob;
+      ((*(*b).vtbl).release)(b);
+      return;
+    }
+    shim_blob_release(blob);
+  }
+}
+
+unsafe fn call_d3dcompile(source: str, name: *const c_char, macros: *const ShaderMacro, entry: *const c_char,
+  target: *const c_char, blob: *var *var u8, errors: *var *var u8): Hresult {
+  unsafe {
+    if (comptime @target_os() == "windows") {
+      let f = s_d3dcompile as PfnD3dCompile;
+      return f(@ptr(source) as *const u8, #source, name, macros, null, entry, target, 0, 0, blob, errors);
+    }
+    return shim_d3dcompile(s_d3dcompile, @ptr(source) as *const u8, #source, name, macros, null, entry, target, 0, 0, blob,
+      errors);
+  }
+}
+
+// Compiles `source`'s `entry` for `target` ("vs_5_0", "ps_5_0"). `defines` is a
+// list of macro names, each defined as 1. The DXBC, or none when the compile
+// fails (the compiler's message goes to stderr).
+pub fn compile_hlsl(source: str, entry: str, target: str, defines: &[str] = []): List<u8>? {
+  if (!load_d3dcompile()) {
+    return none;
+  }
+
+  // The names and strings C reads must end in NUL.
+  var names: List<String> = List();
+  for (let d& in defines) {
+    if (names.len() >= kMaxDefines) {
+      break;
+    }
+    names.push(with_nul(d));
+  }
+  var macros = [ShaderMacro { name: null, definition: null }; 9];
+  let one = c"1";
+  for (let i in 0..names.len()) {
+    macros[i] = ShaderMacro { name: unsafe @ptr(names[i].as_str()) as *const c_char, definition: one };
+  }
+  let entry_z = with_nul(entry);
+  let target_z = with_nul(target);
+
+  var blob: *var u8 = null;
+  var errors: *var u8 = null;
+  let hr = unsafe call_d3dcompile(source, c"shader", names.len() > 0 ? @ptr(macros[..]) as *const ShaderMacro : null,
+    @ptr(entry_z.as_str()) as *const c_char, @ptr(target_z.as_str()) as *const c_char, &raw var blob, &raw var errors);
+  if (hr < 0) {
+    if (errors != null) {
+      unsafe {
+        let text = @str(blob_data(errors) as *const c8, strlen(blob_data(errors) as *const c_char));
+        eprintln(f"ultragui-d3d11: shader compile error ({entry}/{target}):\n{text}");
+        blob_release(errors);
+      }
+    } else {
+      eprintln(f"ultragui-d3d11: shader compile failed: 0x{hr as u32:08x}");
+    }
+    return none;
+  }
+  if (errors != null) {
+    unsafe blob_release(errors);
+  }
+
+  var out: List<u8> = List();
+  unsafe {
+    let n = blob_size(blob);
+    let p = blob_data(blob) as *const u8;
+    let data = @slice(p, n);
+    for (let i in 0..n) {
+      out.push(data[i]);
+    }
+    blob_release(blob);
+  }
+  return out;
+}

@@ -1,0 +1,91 @@
+// OpenGlRhi against a real GL 3.3 core context (GLFW): the scene of
+// support/scene.aki, drawn for a few frames, with checks on what the RHI
+// reports. It is also the program whose screenshot is compared with the C++
+// RHI's (tools/rhi_scene.cc): run it with a display, e.g.
+//   aki/tools/xshot.sh /tmp/gl_aki.png 4 aki/ultragui_opengl/build/tests/gl_rhi_scene_test
+// UGUI_SCENE_SECS keeps the window open and redrawing that long. Without a
+// display (glfwInit fails) it says so and passes.
+
+module gl_rhi_scene_test;
+
+import {println} from akikit::logging;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {WindowConfig} from ultragui::platform::platform;
+import {TextEngine} from ultragui::text::text_engine;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {OpenGlRhi} from ultragui_opengl::opengl_rhi;
+import {Expect} from support::expect;
+import {destroy_textures, draw_scene, kFontPath, kSceneHeight, kSceneWidth, make_textures} from support::scene;
+
+fn hold_seconds(): f64 {
+  let v = get_environment_variable("UGUI_SCENE_SECS") else { return 0.0; };
+  var secs = 0.0;
+  for (let c in v.as_str()) {
+    if (c >= '0' && c <= '9') {
+      secs = secs * 10.0 + (c as u32 - '0' as u32) as f64;
+    }
+  }
+  return secs;
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var platform = GlfwPlatform();
+  let wc = WindowConfig { width: kSceneWidth, height: kSceneHeight, title: from_str("gl_rhi_scene_test"), resizable: false,
+    opengl: true };
+  if (!platform.init(wc)) {
+    println("gl_rhi_scene_test: no display or no OpenGL 3.3 core context, skipped");
+    return 0;
+  }
+
+  var rhi = OpenGlRhi();
+  let config = RhiConfig { native_window: platform.native_handle(), vsync: true };
+  t.that(rhi.init(config), "OpenGlRhi init");
+  t.that(rhi.dpi_scale() > 0.0, "dpi_scale");
+  let ds = rhi.display_size();
+  t.that(ds.x == kSceneWidth as f32 && ds.y == kSceneHeight as f32, f"display_size {ds.x}x{ds.y}");
+
+  var te = TextEngine();
+  t.that(te.init(), "text engine init");
+  te.set_dpi_scale(rhi.dpi_scale());
+  let font = te.load_font(kFontPath);
+
+  // Texture bookkeeping through the capability.
+  let four = [1u8, 2u8, 3u8, 4u8];
+  let tiny = rhi.create_texture(2, 2, RhiFormat::R8Unorm, four[..] as bytes, RhiFilter::Nearest);
+  t.that(tiny != kInvalidTexture, "create_texture R8");
+  t.that(rhi.create_texture(2, 2, RhiFormat::Rgba32Float, [], RhiFilter::Linear) == kInvalidTexture, "float textures are refused");
+  rhi.destroy_texture(tiny);
+  let again = rhi.create_texture(2, 2, RhiFormat::R8Unorm, four[..] as bytes, RhiFilter::Nearest);
+  t.that(again == tiny, "a destroyed slot is reused first");
+  rhi.destroy_texture(again);
+  t.that(!rhi.begin_offscreen(12345, Color {}), "begin_offscreen of a bad handle");
+
+  let tex = make_textures(rhi);
+  t.that(tex.checker != kInvalidTexture && tex.smooth != kInvalidTexture && tex.target != kInvalidTexture, "scene textures");
+
+  var frames: i32 = 0;
+  let start = platform.time();
+  let hold = hold_seconds();
+  while (true) {
+    platform.poll_events();
+    t.that(draw_scene(rhi, te, font, tex), "draw_scene");
+    frames += 1;
+    if (frames >= 3 && platform.time() - start >= hold) {
+      break;
+    }
+    if (platform.should_close()) {
+      break;
+    }
+  }
+
+  destroy_textures(rhi, tex);
+  te.shutdown_with(rhi);
+  rhi.shutdown();
+  platform.shutdown();
+  return t.finish();
+}
