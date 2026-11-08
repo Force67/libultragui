@@ -1,0 +1,388 @@
+// The vector animation stack against the C++: the JSON parser, the .uganim
+// parser (every field of the parsed layers and tracks), rendered frames
+// (FNV-1a hashes of the RGBA pixels at several times and sizes, which
+// exercises the evaluator, the shape builder and the SVG rasterizer end to
+// end), and VectorAnimation playback through a recording TextureBackend.
+//
+// tests/data/anim_reference.txt is the output of tools/gen_anim_reference.cc;
+// this test regenerates the same text from the aki code and compares it
+// line by line. The JSON inputs and the document sources are read from the
+// reference file itself (hex / file: / inline: markers); the playback script
+// below mirrors Playback() in the C++ tool.
+
+module anim_test;
+
+import {List, filled} from akikit::containers::list;
+import {String} from akikit::strings::string;
+import {eprintln} from akikit::logging;
+import {read_file, real_path} from akikit::filesystem::file_util;
+import {parent} from akikit::filesystem::path;
+import {AnimDocument, AnimLayer} from ultragui::anim::anim_types;
+import {JsonKind, JsonValue, parse_json} from ultragui::anim::json;
+import {parse_anim_data} from ultragui::anim::anim_parser;
+import {render_anim_frame} from ultragui::anim::anim_render;
+import {VectorAnimation} from ultragui::anim::vector_animation;
+import {TextureId} from ultragui::render::draw_data;
+import {TextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {Expect} from support::expect;
+
+fn b32(v: f32): u32 => @bit_cast(u32, v);
+fn b64(v: f64): u64 => @bit_cast(u64, v);
+
+fn fnv(p: &[u8]): u64 {
+  var h: u64 = 1469598103934665603;
+  for (let x in p) {
+    h = h ^ (x as u64);
+    h = h *% 1099511628211;
+  }
+  return h;
+}
+
+fn hex_val(c: c8): u32 => c is '0'..='9' ? c as u32 - '0' as u32 : (c as u32 | 0x20) - 'a' as u32 + 10;
+
+// "x" followed by hex pairs (the C++ side never prints an empty string).
+fn unhex(h: str): String {
+  var out = String();
+  var i: usize = 1;
+  var raw = List::<byte>();
+  while (i + 1 < #h + 0 && i + 2 <= #h) {
+    raw.push(((hex_val(h[i]) << 4) | hex_val(h[i + 1])) as byte);
+    i += 2;
+  }
+  out.push_utf8(raw.as_slice());
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// JSON
+// ---------------------------------------------------------------------------
+
+fn ser(v&: JsonValue, var out&: String) {
+  match (v.kind) {
+    JsonKind::Null => { out.push_str("null"); },
+    JsonKind::Bool => { out.push_str(v.bool_val ? "true" : "false"); },
+    JsonKind::Number => { let n = b64(v.number_val); out.push_str(f"n0x{n:016x}"); },
+    JsonKind::String => {
+      out.push_c8('"');
+      let s = v.string_val.as_str();
+      var run: usize = 0;
+      for (let i in 0..#s) {
+        let c = s[i];
+        if (c == '\\' || c == '"' || c == '\n' || c == '\t' || c == '\r') {
+          out.push_str(s[run..i]);
+          if (c == '\n') {
+            out.push_str("\\n");
+          } else if (c == '\t') {
+            out.push_str("\\t");
+          } else if (c == '\r') {
+            out.push_str("\\r");
+          } else {
+            out.push_c8('\\');
+            out.push_c8(c);
+          }
+          run = i + 1;
+        }
+      }
+      out.push_str(s[run..]);
+      out.push_c8('"');
+    },
+    JsonKind::Array => {
+      out.push_c8('[');
+      for (let i in 0..v.array_val.len()) {
+        if (i > 0) {
+          out.push_c8(',');
+        }
+        ser(v.array_val[i], out);
+      }
+      out.push_c8(']');
+    },
+    JsonKind::Object => {
+      out.push_c8('{');
+      for (let i in 0..v.object_keys.len()) {
+        if (i > 0) {
+          out.push_c8(',');
+        }
+        out.push_str(f"\"{v.object_keys[i]}\":");
+        ser(v.object_vals[i], out);
+      }
+      out.push_c8('}');
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Documents and frames
+// ---------------------------------------------------------------------------
+
+fn layer_dump(l&: AnimLayer, depth: u32, name: str, var out&: String) {
+  out.push_str(f"LAYER {name} {depth} 0 shape={(l.shape_type as i32)} xywh {b32(l.x):08x} {b32(l.y):08x} {b32(l.w):08x} {b32(l.h):08x} r {b32(l.r):08x} cxy {b32(l.cx):08x} {b32(l.cy):08x} rxy {b32(l.rx):08x} {b32(l.ry):08x} cr {b32(l.corner_radius):08x} rot {b32(l.rotation):08x} s {b32(l.scale_x):08x} {b32(l.scale_y):08x} op {b32(l.opacity):08x} sw {b32(l.stroke_width):08x} tracks={l.tracks.len()} children={l.children.len()} fill={l.fill_str} stroke={l.stroke_str} mask={l.mask_layer} d={l.path_data.len()}\n");
+  for (let t& in l.tracks) {
+    out.push_str(f"TRACK {name} {depth} prop={(t.property as i32)} n={t.keyframes.len()}:");
+    for (let k& in t.keyframes) {
+      out.push_str(f" [{b32(k.t):08x} {b32(k.value):08x} {b32(k.color.r):08x} {b32(k.color.g):08x} {b32(k.color.b):08x} {b32(k.color.a):08x} e{(k.easing as i32)}]");
+    }
+    out.push_str("\n");
+  }
+  for (let c& in l.children) {
+    layer_dump(c, depth + 1, name, out);
+  }
+}
+
+fn document(name: str, src: str, text: str, var out&: String) {
+  var doc = AnimDocument {};
+  let ok = parse_anim_data(text, doc);
+  let okn = ok ? 1i32 : 0i32;
+  let loopn = doc.looping ? 1i32 : 0i32;
+  out.push_str(f"ANIMDOC {name} {src} ok={okn} version={doc.version} w={b32(doc.width):08x} h={b32(doc.height):08x} dur={b32(doc.duration):08x} loop={loopn} layers={doc.layers.len()}\n");
+  if (!ok) {
+    return;
+  }
+  for (let l& in doc.layers) {
+    layer_dump(l, 0, name, out);
+  }
+  let fractions = [0.0f32, 0.1, 0.25, 0.333, 0.5, 0.6180339, 0.75, 0.999, 1.0, 1.5, -0.2];
+  let sizes = [(64u32, 64u32), (100, 80), (37, 53)];
+  for (let sz in sizes) {
+    var pixels = filled((sz.0 * sz.1 * 4) as usize, 0u8);
+    for (let fr in fractions) {
+      let t: f32 = fr * doc.duration;
+      render_anim_frame(doc, t, pixels.as_slice_var(), sz.0, sz.1);
+      let h = fnv(pixels.as_slice());
+      out.push_str(f"FRAME {name} {sz.0} {sz.1} {b32(t):08x} 0x{h:016x}\n");
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Playback through a recording backend
+// ---------------------------------------------------------------------------
+
+struct Recorder : TextureBackend {
+  pub var creates: i32 = 0
+  pub var updates: i32 = 0
+  pub var destroys: i32 = 0
+  pub var last_hash: u64 = 0
+  pub var w: u32 = 0
+  pub var h: u32 = 0
+  pub var next: TextureId = 7
+  pub var log: String = String()
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+    self.creates += 1;
+    self.w = width;
+    self.h = height;
+    self.last_hash = fnv(pixels as &[u8]);
+    self.log.push_str(f"  create {width} {height} fmt={(format as i32)} filter={(filter as i32)} 0x{self.last_hash:016x}\n");
+    let id = self.next;
+    self.next += 1;
+    return id;
+  }
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {
+    self.updates += 1;
+    self.last_hash = fnv(pixels as &[u8]);
+  }
+  pub fn destroy_texture(var self&, id: TextureId) {
+    self.destroys += 1;
+    self.log.push_str(f"  destroy {id}\n");
+  }
+}
+
+// Mirrors State() in the C++ tool; also moves the recorder's own log lines
+// (create/destroy, printed by the C++ at the time of the call) in front.
+fn state(tag: str, step: i32, a&: VectorAnimation, var r&: Recorder, var out&: String) {
+  out.push_str(r.log.as_str());
+  r.log.clear();
+  let loaded = a.is_loaded() ? 1i32 : 0i32;
+  let playing = a.is_playing() ? 1i32 : 0i32;
+  let tex = a.texture();
+  out.push_str(f"PLAY {tag} {step} loaded={loaded} playing={playing} tex={tex} w={a.width()} h={a.height()} speed={b32(a.speed()):08x} dur={b64(a.duration()):016x} prog={b32(a.progress()):08x} creates={r.creates} updates={r.updates} destroys={r.destroys} hash=0x{r.last_hash:016x}\n");
+}
+
+fn flush_log(var r&: Recorder, var out&: String) {
+  out.push_str(r.log.as_str());
+  r.log.clear();
+}
+
+fn playback(root: str, var out&: String) {
+  let shapes = read_file(f"{root}/aki/ultragui/tests/data/anim/shapes.uganim")!;
+  let edge = read_file(f"{root}/aki/ultragui/tests/data/anim/edge.uganim")!;
+  {
+    var r = Recorder {};
+    var a = VectorAnimation();
+    state("unloaded", 0, a, r, out);
+    a.play();
+    a.seek(0.5);
+    state("unloaded", 1, a, r, out);
+    let ok = a.load_data(r, shapes.as_str(), 96, 72);
+    flush_log(r, out);
+    out.push_str(f"PLAYLOAD shapes {(ok ? 1i32 : 0i32)}\n");
+    state("shapes", 0, a, r, out);
+    a.update(r, 0.5);  // not playing
+    state("shapes", 1, a, r, out);
+    a.play();
+    a.set_speed(1.5);
+    for (let i in 0..70i32) {
+      a.update(r, 0.037);
+      state("shapes", 2 + i, a, r, out);
+    }
+    a.seek(0.25);
+    a.update(r, 0.001);
+    state("shapes", 100, a, r, out);
+    a.pause();
+    a.update(r, 1.0);
+    state("shapes", 101, a, r, out);
+    a.stop();
+    state("shapes", 102, a, r, out);
+    a.play();
+    a.update(r, 0.2);
+    state("shapes", 103, a, r, out);
+    a.set_speed(-1.0);
+    a.update(r, 0.3);
+    state("shapes", 104, a, r, out);
+    a.update(r, 5.0);
+    state("shapes", 105, a, r, out);
+    a.unload(r);
+    state("shapes", 106, a, r, out);
+  }
+  {
+    var r = Recorder {};
+    var a = VectorAnimation();
+    a.load_data(r, edge.as_str(), 50, 40);
+    a.set_loop(false);
+    a.play();
+    for (let i in 0..100i32) {
+      a.update(r, 0.0125);
+      if (i % 9 == 0 || i > 78) {
+        state("edge", i, a, r, out);
+      }
+    }
+    a.seek(0.4);
+    state("edge", 200, a, r, out);
+    a.play();
+    a.update(r, 0.0);
+    state("edge", 201, a, r, out);
+    // Reload over a loaded animation destroys the old texture.
+    a.load_data(r, shapes.as_str(), 20, 20);
+    state("edge", 202, a, r, out);
+    let ok = a.load_data(r, "{ not json", 10, 10);
+    flush_log(r, out);
+    out.push_str(f"PLAYLOAD bad {(ok ? 1i32 : 0i32)}\n");
+    state("edge", 203, a, r, out);
+  }
+  {
+    // No backend: still renders and plays, with no texture.
+    var a = VectorAnimation();
+    var r = Recorder {};
+    a.load_data::<Recorder>(none, shapes.as_str(), 32, 32);
+    a.play();
+    a.update::<Recorder>(none, 0.5);
+    state("nobackend", 0, a, r, out);
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+fn first_line(s: str): str {
+  for (let i in 0..#s) {
+    if (s[i] == '\n') {
+      return s[..i];
+    }
+  }
+  return s;
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  let pkg = real_path(@package_dir()) else {
+    eprintln("cannot resolve the package dir");
+    return 1;
+  };
+  let root = parent(parent(pkg.as_str()));
+  let reference = read_file(f"{pkg}/tests/data/anim_reference.txt") else {
+    eprintln("cannot read anim_reference.txt");
+    return 1;
+  };
+
+  // Regenerate the reference text: one block per JSON / ANIMDOC line of the
+  // reference (their inputs are named there), then the playback script.
+  var got = String();
+  var rest = reference.as_str();
+  while (#rest > 0) {
+    let line = first_line(rest);
+    rest = rest[#line..];
+    if (#rest > 0) {
+      rest = rest[1..];
+    }
+    if (#line > 5 && line[..5] == "JSON ") {
+      // JSON <idx> x<hex> <ok> <canonical>
+      let f1 = line[5..];
+      var sp = 0usize;
+      while (f1[sp] != ' ') {
+        sp += 1;
+      }
+      let idx = f1[..sp];
+      let f2 = f1[sp + 1..];
+      sp = 0;
+      while (f2[sp] != ' ') {
+        sp += 1;
+      }
+      let input = unhex(f2[..sp]);
+      var v = JsonValue {};
+      let ok = parse_json(input.as_str(), v);
+      var s = String();
+      ser(v, s);
+      got.push_str(f"JSON {idx} {f2[..sp]} {(ok ? 1i32 : 0i32)} {s}\n");
+    } else if (#line > 8 && line[..8] == "ANIMDOC ") {
+      // ANIMDOC <name> <src> ok=...
+      let f1 = line[8..];
+      var sp = 0usize;
+      while (f1[sp] != ' ') {
+        sp += 1;
+      }
+      let name = f1[..sp];
+      let f2 = f1[sp + 1..];
+      sp = 0;
+      while (f2[sp] != ' ') {
+        sp += 1;
+      }
+      let src = f2[..sp];
+      if (src[..5] == "file:") {
+        let text = read_file(f"{root}/{src[5..]}")!;
+        document(name, src, text.as_str(), got);
+      } else {
+        let text = unhex(src[7..]);
+        document(name, src, text.as_str(), got);
+      }
+    }
+  }
+  playback(root, got);
+
+  // Compare line by line.
+  var a = got.as_str();
+  var b = reference.as_str();
+  var line_no: u32 = 1;
+  var same = true;
+  while ((#a > 0 || #b > 0) && same) {
+    let la = first_line(a);
+    let lb = first_line(b);
+    if (la != lb) {
+      same = false;
+      eprintln(f"line {line_no} differs");
+      eprintln(f"  aki: {la}");
+      eprintln(f"  c++: {lb}");
+    }
+    a = a[#la..];
+    b = b[#lb..];
+    if (#a > 0) {
+      a = a[1..];
+    }
+    if (#b > 0) {
+      b = b[1..];
+    }
+    line_no += 1;
+  }
+  t.that(same, "regenerated reference text equals tests/data/anim_reference.txt");
+  t.that(line_no > 500, f"compared {line_no} lines");
+  return t.finish();
+}
