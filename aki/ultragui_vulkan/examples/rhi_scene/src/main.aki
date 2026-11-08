@@ -1,14 +1,16 @@
 // rhi_scene (aki): GlfwPlatform and VulkanRhi driven directly, with no
 // UIContext: SDF rounded rects (radii, border, shadow, inner softness), a
 // gradient, textured quads (RGBA linear, BGRA nearest, updated each frame),
-// text from the TextEngine atlas, scissored content, and an offscreen render
-// target composited back. rhi_scene.cc is the C++ reference; it builds the
+// text from the TextEngine atlas, scissored content, an offscreen render
+// target composited back, and R8 YCbCr planes converted by the video
+// pipeline. rhi_scene.cc is the C++ reference; it builds the
 // same vertices in the same order, and under aki/tools/xshot.sh the two
 // screenshots should be equal.
 //
-//   rhi_scene <shader_dir> <font.ttf> [frames]
+//   rhi_scene <shader_dir> <font.ttf> [frames [validation]]
 //
 // frames: exit after that many frames (0 or absent: run until closed).
+// validation: 1 turns on the Khronos validation layer.
 
 module rhi_scene;
 
@@ -99,7 +101,7 @@ fn draw_text(var rhi&: VulkanRhi, m&: Mesh, atlas: RhiTextureHandle) {
 pub fn main(): i32 {
   let args = arguments();
   if (args.len() < 2) {
-    eprintln("usage: rhi_scene <shader_dir> <font.ttf> [frames]");
+    eprintln("usage: rhi_scene <shader_dir> <font.ttf> [frames [validation]]");
     return 2;
   }
   var frames: u32 = 0;
@@ -115,7 +117,7 @@ pub fn main(): i32 {
   }
 
   var rhi = VulkanRhi();
-  let rc = RhiConfig { native_window: platform.native_handle(), validation: false, shader_dir: from_str(args[0]) };
+  let rc = RhiConfig { native_window: platform.native_handle(), validation: args.len() > 3 && args[3] == "1", shader_dir: from_str(args[0]) };
   if (!rhi.init(rc)) {
     return 1;
   }
@@ -142,6 +144,23 @@ pub fn main(): i32 {
   let bgra: [u8; 16] = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128];
   let bgra_tex = rhi.create_texture(2, 2, RhiFormat::Bgra8Unorm, bgra[..] as bytes, RhiFilter::Nearest);
   let rt = rhi.create_render_target(128, 128);
+  // YCbCr planes for convert_video_frame: a 64x64 luma ramp, 32x32 chroma.
+  var luma = [0u8; 4096];
+  for (let y in 0u32..64) {
+    for (let x in 0u32..64) {
+      luma[(y * 64 + x) as usize] = (x * 4) as u8;
+    }
+  }
+  var cb_plane = [0u8; 1024];
+  var cr_plane = [0u8; 1024];
+  for (let k in 0u32..1024) {
+    cb_plane[k as usize] = (64 + (k % 32) * 4) as u8;
+    cr_plane[k as usize] = (200 - (k / 32) * 4) as u8;
+  }
+  let y_tex = rhi.create_texture(64, 64, RhiFormat::R8Unorm, luma[..] as bytes, RhiFilter::Linear);
+  let cb_tex = rhi.create_texture(32, 32, RhiFormat::R8Unorm, cb_plane[..] as bytes, RhiFilter::Linear);
+  let cr_tex = rhi.create_texture(32, 32, RhiFormat::R8Unorm, cr_plane[..] as bytes, RhiFilter::Linear);
+  let video = rhi.create_render_target(64, 64);
 
   let transparent = color(0.0, 0.0, 0.0, 0.0);
   var frame: u32 = 0;
@@ -186,12 +205,14 @@ pub fn main(): i32 {
     solid(q, Rect::new(20.0, 320.0, 64.0, 64.0), color(1.0, 1.0, 1.0, 1.0), 0);  // 8
     quad(q, Rect::new(160.0, 240.0, 300.0, 200.0), color(0.3, 0.3, 0.6, 1.0), color(0.3, 0.3, 0.6, 1.0), pack_radii_uniform(30.0), 0.0,
       4.0, color(1.0, 0.8, 0.2, 1.0));  // 9
+    solid(q, Rect::new(520.0, 320.0, 100.0, 100.0), color(1.0, 1.0, 1.0, 1.0), pack_radii_uniform(8.0));  // 10
     text(tx, Vec2 { x: 20.0, y: 420.0 }, hello, color(1.0, 1.0, 1.0, 1.0));
     text(ctext, Vec2 { x: 170.0, y: 300.0 }, clipped, color(1.0, 0.95, 0.4, 1.0));
 
     if (!rhi.acquire_frame()) {
       continue;
     }
+    rhi.convert_video_frame(video, y_tex, cb_tex, cr_tex);
     if (rhi.begin_offscreen(rt, color(0.1, 0.5, 0.4, 1.0))) {
       draw(rhi, rq, 0, 1, kInvalidTexture);
       draw_text(rhi, rtext, atlas);
@@ -205,6 +226,7 @@ pub fn main(): i32 {
     draw(rhi, q, 6, 1, checker_tex);
     draw(rhi, q, 7, 1, rt);
     draw(rhi, q, 8, 1, bgra_tex);
+    draw(rhi, q, 10, 1, video);
     draw_text(rhi, tx, atlas);
     rhi.set_scissor(Rect::new(200.0, 280.0, 180.0, 120.0));
     draw(rhi, q, 9, 1, kInvalidTexture);

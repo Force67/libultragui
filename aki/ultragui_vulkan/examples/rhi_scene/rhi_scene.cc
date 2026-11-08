@@ -2,13 +2,15 @@
 // (platform_glfw.cc) and ugui::RHI (vulkan_rhi.cc) directly, with no
 // UIContext: SDF rounded rects (radii, border, shadow, inner softness), a
 // gradient, textured quads (RGBA linear, BGRA nearest, updated each frame),
-// text from the TextEngine atlas, scissored content, and an offscreen render
-// target composited back. The aki program builds the same vertices in the
+// text from the TextEngine atlas, scissored content, an offscreen render
+// target composited back, and R8 YCbCr planes converted by the video
+// pipeline. The aki program builds the same vertices in the
 // same order; under aki/tools/xshot.sh the two screenshots should be equal.
 //
-//   rhi_scene <shader_dir> <font.ttf> [frames]
+//   rhi_scene <shader_dir> <font.ttf> [frames [validation]]
 //
 // frames: exit after that many frames (0 or absent: run until closed).
+// validation: 1 turns on the Khronos validation layer.
 // Build: aki/ultragui_vulkan/examples/rhi_scene/build_cpp.sh <ref-build-dir>
 
 #include <ugui/platform/platform.h>
@@ -100,7 +102,7 @@ TextRun Shape(TextEngine& te, FontHandle f, const char* s, f32 size) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    fprintf(stderr, "usage: rhi_scene <shader_dir> <font.ttf> [frames]\n");
+    fprintf(stderr, "usage: rhi_scene <shader_dir> <font.ttf> [frames [validation]]\n");
     return 2;
   }
   int frames = argc > 3 ? atoi(argv[3]) : 0;
@@ -116,7 +118,7 @@ int main(int argc, char** argv) {
   RHI rhi;
   RHIConfig rc;
   rc.platform = &platform;
-  rc.validation = false;
+  rc.validation = argc > 4 && atoi(argv[4]) == 1;
   rc.shader_dir = argv[1];
   if (!rhi.Init(rc)) return 1;
 
@@ -144,6 +146,22 @@ int main(int argc, char** argv) {
   RHITextureHandle bgra_tex = rhi.CreateTexture(2, 2, RHIFormat::kBgra8Unorm,
                                                 bgra, RHIFilter::kNearest);
   RHITextureHandle rt = rhi.CreateRenderTarget(128, 128);
+  // YCbCr planes for ConvertVideoFrame: a 64x64 luma ramp, 32x32 chroma.
+  u8 luma[64 * 64];
+  for (u32 y = 0; y < 64; ++y)
+    for (u32 x = 0; x < 64; ++x) luma[y * 64 + x] = static_cast<u8>(x * 4);
+  u8 cb_plane[32 * 32], cr_plane[32 * 32];
+  for (u32 k = 0; k < 32 * 32; ++k) {
+    cb_plane[k] = static_cast<u8>(64 + (k % 32) * 4);
+    cr_plane[k] = static_cast<u8>(200 - (k / 32) * 4);
+  }
+  RHITextureHandle y_tex = rhi.CreateTexture(64, 64, RHIFormat::kR8Unorm,
+                                             luma, RHIFilter::kLinear);
+  RHITextureHandle cb_tex = rhi.CreateTexture(
+      32, 32, RHIFormat::kR8Unorm, cb_plane, RHIFilter::kLinear);
+  RHITextureHandle cr_tex = rhi.CreateTexture(
+      32, 32, RHIFormat::kR8Unorm, cr_plane, RHIFilter::kLinear);
+  RHITextureHandle video = rhi.CreateRenderTarget(64, 64);
 
   const Color none{0, 0, 0, 0};
   for (int frame = 0; frames == 0 || frame < frames; ++frame) {
@@ -186,10 +204,12 @@ int main(int argc, char** argv) {
     Quad(q, {160, 240, 300, 200}, {0.3f, 0.3f, 0.6f, 1},
          {0.3f, 0.3f, 0.6f, 1}, Vertex2D::PackRadii(30), 0.0f, 4.0f,
          {1, 0.8f, 0.2f, 1});                                          // 9
+    Solid(q, {520, 320, 100, 100}, {1, 1, 1, 1}, Vertex2D::PackRadii(8));  // 10
     Text(text, {20, 420}, hello, {1, 1, 1, 1});
     Text(ctext, {170, 300}, clipped, {1, 0.95f, 0.4f, 1});
 
     if (!rhi.AcquireFrame()) continue;
+    rhi.ConvertVideoFrame(video, y_tex, cb_tex, cr_tex);
     if (rhi.BeginOffscreen(rt, {0.1f, 0.5f, 0.4f, 1})) {
       Draw(rhi, rq, 0, 1, kInvalidTexture);
       rhi.DrawTextTriangles(rtext.v.data(), static_cast<u32>(rtext.v.size()),
@@ -203,6 +223,7 @@ int main(int argc, char** argv) {
     Draw(rhi, q, 6, 1, checker_tex);
     Draw(rhi, q, 7, 1, rt);
     Draw(rhi, q, 8, 1, bgra_tex);
+    Draw(rhi, q, 10, 1, video);
     rhi.DrawTextTriangles(text.v.data(), static_cast<u32>(text.v.size()),
                           text.i.data(), static_cast<u32>(text.i.size()),
                           atlas);
