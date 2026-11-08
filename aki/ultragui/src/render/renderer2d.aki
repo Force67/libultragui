@@ -1,0 +1,9 @@
+// ugui/render/renderer2d.{h,cc}: PLACEHOLDER. The next wave ports the 2D
+// batch renderer here and replaces this file wholesale. It exists now only so
+// widgets::widget_vtable can name the type its draw entries take.
+
+module ultragui::render::renderer2d;
+
+pub struct Renderer2D {
+  pub fn Renderer2D(): Renderer2D => Renderer2D {};
+}

@@ -73,6 +73,10 @@ pub struct ErasedBox {
   // The object's address, for a thunk to cast back. Valid while self lives.
   pub fn ptr(var self&): *var u8 => self.object;
 
+  // The same address through a read-only receiver, for code that only reads
+  // through it.
+  pub fn const_ptr(self&): *const u8 => unsafe (self.object as *const u8);
+
   // A borrow of the object, for code that takes the borrowed form.
   pub fn as_ref(var self&): ErasedRef;
 

@@ -1,0 +1,267 @@
+// widgets::widget_registry and widgets::widget: entities, generation-checked
+// handles, open component stores (built-in and host components, release
+// dropping them), the tree, dirty marking, computed style and state
+// transitions through a WidgetContext built the way UIContext builds one.
+// Mirrors tests/test_runtime_safety.cc and the registry parts of
+// tests/test_widgets*.cc.
+
+module world_test;
+
+import {Atomic} from akikit::threading::atomic;
+import {Animator} from ultragui::animation::animator;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {PointerEvents, Visibility, WidgetState} from ultragui::style::enums;
+import {Style, StyleMask} from ultragui::style::style;
+import {EasingType, Transition} from ultragui::style::transition;
+import {TextEngine} from ultragui::text::text_engine;
+import {kAnimStyle} from ultragui::widgets::components;
+import {
+  WidgetKind, add_child, add_state_override, add_state_transition, clear_animation_style, computed_style,
+  destroy_widget, has_widget_context, hit_test, kHierarchy, kStyleC, kTransform, kWidgetNode, layout_widget,
+  measure_widget, remove_child, set_animation_style, set_context, set_selected, set_style,
+  set_tooltip, set_widget_state, tooltip_text, ui_scale, widget_revision, widget_state_of,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {Expect} from support::expect;
+
+// A host component, as in test_runtime_safety.cc's TestTag.
+struct TestTag : Copy {
+  pub var v: i32
+}
+static let kTestTag: ComponentKey<TestTag> = ComponentKey();
+
+// A host component that owns something: its drop is the release
+// notification.
+static let kDrops: Atomic<u32> = Atomic::<u32>(0);
+struct Resource {
+  pub var id: u32
+  fn ~Resource();
+}
+fn Resource::~Resource() {
+  let _ = kDrops.fetch_add(1);
+}
+static let kResource: ComponentKey<Resource> = ComponentKey();
+
+fn check_entities(var t&: Expect) {
+  var world = World();
+  let a = world.create();
+  let b = world.create(77);
+  t.that(a.valid() && b.valid() && a != b, "fresh handles are valid and distinct");
+  t.that(a.index == 1 && b.index == 2, "slot 0 is the null slot");
+  t.that(world.alive(a) && world.alive(b), "alive");
+  t.that(!world.alive(kNullWidget), "null handle is dead");
+  t.eq_u32(world.get(kWidgetNode, b)!.id, 77, "explicit application id");
+  t.that(world.get(kWidgetNode, a)!.id != 0, "auto id");
+  t.that(world.has(kTransform, a) && world.has(kStyleC, a) && world.has(kHierarchy, a), "core components");
+  t.that(world.get(kWidgetNode, a)!.kind == WidgetKind::Widget, "default kind");
+
+  // Host components: add, overwrite, remove.
+  world.add(kTestTag, a, TestTag { v: 42 });
+  t.that(world.has(kTestTag, a) && world.get(kTestTag, a)!.v == 42, "host component add");
+  world.add(kTestTag, a, TestTag { v: 7 });
+  t.that(world.get(kTestTag, a)!.v == 7, "overwrite");
+  t.that(world.store(kTestTag)!.len() == 1, "overwrite keeps one entry");
+  world.remove(kTestTag, a);
+  t.that(!world.has(kTestTag, a), "remove");
+  t.that(world.get_or_add(kTestTag, a, TestTag { v: 3 }).v == 3, "get_or_add adds");
+  t.that(world.get_or_add(kTestTag, a, TestTag { v: 9 }).v == 3, "get_or_add keeps");
+
+  // Release: stale handles resolve to none, the slot is reused with a new
+  // generation, and the old handle stays dead.
+  world.add(kResource, a, Resource { id: 1 });
+  let drops_before = kDrops.load();
+  world.release(a);
+  t.that(!world.alive(a), "released");
+  t.that(world.get(kTestTag, a) == none && world.get(kTransform, a) == none, "stale handle reads none");
+  t.eq_u32(kDrops.load() - drops_before, 1, "release drops host components");
+  let c = world.create();
+  t.that(c.index == a.index && c.generation == a.generation + 1, "slot reused with a bumped generation");
+  t.that(!world.alive(a) && world.alive(c), "old handle dead, new alive");
+  t.that(!world.has(kTestTag, c), "a reused slot starts without components");
+  world.release(a);  // stale release is a no-op
+  t.that(world.alive(c), "stale release leaves the new entity");
+
+  // Dense iteration and swap-and-pop.
+  let d = world.create();
+  world.add(kTestTag, b, TestTag { v: 1 });
+  world.add(kTestTag, c, TestTag { v: 2 });
+  world.add(kTestTag, d, TestTag { v: 3 });
+  world.remove(kTestTag, b);
+  let s& = world.store(kTestTag)!;
+  t.that(s.len() == 2 && s.ids()[0] == d && s.as_slice()[0].v == 3, "swap-and-pop moves the last entry");
+  t.that(world.get(kTestTag, c)!.v == 2 && world.get(kTestTag, d)!.v == 3, "lookups survive the move");
+
+  // Two components of one entity at once.
+  let (tf, tag) = world.get_pair_var(kTransform, kTestTag, d);
+  if (var tr& = tf) {
+    tr.intrinsic_w = 5.0;
+  }
+  if (var tg& = tag) {
+    tg.v = 30;
+  }
+  t.that(world.get(kTransform, d)!.intrinsic_w == 5.0 && world.get(kTestTag, d)!.v == 30, "get_pair_var writes both");
+
+  // Dropping the world drops the remaining host components.
+  world.add(kResource, d, Resource { id: 2 });
+}
+
+fn check_tree(var t&: Expect) {
+  var world = World();
+  let root = world.create();
+  let a = world.create();
+  let b = world.create();
+  let a1 = world.create();
+  add_child(world, root, a);
+  add_child(world, root, b);
+  add_child(world, a, a1);
+  t.that(world.get(kHierarchy, a1)!.parent == a, "parent link");
+  t.that(world.get(kHierarchy, root)!.children.len() == 2, "children");
+
+  // Reparenting removes from the old parent.
+  add_child(world, b, a1);
+  t.that(world.get(kHierarchy, a)!.children.len() == 0 && world.get(kHierarchy, a1)!.parent == b, "reparent");
+  add_child(world, a, kNullWidget);
+  t.that(world.get(kHierarchy, a)!.children.len() == 0, "null child ignored");
+
+  // Dirty marking bubbles up and bumps the revision.
+  world.get_var(kTransform, root)!.layout_dirty = false;
+  world.get_var(kTransform, b)!.layout_dirty = false;
+  let rev = widget_revision();
+  set_style(world, a1, Style { opacity: 0.5 });
+  t.that(world.get(kTransform, b)!.layout_dirty && world.get(kTransform, root)!.layout_dirty, "mark_dirty reaches the root");
+  t.that(widget_revision() > rev, "revision bumped");
+
+  // Context propagation: attaching the root attaches children added later.
+  set_context(world, root, true);
+  let late = world.create();
+  add_child(world, a, late);
+  t.that(has_widget_context(world, late) && has_widget_context(world, a1), "context propagates");
+  remove_child(world, a, late);
+  t.that(world.get(kHierarchy, late)!.parent == kNullWidget, "remove_child clears the parent");
+
+  // Destroying a subtree releases it and unhooks it from its parent.
+  destroy_widget(world, b);
+  t.that(!world.alive(b) && !world.alive(a1), "subtree released");
+  t.that(world.get(kHierarchy, root)!.children.len() == 1, "unhooked from the parent");
+
+  // Tooltips.
+  set_tooltip(world, a, "help");
+  t.that(tooltip_text(world, a) == "help" && tooltip_text(world, root) == "", "tooltip text");
+}
+
+fn check_style(var t&: Expect) {
+  var world = World();
+  let e = world.create();
+  set_style(world, e, Style { background: Color::red(), opacity: 0.8 });
+  var hover = Style {};
+  hover.background = Color::blue();
+  add_state_override(world, e, WidgetState::Hovered, hover, StyleMask::kBackground);
+  t.that(computed_style(world, e).background == Color::red(), "no state, base style");
+  world.get_var(kStyleC, e)!.state = WidgetState::Hovered;
+  t.that(computed_style(world, e).background == Color::blue(), "state override applies");
+  world.get_var(kTransform, e)!.inherited_opacity = 0.5;
+  t.that(computed_style(world, e).opacity == 0.4f32, "opacity inherits multiplicatively");
+  set_animation_style(world, e, Style { background: Color::green() });
+  t.that(computed_style(world, e).background == Color::green(), "animation style wins");
+  clear_animation_style(world, e);
+  t.that(!world.has(kAnimStyle, e) && computed_style(world, e).background == Color::blue(), "cleared");
+}
+
+// A UIContext-shaped owner: the World and the subsystems side by side, and a
+// WidgetContext built per call from views of the subsystems while the World
+// is lent separately.
+struct Ui {
+  pub var world: World = World()
+  pub var text: TextEngine = TextEngine()
+  pub var animator: Animator = Animator()
+  pub var last_time: f64 = 2.0
+  pub var scale: f32 = 1.5
+
+  pub fn set_state(var self&, e: WidgetId, s: WidgetState) {
+    var ctx = WidgetContext { text_engine: self.text, animator: self.animator, current_time: self.last_time, ui_scale: self.scale };
+    set_widget_state(self.world, ctx, e, s);
+  }
+}
+
+fn check_context(var t&: Expect) {
+  var ui = Ui {};
+  let e = ui.world.create();
+  let detached = ui.world.create();
+  set_context(ui.world, e, true);
+  var hover = Style {};
+  hover.opacity = 0.25;
+  add_state_override(ui.world, e, WidgetState::Hovered, hover, StyleMask::kOpacity);
+  add_state_transition(ui.world, e, WidgetState::Hovered, Transition { duration: 0.2, easing: EasingType::Linear });
+  add_state_transition(ui.world, detached, WidgetState::Hovered, Transition { duration: 0.2 });
+
+  let id = ui.world.get(kWidgetNode, e)!.id;
+  ui.set_state(e, WidgetState::Hovered);
+  t.that(widget_state_of(ui.world, e) == WidgetState::Hovered, "state set");
+  t.that(ui.animator.is_animating(id), "a relevant transition starts on the animator");
+
+  ui.set_state(detached, WidgetState::Hovered);
+  t.that(!ui.animator.is_animating(ui.world.get(kWidgetNode, detached)!.id), "no context, no transition");
+
+  // Selected toggles one flag and keeps the rest.
+  var ctx = WidgetContext { animator: ui.animator, current_time: ui.last_time, ui_scale: ui.scale };
+  set_selected(ui.world, ctx, e, true);
+  t.that(widget_state_of(ui.world, e) == WidgetState::Hovered.with(WidgetState::Selected), "selected on");
+  set_selected(ui.world, ctx, e, false);
+  t.that(widget_state_of(ui.world, e) == WidgetState::Hovered, "selected off");
+
+  t.that(ui_scale(ui.world, ctx, e) == 1.5 && ui_scale(ui.world, ctx, detached) == 1.0, "ui_scale needs a context");
+
+  // The animator writes styles back into the World through its callback:
+  // views of the two fields first, then the call (a literal cannot capture
+  // one field of `ui` while another is lent to the call).
+  var world& = ui.world;
+  var animator& = ui.animator;
+  let _ = animator.update(2.1, fn(wid: u32, s&: Style) {
+    if (wid == id) {
+      set_animation_style(world, e, s);
+    }
+  });
+  t.that(ui.world.has(kAnimStyle, e), "animator callback writes the World");
+}
+
+fn check_hit_test(var t&: Expect) {
+  var world = World();
+  var ctx = WidgetContext::detached();
+  let root = world.create();
+  let a = world.create();
+  let b = world.create();
+  add_child(world, root, a);
+  add_child(world, root, b);
+  layout_widget(world, ctx, root, Rect::new(0.0, 0.0, 100.0, 100.0), Rect::new(0.0, 0.0, 100.0, 100.0));
+  layout_widget(world, ctx, a, Rect::new(0.0, 0.0, 60.0, 60.0), Rect::new(0.0, 0.0, 60.0, 60.0));
+  layout_widget(world, ctx, b, Rect::new(40.0, 40.0, 60.0, 60.0), Rect::new(40.0, 40.0, 60.0, 60.0));
+  t.that(!world.get(kTransform, a)!.layout_dirty, "layout_widget clears layout_dirty");
+  t.that(hit_test(world, ctx, root, Vec2::new(50.0, 50.0)) == b, "later sibling is on top");
+  t.that(hit_test(world, ctx, root, Vec2::new(10.0, 10.0)) == a, "first sibling");
+  t.that(hit_test(world, ctx, root, Vec2::new(150.0, 10.0)) == kNullWidget, "outside");
+  set_style(world, b, Style { visibility: Visibility::Hidden });
+  t.that(hit_test(world, ctx, root, Vec2::new(50.0, 50.0)) == a, "hidden takes no hits");
+  set_style(world, a, Style { pointer_events: PointerEvents::None });
+  t.that(hit_test(world, ctx, root, Vec2::new(50.0, 50.0)) == root, "pointer-events none passes through");
+  world.get_var(kTransform, a)!.intrinsic_w = 12.0;
+  world.get_var(kTransform, a)!.intrinsic_h = 34.0;
+  let (w, h) = measure_widget(world, ctx, a);
+  t.that(w == 12.0 && h == 34.0, "measure falls back to the intrinsic size");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  let drops = kDrops.load();
+  check_entities(t);
+  t.eq_u32(kDrops.load() - drops, 2, "dropping the World drops its components");
+  check_tree(t);
+  check_style(t);
+  check_context(t);
+  check_hit_test(t);
+  return t.finish();
+}

@@ -1,0 +1,63 @@
+// ugui/widgets/components.h: built-in widget components, opt-in per entity:
+// attach with world.add(kTooltip, e, Tooltip { ... }); a system reads it
+// back. Host engines define their own component structs the same way, each
+// with a `static let` ComponentKey beside it.
+
+module ultragui::widgets::components;
+
+import {List} from akikit::containers::list;
+import {String} from akikit::strings::string;
+import {ComponentKey} from ultragui::core::component_store;
+import {Vec2} from ultragui::core::math;
+import {WidgetState} from ultragui::style::enums;
+import {Style, StyleOverride} from ultragui::style::style;
+import {Transition} from ultragui::style::transition;
+
+// Hover help text. The tooltip system shows it after a short delay.
+pub struct Tooltip : Clone {
+  pub var text: String = String()
+}
+
+// Notified during a drag with the widget's new top-left in screen pixels, so
+// the application can persist a dragged position across rebuilds.
+pub type DragHandler = own fn(Vec2): ();
+
+// Marks an entity as user-movable: dragging it (or a DragHandle that
+// resolves to it) rewrites its style offsets so the next layout pass follows
+// the cursor. origin/press are scratch the drag system fills in on drag
+// start.
+pub struct Movable {
+  pub var origin_x: f32 = 0.0
+  pub var origin_y: f32 = 0.0
+  pub var press: Vec2 = Vec2::zero()
+  pub var on_drag: DragHandler? = none
+}
+
+// Tag: clicking inside this widget and dragging routes the drag to the
+// nearest Movable ancestor (e.g. a panel header grabs the whole panel).
+pub struct DragHandle : Copy {}
+
+// A state -> transition mapping (e.g. fade when :hover activates).
+pub struct StateTransitionRule : Copy, Equal {
+  pub var state: WidgetState = WidgetState::None
+  pub var transition: Transition = Transition {}
+}
+
+// Per-state style overrides (:hover, :pressed, :selected, ...) and their
+// transitions. Carried only by widgets that declare state styles.
+pub struct StateStyle : Clone {
+  pub var overrides: List<StyleOverride> = List()
+  pub var transitions: List<StateTransitionRule> = List()
+}
+
+// Active animated style override written by the animator. Removing the
+// component reverts to the resolved base/state style.
+pub struct AnimStyle : Copy {
+  pub var style: Style = Style {}
+}
+
+pub static let kTooltip: ComponentKey<Tooltip> = ComponentKey();
+pub static let kMovable: ComponentKey<Movable> = ComponentKey();
+pub static let kDragHandle: ComponentKey<DragHandle> = ComponentKey();
+pub static let kStateStyle: ComponentKey<StateStyle> = ComponentKey();
+pub static let kAnimStyle: ComponentKey<AnimStyle> = ComponentKey();

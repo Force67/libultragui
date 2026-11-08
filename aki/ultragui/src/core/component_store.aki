@@ -6,17 +6,56 @@
 // returned by get/add lives only until the next structural change, which the
 // borrow checker enforces.
 //
-// ComponentTypeId / ComponentTypeIdFor (the process-wide type-name table) have
-// no aki counterpart: aki has no type names at run time, and World finds a
-// built-in store by its field type at compile time instead (see
-// widgets::widget_registry). IComponentStore, the erased base World used to
-// drop an entity's components, is ErasedStore in widget_registry.
+// ComponentTypeId<C>() / ComponentTypeIdFor (the process-wide table of dense
+// ids keyed by type name) become ComponentKey<C>: aki has neither type names
+// at run time nor function-local statics, so each component type declares
+// its key once, as a module static, and World indexes its stores by the
+// key's dense id:
+//
+//   pub static let kTooltip: ComponentKey<Tooltip> = ComponentKey();
+//   world.add(kTooltip, e, Tooltip { text });
+//
+// The id is assigned on first use from one process-wide counter, as the C++
+// assigns it, so it is the same in every World. IComponentStore, the erased
+// base World uses to drop an entity's components, is the remove thunk
+// World keeps beside each store (widgets::widget_registry).
 
 module ultragui::core::component_store;
 
 import {List, resize} from akikit::containers::list;
+import {Atomic} from akikit::threading::atomic;
 import {swap_at} from akikit::algorithm;
 import {WidgetId} from ultragui::core::handle;
+
+// The next unassigned component id, process-wide.
+static let kNextComponentId: Atomic<u32> = Atomic::<u32>(0);
+
+comptime let kUnassigned: u32 = 0xFFFF_FFFF;
+
+// The key of component type C: a `static let` per type (or per store a
+// program wants of one type; two keys of one type are two stores). Keys made
+// in a loop would each take a fresh id, so keep them static.
+pub struct ComponentKey<C> {
+  var id: Atomic<u32>
+
+  pub fn ComponentKey(): ComponentKey<C> => ComponentKey::<C> { id: Atomic::<u32>(kUnassigned) };
+
+  // The dense id, assigned on first use; stable for the process.
+  pub fn index(self&): u32;
+}
+
+fn ComponentKey<C>::index(self&): u32 {
+  let v = self.id.load();
+  if (v != kUnassigned) {
+    return v;
+  }
+  let fresh = kNextComponentId.fetch_add(1);
+  if (self.id.compare_exchange(kUnassigned, fresh)) {
+    return fresh;
+  }
+  // Another thread assigned it first; that id wins and `fresh` stays unused.
+  return self.id.load();
+}
 
 comptime let kInvalid: u32 = 0xFFFF_FFFF;
 
