@@ -43,6 +43,10 @@ import {
 } from ultragui::widgets::scroll_view;
 import {slider_click, slider_draw, slider_measure, slider_update} from ultragui::widgets::slider;
 import {text_draw, text_measure} from ultragui::widgets::text;
+import {
+  text_input_char_input, text_input_click, text_input_consumes_text, text_input_draw, text_input_key_down,
+  text_input_measure, text_input_update,
+} from ultragui::widgets::text_input;
 import {toggle_click, toggle_draw, toggle_measure, toggle_update} from ultragui::widgets::toggle;
 
 // WidgetVTable::custom_paint: paint_widget draws nothing itself and `draw`
@@ -90,6 +94,10 @@ pub fn vt_draw(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: 
       dropdown_draw(world, ctx, e, renderer);
       true
     },
+    WidgetKind::TextInput => {
+      text_input_draw(world, ctx, e, renderer);
+      true
+    },
     WidgetKind::ScrollView => {
       scroll_view_draw(world, ctx, e, renderer);
       true
@@ -107,6 +115,7 @@ pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, 
   WidgetKind::Toggle => toggle_measure(world, ctx, e),
   WidgetKind::Slider => slider_measure(world, ctx, e),
   WidgetKind::Dropdown => dropdown_measure(world, ctx, e),
+  WidgetKind::TextInput => text_input_measure(world, ctx, e),
   _ => none,
 };
 
@@ -127,6 +136,7 @@ pub fn vt_on_click(kind: WidgetKind, var world&: World, var ctx&: WidgetContext,
   WidgetKind::Toggle => toggle_click(world, ctx, e),
   WidgetKind::Slider => slider_click(world, ctx, e),
   WidgetKind::Dropdown => dropdown_click(world, ctx, e),
+  WidgetKind::TextInput => text_input_click(world, ctx, e),
   _ => none,
 };
 
@@ -143,6 +153,10 @@ pub fn vt_on_update(kind: WidgetKind, var world&: World, var ctx&: WidgetContext
     },
     WidgetKind::Dropdown => {
       dropdown_update(world, ctx, e, dt);
+      true
+    },
+    WidgetKind::TextInput => {
+      text_input_update(world, ctx, e, dt);
       true
     },
     WidgetKind::ScrollView => {
@@ -173,18 +187,21 @@ pub fn vt_on_layout(kind: WidgetKind, var world&: World, var ctx&: WidgetContext
 // WidgetVTable::on_key_down
 pub fn vt_on_key_down(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, key: i32, mods: i32): bool? =>
   match (kind) {
+    WidgetKind::TextInput => text_input_key_down(world, ctx, e, key, mods),
     _ => none,
   };
 
 // WidgetVTable::on_char_input
 pub fn vt_on_char_input(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, codepoint: u32): bool? =>
   match (kind) {
+    WidgetKind::TextInput => text_input_char_input(world, ctx, e, codepoint),
     _ => none,
   };
 
 // WidgetVTable::consumes_text_input
 pub fn vt_consumes_text_input(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): bool? =>
   match (kind) {
+    WidgetKind::TextInput => text_input_consumes_text(world, ctx, e),
     _ => none,
   };
 
