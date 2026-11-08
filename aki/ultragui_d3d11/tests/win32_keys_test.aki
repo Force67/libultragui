@@ -1,0 +1,211 @@
+// win32_keys (the portable half of ugui_impl_win32): virtual keys to GLFW key
+// codes, message decoding, modifier bits and the WM_CHAR surrogate state. The
+// expected values are what ugui_impl_win32.cc computes for the same messages,
+// worked out from its code and the GLFW and winuser.h constants (the C++ needs
+// windows.h, so it cannot run here).
+
+module win32_keys_test;
+
+import {Vec2} from ultragui::core::math;
+import {MouseButton} from ultragui::input::input_queue;
+import {CharDecoder, Decoded, Input, InputKind, KeyState, decode_message, is_key_message, key_from_virtual_key,
+  kKeyEnter, kKeyKpEnter, kKeyLeftAlt, kKeyLeftControl, kKeyLeftShift, kKeyRightAlt, kKeyRightControl, kKeyRightShift,
+  kKeyUnknown, kModAlt, kModCapsLock, kModControl, kModNumLock, kModShift, kModSuper, mods_from_state, scancode_of}
+  from ultragui_d3d11::win32_keys;
+import {Expect} from support::expect;
+
+comptime let kExt: i64 = 0x01000000;  // KF_EXTENDED (0x100) in HIWORD(lparam)
+static let one: Vec2 = Vec2 { x: 1.0, y: 1.0 };
+
+fn decode(var c&: CharDecoder, message: u32, wparam: u64, lparam: i64): Decoded =>
+  decode_message(c, message, wparam, lparam, one, false, KeyState {});
+
+// MAKELPARAM(x, y)
+fn point(x: i32, y: i32): i64 => (((y as u32 & 0xFFFF) << 16) | (x as u32 & 0xFFFF)) as i64;
+
+pub fn main(): i32 {
+  var t = Expect();
+
+  // Letters and digits are their own codes; F-keys, keypad digits are ranges.
+  t.that(key_from_virtual_key('A' as u32, 0, false) == 65, "A");
+  t.that(key_from_virtual_key('Z' as u32, 0, false) == 90, "Z");
+  t.that(key_from_virtual_key('0' as u32, 0, false) == 48, "0");
+  t.that(key_from_virtual_key(0x70, 0, false) == 290, "F1");
+  t.that(key_from_virtual_key(0x87, 0, false) == 290 + 23, "F24");
+  t.that(key_from_virtual_key(0x60, 0, false) == 320, "numpad 0");
+  t.that(key_from_virtual_key(0x69, 0, false) == 329, "numpad 9");
+  t.that(key_from_virtual_key(0x20, 0, false) == 32, "space");
+  t.that(key_from_virtual_key(0xDE, 0, false) == 39, "'");
+  t.that(key_from_virtual_key(0xBC, 0, false) == 44, ",");
+  t.that(key_from_virtual_key(0xBD, 0, false) == 45, "-");
+  t.that(key_from_virtual_key(0xBE, 0, false) == 46, ".");
+  t.that(key_from_virtual_key(0xBF, 0, false) == 47, "/");
+  t.that(key_from_virtual_key(0xBA, 0, false) == 59, ";");
+  t.that(key_from_virtual_key(0xBB, 0, false) == 61, "=");
+  t.that(key_from_virtual_key(0xDB, 0, false) == 91, "[");
+  t.that(key_from_virtual_key(0xDC, 0, false) == 92, "backslash");
+  t.that(key_from_virtual_key(0xDD, 0, false) == 93, "]");
+  t.that(key_from_virtual_key(0xC0, 0, false) == 96, "`");
+  t.that(key_from_virtual_key(0x1B, 0, false) == 256, "escape");
+  t.that(key_from_virtual_key(0x09, 0, false) == 258, "tab");
+  t.that(key_from_virtual_key(0x08, 0, false) == 259, "backspace");
+  t.that(key_from_virtual_key(0x2D, 0, false) == 260, "insert");
+  t.that(key_from_virtual_key(0x2E, 0, false) == 261, "delete");
+  t.that(key_from_virtual_key(0x27, 0, false) == 262, "right");
+  t.that(key_from_virtual_key(0x25, 0, false) == 263, "left");
+  t.that(key_from_virtual_key(0x28, 0, false) == 264, "down");
+  t.that(key_from_virtual_key(0x26, 0, false) == 265, "up");
+  t.that(key_from_virtual_key(0x21, 0, false) == 266, "page up");
+  t.that(key_from_virtual_key(0x22, 0, false) == 267, "page down");
+  t.that(key_from_virtual_key(0x24, 0, false) == 268, "home");
+  t.that(key_from_virtual_key(0x23, 0, false) == 269, "end");
+  t.that(key_from_virtual_key(0x14, 0, false) == 280, "caps lock");
+  t.that(key_from_virtual_key(0x91, 0, false) == 281, "scroll lock");
+  t.that(key_from_virtual_key(0x90, 0, false) == 282, "num lock");
+  t.that(key_from_virtual_key(0x2C, 0, false) == 283, "print screen");
+  t.that(key_from_virtual_key(0x13, 0, false) == 284, "pause");
+  t.that(key_from_virtual_key(0x6E, 0, false) == 330, "kp decimal");
+  t.that(key_from_virtual_key(0x6F, 0, false) == 331, "kp divide");
+  t.that(key_from_virtual_key(0x6A, 0, false) == 332, "kp multiply");
+  t.that(key_from_virtual_key(0x6D, 0, false) == 333, "kp subtract");
+  t.that(key_from_virtual_key(0x6B, 0, false) == 334, "kp add");
+  t.that(key_from_virtual_key(0x5B, 0, false) == 343, "left super");
+  t.that(key_from_virtual_key(0x5C, 0, false) == 347, "right super");
+  t.that(key_from_virtual_key(0x5D, 0, false) == 348, "menu");
+  t.that(key_from_virtual_key(0x07, 0, false) == kKeyUnknown, "unassigned code");
+  t.that(key_from_virtual_key(0xFF, 0, false) == kKeyUnknown, "0xFF");
+
+  // The extended bit separates keypad Enter and the right-hand Control/Alt.
+  t.that(key_from_virtual_key(0x0D, 0, false) == kKeyEnter, "enter");
+  t.that(key_from_virtual_key(0x0D, kExt, false) == kKeyKpEnter, "keypad enter");
+  t.that(key_from_virtual_key(0x11, 0, false) == kKeyLeftControl, "control");
+  t.that(key_from_virtual_key(0x11, kExt, false) == kKeyRightControl, "right control by the extended bit");
+  t.that(key_from_virtual_key(0x12, 0, false) == kKeyLeftAlt, "alt");
+  t.that(key_from_virtual_key(0x12, kExt, false) == kKeyRightAlt, "right alt by the extended bit");
+  t.that(key_from_virtual_key(0x10, 0, false) == kKeyLeftShift, "shift");
+  t.that(key_from_virtual_key(0x10, 0, true) == kKeyRightShift, "right shift by the scan code");
+  t.that(key_from_virtual_key(0xA0, 0, true) == kKeyLeftShift, "VK_LSHIFT is the left one whatever the scan code");
+  t.that(key_from_virtual_key(0xA1, 0, false) == kKeyRightShift, "VK_RSHIFT");
+  t.that(key_from_virtual_key(0xA2, kExt, false) == 341, "VK_LCONTROL");
+  t.that(key_from_virtual_key(0xA3, 0, false) == 345, "VK_RCONTROL");
+  t.that(key_from_virtual_key(0xA4, 0, false) == 342, "VK_LMENU");
+  t.that(key_from_virtual_key(0xA5, 0, false) == 346, "VK_RMENU");
+
+  // Modifier bits.
+  t.that(mods_from_state(KeyState {}) == 0, "no mods");
+  t.that(mods_from_state(KeyState { shift_down: true, alt_down: true }) == kModShift | kModAlt, "shift+alt");
+  t.that(mods_from_state(KeyState { control_down: true, win_down: true }) == kModControl | kModSuper, "ctrl+win");
+  t.that(mods_from_state(KeyState { caps_lock_on: true, num_lock_on: true }) == kModCapsLock | kModNumLock, "locks");
+  t.that(mods_from_state(KeyState { shift_down: true, control_down: true, alt_down: true, win_down: true, caps_lock_on: true,
+    num_lock_on: true }) == 0x3F, "all");
+
+  var chars = CharDecoder();
+
+  // Mouse: coordinates are signed 16-bit, scaled; a button message moves first.
+  var d = decode_message(chars, 0x0200, 0, point(30, 40), Vec2 { x: 2.0, y: 0.5 }, false, KeyState {});
+  t.that(d.handled && d.capture == 0, "WM_MOUSEMOVE handled");
+  var i = d.input ?? Input {};
+  t.that(i.kind == InputKind::MouseMove && i.position.x == 60.0 && i.position.y == 20.0, "mouse position scaled");
+  d = decode(chars, 0x0200, 0, point(-5, -7));
+  i = d.input ?? Input {};
+  t.that(i.position.x == -5.0 && i.position.y == -7.0, "negative coordinates");
+
+  d = decode(chars, 0x0201, 0, point(3, 4));
+  i = d.input ?? Input {};
+  t.that(d.handled && d.capture == 1 && i.kind == InputKind::MouseButton && i.pressed && i.button == MouseButton::Left
+    && i.position.x == 3.0 && i.position.y == 4.0, "left down captures");
+  d = decode(chars, 0x0203, 0, 0);
+  i = d.input ?? Input {};
+  t.that(d.capture == 1 && i.pressed && i.button == MouseButton::Left, "left double click is a press");
+  d = decode(chars, 0x0202, 0, 0);
+  i = d.input ?? Input {};
+  t.that(d.capture == -1 && !i.pressed && i.button == MouseButton::Left, "left up releases");
+  d = decode(chars, 0x0204, 0, 0);
+  i = d.input ?? Input {};
+  t.that(i.button == MouseButton::Right && i.pressed, "right down");
+  d = decode(chars, 0x0205, 0, 0);
+  i = d.input ?? Input {};
+  t.that(i.button == MouseButton::Right && !i.pressed, "right up");
+  d = decode(chars, 0x0206, 0, 0);
+  i = d.input ?? Input {};
+  t.that(i.button == MouseButton::Right && i.pressed, "right double click");
+  d = decode(chars, 0x0207, 0, 0);
+  i = d.input ?? Input {};
+  t.that(i.button == MouseButton::Middle && i.pressed, "middle down");
+  d = decode(chars, 0x0208, 0, 0);
+  i = d.input ?? Input {};
+  t.that(i.button == MouseButton::Middle && !i.pressed, "middle up");
+  d = decode(chars, 0x0209, 0, 0);
+  i = d.input ?? Input {};
+  t.that(i.button == MouseButton::Middle && i.pressed, "middle double click");
+
+  // Wheel: the delta is the signed high word of wparam, in notches of 120.
+  d = decode(chars, 0x020A, (120u64 << 16), 0);
+  i = d.input ?? Input {};
+  t.that(d.handled && i.kind == InputKind::Scroll && i.scroll.x == 0.0 && i.scroll.y == 1.0, "wheel up one notch");
+  d = decode(chars, 0x020A, ((-240i32 as u32 as u64 & 0xFFFF) << 16), 0);
+  i = d.input ?? Input {};
+  t.that(i.scroll.y == -2.0, "wheel down two notches");
+  d = decode(chars, 0x020E, (120u64 << 16), 0);
+  i = d.input ?? Input {};
+  t.that(i.scroll.x == -1.0 && i.scroll.y == 0.0, "horizontal wheel is negated");
+
+  // Keys: scan code, repeat bit, press/release and the modifiers passed in.
+  let keys = KeyState { control_down: true };
+  let lp: i64 = (0x1E << 16) | 1;
+  d = decode_message(chars, 0x0100, 'A' as u64, lp, one, false, keys);
+  i = d.input ?? Input {};
+  t.that(d.handled && i.kind == InputKind::Key && i.key == 65 && i.scancode == 0x1E && i.pressed && !i.repeat
+    && i.mods == kModControl, "WM_KEYDOWN");
+  d = decode_message(chars, 0x0104, 'A' as u64, lp | (1 << 30), one, false, keys);
+  i = d.input ?? Input {};
+  t.that(i.pressed && i.repeat, "WM_SYSKEYDOWN with the repeat bit");
+  d = decode_message(chars, 0x0101, 'A' as u64, lp | (1 << 30), one, false, keys);
+  i = d.input ?? Input {};
+  t.that(!i.pressed && !i.repeat, "WM_KEYUP is never a repeat");
+  d = decode_message(chars, 0x0105, 'A' as u64, lp, one, false, keys);
+  i = d.input ?? Input {};
+  t.that(!i.pressed, "WM_SYSKEYUP");
+  d = decode_message(chars, 0x0100, 0x10, (0x36 << 16), one, true, KeyState { shift_down: true });
+  i = d.input ?? Input {};
+  t.that(i.key == kKeyRightShift && i.scancode == 0x36 && i.mods == kModShift, "right shift key message");
+  d = decode_message(chars, 0x0100, 0x0D, (0x11C << 16) | kExt, one, false, KeyState {});
+  i = d.input ?? Input {};
+  t.that(i.scancode == 0x11C, "the scan code keeps the extended bit (0x1FF mask)");
+  t.that(scancode_of((0x11C << 16)) == 0x1C, "scancode_of masks to 8 bits as MapVirtualKeyW is asked");
+  t.that(is_key_message(0x0100) && is_key_message(0x0105) && !is_key_message(0x0102) && !is_key_message(0x0200), "is_key_message");
+
+  // Characters: UTF-16 units, surrogate pairs joined, controls dropped.
+  d = decode(chars, 0x0102, 'x' as u64, 0);
+  i = d.input ?? Input {};
+  t.that(d.handled && i.kind == InputKind::Char && i.codepoint == 'x' as u32, "WM_CHAR");
+  d = decode(chars, 0x0102, 0xE9, 0);
+  i = d.input ?? Input {};
+  t.that(i.codepoint == 0xE9, "WM_CHAR e acute");
+  d = decode(chars, 0x0102, 13, 0);
+  t.that(d.handled && d.input == none, "control character is handled but not pushed");
+  d = decode(chars, 0x0102, 8, 0);
+  t.that(d.handled && d.input == none, "backspace char");
+  d = decode(chars, 0x0102, 127, 0);
+  t.that(d.handled && d.input == none, "DEL char");
+  d = decode(chars, 0x0102, 0xD83D, 0);
+  t.that(d.handled && d.input == none && chars.high_surrogate == 0xD83D, "the high surrogate waits");
+  d = decode(chars, 0x0102, 0xDE00, 0);
+  i = d.input ?? Input {};
+  t.that(i.codepoint == 0x1F600 && chars.high_surrogate == 0, "the pair joins into U+1F600");
+  d = decode(chars, 0x0102, 0xDE00, 0);
+  i = d.input ?? Input {};
+  t.that(i.codepoint == 0xDE00, "a lone low surrogate passes through as C++ does");
+  d = decode(chars, 0x0102, 0xD83D, 0);
+  d = decode(chars, 0x0102, 'y' as u64, 0);
+  i = d.input ?? Input {};
+  t.that(i.codepoint == 'y' as u32 && chars.high_surrogate == 0, "a pending high surrogate is dropped by the next unit");
+
+  // Other messages are not handled.
+  d = decode(chars, 0x000F, 0, 0);
+  t.that(!d.handled && d.input == none && d.capture == 0, "WM_PAINT is not ours");
+  d = decode(chars, 0x0113, 0, 0);
+  t.that(!d.handled, "WM_TIMER is not ours");
+
+  return t.finish();
+}

@@ -1,0 +1,373 @@
+// The platform-independent half of ugui/backends/ugui_impl_win32.{h,cc}: what a
+// Win32 window message means as ultragui input. It reads no system state (the
+// caller passes in what the C++ asks Windows for), so it builds and is tested
+// on every OS; os/windows/ugui_impl_win32.aki is the other half that calls
+// Windows and feeds a HostPlatform.
+//
+// Keys become GLFW key codes, which is what ultragui's widgets read.
+//
+// Shape differences from the C++ (behavior is the same):
+//
+// * HandleMessage is split: `decode_message` here turns a message into an
+//   `Input` (or none for a message of a kind not handled), and the Windows half
+//   pushes it. The one piece of state, the high surrogate of a WM_CHAR pair
+//   (the C++'s file-static g_high_surrogate), lives in `CharDecoder`.
+// * `key_from_virtual_key` takes `right_shift`, the answer to the C++'s
+//   MapVirtualKeyW(scancode, MAPVK_VSC_TO_VK_EX) == VK_RSHIFT, which only the
+//   generic VK_SHIFT needs; `mods_from_state` takes the keyboard state as the
+//   `KeyState` flags the Windows half reads with GetKeyState.
+
+module ultragui_d3d11::win32_keys;
+
+import {Vec2} from ultragui::core::math;
+import {MouseButton} from ultragui::input::input_queue;
+
+// GLFW's key codes, the ones this file produces.
+pub comptime let kKeyUnknown: i32 = -1;
+pub comptime let kKeyEscape: i32 = 256;
+pub comptime let kKeyEnter: i32 = 257;
+pub comptime let kKeyTab: i32 = 258;
+pub comptime let kKeyBackspace: i32 = 259;
+pub comptime let kKeyInsert: i32 = 260;
+pub comptime let kKeyDelete: i32 = 261;
+pub comptime let kKeyRight: i32 = 262;
+pub comptime let kKeyLeft: i32 = 263;
+pub comptime let kKeyDown: i32 = 264;
+pub comptime let kKeyUp: i32 = 265;
+pub comptime let kKeyPageUp: i32 = 266;
+pub comptime let kKeyPageDown: i32 = 267;
+pub comptime let kKeyHome: i32 = 268;
+pub comptime let kKeyEnd: i32 = 269;
+pub comptime let kKeyCapsLock: i32 = 280;
+pub comptime let kKeyScrollLock: i32 = 281;
+pub comptime let kKeyNumLock: i32 = 282;
+pub comptime let kKeyPrintScreen: i32 = 283;
+pub comptime let kKeyPause: i32 = 284;
+pub comptime let kKeyF1: i32 = 290;
+pub comptime let kKeyKp0: i32 = 320;
+pub comptime let kKeyKpDecimal: i32 = 330;
+pub comptime let kKeyKpDivide: i32 = 331;
+pub comptime let kKeyKpMultiply: i32 = 332;
+pub comptime let kKeyKpSubtract: i32 = 333;
+pub comptime let kKeyKpAdd: i32 = 334;
+pub comptime let kKeyKpEnter: i32 = 335;
+pub comptime let kKeyLeftShift: i32 = 340;
+pub comptime let kKeyLeftControl: i32 = 341;
+pub comptime let kKeyLeftAlt: i32 = 342;
+pub comptime let kKeyLeftSuper: i32 = 343;
+pub comptime let kKeyRightShift: i32 = 344;
+pub comptime let kKeyRightControl: i32 = 345;
+pub comptime let kKeyRightAlt: i32 = 346;
+pub comptime let kKeyRightSuper: i32 = 347;
+pub comptime let kKeyMenu: i32 = 348;
+
+// GLFW modifier bits.
+pub comptime let kModShift: i32 = 0x1;
+pub comptime let kModControl: i32 = 0x2;
+pub comptime let kModAlt: i32 = 0x4;
+pub comptime let kModSuper: i32 = 0x8;
+pub comptime let kModCapsLock: i32 = 0x10;
+pub comptime let kModNumLock: i32 = 0x20;
+
+// Window messages (winuser.h).
+pub comptime let kWmKeyDown: u32 = 0x0100;
+pub comptime let kWmKeyUp: u32 = 0x0101;
+pub comptime let kWmChar: u32 = 0x0102;
+pub comptime let kWmSysKeyDown: u32 = 0x0104;
+pub comptime let kWmSysKeyUp: u32 = 0x0105;
+pub comptime let kWmMouseMove: u32 = 0x0200;
+pub comptime let kWmLButtonDown: u32 = 0x0201;
+pub comptime let kWmLButtonUp: u32 = 0x0202;
+pub comptime let kWmLButtonDblClk: u32 = 0x0203;
+pub comptime let kWmRButtonDown: u32 = 0x0204;
+pub comptime let kWmRButtonUp: u32 = 0x0205;
+pub comptime let kWmRButtonDblClk: u32 = 0x0206;
+pub comptime let kWmMButtonDown: u32 = 0x0207;
+pub comptime let kWmMButtonUp: u32 = 0x0208;
+pub comptime let kWmMButtonDblClk: u32 = 0x0209;
+pub comptime let kWmMouseWheel: u32 = 0x020A;
+pub comptime let kWmMouseHWheel: u32 = 0x020E;
+
+// Virtual-key codes (winuser.h), the ones key_from_virtual_key reads.
+comptime let kVkBack: u32 = 0x08;
+comptime let kVkTab: u32 = 0x09;
+comptime let kVkReturn: u32 = 0x0D;
+comptime let kVkShift: u32 = 0x10;
+comptime let kVkControl: u32 = 0x11;
+comptime let kVkMenu: u32 = 0x12;
+comptime let kVkPause: u32 = 0x13;
+comptime let kVkCapital: u32 = 0x14;
+comptime let kVkEscape: u32 = 0x1B;
+comptime let kVkSpace: u32 = 0x20;
+comptime let kVkPrior: u32 = 0x21;
+comptime let kVkNext: u32 = 0x22;
+comptime let kVkEnd: u32 = 0x23;
+comptime let kVkHome: u32 = 0x24;
+comptime let kVkLeft: u32 = 0x25;
+comptime let kVkUp: u32 = 0x26;
+comptime let kVkRight: u32 = 0x27;
+comptime let kVkDown: u32 = 0x28;
+comptime let kVkSnapshot: u32 = 0x2C;
+comptime let kVkInsert: u32 = 0x2D;
+comptime let kVkDelete: u32 = 0x2E;
+comptime let kVkLWin: u32 = 0x5B;
+comptime let kVkRWin: u32 = 0x5C;
+comptime let kVkApps: u32 = 0x5D;
+comptime let kVkNumpad0: u32 = 0x60;
+comptime let kVkNumpad9: u32 = 0x69;
+comptime let kVkMultiply: u32 = 0x6A;
+comptime let kVkAdd: u32 = 0x6B;
+comptime let kVkSubtract: u32 = 0x6D;
+comptime let kVkDecimal: u32 = 0x6E;
+comptime let kVkDivide: u32 = 0x6F;
+comptime let kVkF1: u32 = 0x70;
+comptime let kVkF24: u32 = 0x87;
+comptime let kVkNumLock: u32 = 0x90;
+comptime let kVkScroll: u32 = 0x91;
+comptime let kVkLShift: u32 = 0xA0;
+comptime let kVkRShift: u32 = 0xA1;
+comptime let kVkLControl: u32 = 0xA2;
+comptime let kVkRControl: u32 = 0xA3;
+comptime let kVkLMenu: u32 = 0xA4;
+comptime let kVkRMenu: u32 = 0xA5;
+comptime let kVkOem1: u32 = 0xBA;
+comptime let kVkOemPlus: u32 = 0xBB;
+comptime let kVkOemComma: u32 = 0xBC;
+comptime let kVkOemMinus: u32 = 0xBD;
+comptime let kVkOemPeriod: u32 = 0xBE;
+comptime let kVkOem2: u32 = 0xBF;
+comptime let kVkOem3: u32 = 0xC0;
+comptime let kVkOem4: u32 = 0xDB;
+comptime let kVkOem5: u32 = 0xDC;
+comptime let kVkOem6: u32 = 0xDD;
+comptime let kVkOem7: u32 = 0xDE;
+
+comptime let kKfExtended: u32 = 0x100;
+comptime let kWheelDelta: f32 = 120.0;
+
+// HIWORD(lparam) & KF_EXTENDED
+fn extended(lparam: i64): bool => (((lparam as u64 >> 16) as u32) & 0xFFFF & kKfExtended) != 0;
+
+// The two halves of a message parameter as Windows' macros read them.
+fn low_word(v: u64): u32 => (v & 0xFFFF) as u32;
+fn high_word(v: u64): u32 => ((v >> 16) & 0xFFFF) as u32;
+
+// GET_X_LPARAM / GET_Y_LPARAM: a signed 16-bit coordinate.
+fn signed_word(w: u32): i32 => (w as u16) as i16 as i32;
+
+// MousePosition()
+fn mouse_position(lparam: i64, scale: Vec2): Vec2 => Vec2 {
+  x: signed_word(low_word(lparam as u64)) as f32 * scale.x,
+  y: signed_word(high_word(lparam as u64)) as f32 * scale.y,
+};
+
+// KeyFromVirtualKey(): the GLFW key code for a Win32 virtual key; `lparam`
+// tells the keypad Enter and the right-hand modifiers apart; `right_shift` is
+// for the generic VK_SHIFT, true when its scan code is the right Shift's.
+// kKeyUnknown (-1) for a key GLFW has no code for.
+pub fn key_from_virtual_key(vk: u32, lparam: i64, right_shift: bool): i32 {
+  if ((vk >= '0' as u32 && vk <= '9' as u32) || (vk >= 'A' as u32 && vk <= 'Z' as u32)) {
+    return vk as i32;
+  }
+  if (vk >= kVkF1 && vk <= kVkF24) {
+    return kKeyF1 + (vk - kVkF1) as i32;
+  }
+  if (vk >= kVkNumpad0 && vk <= kVkNumpad9) {
+    return kKeyKp0 + (vk - kVkNumpad0) as i32;
+  }
+  return match (vk) {
+    kVkSpace => 32,
+    kVkOem7 => 39,       // '
+    kVkOemComma => 44,   // ,
+    kVkOemMinus => 45,   // -
+    kVkOemPeriod => 46,  // .
+    kVkOem2 => 47,       // /
+    kVkOem1 => 59,       // ;
+    kVkOemPlus => 61,    // =
+    kVkOem4 => 91,       // [
+    kVkOem5 => 92,       // backslash
+    kVkOem6 => 93,       // ]
+    kVkOem3 => 96,       // `
+    kVkEscape => kKeyEscape,
+    kVkReturn => extended(lparam) ? kKeyKpEnter : kKeyEnter,
+    kVkTab => kKeyTab,
+    kVkBack => kKeyBackspace,
+    kVkInsert => kKeyInsert,
+    kVkDelete => kKeyDelete,
+    kVkRight => kKeyRight,
+    kVkLeft => kKeyLeft,
+    kVkDown => kKeyDown,
+    kVkUp => kKeyUp,
+    kVkPrior => kKeyPageUp,
+    kVkNext => kKeyPageDown,
+    kVkHome => kKeyHome,
+    kVkEnd => kKeyEnd,
+    kVkCapital => kKeyCapsLock,
+    kVkScroll => kKeyScrollLock,
+    kVkNumLock => kKeyNumLock,
+    kVkSnapshot => kKeyPrintScreen,
+    kVkPause => kKeyPause,
+    kVkDecimal => kKeyKpDecimal,
+    kVkDivide => kKeyKpDivide,
+    kVkMultiply => kKeyKpMultiply,
+    kVkSubtract => kKeyKpSubtract,
+    kVkAdd => kKeyKpAdd,
+    kVkLWin => kKeyLeftSuper,
+    kVkRWin => kKeyRightSuper,
+    kVkApps => kKeyMenu,
+    // The generic modifiers; the scan code says which side.
+    kVkShift => right_shift ? kKeyRightShift : kKeyLeftShift,
+    kVkControl => extended(lparam) ? kKeyRightControl : kKeyLeftControl,
+    kVkMenu => extended(lparam) ? kKeyRightAlt : kKeyLeftAlt,
+    kVkLShift => kKeyLeftShift,
+    kVkRShift => kKeyRightShift,
+    kVkLControl => kKeyLeftControl,
+    kVkRControl => kKeyRightControl,
+    kVkLMenu => kKeyLeftAlt,
+    kVkRMenu => kKeyRightAlt,
+    _ => kKeyUnknown,
+  };
+}
+
+// The scan code of a key message's lparam, as the C++ forms it: bits 16..24.
+pub fn scancode_of(lparam: i64): u32 => ((lparam as u64 >> 16) & 0xFF) as u32;
+
+// The GetKeyState() answers CurrentMods() reads: the high bit (down) for the
+// first four, the low bit (toggled) for the locks.
+pub struct KeyState : Copy {
+  pub var shift_down: bool = false
+  pub var control_down: bool = false
+  pub var alt_down: bool = false
+  pub var win_down: bool = false  // either Windows key
+  pub var caps_lock_on: bool = false
+  pub var num_lock_on: bool = false
+}
+
+// CurrentMods(): GLFW modifier bits for the keyboard's state.
+pub fn mods_from_state(s: KeyState): i32 {
+  var mods: i32 = 0;
+  if (s.shift_down) {
+    mods |= kModShift;
+  }
+  if (s.control_down) {
+    mods |= kModControl;
+  }
+  if (s.alt_down) {
+    mods |= kModAlt;
+  }
+  if (s.win_down) {
+    mods |= kModSuper;
+  }
+  if (s.caps_lock_on) {
+    mods |= kModCapsLock;
+  }
+  if (s.num_lock_on) {
+    mods |= kModNumLock;
+  }
+  return mods;
+}
+
+pub enum InputKind as u8 { MouseMove, MouseButton, Scroll, Key, Char }
+
+// What one message asks the host platform to be told.
+pub struct Input : Copy {
+  pub var kind: InputKind = InputKind::MouseMove
+  pub var position: Vec2 = Vec2 { x: 0.0, y: 0.0 }  // MouseMove, and MouseButton (which moves first)
+  pub var button: MouseButton = MouseButton::Left
+  pub var pressed: bool = false                      // MouseButton, Key
+  pub var scroll: Vec2 = Vec2 { x: 0.0, y: 0.0 }
+  pub var key: i32 = 0
+  pub var scancode: i32 = 0
+  pub var repeat: bool = false
+  pub var mods: i32 = 0
+  pub var codepoint: u32 = 0
+}
+
+// The result of decode_message: `handled` is the C++'s return value (true for
+// input of a kind handled here, whether or not it produced anything to push:
+// half a surrogate pair and control characters push nothing); `input` is what
+// to push. `capture` is the mouse-capture change a button message wants:
+// 1 set, -1 release when held, 0 none.
+pub struct Decoded : Copy {
+  pub var handled: bool = false
+  pub var input: Input? = none
+  pub var capture: i32 = 0
+}
+
+// The high surrogate of a WM_CHAR pair, until its low half arrives (the C++'s
+// file-static g_high_surrogate).
+pub struct CharDecoder {
+  pub var high_surrogate: u32 = 0
+
+  pub fn CharDecoder(): CharDecoder => CharDecoder {};
+}
+
+// True for the four key messages, the ones whose decoding reads `right_shift`
+// and `keys`.
+pub fn is_key_message(message: u32): bool =>
+  message == kWmKeyDown || message == kWmSysKeyDown || message == kWmKeyUp || message == kWmSysKeyUp;
+
+fn is_high_surrogate(unit: u32): bool => unit >= 0xD800 && unit <= 0xDBFF;
+fn is_low_surrogate(unit: u32): bool => unit >= 0xDC00 && unit <= 0xDFFF;
+
+// The part of HandleMessage() before the platform is touched. `right_shift` is
+// the VK_SHIFT side (see key_from_virtual_key) and `keys` the keyboard state
+// (CurrentMods); the caller asks Windows for both only for a key message, which
+// is the only one that reads them.
+pub fn decode_message(var chars&: CharDecoder, message: u32, wparam: u64, lparam: i64, scale: Vec2, right_shift: bool,
+  keys: KeyState): Decoded {
+  var d = Decoded {};
+  if (message == kWmMouseMove) {
+    d.handled = true;
+    d.input = Input { kind: InputKind::MouseMove, position: mouse_position(lparam, scale) };
+  } else if (message == kWmLButtonDown || message == kWmLButtonDblClk || message == kWmRButtonDown
+      || message == kWmRButtonDblClk || message == kWmMButtonDown || message == kWmMButtonDblClk
+      || message == kWmLButtonUp || message == kWmRButtonUp || message == kWmMButtonUp) {
+    let pressed = message != kWmLButtonUp && message != kWmRButtonUp && message != kWmMButtonUp;
+    var button = MouseButton::Left;
+    if (message == kWmRButtonDown || message == kWmRButtonDblClk || message == kWmRButtonUp) {
+      button = MouseButton::Right;
+    } else if (message == kWmMButtonDown || message == kWmMButtonDblClk || message == kWmMButtonUp) {
+      button = MouseButton::Middle;
+    }
+    d.handled = true;
+    d.capture = pressed ? 1 : -1;
+    d.input = Input { kind: InputKind::MouseButton, position: mouse_position(lparam, scale), button, pressed };
+  } else if (message == kWmMouseWheel) {
+    d.handled = true;
+    d.input = Input { kind: InputKind::Scroll,
+      scroll: Vec2 { x: 0.0, y: signed_word(high_word(wparam)) as f32 / kWheelDelta } };
+  } else if (message == kWmMouseHWheel) {
+    d.handled = true;
+    d.input = Input { kind: InputKind::Scroll,
+      scroll: Vec2 { x: -(signed_word(high_word(wparam)) as f32) / kWheelDelta, y: 0.0 } };
+  } else if (message == kWmKeyDown || message == kWmSysKeyDown || message == kWmKeyUp || message == kWmSysKeyUp) {
+    let pressed = message == kWmKeyDown || message == kWmSysKeyDown;
+    d.handled = true;
+    d.input = Input {
+      kind: InputKind::Key,
+      key: key_from_virtual_key(wparam as u32, lparam, right_shift),
+      scancode: ((lparam as u64 >> 16) & 0x1FF) as i32,
+      pressed,
+      repeat: pressed && (lparam & (1 << 30)) != 0,
+      mods: mods_from_state(keys),
+    };
+  } else if (message == kWmChar) {
+    d.handled = true;
+    let unit = (wparam & 0xFFFF) as u32;
+    if (is_high_surrogate(unit)) {
+      chars.high_surrogate = unit;
+    } else {
+      var codepoint = unit;
+      if (is_low_surrogate(unit) && chars.high_surrogate != 0) {
+        codepoint = 0x10000 + ((chars.high_surrogate - 0xD800) << 10) + (unit - 0xDC00);
+      }
+      chars.high_surrogate = 0;
+      // Control characters arrive as keys already.
+      if (codepoint >= 32 && codepoint != 127) {
+        d.input = Input { kind: InputKind::Char, codepoint };
+      }
+    }
+  }
+  return d;
+}
