@@ -1,0 +1,14 @@
+# ugui/scripting/lua_video.{h,cc} in aki: the video Lua bindings
+# (ugui.load_video, ugui.video_play, ...). A package of its own so a Lua user
+# who does not want video does not link pl_mpeg and miniaudio; it links what
+# ultragui_lua (Lua 5.4) and ultragui_video link. See ../PORTING.md.
+[package]
+name = "ultragui_lua_video"
+kind = "lib"
+version = "0.1.0"
+description = "libultragui's video Lua bindings in aki"
+
+[dependencies]
+ultragui = { path = "../ultragui" }
+ultragui_lua = { path = "../ultragui_lua" }
+ultragui_video = { path = "../ultragui_video" }
