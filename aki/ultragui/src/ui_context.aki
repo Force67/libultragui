@@ -30,12 +30,17 @@
 //   ConvertFrame where the C++ asks the video players, and shut down where
 //   the C++ deletes them.
 // * The script runtime's hooks into UIContext (the C++ Init registers
-//   RegisterAnimLua & co. with lambdas capturing `this`): `script_host()`
-//   lends a ScriptHost (anim loading, widget lookup by name, extensions)
-//   beside the World and the WidgetContext, see ScriptHost.
+//   RegisterAnimLua & co. with lambdas capturing `this`): every call that
+//   can run a script lends a ScriptHost (anim loading, widget lookup by
+//   name, the Rhi, texture sink and audio, extensions) in the
+//   WidgetContext, and `with_host` lends one directly; the bindings
+//   themselves are registered through `add_script_init`, run right after
+//   the runtime's init (ultragui_lua::lua_ui_context).
+// * PaintCallback gets a PaintEnv: the renderer and the Rhi, plus the
+//   World, widget context, root and time a C++ callback reads through the
+//   `&ui` it captures.
 // * The audio backend is an owned AudioBackendBox (`set_audio(box)`), silent
 //   by default; UIContext inits and shuts it down as the C++ does.
-// * PaintCallback is `own fn(&var Renderer2D, &var R): ()`.
 // * The animator's apply/done callbacks are collected and applied after
 //   Animator::update returns (a closure cannot lend the World twice); they
 //   only write the widgets' animation styles, in the same order.
@@ -47,6 +52,7 @@ import {List} from akikit::containers::list;
 import {Atomic} from akikit::threading::atomic;
 import {Mutex} from akikit::threading::mutex;
 import {Arc} from akikit::memory::arc;
+import {Box} from akikit::memory::box;
 import {String, from_str} from akikit::strings::string;
 import {eprintln} from akikit::logging;
 import {Animator} from ultragui::animation::animator;
@@ -68,14 +74,15 @@ import {HostPlatform} from ultragui::platform::platform_host;
 import {DrawData, TextureId} from ultragui::render::draw_data;
 import {paint_widget_tree} from ultragui::render::paint;
 import {Renderer2D} from ultragui::render::renderer2d;
-import {DynTextureBackend, TextureBackendBox} from ultragui::render::texture_backend;
+import {TextureBackendBox} from ultragui::render::texture_backend;
 import {Vertex2D, pack_radii_uniform} from ultragui::render::vertex;
 import {NullRhi} from ultragui::rhi::null_rhi;
 import {DynRhi, Rhi, RhiConfig} from ultragui::rhi::rhi;
 import {RhiTextureBackend} from ultragui::rhi::rhi_texture_backend;
 import {RhiTextureHandle} from ultragui::rhi::rhi_types;
-import {AnimId, FrameEnv, ScriptHost, UiExtension, UiExtensionBox, WidgetCache} from ultragui::scripting::script_host;
+import {AnimId, FrameEnv, ScriptHost, UiExtension, UiExtensionBox, WidgetCache, find_extension_in} from ultragui::scripting::script_host;
 import {NoScript, ScriptRuntime} from ultragui::scripting::script_runtime;
+import {register_widget_tree} from ultragui::scripting::lua_widgets;
 import {ViewportScaleMode} from ultragui::style::enums;
 import {Style} from ultragui::style::style;
 import {Theme} from ultragui::style::theme;
@@ -144,11 +151,24 @@ pub struct FrameStats : Copy {
   pub var reused: bool = false  // the previous draw list was handed back unchanged
 }
 
-// What UIContext::PaintCallback is lent: the renderer and the Rhi.
+// What UIContext::PaintCallback is lent: the renderer and the Rhi (the C++
+// callback's arguments), and what a C++ callback reaches through the
+// UIContext it captures (`ui.root()`, `ui.time()`, the World, PaintWidgetTree's
+// widget context): `world`, `ctx` (the widget context, as for paint_tree),
+// `root`, `time` (platform time when the callback runs).
 pub struct PaintEnv<'a, R: Rhi> {
   pub var renderer: &'a var Renderer2D
   pub var rhi: &'a var R
+  pub var world: &'a var World
+  pub var ctx: WidgetContext<'a>
+  pub var root: WidgetId
+  pub var time: f64
 }
+
+// A script binding registered right after the runtime's init (the C++
+// Init's `#if ULTRAGUI_LUA` block: RegisterAudioLua, RegisterLottieLua,
+// RegisterAnimLua, RegisterVideoLua), see UIContext::add_script_init.
+pub type ScriptInit<S: ScriptRuntime> = own fn(&var S): ();
 
 // UIContext::PaintCallback (Function<void(Renderer2D&, RHI*)>): replaces
 // layout + paint of the root in the swapchain pass.
@@ -294,7 +314,7 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
   pub var widget_cache: WidgetCache = WidgetCache()
 
   var rhi_textures: bool = false  // legacy mode: texture_backend_ is the RHI adapter
-  var vector_anims: List<VectorAnimation> = List()
+  var vector_anims: List<Box<VectorAnimation>> = List()  // boxed: scripts hold their addresses
   var extensions: List<UiExtensionBox> = List()
 
   var root_: WidgetId = kNullWidget
@@ -328,6 +348,7 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
   var current_theme_name: String = String()
 
   var offscreen_queue: List<OffscreenPass> = List()
+  var script_inits: List<ScriptInit<S>> = List()
   var on_paint_cb: PaintCallback<R>? = none
 
   var script_clicks: Arc<Mutex<List<WidgetId>>>? = none  // set_script_click_dispatch
@@ -417,14 +438,31 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
   // Load a .uganim vector animation, owned and updated each frame by
   // UIContext; none on failure.
   pub fn load_anim(var self&, path: str, width: u32, height: u32): AnimId?;
-  pub fn anim(self&, id: AnimId): (&VectorAnimation)? => self.vector_anims.at(id as usize);
-  pub fn anim_var(var self&, id: AnimId): (&var VectorAnimation)? => self.vector_anims.at_var(id as usize);
+  pub fn anim(self&, id: AnimId): (&VectorAnimation)?;
+  pub fn anim_var(var self&, id: AnimId): (&var VectorAnimation)?;
+
+  // Register a script binding to run right after the runtime's init, in the
+  // order added (call before init). The Lua packages add theirs this way
+  // (ultragui_lua::lua_ui_context), where the C++ Init calls
+  // Register*Lua under ULTRAGUI_LUA.
+  pub fn add_script_init(var self&, f: ScriptInit<S>) {
+    self.script_inits.push(f);
+  }
 
   // Add a frame extension (a package's players, see UiExtension); its index.
   pub fn add_extension<T: UiExtension>(var self&, key&: ComponentKey<T>, extension: T): u32;
   // The extension added at `index`, as the type `key` names; none if out of
   // range or of another type.
   pub fn extension_var<T: UiExtension>(var self&, key&: ComponentKey<T>, index: u32): (&var T)?;
+  // The index of the first extension of the type `key` names; none if none
+  // was added.
+  pub fn find_extension<T: UiExtension>(self&, key&: ComponentKey<T>): u32? => find_extension_in(self.extensions, key);
+
+  // Lend the script host (anims, the Rhi and texture sink, audio, the widget
+  // cache, the extensions): what LoadLottie / LoadVideo and the extension
+  // packages' helpers (ultragui_lottie::lottie_ui, ultragui_video::video_ui)
+  // work through.
+  pub fn with_host(var self&, f: fn(&var ScriptHost): ());
 
   // ScriptRuntime::CallHandler with UIContext's World and context (and the
   // script host): the examples' `on_<name>` click dispatch, run after
@@ -436,7 +474,12 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
   // router's on_click (replacing any); the handlers run at the end of
   // pump_input, after the router has processed the frame's input, where the
   // C++ lambda runs inside it (router handlers get no World here).
-  pub fn set_script_click_dispatch(var self&);
+  // `left_only: false` is the previewer's lambda, which dispatches any button.
+  pub fn set_script_click_dispatch(var self&, left_only: bool = true);
+
+  // ScriptRuntime::Exec with UIContext's World and context, without the
+  // timer-clock sync exec_script does: `ui.script().Exec(src, name)`.
+  pub fn script_exec(var self&, script: str, name: str): bool;
 
   // Create an offscreen render target (delegates to the Rhi).
   pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle => self.rhi.create_render_target(width, height);
@@ -476,30 +519,6 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
 // ---------------------------------------------------------------------------
 // UIContext's methods
 // ---------------------------------------------------------------------------
-
-// RegisterWidgetTree (scripting/lua_widgets.cc): register every named widget
-// of a tree with the runtime, depth first.
-pub fn register_widget_tree<S: ScriptRuntime>(var rt&: S, world&: World, root: WidgetId) {
-  if (!root.valid()) {
-    return;
-  }
-  var named = false;
-  if (let n& = world.get(kWidgetNode, root)) {
-    named = n.name.len() > 0;
-  } else {
-    return;
-  }
-  if (named) {
-    rt.register_widget(world, root);
-  }
-  var children = List::<WidgetId>();
-  for (let c in world.get(kHierarchy, root)!.children.iter()) {
-    children.push(c);
-  }
-  for (let child in children.iter()) {
-    register_widget_tree(rt, world, child);
-  }
-}
 
 fn UIContext<P, R, S>::~UIContext() {
   if (self.initialized) {
@@ -566,8 +585,19 @@ fn UIContext<P, R, S>::init(var self&, config: UIConfig): bool {
   }
   self.sync_dpi_scale();
 
-  // Scripting runtime
+  // Scripting runtime, then its bindings into UIContext
   let _ = self.script.init();
+  {
+    var pending = List::<ScriptInit<S>>();
+    swap(self.script_inits, pending);
+    while (pending.len() > 0) {
+      let f = pending.remove(0);
+      {
+        var rt& = self.script;
+        f(rt);
+      }
+    }
+  }
 
   if (!self.audio.init()) {
     eprintln("ultragui: audio init failed (non-fatal)");
@@ -687,13 +717,16 @@ fn UIContext<P, R, S>::install_document(var self&, doc&: UguiDocument): WidgetId
 
 fn UIContext<P, R, S>::load_script(var self&, path: str): bool {
   self.script.sync_timer_clock(self.platform.time());
-  var adapter = RhiTextureBackend::<R>(self.rhi);
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
     host: ScriptHost {
-      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
-      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+      anims: self.vector_anims,
+      env: FrameEnv {
+        rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+        audio: self.audio,
+      },
+      widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
     },
   };
   return self.script.exec_file(self.world, ctx, path);
@@ -701,13 +734,32 @@ fn UIContext<P, R, S>::load_script(var self&, path: str): bool {
 
 fn UIContext<P, R, S>::exec_script(var self&, script: str, name: str): bool {
   self.script.sync_timer_clock(self.platform.time());
-  var adapter = RhiTextureBackend::<R>(self.rhi);
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
     host: ScriptHost {
-      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
-      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+      anims: self.vector_anims,
+      env: FrameEnv {
+        rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+        audio: self.audio,
+      },
+      widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
+    },
+  };
+  return self.script.exec(self.world, ctx, script, name);
+}
+
+fn UIContext<P, R, S>::script_exec(var self&, script: str, name: str): bool {
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims,
+      env: FrameEnv {
+        rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+        audio: self.audio,
+      },
+      widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
     },
   };
   return self.script.exec(self.world, ctx, script, name);
@@ -771,13 +823,16 @@ fn UIContext<P, R, S>::pump_input(var self&) {
   if (self.overlays.entries.len() > 0) {
     var queue = self.platform.input_queue();
     {
-      var adapter = RhiTextureBackend::<R>(self.rhi);
       var ctx = WidgetContext {
         text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
         current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
         host: ScriptHost {
-          anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
-          widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+          anims: self.vector_anims,
+          env: FrameEnv {
+            rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+            audio: self.audio,
+          },
+          widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
         },
       };
       var i = 0u32;
@@ -832,13 +887,16 @@ fn UIContext<P, R, S>::pump_input(var self&) {
   }
 
   if (self.root_.valid()) {
-    var adapter = RhiTextureBackend::<R>(self.rhi);
     var ctx = WidgetContext {
       text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
       current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
       host: ScriptHost {
-        anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
-        widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+        anims: self.vector_anims,
+        env: FrameEnv {
+          rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+          audio: self.audio,
+        },
+        widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
       },
     };
     let _ = self.input.process(self.world, ctx, self.root_);
@@ -893,13 +951,16 @@ fn UIContext<P, R, S>::step_animator(var self&, now: f64) {
 }
 
 fn UIContext<P, R, S>::update_timers(var self&, now: f64) {
-  var adapter = RhiTextureBackend::<R>(self.rhi);
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
     host: ScriptHost {
-      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
-      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+      anims: self.vector_anims,
+      env: FrameEnv {
+        rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+        audio: self.audio,
+      },
+      widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
     },
   };
   self.script.update_timers(self.world, ctx, now);
@@ -982,16 +1043,16 @@ fn UIContext<P, R, S>::update(var self&) {
     var textures = self.renderer.texture_backend();
     if (var b& = textures) {
       for (var a& in self.vector_anims) {
-        a.update(b, dt);
+        a.get_var().update(b, dt);
       }
     } else if (self.rhi_textures) {
       var adapter = RhiTextureBackend::<R>(self.rhi);
       for (var a& in self.vector_anims) {
-        a.update(adapter, dt);
+        a.get_var().update(adapter, dt);
       }
     } else {
       for (var a& in self.vector_anims) {
-        a.update::<TextureBackendBox>(none, dt);
+        a.get_var().update::<TextureBackendBox>(none, dt);
       }
     }
   }
@@ -1111,7 +1172,15 @@ fn UIContext<P, R, S>::run_paint_callback(var self&): bool {
     return false;
   };
   {
-    var env = PaintEnv::<R> { renderer: self.renderer, rhi: self.rhi };
+    let time = self.time();
+    var env = PaintEnv::<R> {
+      renderer: self.renderer, rhi: self.rhi, world: self.world,
+      ctx: WidgetContext {
+        text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+        current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+      },
+      root: self.root_, time,
+    };
     handler(env);
   }
   if (self.on_paint_cb == none) {
@@ -1381,16 +1450,16 @@ fn UIContext<P, R, S>::shutdown(var self&) {
   {
     if (var b& = self.renderer.texture_backend()) {
       for (var a& in self.vector_anims) {
-        a.unload(b);
+        a.get_var().unload(b);
       }
     } else if (self.rhi_textures) {
       var adapter = RhiTextureBackend::<R>(self.rhi);
       for (var a& in self.vector_anims) {
-        a.unload(adapter);
+        a.get_var().unload(adapter);
       }
     } else {
       for (var a& in self.vector_anims) {
-        a.unload::<TextureBackendBox>(none);
+        a.get_var().unload::<TextureBackendBox>(none);
       }
     }
   }
@@ -1433,31 +1502,22 @@ fn UIContext<P, R, S>::load_svg(var self&, path: str, width: u32, height: u32): 
 }
 
 fn UIContext<P, R, S>::load_anim(var self&, path: str, width: u32, height: u32): AnimId? {
-  var adapter = RhiTextureBackend::<R>(self.rhi);
   var host = ScriptHost {
-    anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
-    widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+    anims: self.vector_anims,
+    env: FrameEnv {
+      rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+      audio: self.audio,
+    },
+    widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
   };
   return host.load_anim(path, width, height);
 }
 
-// texture_backend_: the host's backend (draw-data mode), the RHI adapter
-// (legacy mode), or none.
-fn textures_of<'a, R: Rhi>(renderer: &'a var Renderer2D, adapter: &'a var RhiTextureBackend<'a, R>, rhi_textures: bool): DynTextureBackend<'a>? {
-  if (var b& = renderer.texture_backend()) {
-    return b.as_dyn();
-  }
-  if (rhi_textures) {
-    return DynTextureBackend::of(adapter);
-  }
-  return none;
-}
-
-fn UIContext<P, R, S>::set_script_click_dispatch(var self&) {
+fn UIContext<P, R, S>::set_script_click_dispatch(var self&, left_only: bool) {
   let queue = Arc::<Mutex<List<WidgetId>>>(Mutex::<List<WidgetId>>(List::<WidgetId>()));
   let shared = queue.share();
   self.input.set_on_click(own fn(w: WidgetId, b: MouseButton) {
-    if (b != MouseButton::Left) {
+    if (left_only && b != MouseButton::Left) {
       return;
     }
     shared.get().with(fn(l: &var List<WidgetId>) {
@@ -1490,13 +1550,16 @@ fn UIContext<P, R, S>::dispatch_script_clicks(var self&) {
 }
 
 fn UIContext<P, R, S>::call_handler(var self&, func_name: str, widget: WidgetId): bool {
-  var adapter = RhiTextureBackend::<R>(self.rhi);
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
     host: ScriptHost {
-      anims: self.vector_anims, textures: textures_of(self.renderer, adapter, self.rhi_textures),
-      widgets: self.widget_cache, root: self.root_, audio: self.audio.as_dyn(), extensions: self.extensions,
+      anims: self.vector_anims,
+      env: FrameEnv {
+        rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+        audio: self.audio,
+      },
+      widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
     },
   };
   return self.script.call_handler(self.world, ctx, func_name, widget);
@@ -1521,4 +1584,30 @@ fn UIContext<P, R, S>::set_theme(var self&, theme&: Theme) {
   for (let (name, value) in theme.tokens.iter()) {
     self.builder.set_variable(name.as_str(), value.as_str());
   }
+}
+
+fn UIContext<P, R, S>::anim(self&, id: AnimId): (&VectorAnimation)? {
+  if (id as usize >= self.vector_anims.len()) {
+    return none;
+  }
+  return self.vector_anims[id as usize].get();
+}
+
+fn UIContext<P, R, S>::anim_var(var self&, id: AnimId): (&var VectorAnimation)? {
+  if (id as usize >= self.vector_anims.len()) {
+    return none;
+  }
+  return self.vector_anims[id as usize].get_var();
+}
+
+fn UIContext<P, R, S>::with_host(var self&, f: fn(&var ScriptHost): ()) {
+  var host = ScriptHost {
+    anims: self.vector_anims,
+    env: FrameEnv {
+      rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+      audio: self.audio,
+    },
+    widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
+  };
+  f(host);
 }

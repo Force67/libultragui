@@ -8,6 +8,7 @@ version = "0.1.0"
 
 [dependencies]
 ultragui = { path = "../../../ultragui" }
+ultragui_lua = { path = "../../../ultragui_lua" }
 
 [build]
 opt = 2

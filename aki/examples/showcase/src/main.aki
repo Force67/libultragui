@@ -1,0 +1,329 @@
+// examples/showcase/main.cc: demonstrates multiple visual identities.
+//
+//   ultragui_showcase [scene] [font_path]
+//
+// Scenes: dashboard (default), neon, glass, terminal, rpg, nerv, cosmos,
+// meridian. Press 1-8 to switch scenes at runtime.
+//
+// Shape differences (not behavior):
+// * The C++ bakes ULTRAGUI_SHADER_DIR and ULTRAGUI_SHOWCASE_DIR into the
+//   program; here both are found from this package's directory (the shaders
+//   are ultragui_vulkan/shaders, byte-identical to the build's).
+// * The C++ UIContext has the Lua runtime and the bindings of its default
+//   build (audio, Lottie, anim, video); here that is
+//   ultragui_lua::lua_ui_context with add_lottie_lua and add_video_lua.
+// * The click lambda (left click on a named widget -> on_<name>(w)) is
+//   UIContext::set_script_click_dispatch, which runs the handlers at the end
+//   of pump_input instead of inside the input router.
+// * The file-level statics (current scene, key states, the NERV target) are
+//   locals of main.
+
+module ultragui_showcase;
+
+import {eprintln, println} from akikit::logging;
+import {arguments} from akikit::process::command_line;
+import {Command} from akikit::process::child;
+import {output} from akikit::process::capture;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {path_exists} from akikit::filesystem::file_util;
+import {String, from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {Vec2} from ultragui::core::math;
+import {Vertex2D, pack_color, pack_radii} from ultragui::render::vertex;
+import {RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {kInvalidFont} from ultragui::text::text_engine;
+import {PaintEnv, UIConfig, UIContext} from ultragui::ui_context;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {GlfwWindow, glfw_get_key, kGlfwKey1, kGlfwPress} from ultragui_glfw::sys::glfw;
+import {VulkanRhi} from ultragui_vulkan::vulkan_rhi;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {LuaBindings, lua_ui_context} from ultragui_lua::lua_ui_context;
+import {add_lottie_lua} from ultragui_lua_lottie::lua_lottie;
+import {add_video_lua} from ultragui_lua_video::lua_video;
+
+type Ui = UIContext<GlfwPlatform, VulkanRhi, LuaRuntime>;
+
+// find_font: $ULTRAGUI_FONT, fc-match's answer (its first line, as fgets
+// reads it, without the trailing newline), or the first existing candidate.
+fn find_font(): String? {
+  if (let env = get_environment_variable("ULTRAGUI_FONT")) {
+    if (path_exists(env.as_str())) {
+      return env;
+    }
+  }
+  var cmd = Command("sh");
+  cmd.arg("-c");
+  cmd.arg("fc-match -f '%{file}' 'sans:style=Regular' 2>/dev/null");
+  if (let out = output(cmd)) {
+    var n: usize = 0;
+    while (n < out.stdout.len() && n < 1023) {
+      n += 1;
+      if (out.stdout[n - 1] == 0x0A) {
+        break;
+      }
+    }
+    while (n > 0 && (out.stdout[n - 1] == 0x0A || out.stdout[n - 1] == 0x0D)) {
+      n -= 1;
+    }
+    var path = String();
+    if (n > 0 && path.push_utf8(out.stdout.as_slice()[..n] as bytes) && path_exists(path.as_str())) {
+      return path;
+    }
+  }
+  let candidates = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+  ];
+  for (let path in candidates) {
+    if (path_exists(path)) {
+      return from_str(path);
+    }
+  }
+  return none;
+}
+
+struct Scene : Copy {
+  pub let name: str<'static>
+  pub let ugui_file: str<'static>
+  pub let lua_file: str<'static>
+  pub let clear_color: u32
+}
+
+static let kScenes: [Scene; 8] = [
+  Scene { name: "dashboard", ugui_file: "scenes/dashboard.ugui", lua_file: "scenes/dashboard.lua", clear_color: 0x0a0a1a },
+  Scene { name: "neon", ugui_file: "scenes/neon.ugui", lua_file: "scenes/neon.lua", clear_color: 0x000000 },
+  Scene { name: "glass", ugui_file: "scenes/glass.ugui", lua_file: "scenes/glass.lua", clear_color: 0x0d0d14 },
+  Scene { name: "terminal", ugui_file: "scenes/terminal.ugui", lua_file: "scenes/terminal.lua", clear_color: 0x000000 },
+  Scene { name: "rpg", ugui_file: "scenes/rpg_menu.ugui", lua_file: "scenes/rpg_menu.lua", clear_color: 0x000000 },
+  Scene { name: "nerv", ugui_file: "scenes/nerv.ugui", lua_file: "scenes/nerv.lua", clear_color: 0x050510 },
+  Scene { name: "cosmos", ugui_file: "scenes/cosmos.ugui", lua_file: "scenes/cosmos.lua", clear_color: 0x06061a },
+  Scene { name: "meridian", ugui_file: "scenes/meridian.ugui", lua_file: "scenes/meridian.lua", clear_color: 0x09090b },
+];
+comptime let kSceneCount: usize = 8;
+comptime let kNervScene: usize = 5;
+
+// --- NERV render-to-texture state ---
+comptime let kNervW: u32 = 640;
+comptime let kNervH: u32 = 400;
+
+fn min4(a: f32, b: f32, c: f32, d: f32): f32 {
+  var m = a;
+  if (b < m) { m = b; }
+  if (c < m) { m = c; }
+  if (d < m) { m = d; }
+  return m;
+}
+
+fn max4(a: f32, b: f32, c: f32, d: f32): f32 {
+  var m = a;
+  if (m < b) { m = b; }
+  if (m < c) { m = c; }
+  if (m < d) { m = d; }
+  return m;
+}
+
+// The perspective projection of the NERV monitor: a local corner to screen.
+struct NervProjection : Copy {
+  pub var cx: f32
+  pub var cy: f32
+  pub var cy_sin: f32
+  pub var cy_cos: f32
+  pub var cx_sin: f32
+  pub var cx_cos: f32
+  pub var focal: f32
+
+  pub fn project(self&, lx: f32, ly: f32): (f32, f32) {
+    // Rotate around Y
+    let rx = lx * self.cy_cos;
+    let rz = -lx * self.cy_sin;
+    // Rotate around X
+    let ry = ly * self.cx_cos - rz * self.cx_sin;
+    let rz2 = ly * self.cx_sin + rz * self.cx_cos;
+    // Perspective divide
+    let s = self.focal / (self.focal + rz2);
+    return (self.cx + rx * s, self.cy + ry * s);
+  }
+}
+
+fn nerv_setup(var ui&: Ui, var nerv_target&: RhiTextureHandle) {
+  nerv_target = ui.create_render_target(kNervW, kNervH);
+  if (nerv_target == kInvalidTexture) {
+    eprintln("Failed to create NERV render target");
+    return;
+  }
+
+  println(f"NERV: render target {nerv_target} ({kNervW}x{kNervH})");
+  let target = nerv_target;
+  ui.set_on_paint(own fn(env: &var PaintEnv<VulkanRhi>) {
+    let ds = env.rhi.display_size();
+    let cx = ds.x * 0.5;
+    let cy = ds.y * 0.5;
+    let hw = (kNervW as f32) * 0.5;
+    let hh = (kNervH as f32) * 0.5;
+
+    // 3D perspective transform: tilt the monitor
+    let angle_y: f32 = 0.35;   // ~20 deg around Y axis
+    let angle_x: f32 = -0.12;  // slight tilt back
+    let focal: f32 = 900.0;
+    let p = NervProjection {
+      cx, cy, cy_sin: @sin(angle_y), cy_cos: @cos(angle_y), cx_sin: @sin(angle_x), cx_cos: @cos(angle_x), focal,
+    };
+
+    // Quad corners: TL, TR, BR, BL
+    let (tlx, tly) = p.project(-hw, -hh);
+    let (trx, try_) = p.project(hw, -hh);
+    let (brx, bry) = p.project(hw, hh);
+    let (blx, bly) = p.project(-hw, hh);
+
+    // Ambient glow: use the projected bounding box
+    let gx = min4(tlx, trx, brx, blx) - 30.0;
+    let gy = min4(tly, try_, bry, bly) - 30.0;
+    let gw = max4(tlx, trx, brx, blx) - gx + 60.0;
+    let gh = max4(tly, try_, bry, bly) - gy + 60.0;
+    env.renderer.draw_shadow(Rect { x: gx, y: gy, w: gw, h: gh }, Color::from_hex(0xff6600, 0.08), 50.0, 0.0,
+                             Vec2 { x: 0.0, y: 0.0 }, pack_radii(12.0, 12.0, 12.0, 12.0));
+
+    // Build a perspective-projected textured quad using raw vertices.
+    // half_size = {0,0} bypasses the SDF rounded-rect logic in the shader,
+    // giving us pure texture * color output.
+    let white = pack_color(1.0, 1.0, 1.0, 1.0);
+    let verts = [
+      Vertex2D { pos: [tlx, tly], uv: [0.0, 0.0], color: white, color2: white, corner_radii: 0, softness: 0.0, half_size: [0.0, 0.0], border_width: 0.0, border_color: 0 },
+      Vertex2D { pos: [trx, try_], uv: [1.0, 0.0], color: white, color2: white, corner_radii: 0, softness: 0.0, half_size: [0.0, 0.0], border_width: 0.0, border_color: 0 },
+      Vertex2D { pos: [brx, bry], uv: [1.0, 1.0], color: white, color2: white, corner_radii: 0, softness: 0.0, half_size: [0.0, 0.0], border_width: 0.0, border_color: 0 },
+      Vertex2D { pos: [blx, bly], uv: [0.0, 1.0], color: white, color2: white, corner_radii: 0, softness: 0.0, half_size: [0.0, 0.0], border_width: 0.0, border_color: 0 },
+    ];
+    let indices = [0u32, 1, 2, 0, 2, 3];
+
+    env.rhi.draw_triangles(verts[..], indices[..], target);
+  });
+}
+
+fn nerv_teardown(var ui&: Ui, var nerv_target&: RhiTextureHandle) {
+  ui.set_on_paint(none);
+  if (nerv_target != kInvalidTexture) {
+    ui.rhi.destroy_render_target(nerv_target);
+    nerv_target = kInvalidTexture;
+  }
+}
+
+fn load_scene(var ui&: Ui, idx: usize, var nerv_target&: RhiTextureHandle) {
+  // Tear down NERV state if switching away
+  if (nerv_target != kInvalidTexture) {
+    nerv_teardown(ui, nerv_target);
+  }
+
+  let s = kScenes[idx];
+  let base = f"{@package_dir()}/../../../examples/showcase";
+  let ugui_path = f"{base}/{s.ugui_file}";
+  let lua_path = f"{base}/{s.lua_file}";
+
+  if (!ui.load_ui(ugui_path.as_str()).valid()) {
+    eprintln(f"Failed to load scene '{s.name}'");
+    return;
+  }
+  let _ = ui.load_script(lua_path.as_str());
+
+  // Wire click handler
+  ui.set_script_click_dispatch();
+
+  // Set up NERV render-to-texture if this is the NERV scene
+  if (idx == kNervScene) {
+    nerv_setup(ui, nerv_target);
+  }
+
+  println(f"Scene: {s.name}");
+}
+
+pub fn main(): i32 {
+  // Parse args
+  var current_scene: usize = 0;
+  var font_path: String? = none;
+  let args = arguments();
+  for (let a in args.iter()) {
+    var is_scene = false;
+    for (let j in 0..kSceneCount) {
+      if (a == kScenes[j].name) {
+        current_scene = j;
+        is_scene = true;
+        break;
+      }
+    }
+    if (!is_scene) {
+      font_path = from_str(a);
+    }
+  }
+
+  if (font_path == none) {
+    font_path = find_font();
+  }
+  let font_file = font_path else {
+    eprintln("No font found. Set ULTRAGUI_FONT or pass a TTF path.");
+    eprintln("  Usage: ultragui_showcase [dashboard|neon|glass|terminal|rpg|nerv|cosmos|meridian] [font.ttf]");
+    return 1;
+  };
+  println(f"Font: {font_file}");
+
+  let config = UIConfig {
+    title: from_str("ultragui showcase"),
+    width: 1280,
+    height: 800,
+    clear_color: Color::from_hex(kScenes[current_scene].clear_color),
+    shader_dir: from_str(f"{@package_dir()}/../../ultragui_vulkan/shaders"),
+  };
+
+  var ui_box = lua_ui_context(GlfwPlatform(), VulkanRhi(), LuaBindings {});
+  var ui& = ui_box.get_var();
+  add_lottie_lua(ui);
+  add_video_lua(ui);
+  if (!ui.init(config)) {
+    eprintln("Failed to initialize");
+    return 1;
+  }
+
+  let font = ui.load_font(font_file.as_str());
+  if (font == kInvalidFont) {
+    ui.shutdown();
+    return 1;
+  }
+  ui.set_default_font(font);
+
+  let window = unsafe (ui.platform.native_handle() as *var GlfwWindow);
+  println("Press 1-8 to switch scenes: dashboard, neon, glass, terminal, rpg, nerv, cosmos, meridian");
+
+  var scene_dirty = true;
+  var key_was_down: [bool; 16] = [false; 16];
+  var nerv_target: RhiTextureHandle = kInvalidTexture;
+
+  while (ui.running()) {
+    // Poll scene-switch keys without hijacking GLFW callbacks
+    for (let i in 0..kSceneCount) {
+      let down = unsafe glfw_get_key(window, kGlfwKey1 + i as i32) == kGlfwPress;
+      if (down && !key_was_down[i] && i != current_scene) {
+        current_scene = i;
+        scene_dirty = true;
+      }
+      key_was_down[i] = down;
+    }
+
+    if (scene_dirty) {
+      scene_dirty = false;
+      ui.set_clear_color(Color::from_hex(kScenes[current_scene].clear_color));
+      load_scene(ui, current_scene, nerv_target);
+    }
+
+    // Queue NERV offscreen render before update
+    if (current_scene == kNervScene && nerv_target != kInvalidTexture) {
+      ui.queue_offscreen(nerv_target, ui.root(), Color::from_hex(0x0a0a18));
+    }
+
+    ui.update();
+  }
+
+  ui.shutdown();
+  return 0;
+}

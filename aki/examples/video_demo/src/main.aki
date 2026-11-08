@@ -1,0 +1,482 @@
+// examples/video_demo/main.cc: MPEG-1 video playback, three scenes:
+//   1: basic player (single video in an Image widget)
+//   2: multi-view (same texture on several widgets)
+//   3: 3D cube (video texture on spinning cube faces)
+//
+//   ultragui_video_demo [font_path]
+//
+// Controls: Space play/pause, R restart, L loop, Left/Right seek 2 s, 1-3
+// switch scene.
+//
+// Shape differences (not behavior):
+// * The C++ bakes ULTRAGUI_SHADER_DIR and ULTRAGUI_VIDEO_DEMO_DIR; here both
+//   are found from this package's directory.
+// * UIContext::LoadVideo is ultragui_video::video_ui::load_video (a VideoId;
+//   `video_var(ui, id)` is the C++ VideoPlayer*, `video_stop`/`video_seek`
+//   its Stop/Seek through UIContext's Rhi).
+// * The cube scene's paint lambda captures `video` and `&ui`; here it
+//   captures the video's texture handle (created once at load, so
+//   `video->texture()` is the same every frame) and reads the time and root
+//   from the PaintEnv.
+// * The C++ UIContext has the Lua runtime linked; nothing here runs a
+//   script, so the port uses NoScript. The loop's function-level statics
+//   (key states) are locals of main.
+
+module ultragui_video_demo;
+
+import {eprintln, println} from akikit::logging;
+import {arguments} from akikit::process::command_line;
+import {Command} from akikit::process::child;
+import {output} from akikit::process::capture;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {path_exists} from akikit::filesystem::file_util;
+import {String, from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {LayoutEngine, LayoutViewport} from ultragui::layout::layout;
+import {compute_widget_layout} from ultragui::layout::layout_tree;
+import {paint_widget_tree} from ultragui::render::paint;
+import {texture_id_from_rhi_handle} from ultragui::render::texture_backend;
+import {Vertex2D} from ultragui::render::vertex;
+import {Rhi} from ultragui::rhi::rhi;
+import {RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {NoScript} from ultragui::scripting::script_runtime;
+import {kInvalidFont} from ultragui::text::text_engine;
+import {PaintEnv, UIConfig, UIContext} from ultragui::ui_context;
+import {set_image_texture} from ultragui::widgets::image;
+import {set_text} from ultragui::widgets::text;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {
+  GlfwWindow, glfw_get_key, kGlfwKey1, kGlfwKeyL, kGlfwKeyLeft, kGlfwKeyR, kGlfwKeyRight, kGlfwKeySpace, kGlfwPress,
+} from ultragui_glfw::sys::glfw;
+import {VulkanRhi} from ultragui_vulkan::vulkan_rhi;
+import {load_video, video_seek, video_stop, video_var} from ultragui_video::video_ui;
+
+extern("sqrtf") fn c_sqrtf(x: f32): f32;
+extern("fabsf") fn c_fabsf(x: f32): f32;
+
+fn sqrtf(x: f32): f32 => unsafe c_sqrtf(x);
+fn fabsf(x: f32): f32 => unsafe c_fabsf(x);
+
+fn find_font(): String? {
+  if (let env = get_environment_variable("ULTRAGUI_FONT")) {
+    if (path_exists(env.as_str())) {
+      return env;
+    }
+  }
+  var cmd = Command("sh");
+  cmd.arg("-c");
+  cmd.arg("fc-match -f '%{file}' 'sans:style=Regular' 2>/dev/null");
+  let out = output(cmd) else {
+    return none;
+  };
+  var n: usize = 0;
+  while (n < out.stdout.len() && n < 1023) {
+    n += 1;
+    if (out.stdout[n - 1] == 0x0A) {
+      break;
+    }
+  }
+  while (n > 0 && (out.stdout[n - 1] == 0x0A || out.stdout[n - 1] == 0x0D)) {
+    n -= 1;
+  }
+  if (n == 0) {
+    return none;
+  }
+  var path = String();
+  if (!path.push_utf8(out.stdout.as_slice()[..n] as bytes)) {
+    return none;
+  }
+  return path_exists(path.as_str()) ? path : none;
+}
+
+// ---------------------------------------------------------------------------
+// Layouts
+// ---------------------------------------------------------------------------
+
+comptime let kLayoutBasic: str = r"""
+panel root {
+    layout: column;
+    width: 100vw; height: 100vh;
+    padding: 30; gap: 20;
+    background: #0f0f1a; align: center;
+
+    text title { text: "MPEG-1 Video Player"; font-size: 26; color: #e0e0ff; text-align: center; letter-spacing: 2; }
+    text subtitle { text: "GPU YCbCr->RGB conversion * pl_mpeg * zero licensing fees"; font-size: 13; color: #606080; text-align: center; }
+
+    panel video_card {
+        layout: column; align: center; padding: 12;
+        background: #1a1a2e; corner-radius: 12;
+        border-color: #2a2a50; border-width: 1;
+        shadow-color: #00000060; shadow-blur: 20; shadow-y: 6;
+        image video_frame { width: 320; height: 240; }
+    }
+
+    text time_display { text: "0:00 / 0:00"; font-size: 14; color: #8080a0; text-align: center; }
+    text controls { text: "Space: play/pause  R: restart  L: loop  <-/->: seek"; font-size: 11; color: #404060; text-align: center; }
+    text footer { text: "Press 1-3 to switch scenes"; font-size: 11; color: #303050; text-align: center; }
+}
+""";
+
+comptime let kLayoutMulti: str = r"""
+panel root {
+    layout: column;
+    width: 100vw; height: 100vh;
+    padding: 30; gap: 20;
+    background: #0a0a18; align: center;
+
+    text title { text: "Video Texture: One Decode, Many Widgets"; font-size: 24; color: #e0e0ff; text-align: center; }
+
+    panel grid {
+        layout: row; justify: center; gap: 20;
+        flex-wrap: wrap; align: center; flex-grow: 1;
+
+        panel card1 {
+            layout: column; align: center; gap: 8; padding: 16;
+            background: #1a1a2e; corner-radius: 16;
+            border-color: #2a2a50; border-width: 1;
+            shadow-color: #00000040; shadow-blur: 10; shadow-y: 4;
+            image vid1 { width: 240; height: 180; }
+            text lbl1 { text: "Original"; font-size: 12; color: #8888aa; text-align: center; }
+        }
+        panel card2 {
+            layout: column; align: center; gap: 8; padding: 16;
+            background: #1a1a2e; corner-radius: 16;
+            border-color: #4a2a50; border-width: 1;
+            shadow-color: #ff00aa20; shadow-blur: 10; shadow-y: 4;
+            image vid2 { width: 160; height: 120; }
+            text lbl2 { text: "Scaled Down"; font-size: 12; color: #aa88aa; text-align: center; }
+        }
+        panel card3 {
+            layout: column; align: center; gap: 8; padding: 16;
+            background: #1a1a2e; corner-radius: 16;
+            border-color: #2a4a50; border-width: 1;
+            shadow-color: #00aaff20; shadow-blur: 10; shadow-y: 4;
+            image vid3 { width: 120; height: 120; }
+            text lbl3 { text: "Square Crop"; font-size: 12; color: #88aaaa; text-align: center; }
+        }
+        panel card4 {
+            layout: column; align: center; gap: 8; padding: 16;
+            background: #1a1a2e; corner-radius: 16;
+            border-color: #2a502a; border-width: 1;
+            shadow-color: #00ff4420; shadow-blur: 10; shadow-y: 4;
+            image vid4 { width: 80; height: 60; }
+            text lbl4 { text: "Thumbnail"; font-size: 12; color: #88aa88; text-align: center; }
+        }
+    }
+
+    text footer { text: "Same GPU texture: zero extra decode cost * Press 1-3 to switch"; font-size: 11; color: #404060; text-align: center; }
+}
+""";
+
+comptime let kLayoutCube: str = r"""
+panel root {
+    layout: column;
+    width: 100vw; height: 100vh;
+    padding: 30; gap: 20;
+    background: #050510; align: center;
+
+    text title { text: "Video on 3D Cube"; font-size: 24; color: #e0e0ff; text-align: center; }
+    text subtitle { text: "Software-projected cube faces, GPU-textured with decoded video"; font-size: 12; color: #505070; text-align: center; }
+    panel spacer { flex-grow: 1; }
+    text footer { text: "Press 1-3 to switch scenes"; font-size: 11; color: #303050; text-align: center; }
+}
+""";
+
+// ---------------------------------------------------------------------------
+// Cube math
+// ---------------------------------------------------------------------------
+
+struct Vec3 : Copy {
+  pub var x: f32
+  pub var y: f32
+  pub var z: f32
+}
+
+fn rotate(v: Vec3, yaw: f32, pitch: f32): Vec3 {
+  let cy = @cos(yaw);
+  let sy = @sin(yaw);
+  let x1 = v.x * cy + v.z * sy;
+  let z1 = -v.x * sy + v.z * cy;
+  let cx = @cos(pitch);
+  let sx = @sin(pitch);
+  let y2 = v.y * cx - z1 * sx;
+  let z2 = v.y * sx + z1 * cx;
+  return Vec3 { x: x1, y: y2, z: z2 };
+}
+
+static let kCubeVerts: [Vec3; 8] = [
+  Vec3 { x: -1.0, y: -1.0, z: -1.0 }, Vec3 { x: 1.0, y: -1.0, z: -1.0 }, Vec3 { x: 1.0, y: 1.0, z: -1.0 }, Vec3 { x: -1.0, y: 1.0, z: -1.0 },
+  Vec3 { x: -1.0, y: -1.0, z: 1.0 }, Vec3 { x: 1.0, y: -1.0, z: 1.0 }, Vec3 { x: 1.0, y: 1.0, z: 1.0 }, Vec3 { x: -1.0, y: 1.0, z: 1.0 },
+];
+
+static let kFaces: [[usize; 4]; 6] = [
+  [0, 1, 2, 3], [5, 4, 7, 6], [4, 0, 3, 7],
+  [1, 5, 6, 2], [3, 2, 6, 7], [4, 5, 1, 0],
+];
+
+struct Proj : Copy {
+  pub var x: f32
+  pub var y: f32
+  pub var z: f32
+}
+
+struct Fz : Copy {
+  pub var i: usize
+  pub var z: f32
+}
+
+static let kUvs: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+fn draw_cube<R: Rhi>(var rhi&: R, tex: RhiTextureHandle, cx: f32, cy: f32, size: f32, time: f32) {
+  let yaw = time * 0.7;
+  let pitch = time * 0.4;
+  let fov: f32 = 3.0;
+
+  var proj: [Proj; 8] = [Proj { x: 0.0, y: 0.0, z: 0.0 }; 8];
+  for (let i in 0usize..8) {
+    let v = rotate(kCubeVerts[i], yaw, pitch);
+    let d = fov / (fov + v.z + 2.0);
+    proj[i] = Proj { x: cx + v.x * size * d, y: cy + v.y * size * d, z: v.z };
+  }
+
+  // Sort faces back-to-front
+  var sorted: [Fz; 6] = [Fz { i: 0, z: 0.0 }; 6];
+  for (let i in 0usize..6) {
+    var az: f32 = 0.0;
+    for (let j in 0usize..4) {
+      az += proj[kFaces[i][j]].z;
+    }
+    sorted[i] = Fz { i, z: az / 4.0 };
+  }
+  for (let i in 0usize..5) {
+    for (let j in (i + 1)..6) {
+      if (sorted[i].z > sorted[j].z) {
+        let t = sorted[i];
+        sorted[i] = sorted[j];
+        sorted[j] = t;
+      }
+    }
+  }
+
+  for (let fi in 0usize..6) {
+    let f = kFaces[sorted[fi].i];
+
+    // Back-face culling via 2D cross product
+    let ax = proj[f[1]].x - proj[f[0]].x;
+    let ay = proj[f[1]].y - proj[f[0]].y;
+    let bx = proj[f[2]].x - proj[f[0]].x;
+    let by = proj[f[2]].y - proj[f[0]].y;
+    if (ax * by - ay * bx < 0.0) {
+      continue;
+    }
+
+    // Lighting: face normal dot view direction
+    let r0 = rotate(kCubeVerts[f[0]], yaw, pitch);
+    let r1 = rotate(kCubeVerts[f[1]], yaw, pitch);
+    let r2 = rotate(kCubeVerts[f[2]], yaw, pitch);
+    let ex = r1.x - r0.x;
+    let ey = r1.y - r0.y;
+    let ez = r1.z - r0.z;
+    let fx = r2.x - r0.x;
+    let fy = r2.y - r0.y;
+    let fz = r2.z - r0.z;
+    let nz = ex * fy - ey * fx;
+    let len = sqrtf((ey * fz - ez * fy) * (ey * fz - ez * fy) + (ez * fx - ex * fz) * (ez * fx - ex * fz) + nz * nz);
+    var light: f32 = (len > 0.0) ? fabsf(nz / len) : 0.5;
+    light = 0.3 + 0.7 * light;
+
+    let shade = @saturating_cast(u8, light * 255.0);
+    let col: u32 = (0xFF << 24) | (shade as u32) | ((shade as u32) << 8) | ((shade as u32) << 16);
+
+    var verts: [Vertex2D; 4] = [Vertex2D {
+      pos: [0.0, 0.0], uv: [0.0, 0.0], color: 0, color2: 0, corner_radii: 0, softness: 0.0, half_size: [0.0, 0.0],
+      border_width: 0.0, border_color: 0,
+    }; 4];
+    for (let v in 0usize..4) {
+      verts[v].pos = [proj[f[v]].x, proj[f[v]].y];
+      verts[v].uv = kUvs[v];
+      verts[v].color = col;
+    }
+    let idx = [0u32, 1, 2, 0, 2, 3];
+    rhi.draw_triangles(verts[..], idx[..], tex);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+pub fn main(): i32 {
+  let args = arguments();
+  let font_path = args.len() > 0 ? from_str(args[0]) : find_font() else {
+    eprintln("No font found. Set ULTRAGUI_FONT or pass a path.");
+    return 1;
+  };
+
+  let video_path = f"{@package_dir()}/../../../examples/demo.mpg";
+
+  let config = UIConfig {
+    title: from_str("ultragui: Video Demo"),
+    width: 800,
+    height: 600,
+    clear_color: Color::from_hex(0x0f0f1a),
+    shader_dir: from_str(f"{@package_dir()}/../../ultragui_vulkan/shaders"),
+  };
+
+  var ui = UIContext::<GlfwPlatform, VulkanRhi, NoScript>(GlfwPlatform(), VulkanRhi(), NoScript());
+  if (!ui.init(config)) {
+    return 1;
+  }
+
+  let font = ui.load_font(font_path.as_str());
+  if (font == kInvalidFont) {
+    ui.shutdown();
+    return 1;
+  }
+  ui.set_default_font(font);
+
+  let video = load_video(ui, video_path.as_str()) else {
+    eprintln(f"Failed to load video: {video_path}");
+    ui.shutdown();
+    return 1;
+  };
+  var video_tex = kInvalidTexture;
+  var video_w = 0u32;
+  var video_h = 0u32;
+  if (var v& = video_var(ui, video)) {
+    v.play();
+    v.set_loop(true);
+    video_tex = v.texture();
+    video_w = v.width();
+    video_h = v.height();
+    println(f"Video: {v.width()}x{v.height()}, {v.frame_rate():.1f} fps, {v.duration():.1f}s duration");
+  }
+
+  let window = unsafe (ui.platform.native_handle() as *var GlfwWindow);
+
+  var scene: usize = 0;
+  var scene_dirty = true;
+  var key_was_down: [bool; 3] = [false; 3];
+  var sp = false;
+  var rk = false;
+  var lk = false;
+  var lft = false;
+  var rgt = false;
+
+  while (ui.running()) {
+    // Scene switching
+    for (let i in 0usize..3) {
+      let down = unsafe glfw_get_key(window, kGlfwKey1 + i as i32) == kGlfwPress;
+      if (down && !key_was_down[i] && scene != i) {
+        scene = i;
+        scene_dirty = true;
+      }
+      key_was_down[i] = down;
+    }
+
+    if (scene_dirty) {
+      scene_dirty = false;
+      if (scene == 0) {
+        let _ = ui.load_ui_string(kLayoutBasic, "basic");
+        ui.set_clear_color(Color::from_hex(0x0f0f1a));
+        ui.set_on_paint(none);
+      } else if (scene == 1) {
+        let _ = ui.load_ui_string(kLayoutMulti, "multi");
+        ui.set_clear_color(Color::from_hex(0x0a0a18));
+        ui.set_on_paint(none);
+      } else if (scene == 2) {
+        let _ = ui.load_ui_string(kLayoutCube, "cube");
+        ui.set_clear_color(Color::from_hex(0x050510));
+        let tex = video_tex;
+        ui.set_on_paint(own fn(env: &var PaintEnv<VulkanRhi>) {
+          let vp = env.rhi.display_size();
+          if (tex != kInvalidTexture) {
+            let m = vp.x < vp.y ? vp.x : vp.y;  // std::min
+            draw_cube(env.rhi, tex, vp.x / 2.0, vp.y / 2.0, m * 0.22, env.time as f32);
+          }
+          let root = env.root;
+          if (root.valid()) {
+            let lv = LayoutViewport { width: vp.x, height: vp.y, scale: 1.0 };
+            var le = LayoutEngine();
+            compute_widget_layout(env.world, env.ctx, root, lv, le);
+            paint_widget_tree(env.world, env.ctx, root, env.renderer);
+          }
+        });
+      }
+    }
+
+    // Playback controls (edge-triggered)
+    let sp2 = unsafe glfw_get_key(window, kGlfwKeySpace) == kGlfwPress;
+    let rk2 = unsafe glfw_get_key(window, kGlfwKeyR) == kGlfwPress;
+    let lk2 = unsafe glfw_get_key(window, kGlfwKeyL) == kGlfwPress;
+    let lft2 = unsafe glfw_get_key(window, kGlfwKeyLeft) == kGlfwPress;
+    let rgt2 = unsafe glfw_get_key(window, kGlfwKeyRight) == kGlfwPress;
+
+    if (sp2 && !sp) {
+      if (var v& = video_var(ui, video)) {
+        if (v.is_playing()) {
+          v.pause();
+        } else {
+          v.play();
+        }
+      }
+    }
+    if (rk2 && !rk) {
+      video_stop(ui, video);
+      if (var v& = video_var(ui, video)) {
+        v.play();
+      }
+    }
+    if (lk2 && !lk) {
+      if (var v& = video_var(ui, video)) {
+        v.set_loop(!v.is_looping());
+      }
+    }
+    if (lft2 && !lft) {
+      let pos = video_var(ui, video)!.position();
+      video_seek(ui, video, pos - 2.0);
+    }
+    if (rgt2 && !rgt) {
+      let pos = video_var(ui, video)!.position();
+      video_seek(ui, video, pos + 2.0);
+    }
+    sp = sp2;
+    rk = rk2;
+    lk = lk2;
+    lft = lft2;
+    rgt = rgt2;
+
+    // Update video texture on Image widgets
+    if (scene == 0) {
+      if (video_tex != kInvalidTexture) {
+        let w = ui.find_widget("video_frame");
+        set_image_texture(ui.world, w, texture_id_from_rhi_handle(video_tex), video_w as f32, video_h as f32);
+      }
+      let td = ui.find_widget("time_display");
+      if (td.valid()) {
+        let v& = video_var(ui, video)!;
+        let pos = v.position();
+        let dur = v.duration();
+        let p = @saturating_cast(i32, pos);
+        let d = @saturating_cast(i32, dur);
+        let looping = v.is_looping() ? "  [LOOP]" : "";
+        let paused = v.is_playing() ? "" : "  [PAUSED]";
+        let text = f"{p / 60}:{p % 60:02} / {d / 60}:{d % 60:02}{looping}{paused}";
+        set_text(ui.world, td, text.as_str());
+      }
+    } else if (scene == 1) {
+      let names = ["vid1", "vid2", "vid3", "vid4"];
+      for (let name in names) {
+        if (video_tex != kInvalidTexture) {
+          let w = ui.find_widget(name);
+          set_image_texture(ui.world, w, texture_id_from_rhi_handle(video_tex), video_w as f32, video_h as f32);
+        }
+      }
+    }
+
+    ui.update();
+  }
+
+  ui.shutdown();
+  return 0;
+}

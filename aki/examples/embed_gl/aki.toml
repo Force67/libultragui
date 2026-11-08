@@ -1,0 +1,16 @@
+# examples/embed_gl in aki: the host owns the window, the GL 3.3 context and
+# an animated background; UIContext (OpenGlRhi, embedded) composites the UI
+# on top, as examples/embed_gl/main.cc (the C++ reference build is
+# -DULTRAGUI_BACKEND_OPENGL=ON).
+[package]
+name = "ultragui_embed_gl"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_opengl = { path = "../../ultragui_opengl" }
+
+[build]
+opt = 2

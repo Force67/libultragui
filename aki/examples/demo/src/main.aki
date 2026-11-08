@@ -1,0 +1,94 @@
+// examples/demo/main.cc: opens a window and renders colored rounded
+// rectangles through the Vulkan RHI (GlfwPlatform, VulkanRhi and Renderer2D
+// driven directly, no UIContext).
+//
+// The C++ build bakes ULTRAGUI_SHADER_DIR (its build tree's shaders/) into
+// the program; here the shaders are the byte-identical copies in
+// ultragui_vulkan/shaders, found from this package's directory.
+//
+// Kept from the C++: DrawRect's third argument is the packed corner radii, a
+// u32; the C++ passes 16.0f, 8.0f, ... which convert to the integers 16, 8,
+// ... (only the first corner's byte), and so does this port.
+
+module ultragui_demo;
+
+import {eprintln, println} from akikit::logging;
+import {from_str} from akikit::strings::string;
+import {Color, lerp_color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {WindowConfig} from ultragui::platform::platform;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {RhiConfig} from ultragui::rhi::rhi;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {VulkanRhi} from ultragui_vulkan::vulkan_rhi;
+
+pub fn main(): i32 {
+  var platform = GlfwPlatform();
+
+  let wcfg = WindowConfig { width: 1280, height: 720, title: from_str("libultragui demo") };
+  if (!platform.init(wcfg)) {
+    eprintln("Failed to initialize platform");
+    return 1;
+  }
+
+  var rhi = VulkanRhi();
+  let rcfg = RhiConfig {
+    native_window: platform.native_handle(),
+    validation: true,
+    shader_dir: from_str(f"{@package_dir()}/../../ultragui_vulkan/shaders"),
+  };
+  if (!rhi.init(rcfg)) {
+    eprintln("Failed to initialize Vulkan RHI");
+    platform.shutdown();
+    return 1;
+  }
+
+  var renderer = Renderer2D();
+  let _ = renderer.init_rhi(rhi);
+
+  let ds = rhi.display_size();
+  println(f"libultragui demo: rendering ({ds.x:.0f}x{ds.y:.0f})");
+
+  while (!platform.should_close()) {
+    platform.poll_events();
+
+    if (!rhi.begin_frame(Color::from_hex(0x1a1a2e))) {
+      continue;
+    }
+
+    renderer.begin_frame_rhi(rhi);
+
+    let t = platform.time() as f32;
+
+    // Background panel
+    renderer.draw_rect(Rect { x: 40.0, y: 40.0, w: 400.0, h: 640.0 }, Color::from_hex(0x16213e, 0.9), 16);
+
+    // Title bar
+    renderer.draw_rect(Rect { x: 40.0, y: 40.0, w: 400.0, h: 60.0 }, Color::from_hex(0x0f3460), 16);
+
+    // Buttons
+    for (let i in 0i32..5) {
+      let y = 140.0 + (i as f32) * 80.0;
+      let pulse = 0.5 + 0.5 * @sin(t * 2.0 + (i as f32) * 0.5);
+      let btn_color = lerp_color(Color::from_hex(0x0f3460), Color::from_hex(0xe94560), pulse * 0.3);
+      renderer.draw_rect(Rect { x: 80.0, y, w: 320.0, h: 56.0 }, btn_color, 8);
+    }
+
+    // Floating card on the right
+    let bounce = @sin(t * 1.5) * 20.0;
+    renderer.draw_rect(Rect { x: 520.0, y: 100.0 + bounce, w: 700.0, h: 500.0 }, Color::from_hex(0x533483, 0.85), 24);
+
+    // Nested content
+    renderer.draw_rect(Rect { x: 560.0, y: 160.0 + bounce, w: 620.0, h: 120.0 }, Color::from_hex(0xe94560, 0.6), 12);
+    renderer.draw_rect(Rect { x: 560.0, y: 310.0 + bounce, w: 300.0, h: 80.0 }, Color::from_hex(0x0f3460, 0.8), 8);
+    renderer.draw_rect(Rect { x: 880.0, y: 310.0 + bounce, w: 300.0, h: 80.0 }, Color::from_hex(0x0f3460, 0.8), 8);
+
+    renderer.end_frame(rhi);
+    rhi.end_frame();
+  }
+
+  renderer.shutdown();
+  rhi.shutdown();
+  platform.shutdown();
+  return 0;
+}

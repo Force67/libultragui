@@ -1,0 +1,19 @@
+# examples/showcase in aki: eight scenes (.ugui + Lua), switched with 1-8,
+# the NERV scene rendered to a texture and drawn as a perspective quad;
+# UIContext over GLFW and Vulkan with the Lua runtime and the bindings of the
+# C++ default build (audio, Lottie, anim, video), as examples/showcase/main.cc.
+[package]
+name = "ultragui_showcase"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_vulkan = { path = "../../ultragui_vulkan" }
+ultragui_lua = { path = "../../ultragui_lua" }
+ultragui_lua_lottie = { path = "../../ultragui_lua_lottie" }
+ultragui_lua_video = { path = "../../ultragui_lua_video" }
+
+[build]
+opt = 2

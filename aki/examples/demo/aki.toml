@@ -1,0 +1,14 @@
+# examples/demo in aki: GlfwPlatform + VulkanRhi + Renderer2D driven directly
+# (colored rounded rectangles), as examples/demo/main.cc. See ../README.md.
+[package]
+name = "ultragui_demo"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_vulkan = { path = "../../ultragui_vulkan" }
+
+[build]
+opt = 2

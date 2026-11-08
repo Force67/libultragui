@@ -1,0 +1,630 @@
+// examples/preview/main.cc: ugui_preview, a standalone .ugui previewer.
+//
+//   ugui_preview <file.ugui> [--screenshot out.png] [--size WxH] [--frames N]
+//                [--bg #rrggbb] [--script f.lua] [--font f.ttf]
+//
+// Without --screenshot: a live window that reloads the .ugui (and its
+// script) when the file changes (polled every 30 frames). With it: renders
+// N frames (default 3) into an offscreen framebuffer of an invisible window,
+// reads the pixels back and writes a PNG, for design iteration and visual
+// diffing. A script next to the .ugui (same name, .lua) runs if it exists.
+//
+// Shape differences (not behavior):
+// * The C++ loads its GL entry points into file-static function pointers;
+//   here they are a HostGl table, loaded through glfwGetProcAddress.
+// * `ugui::gl` is a file-static backend in the C++; here the host keeps a
+//   boxed GlRenderer and hands UIContext a forwarding view of it
+//   (SharedTextures), where the C++ hands it gl::texture_backend().
+// * The C++ UIContext has the Lua runtime and the bindings of its default
+//   build: ultragui_lua::lua_ui_context with add_lottie_lua/add_video_lua.
+//   The click lambda (any button on a named widget -> on_<name>(w)) is
+//   set_script_click_dispatch(false), run after the input router.
+// * RenderDrawData's list is read back with `ui.renderer.get_draw_data()`
+//   after the atlas upload (the same buffers). The UIContext's Rhi type is
+//   NullRhi: draw-data mode never initializes one.
+// * std::filesystem::last_write_time is akikit's file_info().modified_ns;
+//   replace_extension, sscanf("%dx%d"), atoi and strtoul are written out (the
+//   last two call libc).
+
+module ugui_preview;
+
+import {List, filled} from akikit::containers::list;
+import {eprintln, println} from akikit::logging;
+import {arguments} from akikit::process::command_line;
+import {Command} from akikit::process::child;
+import {output} from akikit::process::capture;
+import {exit} from akikit::process::process;
+import {file_info, path_exists, write_bytes} from akikit::filesystem::file_util;
+import {Box} from akikit::memory::box;
+import {String, from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {TextureId} from ultragui::render::draw_data;
+import {TextureBackend, TextureBackendBox} from ultragui::render::texture_backend;
+import {NullRhi} from ultragui::rhi::null_rhi;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {CULong} from ultragui::sys::c_long;
+import {UIConfig, UIContext} from ultragui::ui_context;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {
+  glfw_create_window, glfw_destroy_window, glfw_get_framebuffer_size, glfw_get_proc_address, glfw_init,
+  glfw_make_context_current, glfw_swap_buffers, glfw_swap_interval, glfw_terminate, glfw_window_hint,
+  glfw_window_should_close, kGlfwClientApi, kGlfwContextVersionMajor, kGlfwContextVersionMinor, kGlfwFalse,
+  kGlfwOpenglApi, kGlfwOpenglCoreProfile, kGlfwOpenglForwardCompat, kGlfwOpenglProfile, kGlfwResizable, kGlfwTrue,
+  kGlfwVisible,
+} from ultragui_glfw::sys::glfw;
+import {GlRenderer, InitInfo} from ultragui_opengl::ugui_impl_opengl3;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {LuaBindings, lua_ui_context} from ultragui_lua::lua_ui_context;
+import {add_lottie_lua} from ultragui_lua_lottie::lua_lottie;
+import {add_video_lua} from ultragui_lua_video::lua_video;
+
+extern("atoi") fn c_atoi(s: *const c_char): i32;
+extern("strtoul") fn c_strtoul(s: *const c_char, end: *var *var c_char, base: i32): CULong;
+
+type Ui = UIContext<GlfwPlatform, NullRhi, LuaRuntime>;
+
+// --- Minimal GL loader (the entry points this tool uses) ---------------------
+
+comptime let kGlTexture2d: u32 = 0x0DE1;
+comptime let kGlRgba: u32 = 0x1908;
+comptime let kGlRgba8: i32 = 0x8058;
+comptime let kGlUnsignedByte: u32 = 0x1401;
+comptime let kGlTextureMinFilter: u32 = 0x2801;
+comptime let kGlTextureMagFilter: u32 = 0x2800;
+comptime let kGlNearest: i32 = 0x2600;
+comptime let kGlFramebuffer: u32 = 0x8D40;
+comptime let kGlColorAttachment0: u32 = 0x8CE0;
+comptime let kGlFramebufferComplete: u32 = 0x8CD5;
+comptime let kGlColorBufferBit: u32 = 0x4000;
+comptime let kGlPackAlignment: u32 = 0x0D05;
+
+struct HostGl : Copy {
+  pub let gen_textures: extern fn(i32, *var u32): ()
+  pub let bind_texture: extern fn(u32, u32): ()
+  pub let tex_image2d: extern fn(u32, i32, i32, i32, i32, i32, u32, u32, *const u8): ()
+  pub let tex_parameteri: extern fn(u32, u32, i32): ()
+  pub let gen_framebuffers: extern fn(i32, *var u32): ()
+  pub let bind_framebuffer: extern fn(u32, u32): ()
+  pub let framebuffer_texture2d: extern fn(u32, u32, u32, u32, i32): ()
+  pub let check_framebuffer_status: extern fn(u32): u32
+  pub let clear_color: extern fn(f32, f32, f32, f32): ()
+  pub let clear: extern fn(u32): ()
+  pub let pixel_storei: extern fn(u32, i32): ()
+  pub let read_pixels: extern fn(i32, i32, i32, i32, u32, u32, *var u8): ()
+  pub let finish: extern fn(): ()
+}
+
+// LoadProc: glfwGetProcAddress as the C function the backend takes.
+extern fn load_proc(name: *const c_char): *var u8 {
+  return unsafe glfw_get_proc_address(name);
+}
+
+fn proc<F>(name: *const c_char): F? {
+  var p = unsafe glfw_get_proc_address(name);
+  if (p == null) {
+    return none;
+  }
+  return unsafe @read(&raw var p as *const F);
+}
+
+// LoadHostGL
+fn load_host_gl(): HostGl? {
+  let gen_textures = proc::<extern fn(i32, *var u32): ()>(c"glGenTextures") else {
+    return none;
+  };
+  let bind_texture = proc::<extern fn(u32, u32): ()>(c"glBindTexture") else {
+    return none;
+  };
+  let tex_image2d = proc::<extern fn(u32, i32, i32, i32, i32, i32, u32, u32, *const u8): ()>(c"glTexImage2D") else {
+    return none;
+  };
+  let tex_parameteri = proc::<extern fn(u32, u32, i32): ()>(c"glTexParameteri") else {
+    return none;
+  };
+  let gen_framebuffers = proc::<extern fn(i32, *var u32): ()>(c"glGenFramebuffers") else {
+    return none;
+  };
+  let bind_framebuffer = proc::<extern fn(u32, u32): ()>(c"glBindFramebuffer") else {
+    return none;
+  };
+  let framebuffer_texture2d = proc::<extern fn(u32, u32, u32, u32, i32): ()>(c"glFramebufferTexture2D") else {
+    return none;
+  };
+  let check_framebuffer_status = proc::<extern fn(u32): u32>(c"glCheckFramebufferStatus") else {
+    return none;
+  };
+  let clear_color = proc::<extern fn(f32, f32, f32, f32): ()>(c"glClearColor") else {
+    return none;
+  };
+  let clear = proc::<extern fn(u32): ()>(c"glClear") else {
+    return none;
+  };
+  let pixel_storei = proc::<extern fn(u32, i32): ()>(c"glPixelStorei") else {
+    return none;
+  };
+  let read_pixels = proc::<extern fn(i32, i32, i32, i32, u32, u32, *var u8): ()>(c"glReadPixels") else {
+    return none;
+  };
+  let finish = proc::<extern fn(): ()>(c"glFinish") else {
+    return none;
+  };
+  return HostGl {
+    gen_textures, bind_texture, tex_image2d, tex_parameteri, gen_framebuffers, bind_framebuffer, framebuffer_texture2d,
+    check_framebuffer_status, clear_color, clear, pixel_storei, read_pixels, finish,
+  };
+}
+
+// gl::texture_backend() as UIContext holds it: a view of the host's boxed
+// renderer, which outlives the UIContext's use of it.
+struct SharedTextures : TextureBackend {
+  pub unowned var renderer: *var GlRenderer
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId =>
+    unsafe (*self.renderer).create_texture(width, height, format, pixels, filter);
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {
+    unsafe (*self.renderer).update_texture(id, pixels);
+  }
+  pub fn destroy_texture(var self&, id: TextureId) {
+    unsafe (*self.renderer).destroy_texture(id);
+  }
+}
+
+// --- PNG writer (stored deflate, no compression: zero deps) ------------------
+
+fn crc_table(): [u32; 256] {
+  var table: [u32; 256] = [0; 256];
+  for (let i in 0u32..256) {
+    var c = i;
+    for (let k in 0..8) {
+      c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+    }
+    table[i as usize] = c;
+  }
+  return table;
+}
+
+fn crc32(table&: [u32; 256], data: &[u8], crc0: u32): u32 {
+  var crc = ~crc0;
+  for (let b in data) {
+    crc = table[((crc ^ (b as u32)) & 0xFF) as usize] ^ (crc >> 8);
+  }
+  return ~crc;
+}
+
+fn put_u32_be(var v&: List<u8>, x: u32) {
+  v.push((x >> 24) as u8);
+  v.push(((x >> 16) & 0xFF) as u8);
+  v.push(((x >> 8) & 0xFF) as u8);
+  v.push((x & 0xFF) as u8);
+}
+
+fn put_chunk(var out&: List<u8>, table&: [u32; 256], kind: str, data&: List<u8>) {
+  put_u32_be(out, data.len() as u32);
+  let crc_start = out.len();
+  for (let i in 0..4) {
+    out.push(kind[i] as u8);
+  }
+  for (let b in data.iter()) {
+    out.push(b);
+  }
+  let crc = crc32(table, out.as_slice()[crc_start..], 0);
+  put_u32_be(out, crc);
+}
+
+fn write_png(path: str, rgba: &[u8], width: i32, height: i32): bool {
+  // Raw scanlines, each prefixed with filter byte 0 (None).
+  let stride = width as usize * 4;
+  var raw = List::<u8>();
+  raw.reserve(height as usize * (1 + stride));
+  for (let y in 0..height as usize) {
+    raw.push(0);
+    for (let b in rgba[y * stride..(y + 1) * stride]) {
+      raw.push(b);
+    }
+  }
+
+  var a: u32 = 1;  // adler32
+  var b: u32 = 0;
+  for (let c in raw.iter()) {
+    a = (a + c as u32) % 65521;
+    b = (b + a) % 65521;
+  }
+
+  // zlib stream of stored blocks (max 65535 bytes each).
+  var idat = List::<u8>();
+  idat.push(0x78);
+  idat.push(0x01);
+  var pos: usize = 0;
+  while (pos < raw.len()) {
+    var n = raw.len() - pos;
+    if (n > 65535) {
+      n = 65535;
+    }
+    let last = pos + n == raw.len();
+    idat.push(last ? 1 : 0);
+    idat.push((n & 0xFF) as u8);
+    idat.push((n >> 8) as u8);
+    idat.push((~n & 0xFF) as u8);
+    idat.push(((~n >> 8) & 0xFF) as u8);
+    for (let x in raw.as_slice()[pos..pos + n]) {
+      idat.push(x);
+    }
+    pos += n;
+  }
+  put_u32_be(idat, (b << 16) | a);
+
+  var ihdr = List::<u8>();
+  put_u32_be(ihdr, width as u32);
+  put_u32_be(ihdr, height as u32);
+  ihdr.push(8);  // bit depth
+  ihdr.push(6);  // color type RGBA
+  ihdr.push(0);
+  ihdr.push(0);
+  ihdr.push(0);
+
+  let table = crc_table();
+  var png = List::<u8>();
+  for (let x in [137u8, 80, 78, 71, 13, 10, 26, 10]) {
+    png.push(x);
+  }
+  put_chunk(png, table, "IHDR", ihdr);
+  put_chunk(png, table, "IDAT", idat);
+  put_chunk(png, table, "IEND", List::<u8>());
+
+  let _written = write_bytes(path, png.as_slice() as bytes) else {
+    return false;
+  };
+  return true;
+}
+
+// --- Helpers -------------------------------------------------------------------
+
+// FindFont: what fc-match prints (all of it, as fread reads it), if that file
+// exists.
+fn find_font(): String? {
+  var cmd = Command("sh");
+  cmd.arg("-c");
+  cmd.arg("fc-match -f '%{file}' sans 2>/dev/null");
+  let out = output(cmd) else {
+    return none;
+  };
+  let n = out.stdout.len() < 1023 ? out.stdout.len() : 1023;
+  if (n == 0) {
+    return none;
+  }
+  var path = String();
+  if (!path.push_utf8(out.stdout.as_slice()[..n] as bytes)) {
+    return none;
+  }
+  return path_exists(path.as_str()) ? path : none;
+}
+
+// A NUL-terminated copy of s, for libc.
+fn c_text(s: str): String {
+  var out = from_str(s);
+  out.push_c8('\0');
+  return out;
+}
+
+// ParseHexColor: skip '#', strtoul(s, nullptr, 16), as a u32.
+fn parse_hex_color(s0: str): Color {
+  var s = s0;
+  if (#s > 0 && s[0] == '#') {
+    s = s[1..];
+  }
+  let text = c_text(s);
+  let hex = unsafe c_strtoul(@ptr(text.as_str()) as *const c_char, null, 16) as u32;
+  return Color::from_hex(hex);
+}
+
+// atoi
+fn atoi(s: str): i32 {
+  let text = c_text(s);
+  return unsafe c_atoi(@ptr(text.as_str()) as *const c_char);
+}
+
+// sscanf(s, "%d", &v) at `i`: optional whitespace, sign, at least one digit.
+fn scan_int(s: str, var i&: usize): i32? {
+  while (i < #s && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\x0B' || s[i] == '\x0C')) {
+    i += 1;
+  }
+  var neg = false;
+  if (i < #s && (s[i] == '+' || s[i] == '-')) {
+    neg = s[i] == '-';
+    i += 1;
+  }
+  let start = i;
+  var v: i64 = 0;
+  while (i < #s && s[i] >= '0' && s[i] <= '9') {
+    v = v *% 10 +% (s[i] as i64 - '0' as i64);
+    i += 1;
+  }
+  if (i == start) {
+    return none;
+  }
+  return (neg ? -v : v) as i32;
+}
+
+// sscanf(s, "%dx%d", &w, &h) == 2
+fn parse_size(s: str): (i32, i32)? {
+  var i: usize = 0;
+  let w = scan_int(s, i) else {
+    return none;
+  };
+  if (i >= #s || s[i] != 'x') {
+    return none;
+  }
+  i += 1;
+  let h = scan_int(s, i) else {
+    return none;
+  };
+  return (w, h);
+}
+
+// std::filesystem::path(p).replace_extension(".lua")
+fn replace_extension_lua(p: str): String {
+  var name_start: usize = 0;
+  for (let i in 0..#p) {
+    if (p[i] == '/') {
+      name_start = i + 1;
+    }
+  }
+  let name = p[name_start..];
+  var end = #p;
+  if (name != "." && name != "..") {
+    var dot: usize? = none;
+    for (let i in 0..#name) {
+      if (name[i] == '.') {
+        dot = i;
+      }
+    }
+    if (let d = dot) {
+      if (d > 0) {
+        end = name_start + d;
+      }
+    }
+  }
+  var out = from_str(p[..end]);
+  out.push_str(".lua");
+  return out;
+}
+
+// last_write_time(path, ec): the modification time, none on error.
+fn mtime(path: str): i64? {
+  let info = file_info(path) else {
+    return none;
+  };
+  return info.modified_ns;
+}
+
+// One frame: build the draw list, upload the atlas if it changed, clear,
+// draw.
+fn frame(var ui&: Ui, var backend&: GlRenderer, gl&: HostGl, bg: Color, var font_rev&: u32) {
+  let _ = ui.render_draw_data();
+  if (ui.text_engine.atlas_revision() != font_rev) {
+    let size = ui.text_engine.atlas_size();
+    let _ = backend.update_font_atlas(ui.text_engine.atlas_pixels() as bytes, size.x as u32, size.y as u32);
+    font_rev = ui.text_engine.atlas_revision();
+  }
+  unsafe (gl.clear_color)(bg.r, bg.g, bg.b, 1.0);
+  unsafe (gl.clear)(kGlColorBufferBit);
+  backend.new_frame();
+  let dd = ui.renderer.get_draw_data();
+  backend.render_draw_data(dd);
+}
+
+fn usage_value(flag: str) {
+  eprintln(f"ugui_preview: {flag} needs a value");
+  exit(2);
+}
+
+pub fn main(): i32 {
+  var ugui_path: String? = none;
+  var script_path: String? = none;
+  var screenshot_path: String? = none;
+  var font_path: String? = none;
+  var width: i32 = 1280;
+  var height: i32 = 800;
+  var frames: i32 = 3;
+  var bg = Color::from_hex(0x0f0f1a);
+
+  let args = arguments();
+  var i: usize = 0;
+  while (i < args.len()) {
+    let a = args[i];
+    let has_next = i + 1 < args.len();
+    if (a == "--screenshot") {
+      if (!has_next) { usage_value("--screenshot"); }
+      i += 1;
+      screenshot_path = from_str(args[i]);
+    } else if (a == "--script") {
+      if (!has_next) { usage_value("--script"); }
+      i += 1;
+      script_path = from_str(args[i]);
+    } else if (a == "--font") {
+      if (!has_next) { usage_value("--font"); }
+      i += 1;
+      font_path = from_str(args[i]);
+    } else if (a == "--size") {
+      if (!has_next) { usage_value("--size"); }
+      i += 1;
+      let (w, h) = parse_size(args[i]) else {
+        eprintln("ugui_preview: --size expects WxH");
+        return 2;
+      };
+      width = w;
+      height = h;
+    } else if (a == "--frames") {
+      if (!has_next) { usage_value("--frames"); }
+      i += 1;
+      frames = atoi(args[i]);
+    } else if (a == "--bg") {
+      if (!has_next) { usage_value("--bg"); }
+      i += 1;
+      bg = parse_hex_color(args[i]);
+    } else if (#a == 0 || a[0] != '-') {
+      ugui_path = from_str(a);
+    } else {
+      eprintln(f"ugui_preview: unknown flag {a}");
+      return 2;
+    }
+    i += 1;
+  }
+  let ugui_file = ugui_path else {
+    eprintln("usage: ugui_preview <file.ugui> [--screenshot out.png] [--size WxH] [--frames N] [--bg #rrggbb] [--script f.lua] [--font f.ttf]");
+    return 2;
+  };
+
+  if (unsafe glfw_init() == 0) {
+    eprintln("ugui_preview: glfwInit failed");
+    return 1;
+  }
+  unsafe {
+    glfw_window_hint(kGlfwClientApi, kGlfwOpenglApi);
+    glfw_window_hint(kGlfwContextVersionMajor, 3);
+    glfw_window_hint(kGlfwContextVersionMinor, 3);
+    glfw_window_hint(kGlfwOpenglProfile, kGlfwOpenglCoreProfile);
+    glfw_window_hint(kGlfwOpenglForwardCompat, kGlfwTrue);
+  }
+  if (screenshot_path != none) {
+    unsafe glfw_window_hint(kGlfwResizable, kGlfwFalse);
+    unsafe glfw_window_hint(kGlfwVisible, kGlfwFalse);
+  }
+  let win = unsafe glfw_create_window(width, height, c"ugui_preview", null, null);
+  if (win == null) {
+    eprintln("ugui_preview: window creation failed");
+    return 1;
+  }
+  unsafe glfw_make_context_current(win);
+  unsafe glfw_swap_interval(1);
+  let gl = load_host_gl() else {
+    eprintln("ugui_preview: failed to load GL");
+    return 1;
+  };
+
+  var ui_box = lua_ui_context(GlfwPlatform(), NullRhi(), LuaBindings {});
+  var ui& = ui_box.get_var();
+  add_lottie_lua(ui);
+  add_video_lua(ui);
+  let cfg = UIConfig {
+    external_window: unsafe (win as *var u8), draw_data: true, width, height, clear_color: bg,
+  };
+  if (!ui.init(cfg)) {
+    eprintln("ugui_preview: ui.Init failed");
+    return 1;
+  }
+
+  if (font_path == none) {
+    font_path = find_font();
+  }
+  if (let f = font_path) {
+    ui.set_default_font(ui.load_font(f.as_str()));
+  } else {
+    eprintln("ugui_preview: no font found (use --font)");
+  }
+
+  if (!ui.load_ui(ugui_file.as_str()).valid()) {
+    eprintln(f"ugui_preview: failed to load {ugui_file}");
+    return 1;
+  }
+
+  // Companion script: explicit --script, else <file>.lua next to the .ugui.
+  let lua_file = script_path ?? replace_extension_lua(ugui_file.as_str());
+  if (path_exists(lua_file.as_str())) {
+    let _ = ui.load_script(lua_file.as_str());
+  }
+
+  // Click wiring as in the examples: on_<name>(w) in the script.
+  ui.set_script_click_dispatch(false);
+
+  var backend = Box(GlRenderer());
+  if (!backend.get_var().init(InitInfo { get_proc_address: @c_fn(load_proc) })) {
+    eprintln("ugui_preview: GL backend init failed");
+    return 1;
+  }
+  ui.set_texture_backend(TextureBackendBox::of(SharedTextures { renderer: unsafe (backend.as_ptr() as *var GlRenderer) }));
+
+  var fbw: i32 = 0;
+  var fbh: i32 = 0;
+  unsafe glfw_get_framebuffer_size(win, &raw var fbw, &raw var fbh);
+
+  // Offscreen target for --screenshot: render into an FBO (the window is
+  // hidden, so the default framebuffer's contents are undefined).
+  var fbo: u32 = 0;
+  var fbo_tex: u32 = 0;
+  if (screenshot_path != none) {
+    unsafe (gl.gen_textures)(1, &raw var fbo_tex);
+    unsafe (gl.bind_texture)(kGlTexture2d, fbo_tex);
+    unsafe (gl.tex_image2d)(kGlTexture2d, 0, kGlRgba8, fbw, fbh, 0, kGlRgba, kGlUnsignedByte, null);
+    unsafe (gl.tex_parameteri)(kGlTexture2d, kGlTextureMinFilter, kGlNearest);
+    unsafe (gl.tex_parameteri)(kGlTexture2d, kGlTextureMagFilter, kGlNearest);
+    unsafe (gl.gen_framebuffers)(1, &raw var fbo);
+    unsafe (gl.bind_framebuffer)(kGlFramebuffer, fbo);
+    unsafe (gl.framebuffer_texture2d)(kGlFramebuffer, kGlColorAttachment0, kGlTexture2d, fbo_tex, 0);
+    if (unsafe (gl.check_framebuffer_status)(kGlFramebuffer) != kGlFramebufferComplete) {
+      eprintln("ugui_preview: FBO incomplete");
+      return 1;
+    }
+  }
+
+  var font_rev: u32 = 0xFFFFFFFF;
+
+  var exit_code: i32 = 0;
+  if (let shot = screenshot_path) {
+    if (frames < 1) {
+      frames = 1;
+    }
+    for (let k in 0..frames) {
+      frame(ui, backend.get_var(), gl, bg, font_rev);
+    }
+    unsafe (gl.finish)();
+
+    let size = fbw as usize * fbh as usize * 4;
+    var pixels = filled(size, 0u8);
+    unsafe (gl.pixel_storei)(kGlPackAlignment, 1);
+    unsafe (gl.read_pixels)(0, 0, fbw, fbh, kGlRgba, kGlUnsignedByte, @ptr(pixels.as_slice_var()));
+
+    // GL's origin is bottom-left; PNG rows go top-down.
+    var flipped = filled(size, 0u8);
+    let stride = fbw as usize * 4;
+    for (let y in 0..fbh as usize) {
+      let src = (fbh as usize - 1 - y) * stride;
+      for (let x in 0..stride) {
+        flipped[y * stride + x] = pixels[src + x];
+      }
+    }
+
+    if (write_png(shot.as_str(), flipped.as_slice(), fbw, fbh)) {
+      println(f"ugui_preview: wrote {shot} ({fbw}x{fbh})");
+    } else {
+      eprintln(f"ugui_preview: failed to write {shot}");
+      exit_code = 1;
+    }
+  } else {
+    var last = mtime(ugui_file.as_str());
+    var poll: i32 = 0;
+    while (unsafe glfw_window_should_close(win) == 0) {
+      poll += 1;
+      if (poll >= 30) {
+        poll = 0;
+        let now = mtime(ugui_file.as_str());
+        if (now != none && now != last) {
+          last = now;
+          let _ = ui.load_ui(ugui_file.as_str());
+          if (path_exists(lua_file.as_str())) {
+            let _ = ui.load_script(lua_file.as_str());
+          }
+          println(f"ugui_preview: reloaded {ugui_file}");
+        }
+      }
+      frame(ui, backend.get_var(), gl, bg, font_rev);
+      unsafe glfw_swap_buffers(win);
+    }
+  }
+
+  backend.get_var().shutdown();
+  ui.shutdown();
+  unsafe glfw_destroy_window(win);
+  unsafe glfw_terminate();
+  return exit_code;
+}

@@ -1,0 +1,15 @@
+# examples/lottie_demo in aki: four Lottie animations (rlottie) on Image
+# widgets through UIContext over GLFW and Vulkan, as examples/lottie_demo/main.cc.
+[package]
+name = "ultragui_lottie_demo"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_vulkan = { path = "../../ultragui_vulkan" }
+ultragui_lottie = { path = "../../ultragui_lottie" }
+
+[build]
+opt = 2

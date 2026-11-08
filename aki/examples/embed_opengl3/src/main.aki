@@ -1,0 +1,324 @@
+// examples/embed_opengl3/main.cc: embedding sample (Dear ImGui style) on
+// OpenGL 3.3 through draw data. The host creates the window and GL context
+// and draws its own background; ultragui runs in draw-data mode
+// (RenderDrawData builds a draw list, no RHI) and the ugui_impl_opengl3
+// backend (GlRenderer) records it into the host's context. Works with any
+// library RHI backend, since draw-data mode uses none.
+//
+// Shape differences (not behavior):
+// * The C++ loads its GL entry points into file-static function pointers;
+//   here they are a HostGl table, loaded through glfwGetProcAddress.
+// * `ugui::gl` is a file-static backend in the C++; here the host keeps a
+//   GlRenderer value (boxed, so its address is stable) and hands UIContext a
+//   forwarding view of it (SharedTextures), where the C++ hands UIContext a
+//   non-owning pointer to gl::texture_backend().
+// * The click lambda compares the clicked widget with the one named
+//   btn_hello, looked up once (router handlers get no World here).
+// * RenderDrawData's list is read back with `ui.renderer.get_draw_data()`
+//   after the atlas upload (the same buffers; RenderDrawData returns them).
+// * The UIContext's Rhi type is NullRhi: draw-data mode never initializes
+//   one (the C++ links the build's RHI and leaves it untouched); nothing here
+//   runs a script, so the runtime is NoScript.
+
+module ultragui_embed_opengl3;
+
+import {eprintln, println} from akikit::logging;
+import {Command} from akikit::process::child;
+import {output} from akikit::process::capture;
+import {path_exists} from akikit::filesystem::file_util;
+import {Box} from akikit::memory::box;
+import {String, from_str} from akikit::strings::string;
+import {Atomic} from akikit::threading::atomic;
+import {WidgetId} from ultragui::core::handle;
+import {MouseButton} from ultragui::input::input_queue;
+import {TextureId} from ultragui::render::draw_data;
+import {TextureBackend, TextureBackendBox} from ultragui::render::texture_backend;
+import {NullRhi} from ultragui::rhi::null_rhi;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {NoScript} from ultragui::scripting::script_runtime;
+import {load_svg_memory} from ultragui::svg::svg;
+import {UIConfig, UIContext} from ultragui::ui_context;
+import {set_image_texture} from ultragui::widgets::image;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {
+  glfw_create_window, glfw_destroy_window, glfw_get_framebuffer_size, glfw_get_proc_address, glfw_get_time,
+  glfw_init, glfw_make_context_current, glfw_swap_buffers, glfw_swap_interval, glfw_terminate, glfw_window_hint,
+  glfw_window_should_close, kGlfwClientApi, kGlfwContextVersionMajor, kGlfwContextVersionMinor, kGlfwOpenglApi,
+  kGlfwOpenglCoreProfile, kGlfwOpenglForwardCompat, kGlfwOpenglProfile, kGlfwSrgbCapable, kGlfwTrue,
+} from ultragui_glfw::sys::glfw;
+import {GlRenderer, InitInfo} from ultragui_opengl::ugui_impl_opengl3;
+
+// LoadProc: glfwGetProcAddress as the C function the backend takes.
+extern fn load_proc(name: *const c_char): *var u8 {
+  return unsafe glfw_get_proc_address(name);
+}
+
+comptime let kGlTriangles: u32 = 0x0004;
+comptime let kGlFragmentShader: u32 = 0x8B30;
+comptime let kGlVertexShader: u32 = 0x8B31;
+
+struct HostGl : Copy {
+  pub let viewport: extern fn(i32, i32, i32, i32): ()
+  pub let create_shader: extern fn(u32): u32
+  pub let shader_source: extern fn(u32, i32, *const *const c_char, *const i32): ()
+  pub let compile_shader: extern fn(u32): ()
+  pub let create_program: extern fn(): u32
+  pub let attach_shader: extern fn(u32, u32): ()
+  pub let link_program: extern fn(u32): ()
+  pub let use_program: extern fn(u32): ()
+  pub let gen_vertex_arrays: extern fn(i32, *var u32): ()
+  pub let bind_vertex_array: extern fn(u32): ()
+  pub let get_uniform_location: extern fn(u32, *const c_char): i32
+  pub let uniform1f: extern fn(i32, f32): ()
+  pub let draw_arrays: extern fn(u32, i32, i32): ()
+}
+
+// glfwGetProcAddress(name) as a function of type F; none if GLFW lacks it.
+fn proc<F>(name: *const c_char): F? {
+  var p = unsafe glfw_get_proc_address(name);
+  if (p == null) {
+    return none;
+  }
+  return unsafe @read(&raw var p as *const F);
+}
+
+// LoadHostGL
+fn load_gl(): HostGl? {
+  let viewport = proc::<extern fn(i32, i32, i32, i32): ()>(c"glViewport") else {
+    return none;
+  };
+  let create_shader = proc::<extern fn(u32): u32>(c"glCreateShader") else {
+    return none;
+  };
+  let shader_source = proc::<extern fn(u32, i32, *const *const c_char, *const i32): ()>(c"glShaderSource") else {
+    return none;
+  };
+  let compile_shader = proc::<extern fn(u32): ()>(c"glCompileShader") else {
+    return none;
+  };
+  let create_program = proc::<extern fn(): u32>(c"glCreateProgram") else {
+    return none;
+  };
+  let attach_shader = proc::<extern fn(u32, u32): ()>(c"glAttachShader") else {
+    return none;
+  };
+  let link_program = proc::<extern fn(u32): ()>(c"glLinkProgram") else {
+    return none;
+  };
+  let use_program = proc::<extern fn(u32): ()>(c"glUseProgram") else {
+    return none;
+  };
+  let gen_vertex_arrays = proc::<extern fn(i32, *var u32): ()>(c"glGenVertexArrays") else {
+    return none;
+  };
+  let bind_vertex_array = proc::<extern fn(u32): ()>(c"glBindVertexArray") else {
+    return none;
+  };
+  let get_uniform_location = proc::<extern fn(u32, *const c_char): i32>(c"glGetUniformLocation") else {
+    return none;
+  };
+  let uniform1f = proc::<extern fn(i32, f32): ()>(c"glUniform1f") else {
+    return none;
+  };
+  let draw_arrays = proc::<extern fn(u32, i32, i32): ()>(c"glDrawArrays") else {
+    return none;
+  };
+  return HostGl {
+    viewport, create_shader, shader_source, compile_shader, create_program, attach_shader, link_program, use_program, gen_vertex_arrays, bind_vertex_array, get_uniform_location, uniform1f, draw_arrays,
+  };
+}
+
+// A NUL-terminated copy of s, for GL.
+fn c_text(s: str): String {
+  var out = from_str(s);
+  out.push_c8('\0');
+  return out;
+}
+
+// gl::texture_backend() as UIContext holds it: a view of the host's
+// renderer, which the host keeps (boxed) for as long as the UIContext.
+struct SharedTextures : TextureBackend {
+  pub unowned var renderer: *var GlRenderer
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId =>
+    unsafe (*self.renderer).create_texture(width, height, format, pixels, filter);
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {
+    unsafe (*self.renderer).update_texture(id, pixels);
+  }
+  pub fn destroy_texture(var self&, id: TextureId) {
+    unsafe (*self.renderer).destroy_texture(id);
+  }
+}
+
+comptime let kHostVert: str = "#version 330 core\nout vec2 v_uv;\nvoid main() {\n  vec2 v[3] = vec2[](vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));\n  v_uv = v[gl_VertexID] * 0.5 + 0.5;\n  gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);\n}";
+comptime let kHostFrag: str = "#version 330 core\nin vec2 v_uv; uniform float u_time; out vec4 frag;\nvoid main() {\n  vec3 c = 0.5 + 0.5 * cos(u_time + v_uv.xyx * 3.0 + vec3(0.0, 2.0, 4.0));\n  frag = vec4(c * 0.22, 1.0);\n}";
+
+comptime let kUi: str = r"""
+panel root {
+  width: 100vw; height: 100vh;
+  layout: column; justify: center; align: center;
+  panel card {
+    layout: column; gap: 10; padding: 28;
+    background: #14142899; corner-radius: 18;
+    border-color: #ffffff20; border-width: 1;
+    shadow-color: #00000080; shadow-blur: 28; shadow-y: 10;
+    image logo { width: 72; height: 72; }
+    text title { text: "ultragui via ugui_impl_opengl3"; font-size: 22; color: #ffffff; }
+    text sub { text: "Host owns the GL context; ultragui hands it a draw list.";
+               font-size: 13; color: #a8a8c8; }
+    button btn_hello { text: "Click me"; background: #4a4aff; color: #ffffff;
+                       corner-radius: 8; padding: 10 20; cursor: pointer; }
+  }
+}
+""";
+
+comptime let kLogoSvg: str = r"""
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="50" cy="50" r="46" fill="#4a4aff"/>
+  <circle cx="50" cy="50" r="46" fill="none" stroke="#ffffff" stroke-width="4"/>
+  <rect x="30" y="30" width="40" height="40" rx="8" fill="#ffffff"/>
+</svg>
+""";
+
+// FindFont: what fc-match prints (all of it, as fread reads it), if that
+// file exists.
+fn find_font(): String? {
+  var cmd = Command("sh");
+  cmd.arg("-c");
+  cmd.arg("fc-match -f '%{file}' sans 2>/dev/null");
+  let out = output(cmd) else {
+    return none;
+  };
+  let n = out.stdout.len() < 1023 ? out.stdout.len() : 1023;
+  if (n == 0) {
+    return none;
+  }
+  var path = String();
+  if (!path.push_utf8(out.stdout.as_slice()[..n] as bytes)) {
+    return none;
+  }
+  return path_exists(path.as_str()) ? path : none;
+}
+
+pub fn main(): i32 {
+  if (unsafe glfw_init() == 0) {
+    eprintln("embed_opengl3: glfwInit failed");
+    return 1;
+  }
+  unsafe {
+    glfw_window_hint(kGlfwClientApi, kGlfwOpenglApi);
+    glfw_window_hint(kGlfwContextVersionMajor, 3);
+    glfw_window_hint(kGlfwContextVersionMinor, 3);
+    glfw_window_hint(kGlfwOpenglProfile, kGlfwOpenglCoreProfile);
+    glfw_window_hint(kGlfwOpenglForwardCompat, kGlfwTrue);
+    glfw_window_hint(kGlfwSrgbCapable, kGlfwTrue);
+  }
+  let win = unsafe glfw_create_window(1280, 800, c"ultragui embedded (OpenGL3 draw-data)", null, null);
+  if (win == null) {
+    eprintln("embed_opengl3: window creation failed");
+    return 1;
+  }
+  unsafe glfw_make_context_current(win);
+  unsafe glfw_swap_interval(1);
+  let gl = load_gl() else {
+    eprintln("embed_opengl3: failed to load host GL");
+    return 1;
+  };
+
+  // Host's own background program.
+  let vert = c_text(kHostVert);
+  let frag = c_text(kHostFrag);
+  let vs = unsafe (gl.create_shader)(kGlVertexShader);
+  let vsrc = unsafe (@ptr(vert.as_str()) as *const c_char);
+  unsafe (gl.shader_source)(vs, 1, &raw vsrc, null);
+  unsafe (gl.compile_shader)(vs);
+  let fs = unsafe (gl.create_shader)(kGlFragmentShader);
+  let fsrc = unsafe (@ptr(frag.as_str()) as *const c_char);
+  unsafe (gl.shader_source)(fs, 1, &raw fsrc, null);
+  unsafe (gl.compile_shader)(fs);
+  let prog = unsafe (gl.create_program)();
+  unsafe (gl.attach_shader)(prog, vs);
+  unsafe (gl.attach_shader)(prog, fs);
+  unsafe (gl.link_program)(prog);
+  let u_time = unsafe (gl.get_uniform_location)(prog, c"u_time");
+  var vao: u32 = 0;
+  unsafe (gl.gen_vertex_arrays)(1, &raw var vao);
+
+  // ultragui in draw-data mode, attached to the host's window.
+  var ui = UIContext::<GlfwPlatform, NullRhi, NoScript>(GlfwPlatform(), NullRhi(), NoScript());
+  let cfg = UIConfig { external_window: unsafe (win as *var u8), draw_data: true, width: 1280, height: 800 };
+  if (!ui.init(cfg)) {
+    eprintln("embed_opengl3: ui.Init failed");
+    return 1;
+  }
+  if (let font = find_font()) {
+    ui.set_default_font(ui.load_font(font.as_str()));
+  } else {
+    eprintln("embed_opengl3: no system font found");
+  }
+  let _ = ui.load_ui_string(kUi, "embed");
+
+  let button: WidgetId = ui.find_widget("btn_hello");
+  let clicks = Atomic::<i32>(0);
+  ui.input.set_on_click(own fn(w: WidgetId, b: MouseButton) {
+    if (button.valid() && w == button) {
+      let n = clicks.fetch_add(1) + 1;
+      println(f"embed_opengl3: button clicked ({n})");
+    }
+  });
+
+  // Initialize the GL backend and wire its texture seam into ultragui.
+  var gl_backend = Box(GlRenderer());
+  if (!gl_backend.get_var().init(InitInfo { get_proc_address: @c_fn(load_proc) })) {
+    eprintln("embed_opengl3: backend init failed");
+    return 1;
+  }
+
+  ui.set_texture_backend(TextureBackendBox::of(SharedTextures { renderer: unsafe (gl_backend.as_ptr() as *var GlRenderer) }));
+  {
+    if (let img = load_svg_memory(kLogoSvg as bytes, 72, 72)) {
+      var logo: TextureId = 0;
+      if (var tex& = ui.texture_backend()) {
+        logo = tex.create_texture(img.width, img.height, RhiFormat::Rgba8Unorm, img.pixels.as_slice() as bytes, RhiFilter::Linear);
+      }
+      let w = ui.find_widget("logo");
+      set_image_texture(ui.world, w, logo, img.width as f32, img.height as f32);
+    }
+  }
+
+  var font_rev: u32 = 0xFFFFFFFF;
+
+  while (unsafe glfw_window_should_close(win) == 0) {
+    let _ = ui.render_draw_data();  // polls input, builds UI
+    if (ui.text_engine.atlas_revision() != font_rev) {
+      let size = ui.text_engine.atlas_size();
+      let _ = gl_backend.get_var().update_font_atlas(ui.text_engine.atlas_pixels() as bytes, size.x as u32, size.y as u32);
+      font_rev = ui.text_engine.atlas_revision();
+    }
+
+    var fbw: i32 = 0;
+    var fbh: i32 = 0;
+    unsafe glfw_get_framebuffer_size(win, &raw var fbw, &raw var fbh);
+
+    // 1. Host scene.
+    unsafe (gl.viewport)(0, 0, fbw, fbh);
+    unsafe (gl.use_program)(prog);
+    unsafe (gl.uniform1f)(u_time, unsafe glfw_get_time() as f32);
+    unsafe (gl.bind_vertex_array)(vao);
+    unsafe (gl.draw_arrays)(kGlTriangles, 0, 3);
+
+    // 2. ultragui's draw list on top.
+    gl_backend.get_var().new_frame();
+    let dd = ui.renderer.get_draw_data();
+    gl_backend.get_var().render_draw_data(dd);
+
+    // 3. Host presents.
+    unsafe glfw_swap_buffers(win);
+  }
+
+  gl_backend.get_var().shutdown();
+  ui.shutdown();
+  unsafe glfw_destroy_window(win);
+  unsafe glfw_terminate();
+  return 0;
+}

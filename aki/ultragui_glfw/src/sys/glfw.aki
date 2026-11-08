@@ -18,7 +18,16 @@ pub comptime let kGlfwRelease: i32 = 0;
 pub comptime let kGlfwPress: i32 = 1;
 pub comptime let kGlfwRepeat: i32 = 2;
 
+// Keys (glfwGetKey; the examples poll scene and playback keys)
+pub comptime let kGlfwKeySpace: i32 = 32;
+pub comptime let kGlfwKey1: i32 = 49;
+pub comptime let kGlfwKeyL: i32 = 76;
+pub comptime let kGlfwKeyR: i32 = 82;
+pub comptime let kGlfwKeyRight: i32 = 262;
+pub comptime let kGlfwKeyLeft: i32 = 263;
+
 // Window hints
+pub comptime let kGlfwVisible: i32 = 0x00020004;
 pub comptime let kGlfwResizable: i32 = 0x00020003;
 pub comptime let kGlfwSrgbCapable: i32 = 0x0002100E;
 pub comptime let kGlfwClientApi: i32 = 0x00022001;
@@ -60,6 +69,7 @@ pub extern("glfwGetFramebufferSize") fn glfw_get_framebuffer_size(window: *var G
 pub extern("glfwGetWindowContentScale") fn glfw_get_window_content_scale(window: *var GlfwWindow, xscale: *var f32,
   yscale: *var f32): ();
 pub extern("glfwGetTime") fn glfw_get_time(): f64;
+pub extern("glfwGetKey") fn glfw_get_key(window: *var GlfwWindow, key: i32): i32;
 pub extern("glfwSetWindowUserPointer") fn glfw_set_window_user_pointer(window: *var GlfwWindow, pointer: *var u8): ();
 pub extern("glfwGetWindowUserPointer") fn glfw_get_window_user_pointer(window: *var GlfwWindow): *var u8;
 pub extern("glfwCreateStandardCursor") fn glfw_create_standard_cursor(shape: i32): *var GlfwCursor;
