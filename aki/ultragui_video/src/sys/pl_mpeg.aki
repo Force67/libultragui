@@ -1,0 +1,146 @@
+// No C++ counterpart: the pl_mpeg API the video player calls, declared by
+// hand (pl_mpeg.h). `Plm` is opaque; `PlmDecoder` owns one and destroys it
+// with the owner.
+
+module ultragui_video::sys::pl_mpeg;
+
+import {with_nul} from akikit::strings::string;
+
+pub extern type Plm;
+
+// PLM_AUDIO_SAMPLES_PER_FRAME: plm_samples_t holds this many interleaved
+// stereo frames (no PLM_AUDIO_SEPARATE_CHANNELS).
+pub comptime let kAudioSamplesPerFrame: usize = 1152;
+
+// plm_plane_t: width * height bytes, rounded up to macroblocks (16px).
+pub extern struct PlmPlane {
+  pub var width: u32
+  pub var height: u32
+  pub var data: *var u8
+}
+
+// plm_frame_t
+pub extern struct PlmFrame {
+  pub var time: f64
+  pub var width: u32
+  pub var height: u32
+  pub var y: PlmPlane
+  pub var cr: PlmPlane
+  pub var cb: PlmPlane
+}
+
+// plm_samples_t
+pub extern struct PlmSamples {
+  pub var time: f64
+  pub var count: u32
+  pub var interleaved: [f32; 2304]
+}
+
+pub type VideoDecodeCallback = extern fn(*var Plm, *var PlmFrame, *var u8): ();
+pub type AudioDecodeCallback = extern fn(*var Plm, *var PlmSamples, *var u8): ();
+
+pub extern("plm_create_with_filename") fn plm_create_with_filename(filename: *const c_char): *var Plm;
+pub extern("plm_destroy") fn plm_destroy(plm: *var Plm);
+pub extern("plm_get_num_video_streams") fn plm_get_num_video_streams(plm: *var Plm): i32;
+pub extern("plm_get_num_audio_streams") fn plm_get_num_audio_streams(plm: *var Plm): i32;
+pub extern("plm_get_width") fn plm_get_width(plm: *var Plm): i32;
+pub extern("plm_get_height") fn plm_get_height(plm: *var Plm): i32;
+pub extern("plm_get_duration") fn plm_get_duration(plm: *var Plm): f64;
+pub extern("plm_get_framerate") fn plm_get_framerate(plm: *var Plm): f64;
+pub extern("plm_get_samplerate") fn plm_get_samplerate(plm: *var Plm): i32;
+pub extern("plm_get_time") fn plm_get_time(plm: *var Plm): f64;
+pub extern("plm_set_loop") fn plm_set_loop(plm: *var Plm, looping: i32);
+pub extern("plm_set_audio_enabled") fn plm_set_audio_enabled(plm: *var Plm, enabled: i32);
+pub extern("plm_set_audio_lead_time") fn plm_set_audio_lead_time(plm: *var Plm, lead_time: f64);
+pub extern("plm_set_video_decode_callback") fn plm_set_video_decode_callback(plm: *var Plm, callback: VideoDecodeCallback, user: *var u8);
+pub extern("plm_set_audio_decode_callback") fn plm_set_audio_decode_callback(plm: *var Plm, callback: AudioDecodeCallback, user: *var u8);
+pub extern("plm_decode") fn plm_decode(plm: *var Plm, seconds: f64);
+pub extern("plm_decode_video") fn plm_decode_video(plm: *var Plm): *var PlmFrame;
+pub extern("plm_has_ended") fn plm_has_ended(plm: *var Plm): i32;
+pub extern("plm_rewind") fn plm_rewind(plm: *var Plm);
+pub extern("plm_seek") fn plm_seek(plm: *var Plm, time: f64, seek_exact: i32): i32;
+
+// An owned pl_mpeg decoder (plm_t).
+pub struct PlmDecoder {
+  let plm: *var Plm
+  fn ~PlmDecoder();
+
+  // plm_create_with_filename; none when the file cannot be opened.
+  pub fn open(path: str): PlmDecoder?;
+
+  pub fn num_video_streams(self&): i32 => unsafe plm_get_num_video_streams(self.plm);
+  pub fn num_audio_streams(self&): i32 => unsafe plm_get_num_audio_streams(self.plm);
+  pub fn width(self&): i32 => unsafe plm_get_width(self.plm);
+  pub fn height(self&): i32 => unsafe plm_get_height(self.plm);
+  pub fn duration(self&): f64 => unsafe plm_get_duration(self.plm);
+  pub fn framerate(self&): f64 => unsafe plm_get_framerate(self.plm);
+  pub fn samplerate(self&): i32 => unsafe plm_get_samplerate(self.plm);
+  pub fn time(self&): f64 => unsafe plm_get_time(self.plm);
+  pub fn has_ended(self&): bool => unsafe plm_has_ended(self.plm) != 0;
+
+  pub fn set_loop(var self&, looping: bool) {
+    unsafe {
+      plm_set_loop(self.plm, looping ? 1 : 0);
+    }
+  }
+  pub fn set_audio_enabled(var self&, enabled: bool) {
+    unsafe {
+      plm_set_audio_enabled(self.plm, enabled ? 1 : 0);
+    }
+  }
+  pub fn set_audio_lead_time(var self&, lead_time: f64) {
+    unsafe {
+      plm_set_audio_lead_time(self.plm, lead_time);
+    }
+  }
+  pub fn rewind(var self&) {
+    unsafe {
+      plm_rewind(self.plm);
+    }
+  }
+  pub fn seek(var self&, time: f64, exact: bool): bool => unsafe plm_seek(self.plm, time, exact ? 1 : 0) != 0;
+
+  // The callbacks, called from decode() and seek() with `user`. The caller
+  // vouches that `user` outlives the decoder's use of it.
+  pub unsafe fn set_video_callback(var self&, callback: VideoDecodeCallback, user: *var u8) {
+    unsafe {
+      plm_set_video_decode_callback(self.plm, callback, user);
+    }
+  }
+  pub unsafe fn set_audio_callback(var self&, callback: AudioDecodeCallback, user: *var u8) {
+    unsafe {
+      plm_set_audio_decode_callback(self.plm, callback, user);
+    }
+  }
+
+  // plm_decode: advances `seconds`, calling the callbacks.
+  pub fn decode(var self&, seconds: f64) {
+    unsafe {
+      plm_decode(self.plm, seconds);
+    }
+  }
+
+  // plm_decode_video: one frame, valid until the next call; null when none.
+  pub fn decode_video(var self&): (&PlmFrame)? {
+    let frame = unsafe plm_decode_video(self.plm);
+    if (frame == null) {
+      return none;
+    }
+    return unsafe *frame;
+  }
+}
+
+fn PlmDecoder::~PlmDecoder() {
+  unsafe {
+    plm_destroy(self.plm);
+  }
+}
+
+fn PlmDecoder::open(path: str): PlmDecoder? {
+  let z = with_nul(path);
+  let plm = unsafe plm_create_with_filename(@ptr(z.as_str()) as *const c_char);
+  if (plm == null) {
+    return none;
+  }
+  return PlmDecoder { plm };
+}

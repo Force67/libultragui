@@ -22,6 +22,9 @@ aki/
     tools/gen_svg_reference.cc, gen_svg_table.py, gen_svg_corpus.py
                          SVG pixel hashes from the C++ -> tests/support/svg_corpus.aki
     tests/data/svg/      the SVG corpus (@embed'ed by tests/support/svg_corpus.aki)
+  ultragui_audio/        miniaudio AudioBackend (csrc/ugui_ma.c shim)
+  ultragui_lottie/       rlottie from third_party via c_sources; tools/gen_reference.cc + gen_tables.py
+  ultragui_video/        pl_mpeg via [build.implement]; tools/{gen_reference,recording_rhi}.cc + gen_tables.py
   tools/golden/          draw-data golden harness (C++ side), see its README
   tools/xshot.sh         screenshots of windowed backends under Xvfb
 ```
@@ -104,7 +107,7 @@ package), **gone** (no counterpart, reason given).
 | platform/platform_glfw.cc | | pkg:ultragui_glfw |
 | text/text_engine.{h,cc} | ultragui::text::text_engine (+ sys::freetype, sys::harfbuzz) | ported |
 | audio/audio_backend.h | ultragui::audio::audio_backend | ported (seam) |
-| audio/miniaudio_impl.cc, backends/ugui_impl_miniaudio.* | | pkg:ultragui_audio |
+| audio/miniaudio_impl.cc, backends/ugui_impl_miniaudio.* | ultragui_audio::ugui_impl_miniaudio (+ sys::miniaudio, csrc/ugui_ma.c) | ported (pkg:ultragui_audio; `AudioEngine`) |
 | scripting/script_runtime.h, script_runtime_none.cc | ultragui::scripting::script_runtime | ported (capability + NoScript) |
 | scripting/lua_*.{h,cc} | | pkg:ultragui_lua |
 | ultragui_config.h | ultragui::ultragui_config | ported (switch -> package/type map) |
@@ -120,8 +123,8 @@ package), **gone** (no counterpart, reason given).
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
 | anim/* | ultragui::anim::* | next (pure code, core) |
 | ui_context.{h,cc} | ultragui::ui_context | next |
-| lottie/* | | pkg:ultragui_lottie |
-| video/* | | pkg:ultragui_video |
+| lottie/lottie.{h,cc} | ultragui_lottie::lottie (+ sys::rlottie) | ported (pkg:ultragui_lottie; backend passed per call, see "Backends held by value") |
+| video/video.{h,cc} | ultragui_video::video (+ sys::pl_mpeg) | ported (pkg:ultragui_video; RHI passed per call; audio bridge included) |
 | backends/ugui_impl_vulkan.* | | pkg:ultragui_vulkan |
 | backends/ugui_impl_opengl3.* | | pkg:ultragui_opengl |
 | backends/ugui_impl_dx11.* | | pkg:ultragui_d3d11 |
@@ -463,6 +466,54 @@ One that needs the World gets it as a parameter, not a capture; the caller
 takes the callback out of the component (or copies what it needs) before
 calling it, because the component's view borrows the World.
 
+### Subsystems that held a backend pointer: LottieAnimation, VideoPlayer
+
+The C++ `LottieAnimation` keeps the `TextureBackend*` it was loaded with and
+`VideoPlayer` keeps the `RHI*`. A struct cannot hold a borrow of something its
+own owner (UIContext) also owns, so the ported types hold neither: every
+method that can render, upload or free takes the backend as an argument, the
+way `TextEngine::flush_atlas(rhi)` does.
+
+```aki
+var anim = LottieAnimation();
+var tex = DynTextureBackend::of(host_textures);       // or boxed.as_dyn(); null C++ pointer = `none`
+anim.load(tex, "spinner.json", 64, 64);               // backend: (&var DynTextureBackend)?
+anim.update(dt, tex);  anim.seek(0.5, tex);  anim.stop(tex);
+anim.unload(tex);                                     // releases the texture; do this before drop
+
+var vid = VideoPlayer();
+vid.load(rhi, "cutscene.mpg", none);                  // rhi: var R (R: Rhi); audio: (&DynAudioBackend)?
+vid.update(dt, rhi);  vid.convert_frame(rhi);  vid.seek(t, rhi);  vid.stop(rhi);
+vid.unload(rhi);                                      // destroys Y/Cb/Cr and the render target
+```
+
+Pass the same backend/RHI the animation was loaded with. A drop without
+`unload` frees the CPU side (rlottie animation, pl_mpeg decoder, audio device)
+and leaves the GPU handles to the backend's own teardown. Methods that touch
+neither (`play`, `pause`, `set_speed`, `is_playing`, `progress`, ...) take no
+backend. UIContext's `LoadLottie`/`LoadVideo` store the handles' players in
+maps and pass `texture_backend.as_dyn()` / the Rhi on each `update`.
+
+### Optional packages and their native code
+
+* `ultragui_audio`: miniaudio is `[build.implement]` from `third_party`
+  (`MINIAUDIO_IMPLEMENTATION`), plus `csrc/ugui_ma.c`, a ~80-line shim that
+  reports the sizes of miniaudio's opaque structs (aki allocates them as
+  zeroed `NativeBlock`s), fills the config structs miniaudio takes by value,
+  and wraps the playback device's callback. Everything else is declared by
+  hand in `sys::miniaudio`. `AudioEngine` is an `AudioBackend`; wrap it in
+  `AudioBackendBox::of(AudioEngine())` for `UIContext::set_audio`.
+* `ultragui_lottie`: rlottie's sources compile through `c_sources` (the file
+  list of its CMake, config.h in `csrc/`), via its C API
+  (`lottie_animation_*`). No flake change; it builds anywhere akiko has a C++
+  compiler (Windows too: `-DRLOTTIE_BUILD=0`, `-lshlwapi`; not built here, the
+  `--target x86_64-w64-windows-gnu` check only covers aki code). `opt = 3` to
+  match the reference build's -O3 (rlottie's rasterizer is slow below it).
+* `ultragui_video`: pl_mpeg is `[build.implement]` with
+  `-includestddef.h -includestdio.h` (the header expects its includer to have
+  them); it depends on `ultragui_audio` for the miniaudio binding and
+  implementation (the audio bridge uses `ma_pcm_rb` and a playback device).
+
 ## Fidelity
 
 Reproduce the C++ exactly: float expressions in C++ operation order, the
@@ -504,6 +555,19 @@ so bit-exact tables are aarch64's.
   numbers are libc's `strtof` (viewBox, width/height, path data) or
   `atof`-through-`strtod` rounded to f32 (everything else), as in the C++;
   `sys::c_text` calls libc for both so the values cannot differ.
+- `VideoPlayer::Load(rhi, path, AudioBackend* audio)` only tests `audio` for
+  non-null; the audio plays through the bridge's own `ma_device`, not through
+  the backend. The port takes `(&DynAudioBackend)?` and tests it for `some`.
+- pl_mpeg's video callback uploads every decoded frame to the RHI inside
+  `plm_decode`/`plm_seek`. The port copies each frame's planes in the
+  callback and uploads them in order when the call returns (no RHI in
+  reach of a C callback): same RHI calls, same contents, uploaded at the end
+  of the call.
+- `LottieAnimation` computes `frameAtPos` itself (rlottie's formula in
+  `double`): the C API's `lottie_animation_get_frame_at_pos` narrows the
+  position to `float` and can pick a different frame than the C++ call.
+- The audio bridge's `volume`/`muted` are plain fields read by the audio
+  thread while the main thread writes them, as in the C++.
 
 ### Shape differences (not behavior)
 
@@ -566,3 +630,18 @@ so bit-exact tables are aarch64's.
   (`fn(a&: usize, b&: usize): bool => edges[a].y0 < edges[b].y0`).
 - yoga's sources warn about `_FORTIFY_SOURCE` without `-O`; `-Wno-#warnings`
   in `c_flags` silences it.
+- **Private fields of a module-private struct are private to its methods**:
+  helper structs used by free functions in the same file (`SoundSlot`, `Impl`
+  in ugui_impl_miniaudio) need `pub var` fields.
+- **`unowned` goes after `pub`**: `pub unowned var device: *var T`.
+- **Multi-line text is `r"""` ... `"""`** (raw, closer on its own line); a
+  plain `"` cannot span lines. Handy for JSON in tests.
+- **`[build.implement]` flags**: one argument per flag, and an argument not
+  starting with `-` is a macro: `"-includestdio.h"`, not `"-include", "stdio.h"`.
+- **`@slice(p, n)` / `@slice_var` results are already views**: `let s = ...`,
+  not `let s& = ...`.
+- **A struct can hold an `extern fn` value** (`pull: extern fn(*var u8, *var f32, u32): ()`
+  in an extern signature), made with `@c_fn(callback_name)`; the callback's user
+  pointer to a heap object comes from `Box::as_ptr` (stable while the Box lives).
+- Run tests from the package dir; data files are found with `@package_dir()`
+  (`f"{@package_dir()}/../../examples/demo.mpg"`).

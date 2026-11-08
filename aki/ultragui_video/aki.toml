@@ -1,0 +1,21 @@
+# libultragui's MPEG-1 video player in aki (ugui/video/video.{h,cc}) over
+# pl_mpeg, compiled from third_party with [build.implement]. The audio bridge
+# plays through miniaudio, which comes from ultragui_audio (it carries the
+# miniaudio implementation and the binding). See ../PORTING.md.
+[package]
+name = "ultragui_video"
+kind = "lib"
+version = "0.1.0"
+description = "libultragui's MPEG-1 video player in aki, over pl_mpeg"
+
+[dependencies]
+ultragui = { path = "../ultragui" }
+ultragui_audio = { path = "../ultragui_audio" }
+
+[build]
+c_flags = ["-I../../third_party/pl_mpeg", "-Wno-#warnings"]
+link = ["-lm"]
+
+[build.implement]
+# pl_mpeg.h needs size_t and FILE from the includer, as video.cc has them
+"../../third_party/pl_mpeg/pl_mpeg.h" = ["PL_MPEG_IMPLEMENTATION", "-includestddef.h", "-includestdio.h", "-Wno-#warnings"]

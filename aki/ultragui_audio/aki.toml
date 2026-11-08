@@ -1,0 +1,33 @@
+# libultragui's audio backend in aki: the miniaudio-backed AudioBackend
+# (ugui/backends/ugui_impl_miniaudio.*) and the miniaudio binding the video
+# player's audio bridge reuses. miniaudio's implementation is compiled from
+# third_party with [build.implement] (ugui/audio/miniaudio_impl.cc); csrc/ugui_ma.c
+# is the one small C shim (struct sizes, config structs). See ../PORTING.md.
+[package]
+name = "ultragui_audio"
+kind = "lib"
+version = "0.1.0"
+description = "libultragui's miniaudio audio backend in aki"
+
+[dependencies]
+ultragui = { path = "../ultragui" }
+
+[build]
+c_sources = ["csrc/ugui_ma.c"]
+c_flags = ["-I../../third_party/miniaudio", "-Wno-#warnings"]
+
+[build.implement]
+"../../third_party/miniaudio/miniaudio.h" = ["MINIAUDIO_IMPLEMENTATION", "-Wno-#warnings"]
+
+# miniaudio dlopens its audio backends on Linux and needs pthreads.
+[build.os.linux]
+link = ["-ldl", "-lpthread", "-lm"]
+
+[build.os.android]
+link = ["-ldl", "-lm", "-llog", "-lOpenSLES"]
+
+[build.os.freebsd]
+link = ["-lpthread", "-lm"]
+
+[build.os.macos]
+link = ["-framework", "CoreFoundation", "-framework", "CoreAudio", "-framework", "AudioToolbox"]

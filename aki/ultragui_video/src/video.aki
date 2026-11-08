@@ -1,0 +1,750 @@
+// ugui/video/video.{h,cc}: an MPEG-1 video player backed by pl_mpeg. Decodes
+// video frames on the CPU, uploads the YCbCr planes as R8 textures, and
+// converts to RGBA on the GPU through the Rhi (ConvertVideoFrame). Optionally
+// decodes MP2 audio and plays the PCM through a miniaudio device.
+//
+//   var vid = VideoPlayer();
+//   vid.load(rhi, "cutscene.mpg", none);
+//   vid.play();
+//   // each frame:
+//   vid.update(dt, rhi);        // decode + upload planes
+//   vid.convert_frame(rhi);     // GPU YCbCr -> RGBA (call after acquire_frame)
+//   // use vid.texture() on an Image widget
+//   vid.unload(rhi);            // before drop
+//
+// Shape differences (not behavior):
+// * The C++ keeps the `RHI*` it was loaded with. Every method that touches the
+//   RHI takes it as an argument instead (`var rhi&: R`, R: Rhi), as the text
+//   engine does; pass the one the player was loaded with. A stored borrow
+//   cannot sit in a struct whose owner also owns the RHI (UIContext).
+// * The destructor cannot take the RHI: `unload(rhi)` releases the GPU
+//   textures and render target; a VideoPlayer dropped without it frees its
+//   decoder and audio device and leaks those handles to the RHI's teardown.
+// * pl_mpeg calls the video callback from inside plm_decode/plm_seek, where
+//   no RHI is at hand: the callback copies the planes into `pending` and the
+//   method that called into pl_mpeg uploads them, in order, on return. The
+//   sequence of RHI calls and the plane contents are those of the C++; only
+//   the moment of upload moves to the end of the call. The first frame (load,
+//   stop) is decoded with plm_decode_video and uploaded directly, as there.
+// * `Load(rhi, path, AudioBackend* audio)` only tests `audio` for non-null,
+//   as the C++ does (audio plays through the bridge's own ma_device, not
+//   through the backend): here `audio` is a `(&DynAudioBackend)?` that is
+//   likewise only tested for `some`. See PORTING.md, "Known C++ quirks kept".
+// * `audio_active()` is new: whether the audio bridge came up (it needs a
+//   device), for tests that must know whether pl_mpeg's audio clock ran.
+// * texture handles are `RhiTextureHandle` (kInvalidTexture = none).
+
+module ultragui_video::video;
+
+import {List} from akikit::containers::list;
+import {eprintln} from akikit::logging;
+import {Box} from akikit::memory::box;
+import {clamp_min_max} from ultragui::core::algorithm;
+import {DynAudioBackend} from ultragui::audio::audio_backend;
+import {Rhi} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {NativeBlock, UguiPlayback, kMaSuccess} from ultragui_audio::sys::miniaudio;
+import {ugui_ma_pcm_rb_init_f32, ugui_ma_playback_create, ugui_ma_playback_destroy, ugui_ma_playback_start, ugui_ma_playback_stop} from ultragui_audio::sys::miniaudio;
+import {ma_pcm_rb_uninit, ma_pcm_rb_reset, ma_pcm_rb_acquire_read, ma_pcm_rb_commit_read} from ultragui_audio::sys::miniaudio;
+import {ma_pcm_rb_acquire_write, ma_pcm_rb_commit_write} from ultragui_audio::sys::miniaudio;
+import {Plm, PlmDecoder, PlmFrame, PlmSamples} from ultragui_video::sys::pl_mpeg;
+
+// ============================================================================
+// AudioBridge: pl_mpeg's PCM into a ring buffer a miniaudio device drains
+// ============================================================================
+
+struct AudioBridge {
+  pub var ring_buffer: NativeBlock  // ma_pcm_rb
+  pub var ring_initialized: bool = false
+  pub unowned var device: *var UguiPlayback  // null until the device is up
+  pub var device_initialized: bool = false
+  pub var volume: f32 = 1.0
+  pub var muted: bool = false
+  pub var sample_rate: u32 = 0
+
+  fn ~AudioBridge();
+}
+
+comptime let kChannels: u32 = 2;
+
+fn AudioBridge::new(): AudioBridge => AudioBridge { ring_buffer: NativeBlock::pcm_rb(), device: null };
+
+fn AudioBridge::~AudioBridge() {
+  self.shutdown();
+}
+
+// The device callback: drains the ring buffer into the output, scaled by the
+// volume. `user` is the bridge, kept at a stable address by its Box.
+extern fn audio_data_callback(user: *var u8, output: *var f32, frame_count: u32) {
+  unsafe {
+    let me& = *(user as *var AudioBridge);
+    let dst = @slice_var(output, frame_count as usize * 2);
+
+    var frames: u32 = frame_count;
+    var read_buf: *var u8 = null;
+    let rb = me.ring_buffer.as_pcm_rb();
+    if (ma_pcm_rb_acquire_read(rb, &raw var frames, &raw var read_buf) == kMaSuccess && frames > 0) {
+      let vol = me.muted ? 0.0 : me.volume;
+      let src = @slice(read_buf as *const f32, frames as usize * 2);
+      for (let i in 0..frames as usize * 2) {
+        dst[i] = src[i] * vol;
+      }
+      ma_pcm_rb_commit_read(rb, frames);
+
+      // Zero remaining if we didn't get enough
+      if (frames < frame_count) {
+        for (let i in frames as usize * 2..frame_count as usize * 2) {
+          dst[i] = 0.0;
+        }
+      }
+    } else {
+      for (let i in 0..frame_count as usize * 2) {
+        dst[i] = 0.0;
+      }
+    }
+  }
+}
+
+// Ring buffer plus device; false when either cannot be created.
+fn AudioBridge::init(var self&, rate: u32): bool {
+  self.sample_rate = rate;
+
+  // Ring buffer: ~0.5s of stereo audio
+  let rb_frames = rate / 2;
+  if (unsafe ugui_ma_pcm_rb_init_f32(self.ring_buffer.as_pcm_rb(), kChannels, rb_frames) != kMaSuccess) {
+    return false;
+  }
+  self.ring_initialized = true;
+
+  let me = unsafe (&raw var self as *var u8);
+  let device = unsafe ugui_ma_playback_create(rate, kChannels, 512, @c_fn(audio_data_callback), me);
+  if (device == null) {
+    unsafe {
+      ma_pcm_rb_uninit(self.ring_buffer.as_pcm_rb());
+    }
+    self.ring_initialized = false;
+    return false;
+  }
+  self.device = device;
+  self.device_initialized = true;
+  return true;
+}
+
+fn AudioBridge::start(var self&) {
+  if (self.device_initialized) {
+    unsafe {
+      ugui_ma_playback_start(self.device);
+    }
+  }
+}
+
+fn AudioBridge::stop(var self&) {
+  if (self.device_initialized) {
+    unsafe {
+      ugui_ma_playback_stop(self.device);
+    }
+  }
+}
+
+fn AudioBridge::flush(var self&) {
+  if (self.device_initialized) {
+    unsafe {
+      ma_pcm_rb_reset(self.ring_buffer.as_pcm_rb());
+    }
+  }
+}
+
+fn AudioBridge::shutdown(var self&) {
+  if (self.device_initialized) {
+    unsafe {
+      ugui_ma_playback_destroy(self.device);
+    }
+    self.device_initialized = false;
+  }
+  if (self.ring_initialized) {
+    unsafe {
+      ma_pcm_rb_uninit(self.ring_buffer.as_pcm_rb());
+    }
+    self.ring_initialized = false;
+  }
+}
+
+// What the audio thread does not see: copies interleaved stereo frames into
+// the ring buffer, as many as fit.
+fn AudioBridge::push_samples(var self&, interleaved: *const f32, frame_count: u32) {
+  var write_buf: *var u8 = null;
+  var frames: u32 = frame_count;
+  let rb = self.ring_buffer.as_pcm_rb();
+  if (unsafe ma_pcm_rb_acquire_write(rb, &raw var frames, &raw var write_buf) != kMaSuccess) {
+    return;
+  }
+  if (frames > 0) {
+    unsafe {
+      let src = @slice(interleaved, frames as usize * 2);
+      let dst = @slice_var(write_buf as *var f32, frames as usize * 2);  // 2 channels
+      for (let i in 0..frames as usize * 2) {
+        dst[i] = src[i];
+      }
+      ma_pcm_rb_commit_write(rb, frames);
+    }
+  }
+}
+
+// ============================================================================
+// VideoPlayer
+// ============================================================================
+
+// The planes of one decoded frame, copied out of pl_mpeg's buffers.
+struct PendingFrame {
+  pub var y: List<u8>
+  pub var cb: List<u8>
+  pub var cr: List<u8>
+}
+
+// What pl_mpeg's callbacks reach through their user pointer (the C++ Impl*):
+// kept in a Box so its address is stable while the player moves.
+struct DecodeCtx {
+  pub var pending: List<PendingFrame>
+  pub var audio_bridge: Box<AudioBridge>?
+  pub var y_len: usize = 0
+  pub var chroma_len: usize = 0
+}
+
+fn copy_plane(data: *var u8, len: usize): List<u8> {
+  var out: List<u8> = List();
+  let src = unsafe @slice(data as *const u8, len);
+  for (let i in 0..len) {
+    out.push(src[i]);
+  }
+  return out;
+}
+
+extern fn on_video_frame(plm: *var Plm, frame: *var PlmFrame, user: *var u8) {
+  unsafe {
+    var ctx& = *(user as *var DecodeCtx);
+    let f& = *frame;
+    ctx.pending.push(PendingFrame {
+      y: copy_plane(f.y.data, ctx.y_len),
+      cb: copy_plane(f.cb.data, ctx.chroma_len),
+      cr: copy_plane(f.cr.data, ctx.chroma_len),
+    });
+  }
+}
+
+extern fn on_audio_samples(plm: *var Plm, samples: *var PlmSamples, user: *var u8) {
+  unsafe {
+    var ctx& = *(user as *var DecodeCtx);
+    if (var bridge& = ctx.audio_bridge) {
+      var s& = *samples;
+      bridge.get_var().push_samples(@ptr(s.interleaved[..]) as *const f32, s.count);
+    }
+  }
+}
+
+struct Impl {
+  pub var plm: PlmDecoder
+  pub var ctx: Box<DecodeCtx>
+
+  // RGBA render target (output of GPU YCbCr -> RGBA conversion)
+  pub var rgba_target: RhiTextureHandle = kInvalidTexture
+
+  // YCbCr plane textures (R8)
+  pub var y_tex: RhiTextureHandle = kInvalidTexture
+  pub var cb_tex: RhiTextureHandle = kInvalidTexture
+  pub var cr_tex: RhiTextureHandle = kInvalidTexture
+
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  // pl_mpeg plane sizes (rounded up to macroblock boundary)
+  pub var plane_w: u32 = 0
+  pub var plane_h: u32 = 0
+  pub var chroma_w: u32 = 0
+  pub var chroma_h: u32 = 0
+  pub var duration: f64 = 0.0
+  pub var frame_rate: f64 = 0.0
+
+  // Playback state
+  pub var playing: bool = false
+  pub var looping: bool = false
+  pub var finished: bool = false
+  pub var needs_convert: bool = false
+  pub var speed: f32 = 1.0
+}
+
+// Impl::OnVideoFrame: upload the Y, Cb and Cr planes, creating the textures
+// the first time.
+fn Impl::upload_frame<R: Rhi>(var self&, var rhi&: R, frame&: PendingFrame) {
+  // Upload Y plane (full resolution)
+  if (self.y_tex == kInvalidTexture) {
+    self.y_tex = rhi.create_texture(self.plane_w, self.plane_h, RhiFormat::R8Unorm, frame.y.as_slice() as bytes, RhiFilter::Linear);
+  } else {
+    rhi.update_texture(self.y_tex, frame.y.as_slice() as bytes);
+  }
+
+  // Upload Cb plane (half resolution in each dimension for 4:2:0)
+  if (self.cb_tex == kInvalidTexture) {
+    self.cb_tex = rhi.create_texture(self.chroma_w, self.chroma_h, RhiFormat::R8Unorm, frame.cb.as_slice() as bytes, RhiFilter::Linear);
+  } else {
+    rhi.update_texture(self.cb_tex, frame.cb.as_slice() as bytes);
+  }
+
+  // Upload Cr plane
+  if (self.cr_tex == kInvalidTexture) {
+    self.cr_tex = rhi.create_texture(self.chroma_w, self.chroma_h, RhiFormat::R8Unorm, frame.cr.as_slice() as bytes, RhiFilter::Linear);
+  } else {
+    rhi.update_texture(self.cr_tex, frame.cr.as_slice() as bytes);
+  }
+
+  self.needs_convert = true;
+}
+
+// Uploads, in order, what pl_mpeg's video callback queued during a call.
+fn Impl::flush_pending<R: Rhi>(var self&, var rhi&: R) {
+  while (self.ctx.get().pending.len() > 0) {
+    let frame = self.ctx.get_var().pending.remove(0);
+    self.upload_frame(rhi, frame);
+  }
+}
+
+// plm_decode_video and upload of the frame it returns (Load and Stop).
+fn Impl::decode_first_frame<R: Rhi>(var self&, var rhi&: R) {
+  if (let frame& = self.plm.decode_video()) {
+    let copy = PendingFrame {
+      y: copy_plane(frame.y.data, self.ctx.get().y_len),
+      cb: copy_plane(frame.cb.data, self.ctx.get().chroma_len),
+      cr: copy_plane(frame.cr.data, self.ctx.get().chroma_len),
+    };
+    self.upload_frame(rhi, copy);
+  }
+}
+
+// Flush/stop/start on the audio bridge, where there is one.
+fn Impl::audio_flush(var self&) {
+  if (var bridge& = self.ctx.get_var().audio_bridge) {
+    bridge.get_var().flush();
+  }
+}
+
+fn Impl::audio_start(var self&) {
+  if (var bridge& = self.ctx.get_var().audio_bridge) {
+    bridge.get_var().start();
+  }
+}
+
+fn Impl::audio_stop(var self&) {
+  if (var bridge& = self.ctx.get_var().audio_bridge) {
+    bridge.get_var().stop();
+  }
+}
+
+pub struct VideoPlayer {
+  var impl_: Impl?
+
+  pub fn VideoPlayer(): VideoPlayer => VideoPlayer { impl_: none };
+
+  // Load an MPEG-1 (.mpg) file and prepare for playback. If `audio` is some
+  // and the file has an audio stream, audio will be decoded and played back
+  // via miniaudio.
+  pub fn load<R: Rhi>(var self&, var rhi&: R, path: str, audio: (&DynAudioBackend)?): bool;
+
+  // Advance playback by dt seconds. Decodes video frame and uploads to GPU.
+  pub fn update<R: Rhi>(var self&, dt: f64, var rhi&: R);
+
+  // Release all CPU and GPU resources.
+  pub fn unload<R: Rhi>(var self&, var rhi&: R);
+
+  // Returns true if successfully loaded.
+  pub fn is_loaded(self&): bool => self.impl_ != none;
+
+  // ----- Playback control -----
+  pub fn play(var self&);
+  pub fn pause(var self&);
+  pub fn stop<R: Rhi>(var self&, var rhi&: R);  // reset to beginning
+  pub fn seek<R: Rhi>(var self&, seconds: f64, var rhi&: R);
+  pub fn set_loop(var self&, looping: bool);
+  pub fn set_speed(var self&, speed: f32);  // 1.0 = normal
+
+  // ----- State queries -----
+  pub fn is_playing(self&): bool;
+  pub fn is_finished(self&): bool;  // true when non-looping video has ended
+  pub fn is_looping(self&): bool;
+  pub fn speed(self&): f32;
+  pub fn duration(self&): f64;  // total duration in seconds
+  pub fn position(self&): f64;  // current time in seconds
+
+  pub fn width(self&): u32;
+  pub fn height(self&): u32;
+  pub fn frame_rate(self&): f64;
+
+  // The GPU texture containing the current decoded frame (RGBA).
+  pub fn texture(self&): RhiTextureHandle;
+
+  // Returns true if a new video frame has been decoded and needs GPU
+  // conversion.
+  pub fn needs_convert(self&): bool;
+
+  // Run the GPU YCbCr -> RGBA conversion pass. Must be called after
+  // acquire_frame() and outside any render pass. Called automatically by
+  // UIContext between animation updates and the main render pass.
+  pub fn convert_frame<R: Rhi>(var self&, var rhi&: R);
+
+  // Direct access to the YCbCr plane textures (R8 format).
+  pub fn y_texture(self&): RhiTextureHandle;
+  pub fn cb_texture(self&): RhiTextureHandle;
+  pub fn cr_texture(self&): RhiTextureHandle;
+
+  // ----- Audio control -----
+  pub fn set_volume(var self&, volume: f32);
+  pub fn set_muted(var self&, muted: bool);
+  pub fn volume(self&): f32;
+  pub fn muted(self&): bool;
+
+  // Not in the C++: true when the audio bridge (a miniaudio device) is up.
+  pub fn audio_active(self&): bool;
+}
+
+fn VideoPlayer::load<R: Rhi>(var self&, var rhi&: R, path: str, audio: (&DynAudioBackend)?): bool {
+  self.unload(rhi);
+
+  var plm = PlmDecoder::open(path) else {
+    eprintln(f"ugui/video: failed to load '{path}'");
+    return false;
+  };
+
+  if (plm.num_video_streams() == 0) {
+    eprintln(f"ugui/video: no video stream in '{path}'");
+    return false;
+  }
+
+  let width = plm.width() as u32;
+  let height = plm.height() as u32;
+  // pl_mpeg plane sizes are rounded up to macroblock (16px) boundaries
+  let plane_w = (width + 15) & ~15;
+  let plane_h = (height + 15) & ~15;
+  let chroma_w = plane_w / 2;
+  let chroma_h = plane_h / 2;
+  let ctx = Box(DecodeCtx {
+    pending: List(),
+    audio_bridge: none,
+    y_len: plane_w as usize * plane_h as usize,
+    chroma_len: chroma_w as usize * chroma_h as usize,
+  });
+  let duration = plm.duration();
+  let frame_rate = plm.framerate();
+
+  // Create RGBA render target for GPU YCbCr conversion output
+  let rgba_target = rhi.create_render_target(width, height);
+
+  // Configure pl_mpeg: no internal looping, we handle it ourselves
+  plm.set_loop(false);
+
+  var impl = Impl {
+    plm,
+    ctx,
+    rgba_target,
+    width,
+    height,
+    plane_w,
+    plane_h,
+    chroma_w,
+    chroma_h,
+    duration,
+    frame_rate,
+  };
+
+  // Set up video callback
+  let user = unsafe (impl.ctx.as_ptr() as *const u8 as *var u8);
+  unsafe {
+    impl.plm.set_video_callback(@c_fn(on_video_frame), user);
+  }
+
+  // Set up audio
+  let has_audio = impl.plm.num_audio_streams() > 0;
+  if (has_audio && audio != none) {
+    let sample_rate = impl.plm.samplerate() as u32;
+    var bridge = Box(AudioBridge::new());
+    if (bridge.get_var().init(sample_rate)) {
+      impl.ctx.get_var().audio_bridge = bridge;
+      unsafe {
+        impl.plm.set_audio_callback(@c_fn(on_audio_samples), user);
+      }
+      impl.plm.set_audio_lead_time(1024.0 / (sample_rate as f64));
+    } else {
+      eprintln("ugui/video: audio bridge init failed (non-fatal)");
+      impl.plm.set_audio_enabled(false);
+    }
+  } else {
+    impl.plm.set_audio_enabled(false);
+  }
+
+  // Decode first frame so texture is available immediately
+  impl.decode_first_frame(rhi);
+
+  // Rewind after decoding first frame
+  impl.plm.rewind();
+
+  self.impl_ = impl;
+  return true;
+}
+
+fn VideoPlayer::update<R: Rhi>(var self&, dt: f64, var rhi&: R) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  if (!impl.playing || impl.finished) {
+    return;
+  }
+
+  let advance = dt * (impl.speed as f64);
+  impl.plm.decode(advance);
+  impl.flush_pending(rhi);
+
+  if (impl.plm.has_ended()) {
+    if (impl.looping) {
+      impl.plm.rewind();
+      impl.audio_flush();
+    } else {
+      impl.playing = false;
+      impl.finished = true;
+      impl.audio_stop();
+    }
+  }
+}
+
+fn VideoPlayer::texture(self&): RhiTextureHandle {
+  let impl& = self.impl_ else {
+    return kInvalidTexture;
+  };
+  return impl.rgba_target;
+}
+
+fn VideoPlayer::needs_convert(self&): bool {
+  let impl& = self.impl_ else {
+    return false;
+  };
+  return impl.needs_convert;
+}
+
+fn VideoPlayer::convert_frame<R: Rhi>(var self&, var rhi&: R) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  if (!impl.needs_convert) {
+    return;
+  }
+  if (impl.rgba_target == kInvalidTexture || impl.y_tex == kInvalidTexture || impl.cb_tex == kInvalidTexture ||
+      impl.cr_tex == kInvalidTexture) {
+    return;
+  }
+  rhi.convert_video_frame(impl.rgba_target, impl.y_tex, impl.cb_tex, impl.cr_tex);
+  impl.needs_convert = false;
+}
+
+fn VideoPlayer::y_texture(self&): RhiTextureHandle {
+  let impl& = self.impl_ else {
+    return kInvalidTexture;
+  };
+  return impl.y_tex;
+}
+
+fn VideoPlayer::cb_texture(self&): RhiTextureHandle {
+  let impl& = self.impl_ else {
+    return kInvalidTexture;
+  };
+  return impl.cb_tex;
+}
+
+fn VideoPlayer::cr_texture(self&): RhiTextureHandle {
+  let impl& = self.impl_ else {
+    return kInvalidTexture;
+  };
+  return impl.cr_tex;
+}
+
+fn VideoPlayer::width(self&): u32 {
+  let impl& = self.impl_ else {
+    return 0;
+  };
+  return impl.width;
+}
+
+fn VideoPlayer::height(self&): u32 {
+  let impl& = self.impl_ else {
+    return 0;
+  };
+  return impl.height;
+}
+
+fn VideoPlayer::frame_rate(self&): f64 {
+  let impl& = self.impl_ else {
+    return 0.0;
+  };
+  return impl.frame_rate;
+}
+
+fn VideoPlayer::play(var self&) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  if (impl.finished) {
+    // Restart from beginning
+    impl.plm.rewind();
+    impl.finished = false;
+    impl.audio_flush();
+  }
+  impl.playing = true;
+  impl.audio_start();
+}
+
+fn VideoPlayer::pause(var self&) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  impl.playing = false;
+  impl.audio_stop();
+}
+
+fn VideoPlayer::stop<R: Rhi>(var self&, var rhi&: R) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  impl.playing = false;
+  impl.finished = false;
+  impl.plm.rewind();
+  impl.audio_stop();
+  impl.audio_flush();
+
+  // Decode and display first frame
+  impl.decode_first_frame(rhi);
+  impl.plm.rewind();
+}
+
+fn VideoPlayer::seek<R: Rhi>(var self&, seconds_in: f64, var rhi&: R) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  let seconds = clamp_min_max(seconds_in, 0.0, impl.duration);
+  impl.plm.seek(seconds, true);
+  impl.flush_pending(rhi);
+  impl.finished = false;
+  impl.audio_flush();
+}
+
+fn VideoPlayer::set_loop(var self&, looping: bool) {
+  if (var impl& = self.impl_) {
+    impl.looping = looping;
+  }
+}
+
+fn VideoPlayer::set_speed(var self&, speed: f32) {
+  if (var impl& = self.impl_) {
+    impl.speed = speed;
+  }
+}
+
+fn VideoPlayer::is_playing(self&): bool {
+  let impl& = self.impl_ else {
+    return false;
+  };
+  return impl.playing;
+}
+
+fn VideoPlayer::is_finished(self&): bool {
+  let impl& = self.impl_ else {
+    return false;
+  };
+  return impl.finished;
+}
+
+fn VideoPlayer::is_looping(self&): bool {
+  let impl& = self.impl_ else {
+    return false;
+  };
+  return impl.looping;
+}
+
+fn VideoPlayer::speed(self&): f32 {
+  let impl& = self.impl_ else {
+    return 1.0;
+  };
+  return impl.speed;
+}
+
+fn VideoPlayer::duration(self&): f64 {
+  let impl& = self.impl_ else {
+    return 0.0;
+  };
+  return impl.duration;
+}
+
+fn VideoPlayer::position(self&): f64 {
+  let impl& = self.impl_ else {
+    return 0.0;
+  };
+  return impl.plm.time();
+}
+
+fn VideoPlayer::set_volume(var self&, volume: f32) {
+  if (var impl& = self.impl_) {
+    if (var bridge& = impl.ctx.get_var().audio_bridge) {
+      bridge.get_var().volume = volume;
+    }
+  }
+}
+
+fn VideoPlayer::set_muted(var self&, muted: bool) {
+  if (var impl& = self.impl_) {
+    if (var bridge& = impl.ctx.get_var().audio_bridge) {
+      bridge.get_var().muted = muted;
+    }
+  }
+}
+
+fn VideoPlayer::volume(self&): f32 {
+  if (let impl& = self.impl_) {
+    if (let bridge& = impl.ctx.get().audio_bridge) {
+      return bridge.get().volume;
+    }
+  }
+  return 1.0;
+}
+
+fn VideoPlayer::muted(self&): bool {
+  if (let impl& = self.impl_) {
+    if (let bridge& = impl.ctx.get().audio_bridge) {
+      return bridge.get().muted;
+    }
+  }
+  return false;
+}
+
+fn VideoPlayer::audio_active(self&): bool {
+  if (let impl& = self.impl_) {
+    return impl.ctx.get().audio_bridge != none;
+  }
+  return false;
+}
+
+fn VideoPlayer::unload<R: Rhi>(var self&, var rhi&: R) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  // The audio bridge shuts down with its drop: device first, then the ring
+  // buffer, as AudioBridge::Shutdown.
+  impl.ctx.get_var().audio_bridge = none;
+
+  if (impl.y_tex != kInvalidTexture) {
+    rhi.destroy_texture(impl.y_tex);
+  }
+  if (impl.cb_tex != kInvalidTexture) {
+    rhi.destroy_texture(impl.cb_tex);
+  }
+  if (impl.cr_tex != kInvalidTexture) {
+    rhi.destroy_texture(impl.cr_tex);
+  }
+  if (impl.rgba_target != kInvalidTexture) {
+    rhi.destroy_render_target(impl.rgba_target);
+  }
+
+  self.impl_ = none;
+}

@@ -1,0 +1,88 @@
+// No C++ counterpart: the miniaudio API the audio backend and the video
+// player's audio bridge call, declared by hand (miniaudio.h) plus the shim in
+// csrc/ugui_ma.c. miniaudio's structs are opaque here; `NativeBlock` owns a
+// zeroed block of the size the shim reports for each.
+
+module ultragui_audio::sys::miniaudio;
+
+pub extern type MaEngine;
+pub extern type MaSound;
+pub extern type MaPcmRb;
+pub extern type UguiPlayback;
+
+// ma_result: MA_SUCCESS is 0.
+pub comptime let kMaSuccess: i32 = 0;
+// MA_SOUND_FLAG_DECODE and MA_SOUND_FLAG_NO_SPATIALIZATION (checked by
+// _Static_asserts in the shim).
+pub comptime let kSoundFlagDecode: u32 = 0x00000002;
+pub comptime let kSoundFlagNoSpatialization: u32 = 0x00004000;
+
+// ----- the shim -----
+pub extern("ugui_ma_engine_size") fn ugui_ma_engine_size(): usize;
+pub extern("ugui_ma_sound_size") fn ugui_ma_sound_size(): usize;
+pub extern("ugui_ma_pcm_rb_size") fn ugui_ma_pcm_rb_size(): usize;
+pub extern("ugui_ma_engine_init") fn ugui_ma_engine_init(engine: *var MaEngine, channels: u32, sample_rate: u32): i32;
+pub extern("ugui_ma_pcm_rb_init_f32") fn ugui_ma_pcm_rb_init_f32(rb: *var MaPcmRb, channels: u32, frames: u32): i32;
+pub extern("ugui_ma_playback_create") fn ugui_ma_playback_create(sample_rate: u32, channels: u32, period_frames: u32,
+                                                              pull: extern fn(*var u8, *var f32, u32): (), user: *var u8): *var UguiPlayback;
+pub extern("ugui_ma_playback_start") fn ugui_ma_playback_start(device: *var UguiPlayback);
+pub extern("ugui_ma_playback_stop") fn ugui_ma_playback_stop(device: *var UguiPlayback);
+pub extern("ugui_ma_playback_destroy") fn ugui_ma_playback_destroy(device: *var UguiPlayback);
+
+// ----- miniaudio proper -----
+pub extern("ma_engine_uninit") fn ma_engine_uninit(engine: *var MaEngine);
+pub extern("ma_engine_get_sample_rate") fn ma_engine_get_sample_rate(engine: *const MaEngine): u32;
+pub extern("ma_engine_set_volume") fn ma_engine_set_volume(engine: *var MaEngine, volume: f32): i32;
+
+pub extern("ma_sound_init_from_file") fn ma_sound_init_from_file(engine: *var MaEngine, path: *const c_char, flags: u32, group: *var u8,
+                                                               done_fence: *var u8, sound: *var MaSound): i32;
+pub extern("ma_sound_init_copy") fn ma_sound_init_copy(engine: *var MaEngine, existing: *const MaSound, flags: u32, group: *var u8,
+                                                     sound: *var MaSound): i32;
+pub extern("ma_sound_uninit") fn ma_sound_uninit(sound: *var MaSound);
+pub extern("ma_sound_start") fn ma_sound_start(sound: *var MaSound): i32;
+pub extern("ma_sound_stop") fn ma_sound_stop(sound: *var MaSound): i32;
+pub extern("ma_sound_set_volume") fn ma_sound_set_volume(sound: *var MaSound, volume: f32);
+pub extern("ma_sound_set_pan") fn ma_sound_set_pan(sound: *var MaSound, pan: f32);
+pub extern("ma_sound_set_pitch") fn ma_sound_set_pitch(sound: *var MaSound, pitch: f32);
+pub extern("ma_sound_set_looping") fn ma_sound_set_looping(sound: *var MaSound, looping: u32);
+pub extern("ma_sound_is_looping") fn ma_sound_is_looping(sound: *const MaSound): u32;
+pub extern("ma_sound_is_playing") fn ma_sound_is_playing(sound: *const MaSound): u32;
+pub extern("ma_sound_seek_to_pcm_frame") fn ma_sound_seek_to_pcm_frame(sound: *var MaSound, frame: u64): i32;
+
+pub extern("ma_pcm_rb_uninit") fn ma_pcm_rb_uninit(rb: *var MaPcmRb);
+pub extern("ma_pcm_rb_reset") fn ma_pcm_rb_reset(rb: *var MaPcmRb);
+pub extern("ma_pcm_rb_acquire_read") fn ma_pcm_rb_acquire_read(rb: *var MaPcmRb, size_in_frames: *var u32, buffer_out: *var *var u8): i32;
+pub extern("ma_pcm_rb_commit_read") fn ma_pcm_rb_commit_read(rb: *var MaPcmRb, size_in_frames: u32): i32;
+pub extern("ma_pcm_rb_acquire_write") fn ma_pcm_rb_acquire_write(rb: *var MaPcmRb, size_in_frames: *var u32, buffer_out: *var *var u8): i32;
+pub extern("ma_pcm_rb_commit_write") fn ma_pcm_rb_commit_write(rb: *var MaPcmRb, size_in_frames: u32): i32;
+
+extern("calloc") fn c_calloc(count: usize, size: usize): *var u8;
+extern("free") fn c_free(p: *var u8);
+
+// An owned zeroed C block (what `T x{}` is in the C++): freed with the owner.
+// miniaudio needs the address stable and the contents zero before its init.
+pub struct NativeBlock {
+  let block: *var u8
+  pub fn NativeBlock(size: usize): NativeBlock;
+  fn ~NativeBlock();
+
+  // A block of sizeof(ma_engine) / sizeof(ma_sound) / sizeof(ma_pcm_rb) bytes.
+  pub fn engine(): NativeBlock => NativeBlock(unsafe ugui_ma_engine_size());
+  pub fn sound(): NativeBlock => NativeBlock(unsafe ugui_ma_sound_size());
+  pub fn pcm_rb(): NativeBlock => NativeBlock(unsafe ugui_ma_pcm_rb_size());
+
+  pub fn as_engine(self&): *var MaEngine => unsafe (self.block as *var MaEngine);
+  pub fn as_sound(self&): *var MaSound => unsafe (self.block as *var MaSound);
+  pub fn as_pcm_rb(self&): *var MaPcmRb => unsafe (self.block as *var MaPcmRb);
+}
+
+fn NativeBlock::NativeBlock(size: usize): NativeBlock {
+  let p = unsafe c_calloc(1, size);
+  return NativeBlock { block: p };
+}
+
+fn NativeBlock::~NativeBlock() {
+  unsafe {
+    c_free(self.block);
+  }
+}

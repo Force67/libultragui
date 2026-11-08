@@ -1,0 +1,402 @@
+// ugui/backends/ugui_impl_miniaudio.{h,cc} (and audio/miniaudio_impl.cc, which
+// is [build.implement] in aki.toml): the miniaudio-backed AudioBackend, the
+// bundled audio backend. Hand an instance to the context before init (the
+// UIContext integration wraps it in an AudioBackendBox), or use it standalone
+// (init(); play(...); shutdown()). Supports WAV, MP3 and FLAC.
+//
+// Shape differences (not behavior):
+// * the C++ Impl behind a pointer is `impl_: Impl?` (none = not initialized);
+// * a sound slot's ma_sound lives in a zeroed NativeBlock (stable address, as
+//   the in-place array was) and slots are indexes, not pointers;
+// * `play`/`load` take a `str` path (copied to a NUL-terminated buffer for
+//   miniaudio); `loop` is `looping`;
+// * the destructor is the drop, which shuts down.
+
+module ultragui_audio::ugui_impl_miniaudio;
+
+import {List} from akikit::containers::list;
+import {eprintln} from akikit::logging;
+import {String, from_str, with_nul} from akikit::strings::string;
+import {AudioBackend, SoundHandle, kInvalidSound} from ultragui::audio::audio_backend;
+import {NativeBlock, kMaSuccess, kSoundFlagDecode, kSoundFlagNoSpatialization} from ultragui_audio::sys::miniaudio;
+import {ugui_ma_engine_init} from ultragui_audio::sys::miniaudio;
+import {ma_engine_uninit, ma_engine_get_sample_rate, ma_engine_set_volume} from ultragui_audio::sys::miniaudio;
+import {ma_sound_init_from_file, ma_sound_init_copy, ma_sound_uninit, ma_sound_start, ma_sound_stop} from ultragui_audio::sys::miniaudio;
+import {ma_sound_set_volume, ma_sound_set_pan, ma_sound_set_pitch, ma_sound_set_looping, ma_sound_is_looping} from ultragui_audio::sys::miniaudio;
+import {ma_sound_is_playing, ma_sound_seek_to_pcm_frame} from ultragui_audio::sys::miniaudio;
+
+// Sound slot: wraps a single ma_sound.
+struct SoundSlot {
+  pub var sound: NativeBlock
+  pub var handle: SoundHandle = kInvalidSound
+  pub var active: bool = false
+  pub var preloaded: bool = false  // true if loaded but not yet played
+  pub var path: String             // for play_loaded cloning
+}
+
+comptime let kMaxSounds: usize = 128;
+
+struct Impl {
+  pub var engine: NativeBlock
+  pub var engine_initialized: bool = false
+  pub var slots: List<SoundSlot>
+  pub var next_handle: u32 = 1
+  pub var master_vol: f32 = 1.0
+}
+
+fn Impl::new_slots(): List<SoundSlot> {
+  var slots: List<SoundSlot> = List();
+  for (let i in 0..kMaxSounds) {
+    slots.push(SoundSlot { sound: NativeBlock::sound(), path: String() });
+  }
+  return slots;
+}
+
+// The slot of an active sound with this handle.
+fn Impl::find_slot(self&, h: SoundHandle): usize? {
+  for (let i in 0..#self.slots) {
+    let s& = self.slots[i];
+    if (s.active && s.handle == h) {
+      return i;
+    }
+  }
+  return none;
+}
+
+// First an inactive slot, then a finished non-looping sound is reclaimed;
+// none when the pool is full.
+fn Impl::alloc_slot(var self&): usize? {
+  for (let i in 0..#self.slots) {
+    if (!self.slots[i].active) {
+      return i;
+    }
+  }
+  for (let i in 0..#self.slots) {
+    var s& = self.slots[i];
+    if (s.active && !s.preloaded) {
+      let sound = s.sound.as_sound();
+      let looping = unsafe ma_sound_is_looping(sound) != 0;
+      let playing = unsafe ma_sound_is_playing(sound) != 0;
+      if (!looping && !playing) {
+        unsafe {
+          ma_sound_uninit(sound);
+        }
+        s.active = false;
+        return i;
+      }
+    }
+  }
+  return none;  // pool full
+}
+
+// miniaudio-backed AudioBackend.
+pub struct AudioEngine : AudioBackend {
+  var impl_: Impl?
+
+  pub fn AudioEngine(): AudioEngine => AudioEngine { impl_: none };
+  fn ~AudioEngine();
+
+  pub fn init(var self&): bool;
+  pub fn shutdown(var self&);
+  pub fn is_initialized(self&): bool;
+  pub fn play(var self&, path: str, volume: f32, looping: bool): SoundHandle;
+  pub fn load(var self&, path: str): SoundHandle;
+  pub fn play_loaded(var self&, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle;
+  pub fn stop(var self&, handle: SoundHandle);
+  pub fn is_playing(self&, handle: SoundHandle): bool;
+  pub fn set_volume(var self&, handle: SoundHandle, volume: f32);
+  pub fn set_pan(var self&, handle: SoundHandle, pan: f32);
+  pub fn set_pitch(var self&, handle: SoundHandle, pitch: f32);
+  pub fn seek(var self&, handle: SoundHandle, seconds: f32);
+  pub fn set_master_volume(var self&, volume: f32);
+  pub fn master_volume(self&): f32;
+  pub fn stop_all(var self&);
+  pub fn pause_all(var self&);
+  pub fn resume_all(var self&);
+}
+
+fn AudioEngine::~AudioEngine() {
+  if (self.impl_ != none) {
+    self.shutdown();
+  }
+}
+
+// Initialize the audio device and engine.
+fn AudioEngine::init(var self&): bool {
+  if (self.impl_ != none) {
+    return true;  // already initialized
+  }
+  var impl = Impl { engine: NativeBlock::engine(), slots: Impl::new_slots() };
+  let result = unsafe ugui_ma_engine_init(impl.engine.as_engine(), 2, 44100);
+  if (result != kMaSuccess) {
+    eprintln("ugui/audio: failed to initialize audio engine");
+    return false;
+  }
+  impl.engine_initialized = true;
+  self.impl_ = impl;
+  return true;
+}
+
+// Shut down and release all resources.
+fn AudioEngine::shutdown(var self&) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  // Uninit all active sounds
+  for (var s& in impl.slots) {
+    if (s.active) {
+      unsafe {
+        ma_sound_uninit(s.sound.as_sound());
+      }
+      s.active = false;
+    }
+  }
+  if (impl.engine_initialized) {
+    unsafe {
+      ma_engine_uninit(impl.engine.as_engine());
+    }
+    impl.engine_initialized = false;
+  }
+  self.impl_ = none;
+}
+
+fn AudioEngine::is_initialized(self&): bool {
+  let impl& = self.impl_ else {
+    return false;
+  };
+  return impl.engine_initialized;
+}
+
+// ----- Playback -----
+
+// Play a sound file from disk. Returns a handle for control.
+fn AudioEngine::play(var self&, path: str, volume: f32, looping: bool): SoundHandle {
+  var impl& = self.impl_ else {
+    return kInvalidSound;
+  };
+  let index = impl.alloc_slot() else {
+    eprintln("ugui/audio: sound pool full");
+    return kInvalidSound;
+  };
+  let flags = kSoundFlagDecode;  // decode to memory for low-latency playback
+  let z = with_nul(path);
+  let sound = impl.slots[index].sound.as_sound();
+  let result = unsafe ma_sound_init_from_file(impl.engine.as_engine(), @ptr(z.as_str()) as *const c_char, flags, null, null, sound);
+  if (result != kMaSuccess) {
+    eprintln(f"ugui/audio: failed to load '{path}'");
+    return kInvalidSound;
+  }
+  let handle = impl.next_handle;
+  impl.next_handle += 1;
+  var slot& = impl.slots[index];
+  slot.handle = handle;
+  slot.active = true;
+  slot.preloaded = false;
+  slot.path = from_str(path);
+  unsafe {
+    ma_sound_set_volume(sound, volume);
+    ma_sound_set_looping(sound, looping ? 1 : 0);
+    ma_sound_start(sound);
+  }
+  return handle;
+}
+
+// Preload a sound into memory without playing it.
+fn AudioEngine::load(var self&, path: str): SoundHandle {
+  var impl& = self.impl_ else {
+    return kInvalidSound;
+  };
+  let index = impl.alloc_slot() else {
+    return kInvalidSound;
+  };
+  let flags = kSoundFlagDecode | kSoundFlagNoSpatialization;
+  let z = with_nul(path);
+  let sound = impl.slots[index].sound.as_sound();
+  let result = unsafe ma_sound_init_from_file(impl.engine.as_engine(), @ptr(z.as_str()) as *const c_char, flags, null, null, sound);
+  if (result != kMaSuccess) {
+    eprintln(f"ugui/audio: failed to load '{path}'");
+    return kInvalidSound;
+  }
+  let handle = impl.next_handle;
+  impl.next_handle += 1;
+  var slot& = impl.slots[index];
+  slot.handle = handle;
+  slot.active = true;
+  slot.preloaded = true;
+  slot.path = from_str(path);
+  return handle;
+}
+
+// Play a previously loaded sound. Returns a new playback handle.
+fn AudioEngine::play_loaded(var self&, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle {
+  var impl& = self.impl_ else {
+    return kInvalidSound;
+  };
+  let src = impl.find_slot(preloaded) else {
+    return kInvalidSound;
+  };
+  let index = impl.alloc_slot() else {
+    return kInvalidSound;
+  };
+  // Create a copy from the same data source
+  let flags = kSoundFlagDecode | kSoundFlagNoSpatialization;
+  let sound = impl.slots[index].sound.as_sound();
+  let src_sound = impl.slots[src].sound.as_sound();
+  let result = unsafe ma_sound_init_copy(impl.engine.as_engine(), src_sound, flags, null, sound);
+  if (result != kMaSuccess) {
+    return kInvalidSound;
+  }
+  let handle = impl.next_handle;
+  impl.next_handle += 1;
+  let src_path = impl.slots[src].path.clone();
+  var slot& = impl.slots[index];
+  slot.handle = handle;
+  slot.active = true;
+  slot.preloaded = false;
+  slot.path = src_path;
+  unsafe {
+    ma_sound_set_volume(sound, volume);
+    ma_sound_set_looping(sound, looping ? 1 : 0);
+    ma_sound_start(sound);
+  }
+  return handle;
+}
+
+// Stop a sound. The handle becomes invalid after this.
+fn AudioEngine::stop(var self&, handle: SoundHandle) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  let index = impl.find_slot(handle) else {
+    return;
+  };
+  var s& = impl.slots[index];
+  unsafe {
+    ma_sound_stop(s.sound.as_sound());
+    ma_sound_uninit(s.sound.as_sound());
+  }
+  s.active = false;
+}
+
+// Check if a sound is currently playing.
+fn AudioEngine::is_playing(self&, handle: SoundHandle): bool {
+  let impl& = self.impl_ else {
+    return false;
+  };
+  let index = impl.find_slot(handle) else {
+    return false;
+  };
+  return unsafe ma_sound_is_playing(impl.slots[index].sound.as_sound()) != 0;
+}
+
+// ----- Per-sound control -----
+
+fn AudioEngine::set_volume(var self&, handle: SoundHandle, volume: f32) {
+  let impl& = self.impl_ else {
+    return;
+  };
+  if (let index = impl.find_slot(handle)) {
+    unsafe {
+      ma_sound_set_volume(impl.slots[index].sound.as_sound(), volume);
+    }
+  }
+}
+
+// -1.0 left, 0.0 center, 1.0 right.
+fn AudioEngine::set_pan(var self&, handle: SoundHandle, pan: f32) {
+  let impl& = self.impl_ else {
+    return;
+  };
+  if (let index = impl.find_slot(handle)) {
+    unsafe {
+      ma_sound_set_pan(impl.slots[index].sound.as_sound(), pan);
+    }
+  }
+}
+
+// 1.0 = normal.
+fn AudioEngine::set_pitch(var self&, handle: SoundHandle, pitch: f32) {
+  let impl& = self.impl_ else {
+    return;
+  };
+  if (let index = impl.find_slot(handle)) {
+    unsafe {
+      ma_sound_set_pitch(impl.slots[index].sound.as_sound(), pitch);
+    }
+  }
+}
+
+fn AudioEngine::seek(var self&, handle: SoundHandle, seconds: f32) {
+  let impl& = self.impl_ else {
+    return;
+  };
+  if (let index = impl.find_slot(handle)) {
+    // static_cast<u64>(f32 * u32): the u32 rate converts to f32; the cast
+    // saturates where the C++ is undefined (negative seconds).
+    let rate = unsafe ma_engine_get_sample_rate(impl.engine.as_engine());
+    let frame = @saturating_cast(u64, seconds * rate as f32);
+    unsafe {
+      ma_sound_seek_to_pcm_frame(impl.slots[index].sound.as_sound(), frame);
+    }
+  }
+}
+
+// ----- Global control -----
+
+fn AudioEngine::set_master_volume(var self&, volume: f32) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  impl.master_vol = volume;
+  unsafe {
+    ma_engine_set_volume(impl.engine.as_engine(), volume);
+  }
+}
+
+fn AudioEngine::master_volume(self&): f32 {
+  let impl& = self.impl_ else {
+    return 1.0;
+  };
+  return impl.master_vol;
+}
+
+fn AudioEngine::stop_all(var self&) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  for (var s& in impl.slots) {
+    if (s.active && !s.preloaded) {
+      unsafe {
+        ma_sound_stop(s.sound.as_sound());
+        ma_sound_uninit(s.sound.as_sound());
+      }
+      s.active = false;
+    }
+  }
+}
+
+fn AudioEngine::pause_all(var self&) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  for (var s& in impl.slots) {
+    if (s.active && !s.preloaded && unsafe ma_sound_is_playing(s.sound.as_sound()) != 0) {
+      unsafe {
+        ma_sound_stop(s.sound.as_sound());
+      }
+    }
+  }
+}
+
+fn AudioEngine::resume_all(var self&) {
+  var impl& = self.impl_ else {
+    return;
+  };
+  for (var s& in impl.slots) {
+    if (s.active && !s.preloaded) {
+      unsafe {
+        ma_sound_start(s.sound.as_sound());
+      }
+    }
+  }
+}

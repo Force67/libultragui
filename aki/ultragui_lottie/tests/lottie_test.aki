@@ -1,0 +1,457 @@
+// tests/test_lottie.cc, test for test, plus what the C++ test cannot do: the
+// demo animations from examples/lottie_demo/anims rendered through a recording
+// TextureBackend and compared, frame by frame, against the C++'s output
+// (tests/support/lottie_reference.aki, from tools/gen_reference.cc): frame
+// index, progress bits and an FNV-1a hash of the RGBA each frame uploaded.
+
+module lottie_test;
+
+import {List, to_list} from akikit::containers::list;
+import {write_file} from akikit::filesystem::file_util;
+import {println} from akikit::logging;
+import {String, from_str} from akikit::strings::string;
+import {TextureId, kNullTextureId} from ultragui::render::draw_data;
+import {DynTextureBackend, TextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {LottieAnimation} from ultragui_lottie::lottie;
+import {RlottieAnimation} from ultragui_lottie::sys::rlottie;
+import {kCounts, kLoads, kSteps} from support::lottie_reference;
+import {Suite, check} from support::check;
+
+// Minimal Lottie JSON: a red circle that moves across the frame
+// 30fps, 60 frames (2 seconds), 100x100 viewport
+static let kLottieJson: str = r"""
+{
+  "v": "5.5.2",
+  "fr": 30,
+  "ip": 0,
+  "op": 60,
+  "w": 100,
+  "h": 100,
+  "layers": [{
+    "ty": 4,
+    "nm": "circle",
+    "ip": 0,
+    "op": 60,
+    "st": 0,
+    "ks": {
+      "o": {"a": 0, "k": 100},
+      "r": {"a": 0, "k": 0},
+      "p": {"a": 0, "k": [50, 50]},
+      "a": {"a": 0, "k": [0, 0]},
+      "s": {"a": 0, "k": [100, 100]}
+    },
+    "shapes": [{
+      "ty": "el",
+      "p": {"a": 0, "k": [0, 0]},
+      "s": {"a": 0, "k": [60, 60]},
+      "nm": "ellipse"
+    }, {
+      "ty": "fl",
+      "c": {"a": 0, "k": [1, 0, 0, 1]},
+      "o": {"a": 0, "k": 100},
+      "nm": "fill"
+    }]
+  }]
+}
+""";
+
+fn abs_f64(v: f64): f64 => v < 0.0 ? -v : v;
+fn abs_f32(v: f32): f32 => v < 0.0 ? -v : v;
+
+// ============================================================================
+// Tests (no RHI needed: we test the API without GPU)
+// ============================================================================
+
+fn test_load_from_data_no_rhi() {
+  var anim = LottieAnimation();
+  // Load() with no backend and a missing file fails gracefully
+  let ok = anim.load(none, "/nonexistent.json", 64, 64);
+  check(!ok, "!ok");
+  check(!anim.is_loaded(), "!anim.IsLoaded()");
+}
+
+fn test_load_nonexistent_file() {
+  var anim = LottieAnimation();
+  let ok = anim.load(none, "/tmp/does_not_exist_lottie.json", 64, 64);
+  check(!ok, "!ok");
+}
+
+fn test_default_state() {
+  let anim = LottieAnimation();
+  check(!anim.is_loaded(), "!anim.IsLoaded()");
+  check(!anim.is_playing(), "!anim.IsPlaying()");
+  check(anim.texture() == kNullTextureId, "anim.texture() == kNullTextureId");
+  check(anim.width() == 0, "anim.width() == 0");
+  check(anim.height() == 0, "anim.height() == 0");
+  check(anim.duration() == 0.0, "anim.duration() == 0.0");
+  check(anim.progress() == 0.0, "anim.progress() == 0.0f");
+  check(anim.total_frames() == 0, "anim.total_frames() == 0");
+  check(anim.current_frame() == 0, "anim.current_frame() == 0");
+  check(anim.frame_rate() == 0.0, "anim.frame_rate() == 0.0");
+}
+
+fn test_playback_controls_without_load() {
+  var anim = LottieAnimation();
+  // These should all be no-ops, not crash
+  anim.play();
+  anim.pause();
+  anim.stop(none);
+  anim.set_loop(true);
+  anim.set_speed(2.0);
+  anim.seek(0.5, none);
+  anim.update(0.016, none);
+  check(!anim.is_playing(), "!anim.IsPlaying()");
+}
+
+fn test_move_semantics() {
+  var a = LottieAnimation();
+  var b = a;
+  check(!b.is_loaded(), "!b.IsLoaded()");
+
+  var c = LottieAnimation();
+  c = b;
+  check(!c.is_loaded(), "!c.IsLoaded()");
+}
+
+fn test_unload_without_load() {
+  var anim = LottieAnimation();
+  anim.unload(none);  // should not crash
+  check(!anim.is_loaded(), "!anim.IsLoaded()");
+}
+
+fn test_load_from_data() {
+  // load_data with no backend: rlottie parses fine, no texture created
+  var anim = LottieAnimation();
+  let ok = anim.load_data(none, kLottieJson, "test", 64, 64);
+  check(ok, "ok");
+  check(anim.is_loaded(), "anim.IsLoaded()");
+  check(anim.texture() == kNullTextureId, "anim.texture() == kNullTextureId");  // no backend -> no texture
+  check(anim.width() == 64, "anim.width() == 64");
+  check(anim.height() == 64, "anim.height() == 64");
+  check(anim.total_frames() == 61, "anim.total_frames() == 61");  // rlottie: frames 0..op inclusive
+  check(abs_f64(anim.frame_rate() - 30.0) < 0.01, "std::fabs(anim.frame_rate() - 30.0) < 0.01");
+  check(abs_f64(anim.duration() - 2.0) < 0.01, "std::fabs(anim.duration() - 2.0) < 0.01");
+}
+
+fn test_playback_state_machine() {
+  var anim = LottieAnimation();
+  anim.load_data(none, kLottieJson, "test2", 32, 32);
+  check(!anim.is_playing(), "!anim.IsPlaying()");
+
+  anim.play();
+  check(anim.is_playing(), "anim.IsPlaying()");
+
+  anim.pause();
+  check(!anim.is_playing(), "!anim.IsPlaying()");
+
+  anim.play();
+  anim.stop(none);
+  check(!anim.is_playing(), "!anim.IsPlaying()");
+  check(anim.progress() == 0.0, "anim.progress() == 0.0f");
+}
+
+fn test_speed_and_loop() {
+  var anim = LottieAnimation();
+  anim.load_data(none, kLottieJson, "test3", 32, 32);
+
+  check(anim.speed() == 1.0, "anim.speed() == 1.0f");
+  anim.set_speed(2.5);
+  check(anim.speed() == 2.5, "anim.speed() == 2.5f");
+
+  check(anim.is_looping(), "anim.IsLooping()");
+  anim.set_loop(false);
+  check(!anim.is_looping(), "!anim.IsLooping()");
+}
+
+fn test_seek_progress() {
+  var anim = LottieAnimation();
+  anim.load_data(none, kLottieJson, "test4", 32, 32);
+
+  anim.seek(0.5, none);
+  check(abs_f32(anim.progress() - 0.5) < 0.05, "std::fabs(anim.progress() - 0.5f) < 0.05f");
+
+  anim.seek(0.0, none);
+  check(anim.progress() < 0.01, "anim.progress() < 0.01f");
+
+  anim.seek(1.0, none);
+  check(anim.progress() > 0.95, "anim.progress() > 0.95f");
+}
+
+fn test_update_advances_time() {
+  var anim = LottieAnimation();
+  anim.load_data(none, kLottieJson, "test5", 32, 32);
+
+  anim.play();
+  anim.update(1.0, none);  // advance 1 second into a 2 second animation
+  check(abs_f32(anim.progress() - 0.5) < 0.05, "std::fabs(anim.progress() - 0.5f) < 0.05f");
+  check(anim.current_frame() > 0, "anim.current_frame() > 0");
+}
+
+fn test_loop_wraps_around() {
+  var anim = LottieAnimation();
+  anim.load_data(none, kLottieJson, "test6", 32, 32);
+
+  anim.set_loop(true);
+  anim.play();
+  anim.update(3.0, none);  // 3 seconds into a 2 second animation
+  // Should wrap: 3.0: 2.0 = 1.0 second -> ~50% progress
+  check(anim.is_playing(), "anim.IsPlaying()");
+  check(abs_f32(anim.progress() - 0.5) < 0.05, "std::fabs(anim.progress() - 0.5f) < 0.05f");
+}
+
+fn test_no_loop_stops_at_end() {
+  var anim = LottieAnimation();
+  anim.load_data(none, kLottieJson, "test7", 32, 32);
+
+  anim.set_loop(false);
+  anim.play();
+  anim.update(3.0, none);  // past the end
+  check(!anim.is_playing(), "!anim.IsPlaying()");  // should auto-stop
+  check(anim.progress() > 0.95, "anim.progress() > 0.95f");
+}
+
+// ============================================================================
+// Not in the C++ test: the real thing, against recorded C++ output
+// ============================================================================
+
+// A texture backend that keeps the pixels it was given per texture.
+struct Tex {
+  pub var id: TextureId
+  pub var bytes: List<byte>
+}
+
+struct Recorder : TextureBackend {
+  pub var textures: List<Tex> = List()
+  pub var creates: u32 = 0
+  pub var updates: u32 = 0
+  pub var destroys: u32 = 0
+  pub var next: TextureId = 0x1000
+
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+    let id = self.next;
+    self.next += 1;
+    self.textures.push(Tex { id, bytes: to_list(pixels) });
+    self.creates += 1;
+    return id;
+  }
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {
+    for (var t& in self.textures) {
+      if (t.id == id) {
+        for (let i in 0..#t.bytes) {
+          t.bytes[i] = pixels[i];
+        }
+      }
+    }
+    self.updates += 1;
+  }
+  pub fn destroy_texture(var self&, id: TextureId) {
+    var keep: List<Tex> = List();
+    while (let t = self.textures.pop()) {
+      if (t.id != id) {
+        keep.push(t);
+      }
+    }
+    self.textures = keep;
+    self.destroys += 1;
+  }
+}
+
+// FNV-1a over the texture's bytes (tools/gen_reference.cc).
+fn hash_of(rec&: Recorder, id: TextureId): u64 {
+  var h: u64 = 0xcbf29ce484222325;
+  for (let t& in rec.textures) {
+    if (t.id == id) {
+      for (let b in t.bytes) {
+        h = (h ^ (b as u8) as u64) *% 0x100000001b3;
+      }
+    }
+  }
+  return h;
+}
+
+fn f64_bits(v: f64): u64 => @bit_cast(u64, v);
+fn f32_bits(v: f32): u32 => @bit_cast(u32, v);
+
+fn path_of(name: str): String => from_str(f"{@package_dir()}/../../examples/lottie_demo/anims/{name}.json");
+
+// Compares the animation's state with the next recorded step.
+struct Replay {
+  pub var next: usize = 0
+  pub var failures: u32 = 0
+
+  // `kind` and the step's name and size must be what the C++ run recorded here.
+  pub fn step(var self&, kind: str, name: str, w: u32, h: u32, anim&: LottieAnimation, rec&: Recorder, playing: bool) {
+    let s& = kSteps[self.next];
+    self.next += 1;
+    var ok = s.kind == kind && s.name == name && s.w == w && s.h == h;
+    if (kind == "END") {
+      ok = ok && (s.frame == 1) == playing;
+    } else {
+      ok = ok && s.total_frames == anim.total_frames() && s.frame == anim.current_frame()
+        && s.progress_bits == f32_bits(anim.progress()) && s.hash == hash_of(rec, anim.texture());
+    }
+    if (!ok) {
+      self.failures += 1;
+      println(f"    MISMATCH {kind} {name} {w}x{h} step {self.next - 1}: frame {anim.current_frame()} (want {s.frame}), progress 0x{f32_bits(anim.progress()):08x} (want 0x{s.progress_bits:08x}), hash 0x{hash_of(rec, anim.texture()):016x} (want 0x{s.hash:016x})");
+    }
+  }
+}
+
+fn seek(var anim&: LottieAnimation, var rec&: Recorder, p: f32) {
+  var tex = DynTextureBackend::of(rec);
+  anim.seek(p, tex);
+}
+
+fn update(var anim&: LottieAnimation, var rec&: Recorder, dt: f64) {
+  var tex = DynTextureBackend::of(rec);
+  anim.update(dt, tex);
+}
+
+fn stop(var anim&: LottieAnimation, var rec&: Recorder) {
+  var tex = DynTextureBackend::of(rec);
+  anim.stop(tex);
+}
+
+fn unload(var anim&: LottieAnimation, var rec&: Recorder) {
+  var tex = DynTextureBackend::of(rec);
+  anim.unload(tex);
+}
+
+fn load_file(var anim&: LottieAnimation, var rec&: Recorder, path: str, w: u32, h: u32): bool {
+  var tex = DynTextureBackend::of(rec);
+  return anim.load(tex, path, w, h);
+}
+
+fn test_demo_animations_match_cpp() {
+  let names = ["bounce", "pulse", "spinner", "wave"];
+  let sizes: [(u32, u32); 2] = [(64, 64), (96, 48)];
+  let seeks: [f32; 8] = [0.0, 0.1, 0.25, 1.0 / 3.0, 0.5, 0.75, 0.9, 1.0];
+  var replay = Replay {};
+  var loaded: usize = 0;
+  for (let name in names) {
+    for (let (w, h) in sizes) {
+      var rec = Recorder {};
+      var anim = LottieAnimation();
+      let path = path_of(name);
+      check(load_file(anim, rec, path.as_str(), w, h), "demo animation loads");
+      let l& = kLoads[loaded];
+      check(l.name == name && l.w == w && l.h == h, "load order");
+      check(anim.total_frames() == l.total_frames, "total_frames");
+      check(f64_bits(anim.frame_rate()) == l.frame_rate_bits, "frame_rate");
+      check(f64_bits(anim.duration()) == l.duration_bits, "duration");
+      check(hash_of(rec, anim.texture()) == l.hash, f"{name} {w}x{h}: first frame hash 0x{hash_of(rec, anim.texture()):016x}, C++ 0x{l.hash:016x}");
+      for (let s in seeks) {
+        seek(anim, rec, s);
+        replay.step("SEEK", name, w, h, anim, rec, false);
+      }
+      // Playing: 16 ms ticks, 3x speed, looping through the end.
+      anim.set_speed(3.0);
+      anim.play();
+      for (let i in 0..90) {
+        update(anim, rec, 0.016);
+        if (i % 6 == 5) {
+          replay.step("PLAY", name, w, h, anim, rec, false);
+        }
+      }
+      // Not looping: runs out.
+      stop(anim, rec);
+      anim.set_loop(false);
+      anim.set_speed(1.0);
+      anim.play();
+      var i: i32 = 0;
+      while (i < 200 && anim.is_playing()) {
+        update(anim, rec, 0.05);
+        if (i % 7 == 0) {
+          replay.step("ONCE", name, w, h, anim, rec, false);
+        }
+        i += 1;
+      }
+      replay.step("END", name, w, h, anim, rec, anim.is_playing());
+      replay.step("ONCE_END", name, w, h, anim, rec, false);
+      let c& = kCounts[loaded];
+      check(c.name == name && c.w == w && c.h == h, "counts order");
+      check(rec.creates == c.creates && rec.updates == c.updates && rec.destroys == c.destroys_before_unload,
+            f"{name} {w}x{h}: texture calls {rec.creates}/{rec.updates}/{rec.destroys}, C++ {c.creates}/{c.updates}/{c.destroys_before_unload}");
+      unload(anim, rec);
+      check(rec.destroys == c.destroys && #rec.textures == c.live as usize, f"{name} {w}x{h}: unload releases the texture");
+      check(!anim.is_loaded(), "unloaded");
+      loaded += 1;
+    }
+  }
+  check(replay.next == #kSteps, f"every recorded step replayed ({replay.next} of {#kSteps})");
+  check(loaded == #kLoads, "every recorded load replayed");
+  check(replay.failures == 0, f"{replay.failures} frames differ from the C++");
+}
+
+// frame_at_pos is rlottie's own formula in double; the C API takes a float.
+// They agree on positions a float holds exactly, and the double form is what
+// the C++ LottieAnimation calls.
+fn test_frame_at_pos_matches_rlottie() {
+  var anim = LottieAnimation();
+  anim.load_data(none, kLottieJson, "frame_at_pos", 16, 16);
+  let raw = RlottieAnimation::from_data(kLottieJson, "frame_at_pos_raw") else {
+    check(false, "rlottie loads the test animation");
+    return;
+  };
+  let positions: [f32; 8] = [0.0, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9921875, 1.0];
+  for (let p in positions) {
+    anim.seek(p, none);
+    check(anim.current_frame() as usize == raw.frame_at_pos_f32(p), f"frame_at_pos({p}) agrees with rlottie");
+  }
+  // 59 frame steps: pos 0.5 is frame round(29.5) = 30 (halves away from zero)
+  anim.seek(0.5, none);
+  check(anim.current_frame() == 30, "round(0.5 * 60) = 30");
+}
+
+// A file on disk loads like the data does.
+fn test_load_from_file() {
+  let path = "/tmp/ultragui_test.json";
+  if (let r = write_file(path, kLottieJson)) {
+  } else (let e) {
+    check(false, "write the test json");
+  }
+  var anim = LottieAnimation();
+  check(anim.load(none, path, 64, 64), "load from file");
+  check(anim.total_frames() == 61, "file: 61 frames");
+  check(abs_f64(anim.duration() - 2.0) < 0.01, "file: 2 seconds");
+}
+
+pub fn main(): i32 {
+  println("Lottie test suite");
+  println("=================");
+  var s = Suite();
+  test_load_from_data_no_rhi();
+  s.pass("load_from_data_no_rhi");
+  test_load_nonexistent_file();
+  s.pass("load_nonexistent_file");
+  test_default_state();
+  s.pass("default_state");
+  test_playback_controls_without_load();
+  s.pass("playback_controls_without_load");
+  test_move_semantics();
+  s.pass("move_semantics");
+  test_unload_without_load();
+  s.pass("unload_without_load");
+  test_load_from_data();
+  s.pass("load_from_data");
+  test_playback_state_machine();
+  s.pass("playback_state_machine");
+  test_speed_and_loop();
+  s.pass("speed_and_loop");
+  test_seek_progress();
+  s.pass("seek_progress");
+  test_update_advances_time();
+  s.pass("update_advances_time");
+  test_loop_wraps_around();
+  s.pass("loop_wraps_around");
+  test_no_loop_stops_at_end();
+  s.pass("no_loop_stops_at_end");
+  test_demo_animations_match_cpp();
+  s.pass("demo_animations_match_cpp");
+  test_frame_at_pos_matches_rlottie();
+  s.pass("frame_at_pos_matches_rlottie");
+  test_load_from_file();
+  s.pass("load_from_file");
+  return s.finish();
+}

@@ -1,0 +1,326 @@
+// tests/test_audio.cc, test for test. Init may fail in CI (no audio device);
+// the tests skip what needs a device, as the C++ does.
+
+module audio_test;
+
+import {List} from akikit::containers::list;
+import {println} from akikit::logging;
+import {write_bytes} from akikit::filesystem::file_util;
+import {AudioBackendBox, kInvalidSound} from ultragui::audio::audio_backend;
+import {AudioEngine} from ultragui_audio::ugui_impl_miniaudio;
+import {Suite, check} from support::check;
+
+fn test_init_shutdown() {
+  var engine = AudioEngine();
+  let ok = engine.init();
+  // init may fail in CI (no audio device): that's ok, we test the API paths
+  if (ok) {
+    check(engine.is_initialized(), "engine.IsInitialized()");
+    engine.shutdown();
+    check(!engine.is_initialized(), "!engine.IsInitialized()");
+  } else {
+    check(!engine.is_initialized(), "!engine.IsInitialized()");
+  }
+}
+
+fn test_double_init_is_safe() {
+  var engine = AudioEngine();
+  engine.init();
+  let ok2 = engine.init();  // should return true (already initialized)
+  if (engine.is_initialized()) {
+    check(ok2, "ok2");
+  }
+  engine.shutdown();
+}
+
+fn test_shutdown_without_init() {
+  var engine = AudioEngine();
+  engine.shutdown();  // should not crash
+  check(!engine.is_initialized(), "!engine.IsInitialized()");
+}
+
+fn test_play_without_init() {
+  var engine = AudioEngine();
+  let h = engine.play("nonexistent.wav", 1.0, false);
+  check(h == kInvalidSound, "h == kInvalidSound");
+}
+
+fn test_master_volume_default() {
+  let engine = AudioEngine();
+  // Even without init, master_volume should return default
+  check(engine.master_volume() == 1.0, "engine.master_volume() == 1.0f");
+}
+
+fn test_operations_on_invalid_handle() {
+  var engine = AudioEngine();
+  if (!engine.init()) {
+    return;  // skip if no audio device
+  }
+  // All these should be no-ops, not crash
+  engine.stop(999);
+  engine.set_volume(999, 0.5);
+  engine.set_pan(999, -0.5);
+  engine.set_pitch(999, 1.5);
+  engine.seek(999, 0.0);
+  check(!engine.is_playing(999), "!engine.IsPlaying(999)");
+  engine.shutdown();
+}
+
+fn test_master_volume_set_get() {
+  var engine = AudioEngine();
+  if (!engine.init()) {
+    return;
+  }
+  engine.set_master_volume(0.5);
+  check(engine.master_volume() == 0.5, "engine.master_volume() == 0.5f");
+  engine.set_master_volume(0.0);
+  check(engine.master_volume() == 0.0, "engine.master_volume() == 0.0f");
+  engine.set_master_volume(1.0);
+  check(engine.master_volume() == 1.0, "engine.master_volume() == 1.0f");
+  engine.shutdown();
+}
+
+fn test_stop_all_empty() {
+  var engine = AudioEngine();
+  if (!engine.init()) {
+    return;
+  }
+  // Should not crash with no active sounds
+  engine.stop_all();
+  engine.pause_all();
+  engine.resume_all();
+  engine.shutdown();
+}
+
+fn test_load_nonexistent_file() {
+  var engine = AudioEngine();
+  if (!engine.init()) {
+    return;
+  }
+  let h = engine.play("/nonexistent/path/sound.wav", 1.0, false);
+  check(h == kInvalidSound, "h == kInvalidSound");
+  let h2 = engine.load("/nonexistent/path/sound.wav");
+  check(h2 == kInvalidSound, "h2 == kInvalidSound");
+  engine.shutdown();
+}
+
+fn test_destructor_cleans_up() {
+  {
+    var engine = AudioEngine();
+    engine.init();
+    // destructor should call shutdown
+  }
+  // Should not leak or crash
+  check(true, "true");
+}
+
+// ============================================================================
+// WAV playback tests (generate a tiny WAV in memory, write to temp file)
+// ============================================================================
+
+fn push_i32(var out&: List<byte>, v: i32) {
+  let u = v as u32;
+  for (let i in 0..4u32) {
+    out.push(((u >> (i * 8)) & 0xFF) as byte);
+  }
+}
+
+fn push_i16(var out&: List<byte>, v: i16) {
+  let u = v as u16;
+  out.push((u & 0xFF) as byte);
+  out.push((u >> 8) as byte);
+}
+
+fn push_tag(var out&: List<byte>, tag: str) {
+  for (let c in tag) {
+    out.push(c as byte);
+  }
+}
+
+// A minimal 44100 Hz, 16-bit mono WAV (0.1 second = 4410 samples) of a 440 Hz
+// sine wave; its path, or none when it cannot be written.
+fn create_test_wav(): str? {
+  let path = "/tmp/ultragui_test_beep.wav";
+  let sample_rate: i32 = 44100;
+  let num_samples: i32 = 4410;
+  let bits_per_sample: i32 = 16;
+  let num_channels: i32 = 1;
+  let byte_rate = sample_rate * num_channels * bits_per_sample / 8;
+  let block_align = num_channels * bits_per_sample / 8;
+  let data_size = num_samples * block_align;
+
+  var out: List<byte> = List();
+  // RIFF header
+  push_tag(out, "RIFF");
+  push_i32(out, 36 + data_size);
+  push_tag(out, "WAVE");
+  // fmt chunk
+  push_tag(out, "fmt ");
+  push_i32(out, 16);
+  push_i16(out, 1);  // PCM
+  push_i16(out, num_channels as i16);
+  push_i32(out, sample_rate);
+  push_i32(out, byte_rate);
+  push_i16(out, block_align as i16);
+  push_i16(out, bits_per_sample as i16);
+  // data chunk
+  push_tag(out, "data");
+  push_i32(out, data_size);
+  // Generate a 440 Hz sine wave
+  for (let i in 0..num_samples) {
+    let t = i as f64 / sample_rate as f64;
+    let angle = 2.0 * 3.14159265358979 * 440.0 * t;
+    let val = 0.5 * @sin(angle);
+    push_i16(out, @saturating_cast(i16, val * 32767.0));
+  }
+  if (let r = write_bytes(path, out.as_slice())) {
+    return path;
+  }
+  return none;
+}
+
+fn test_play_wav_file() {
+  var engine = AudioEngine();
+  if (!engine.init()) {
+    return;
+  }
+  let wav = create_test_wav() else {
+    engine.shutdown();
+    return;
+  };
+  let h = engine.play(wav, 0.0, false);  // volume=0 so we don't actually hear it
+  if (h != kInvalidSound) {
+    check(engine.is_playing(h), "engine.IsPlaying(h)");
+    engine.stop(h);
+    check(!engine.is_playing(h), "!engine.IsPlaying(h)");
+  }
+  engine.shutdown();
+}
+
+fn test_load_and_play_loaded() {
+  var engine = AudioEngine();
+  if (!engine.init()) {
+    return;
+  }
+  let wav = create_test_wav() else {
+    engine.shutdown();
+    return;
+  };
+  let loaded = engine.load(wav);
+  if (loaded != kInvalidSound) {
+    // Preloaded sound should not be playing
+    check(!engine.is_playing(loaded), "!engine.IsPlaying(loaded)");
+    // Play a copy
+    let h = engine.play_loaded(loaded, 0.0, false);
+    if (h != kInvalidSound) {
+      check(engine.is_playing(h), "engine.IsPlaying(h)");
+      engine.stop(h);
+    }
+    // Original still loaded
+    engine.stop(loaded);  // unloads
+  }
+  engine.shutdown();
+}
+
+fn test_per_sound_controls() {
+  var engine = AudioEngine();
+  if (!engine.init()) {
+    return;
+  }
+  let wav = create_test_wav() else {
+    engine.shutdown();
+    return;
+  };
+  let h = engine.play(wav, 0.0, true);  // loop
+  if (h != kInvalidSound) {
+    engine.set_volume(h, 0.5);
+    engine.set_pan(h, -0.3);
+    engine.set_pitch(h, 1.2);
+    engine.seek(h, 0.0);
+    check(engine.is_playing(h), "engine.IsPlaying(h)");
+    engine.stop(h);
+  }
+  engine.shutdown();
+}
+
+// Not in the C++: where the engine starts, the beep really loads and plays
+// (the C++ test only checks the handle when it is valid), and play_loaded
+// clones it.
+fn test_wav_really_plays() {
+  var engine = AudioEngine();
+  if (!engine.init()) {
+    return;
+  }
+  let wav = create_test_wav() else {
+    engine.shutdown();
+    check(false, "write the test wav");
+    return;
+  };
+  let h = engine.play(wav, 0.0, true);
+  check(h != kInvalidSound, "play(wav) returns a handle");
+  check(engine.is_playing(h), "looping beep is playing");
+  let loaded = engine.load(wav);
+  check(loaded != kInvalidSound && loaded != h, "load(wav) returns a new handle");
+  let copy = engine.play_loaded(loaded, 0.0, true);
+  check(copy != kInvalidSound && copy != loaded && copy != h, "play_loaded returns a new handle");
+  engine.pause_all();
+  check(!engine.is_playing(h) && !engine.is_playing(copy), "pause_all stops playing sounds");
+  engine.resume_all();
+  check(engine.is_playing(h) && engine.is_playing(copy), "resume_all restarts them");
+  check(!engine.is_playing(loaded), "the preloaded sound stays idle");
+  engine.stop_all();
+  check(!engine.is_playing(h) && !engine.is_playing(copy), "stop_all drops them");
+  check(engine.play_loaded(loaded, 0.0, false) != kInvalidSound, "the preloaded sound survives stop_all");
+  engine.shutdown();
+}
+
+// The same engine through the seam: what UIContext holds.
+fn test_through_the_seam() {
+  var boxed = AudioBackendBox::of(AudioEngine());
+  if (!boxed.init()) {
+    return;
+  }
+  check(boxed.is_initialized(), "boxed.is_initialized()");
+  boxed.set_master_volume(0.25);
+  check(boxed.master_volume() == 0.25, "boxed.master_volume() == 0.25f");
+  check(boxed.play("/nonexistent/path/sound.wav", 1.0, false) == kInvalidSound, "boxed.play(nonexistent)");
+  boxed.shutdown();
+  check(!boxed.is_initialized(), "!boxed.is_initialized()");
+}
+
+pub fn main(): i32 {
+  println("Audio test suite");
+  println("================");
+  var s = Suite();
+  test_init_shutdown();
+  s.pass("init_shutdown");
+  test_double_init_is_safe();
+  s.pass("double_init_is_safe");
+  test_shutdown_without_init();
+  s.pass("shutdown_without_init");
+  test_play_without_init();
+  s.pass("play_without_init");
+  test_master_volume_default();
+  s.pass("master_volume_default");
+  test_operations_on_invalid_handle();
+  s.pass("operations_on_invalid_handle");
+  test_master_volume_set_get();
+  s.pass("master_volume_set_get");
+  test_stop_all_empty();
+  s.pass("stop_all_empty");
+  test_load_nonexistent_file();
+  s.pass("load_nonexistent_file");
+  test_destructor_cleans_up();
+  s.pass("destructor_cleans_up");
+  test_play_wav_file();
+  s.pass("play_wav_file");
+  test_load_and_play_loaded();
+  s.pass("load_and_play_loaded");
+  test_per_sound_controls();
+  s.pass("per_sound_controls");
+  test_wav_really_plays();
+  s.pass("wav_really_plays");
+  test_through_the_seam();
+  s.pass("through_the_seam");
+  return s.finish();
+}
