@@ -1,0 +1,265 @@
+// ugui/widgets/message_box.{h,cc}: a message box (WidgetKind::MessageBox),
+// a generic widget carrying a MessageBoxContent (result callback, buttons)
+// and a ModalContent (the backdrop), so it reuses show_modal / hide_modal by
+// composition. Behaviour: the MessageBox arm in widgets::widget_vtable
+// (Escape -> dismissed).
+//
+// Usage:
+//   let mb = create_message_box(world, 0);
+//   setup_message_box(world, mb, "Confirm", "Delete this entity?", MessageBoxButtons::YesNo);
+//   set_message_box_result(world, mb, own fn(env: &var CallbackEnv, r: MessageBoxResult) { ... });
+//   show_message_box(world, ctx, overlays, mb);
+//
+// Shape differences: ShowMessageBox/DismissMessageBox take the World, the
+// WidgetContext and the overlay list where the C++ takes a UIContext*
+// (widgets::overlays); the viewport is the context platform's window size
+// (UIContext's platform in the C++; (0,0) here for a context without one).
+// The panel row is CreatePanel(0) written out, as in widgets::modal.
+
+module ultragui::widgets::message_box;
+
+import {swap} from akikit::algorithm;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {EdgeInsets} from ultragui::core::rect;
+import {Cursor, FlexDirection, FontWeight, JustifyContent, WidgetState} from ultragui::style::enums;
+import {Length} from ultragui::style::property_types;
+import {BoxShadow, Style, StyleMask} from ultragui::style::style;
+import {create_button, set_button_click, set_button_label} from ultragui::widgets::button;
+import {CallbackEnv} from ultragui::widgets::callbacks;
+import {ModalContent, hide_modal, kModalContent, show_modal} from ultragui::widgets::modal;
+import {Overlays} from ultragui::widgets::overlays;
+import {create_text, set_text} from ultragui::widgets::text;
+import {
+  WidgetKind, add_child, add_state_override, kStyleC, kWidgetNode, measure_widget, set_style,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// Result returned by a MessageBox when the user clicks a button.
+pub enum MessageBoxResult as u8 {
+  Ok,
+  Cancel,
+  Yes,
+  No,
+  Dismissed,  // Closed via ESC or click-outside
+}
+
+// Button configuration for a MessageBox.
+pub enum MessageBoxButtons as u8 {
+  Ok,
+  OkCancel,
+  YesNo,
+  YesNoCancel,
+}
+
+// Function<void(MessageBoxResult)>
+pub type MessageBoxResultHandler = own fn(&var CallbackEnv, MessageBoxResult): ();
+
+// Data for a message-box widget.
+pub struct MessageBoxContent {
+  pub var on_result: MessageBoxResultHandler? = none
+  pub var buttons: MessageBoxButtons = MessageBoxButtons::Ok
+}
+
+pub static let kMessageBoxContent: ComponentKey<MessageBoxContent> = ComponentKey();
+
+fn is_message_box(world&: World, e: WidgetId): bool {
+  if (let n& = world.get(kWidgetNode, e)) {
+    return n.kind == WidgetKind::MessageBox && world.has(kMessageBoxContent, e);
+  }
+  return false;
+}
+
+// `if (c && c->on_result) c->on_result(result)` on whatever MessageBoxContent
+// `e` carries.
+fn fire_result(var world&: World, var ctx&: WidgetContext, e: WidgetId, result: MessageBoxResult) {
+  var slot: MessageBoxResultHandler? = none;
+  if (var c& = world.get_var(kMessageBoxContent, e)) {
+    swap(c.on_result, slot);
+  }
+  let handler = slot else {
+    return;
+  };
+  {
+    var env = CallbackEnv { world, ctx };
+    handler(env, result);
+  }
+  if (var c& = world.get_var(kMessageBoxContent, e)) {
+    if (c.on_result == none) {
+      c.on_result = handler;
+    }
+  }
+}
+
+// MessageBoxKeyDown: Escape reports Dismissed (with or without a handler).
+pub fn message_box_key_down(var world&: World, var ctx&: WidgetContext, e: WidgetId, key: i32, mods: i32): bool {
+  if (key == 256) {  // GLFW_KEY_ESCAPE
+    fire_result(world, ctx, e, MessageBoxResult::Dismissed);
+    return true;
+  }
+  return false;
+}
+
+// CreateMessageBox: a widget tagged MessageBox carrying a ModalContent (for
+// the backdrop) and a MessageBoxContent.
+pub fn create_message_box(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::MessageBox;
+  world.add(kModalContent, e, ModalContent {});
+  world.add(kMessageBoxContent, e, MessageBoxContent {});
+  return e;
+}
+
+// MakeBtn of SetupMessageBox.
+fn make_button(var world&: World, self_: WidgetId, row: WidgetId, label: str, result: MessageBoxResult, primary: bool) {
+  let btn = create_button(world, 0);
+  set_button_label(world, btn, label);
+  world.get_var(kWidgetNode, btn)!.tab_index = 0;
+  var bs = Style {};
+  bs.padding = EdgeInsets::symmetric(10.0, 20.0);
+  bs.corner_radius = 4.0;
+  bs.font_size = 14.0;
+  bs.cursor = Cursor::Pointer;
+  if (primary) {
+    bs.background = Color::from_hex(0x3b82f6);
+    bs.text_color = Color::white();
+  } else {
+    bs.background = Color::from_rgba8(60, 60, 80, 255);
+    bs.text_color = Color::from_rgba8(200, 200, 210, 255);
+    bs.border_color = Color::from_rgba8(100, 100, 120, 255);
+    bs.border_width = 1.0;
+  }
+  set_style(world, btn, bs);
+  var hover = bs;
+  hover.background = primary ? Color::from_hex(0x60a5fa) : Color::from_rgba8(80, 80, 100, 255);
+  add_state_override(world, btn, WidgetState::Hovered, hover, StyleMask::kBackground);
+  set_button_click(world, btn, own fn(env: &var CallbackEnv) {
+    fire_result(env.world, env.ctx, self_, result);
+  });
+  add_child(world, row, btn);
+}
+
+// SetupMessageBox: style the box as the dialog panel and build its title,
+// message and button row. Call before show_message_box. No-op if `e` is
+// not a message box.
+pub fn setup_message_box(var world&: World, e: WidgetId, title: str, message: str,
+                         buttons: MessageBoxButtons = MessageBoxButtons::Ok) {
+  if (!is_message_box(world, e)) {
+    return;
+  }
+  world.get_var(kMessageBoxContent, e)!.buttons = buttons;
+
+  // Style the message box itself as the dialog panel.
+  var ds = Style {};
+  ds.flex_direction = FlexDirection::Column;
+  ds.padding = EdgeInsets::all(24.0);
+  ds.gap = 16.0;
+  ds.width = Length::px(400.0);
+  ds.background = Color::from_hex(0x1e1e2e);
+  ds.corner_radius = 8.0;
+  ds.border_color = Color::from_rgba8(255, 255, 255, 30);
+  ds.border_width = 1.0;
+  ds.shadow = BoxShadow { color: Color::from_rgba8(0, 0, 0, 128), blur: 24.0, spread: 4.0 };
+  set_style(world, e, ds);
+
+  // Title.
+  let t = create_text(world, 0);
+  set_text(world, t, title);
+  var ts = Style {};
+  ts.font_size = 18.0;
+  ts.font_weight = FontWeight::Bold;
+  ts.text_color = Color::white();
+  set_style(world, t, ts);
+  add_child(world, e, t);
+
+  // Message.
+  let m = create_text(world, 0);
+  set_text(world, m, message);
+  var ms = Style {};
+  ms.font_size = 14.0;
+  ms.text_color = Color::from_rgba8(200, 200, 210, 255);
+  set_style(world, m, ms);
+  add_child(world, e, m);
+
+  // Button row (CreatePanel(0)).
+  let row = world.create(0);
+  world.get_var(kWidgetNode, row)!.kind = WidgetKind::Panel;
+  var rs = Style {};
+  rs.flex_direction = FlexDirection::Row;
+  rs.justify_content = JustifyContent::End;
+  rs.gap = 8.0;
+  rs.margin.top = 8.0;
+  set_style(world, row, rs);
+
+  match (buttons) {
+    MessageBoxButtons::Ok => {
+      make_button(world, e, row, "OK", MessageBoxResult::Ok, true);
+    },
+    MessageBoxButtons::OkCancel => {
+      make_button(world, e, row, "Cancel", MessageBoxResult::Cancel, false);
+      make_button(world, e, row, "OK", MessageBoxResult::Ok, true);
+    },
+    MessageBoxButtons::YesNo => {
+      make_button(world, e, row, "No", MessageBoxResult::No, false);
+      make_button(world, e, row, "Yes", MessageBoxResult::Yes, true);
+    },
+    MessageBoxButtons::YesNoCancel => {
+      make_button(world, e, row, "Cancel", MessageBoxResult::Cancel, false);
+      make_button(world, e, row, "No", MessageBoxResult::No, false);
+      make_button(world, e, row, "Yes", MessageBoxResult::Yes, true);
+    },
+  }
+
+  add_child(world, e, row);
+}
+
+// SetMessageBoxResult: run when a button is clicked or on Escape. No-op if
+// `e` is not a message box.
+pub fn set_message_box_result(var world&: World, e: WidgetId, handler: MessageBoxResultHandler) {
+  if (!is_message_box(world, e)) {
+    return;
+  }
+  world.get_var(kMessageBoxContent, e)!.on_result = handler;
+}
+
+// ShowMessageBox: center the dialog in the viewport (by margin, from its
+// measured size), then show it as a modal. The margin is written in place
+// without marking the style dirty, as the C++.
+pub fn show_message_box(var world&: World, var ctx&: WidgetContext, var overlays&: Overlays, e: WidgetId) {
+  if (!is_message_box(world, e)) {
+    return;
+  }
+
+  let (mw, mh) = measure_widget(world, ctx, e);
+
+  var vp = Vec2 { x: 0.0, y: 0.0 };
+  if (var p& = ctx.platform) {
+    vp = p.window_size();
+  }
+  var left = (vp.x - mw) * 0.5;
+  var top = (vp.y - mh) * 0.5;
+  if (left < 0.0) {
+    left = 0.0;
+  }
+  if (top < 0.0) {
+    top = 0.0;
+  }
+
+  if (var sc& = world.get_var(kStyleC, e)) {
+    sc.style.margin = EdgeInsets::new(top, 0.0, 0.0, left);
+  }
+
+  show_modal(world, ctx, overlays, e);
+}
+
+// DismissMessageBox: on_result(result), then hide the modal.
+pub fn dismiss_message_box(var world&: World, var ctx&: WidgetContext, var overlays&: Overlays, e: WidgetId,
+                           result: MessageBoxResult) {
+  if (is_message_box(world, e)) {
+    fire_result(world, ctx, e, result);
+  }
+  hide_modal(world, ctx, overlays, e);
+}
