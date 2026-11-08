@@ -1,0 +1,12 @@
+// Every widget kind ugui.* treats specially, for api.lua.
+panel root {
+    layout: column;
+    text title { text: "Title"; color: #ffffff; font-size: 14; }
+    button go { label: "Go"; background: #202040; }
+    checkbox opt { label: "Option"; }
+    slider vol { min: 0; max: 10; value: 3; }
+    dropdown pick { options: "Alpha, Beta, Gamma"; selected: 1; }
+    image pic { width: 32; height: 32; }
+    panel box { width: 50; height: 20; opacity: 0.5; corner-radius: 4; }
+    text unnamed_child_parent { text: "x"; }
+}
