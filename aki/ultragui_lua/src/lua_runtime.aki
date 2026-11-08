@@ -54,15 +54,14 @@ import {
   LuaCall, LuaRaise, LuaText, c_ptr, c_string, push_c_text, text_at,
 } from ultragui_lua::lua_call;
 import {
-  LuaState, LuaCFunction,
+  LuaState,
   kLuaOk, kLuaRegistryIndex, kLuaTFunction, kLuaTString,
   luaL_newstate, lua_close, luaL_requiref, luaopen_base, luaopen_table, luaopen_string, luaopen_math,
-  kLuaTabLibName, kLuaStrLibName, kLuaMathLibName,
   lua_pop, lua_pushlightuserdata, lua_setfield, lua_getfield, lua_touserdata, lua_upvalueindex,
   luaL_loadbuffer, luaL_loadfile, lua_pcall, lua_tostring, lua_getglobal, lua_setglobal, lua_isfunction, lua_istable,
   lua_newtable, lua_pushinteger, lua_pushboolean, lua_pushnumber, lua_pushcclosure, lua_pushcfunction, lua_pushnil,
-  lua_pushvalue, lua_rawgeti, lua_type, lua_gettop, luaL_ref, luaL_unref, lua_pushlstring, lua_error,
-  luaL_typeerror, luaL_argerror, lua_typename, lua_toboolean, lua_tolstring,
+  lua_pushvalue, lua_rawgeti, luaL_ref, luaL_unref, lua_pushlstring, lua_pushstring, lua_error,
+  luaL_typeerror, luaL_argerror, lua_typename,
 } from ultragui_lua::sys::lua;
 
 extern fn printf(format: *const c_char, ...): i32;
@@ -440,17 +439,22 @@ unsafe fn impl_call_handler(p: *var LuaImpl, var world&: World, var ctx&: Widget
 
 fn apply_easing(t: f64, easing: u8): f64 {
   switch (easing) {
-    case 1:
+    case 1: {
       return t * t;  // ease-in
-    case 2:
+    }
+    case 2: {
       return 1.0 - (1.0 - t) * (1.0 - t);  // ease-out
-    case 3:
+    }
+    case 3: {
+      // ease-in-out
       if (t < 0.5) {
         return 2.0 * t * t;
       }
-      return 1.0 - ((-2.0 * t + 2.0) * (-2.0 * t + 2.0)) / 2.0;  // ease-in-out
-    default:
+      return 1.0 - ((-2.0 * t + 2.0) * (-2.0 * t + 2.0)) / 2.0;
+    }
+    default: {
       return t;  // linear
+    }
   }
 }
 
@@ -666,7 +670,8 @@ extern(longjmp) fn native_trampoline(l: *var LuaState): i32 {
   if (let n = outcome) {
     return n;
   } else (let r) {
-    return unsafe raise(l, r);
+    let (k, a, t, m) = raise_parts(r);
+    return unsafe raise(l, k, a, t, m);
   }
 }
 
@@ -675,7 +680,7 @@ unsafe fn run_native(l: *var LuaState): i32 ! LuaRaise {
     let f = lua_touserdata(l, lua_upvalueindex(1)) as *const NativeFunction;
     let p = impl_from_state(l);
     if ((*p).world == null) {
-      return fail LuaRaise::Message("ugui/lua: a native function ran outside a call into the runtime");
+      return fail LuaRaise::Message(c"ugui/lua: a native function ran outside a call into the runtime");
     }
     var world& = *(*p).world;
     var ctx& = *((*p).ctx as *var WidgetContext<'static>);
@@ -684,21 +689,24 @@ unsafe fn run_native(l: *var LuaState): i32 ! LuaRaise {
   }
 }
 
-// Raises what a failed check returned, as luaL_check* would have.
-extern(longjmp) unsafe fn raise(l: *var LuaState, r: LuaRaise): i32 {
+// Raises what a failed check returned, as luaL_check* would have. (An
+// extern function takes no union: the trampolines pass its parts.)
+fn raise_parts(r: LuaRaise): (i32, i32, i32, *const c_char) => match (r) {
+  LuaRaise::Type(let arg, let tag) => (0, arg, tag, null),
+  LuaRaise::NoInteger(let arg) => (1, arg, 0, null),
+  LuaRaise::Message(let msg) => (2, 0, 0, msg),
+};
+
+extern(longjmp) unsafe fn raise(l: *var LuaState, kind: i32, arg: i32, tag: i32, msg: *const c_char): i32 {
   unsafe {
-    match (r) {
-      LuaRaise::Type(arg, tag) => {
-        return luaL_typeerror(l, arg, lua_typename(l, tag));
-      },
-      LuaRaise::NoInteger(arg) => {
-        return luaL_argerror(l, arg, c"number has no integer representation");
-      },
-      LuaRaise::Message(msg) => {
-        lua_pushlstring(l, @ptr(msg) as *const c_char, #msg);
-        return lua_error(l);
-      },
+    if (kind == 0) {
+      return luaL_typeerror(l, arg, lua_typename(l, tag));
     }
+    if (kind == 1) {
+      return luaL_argerror(l, arg, c"number has no integer representation");
+    }
+    lua_pushstring(l, msg);
+    return lua_error(l);
   }
 }
 
@@ -730,7 +738,7 @@ unsafe fn run_builtin(l: *var LuaState, f: static fn(&var LuaCall): i32 ! LuaRai
   unsafe {
     let p = impl_from_state(l);
     if ((*p).world == null) {
-      return fail LuaRaise::Message("ugui/lua: a native function ran outside a call into the runtime");
+      return fail LuaRaise::Message(c"ugui/lua: a native function ran outside a call into the runtime");
     }
     var world& = *(*p).world;
     var ctx& = *((*p).ctx as *var WidgetContext<'static>);
@@ -744,7 +752,8 @@ extern(longjmp) fn c_ugui_find(l: *var LuaState): i32 {
   if (let n = r) {
     return n;
   } else (let e) {
-    return unsafe raise(l, e);
+    let (k, a, t, m) = raise_parts(e);
+    return unsafe raise(l, k, a, t, m);
   }
 }
 
@@ -753,7 +762,8 @@ extern(longjmp) fn c_ugui_get(l: *var LuaState): i32 {
   if (let n = r) {
     return n;
   } else (let e) {
-    return unsafe raise(l, e);
+    let (k, a, t, m) = raise_parts(e);
+    return unsafe raise(l, k, a, t, m);
   }
 }
 
@@ -762,7 +772,8 @@ extern(longjmp) fn c_ugui_set(l: *var LuaState): i32 {
   if (let n = r) {
     return n;
   } else (let e) {
-    return unsafe raise(l, e);
+    let (k, a, t, m) = raise_parts(e);
+    return unsafe raise(l, k, a, t, m);
   }
 }
 
@@ -771,7 +782,8 @@ extern(longjmp) fn c_ugui_log(l: *var LuaState): i32 {
   if (let n = r) {
     return n;
   } else (let e) {
-    return unsafe raise(l, e);
+    let (k, a, t, m) = raise_parts(e);
+    return unsafe raise(l, k, a, t, m);
   }
 }
 
@@ -780,7 +792,8 @@ extern(longjmp) fn c_ugui_after(l: *var LuaState): i32 {
   if (let n = r) {
     return n;
   } else (let e) {
-    return unsafe raise(l, e);
+    let (k, a, t, m) = raise_parts(e);
+    return unsafe raise(l, k, a, t, m);
   }
 }
 
@@ -789,7 +802,8 @@ extern(longjmp) fn c_ugui_tween(l: *var LuaState): i32 {
   if (let n = r) {
     return n;
   } else (let e) {
-    return unsafe raise(l, e);
+    let (k, a, t, m) = raise_parts(e);
+    return unsafe raise(l, k, a, t, m);
   }
 }
 
@@ -798,7 +812,8 @@ extern(longjmp) fn c_ugui_open_url(l: *var LuaState): i32 {
   if (let n = r) {
     return n;
   } else (let e) {
-    return unsafe raise(l, e);
+    let (k, a, t, m) = raise_parts(e);
+    return unsafe raise(l, k, a, t, m);
   }
 }
 
@@ -832,10 +847,10 @@ unsafe fn register_api(l: *var LuaState) {
   }
 }
 
-fn impl_of(call&: LuaCall): *var LuaImpl => call.runtime_ptr() as *var LuaImpl;
+fn impl_of(call&: LuaCall): *var LuaImpl => unsafe (call.runtime_ptr() as *var LuaImpl);
 
 fn registered(call&: LuaCall, name: LuaText): WidgetId {
-  let s = name.to_string();
+  let s = name.owned();
   return find_in_registry(unsafe *impl_of(call), s);
 }
 
@@ -860,8 +875,8 @@ fn ugui_tween(var call&: LuaCall): i32 ! LuaRaise {
   let prop = try call.check_text(2);
 
   var tw = TweenEntry {
-    widget_name: name.to_string(),
-    property: prop.to_string(),
+    widget_name: name.owned(),
+    property: prop.owned(),
     start_time: unsafe (*p).current_time,
     duration: 0.0,
     from_num: 0.0, to_num: 0.0,

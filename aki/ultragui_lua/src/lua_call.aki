@@ -11,7 +11,7 @@
 // same ("bad argument #1 to 'set' (string expected, got no value)").
 //
 // Text comes out of Lua as the C++ reads it: a C string, cut at its first
-// NUL. `check_string`/`to_string` copy it into a String, replacing bytes that
+// NUL. `check_string`/`to_string`/`LuaText::owned` copy it into a String, replacing bytes that
 // are not UTF-8 with U+FFFD (aki's String is always UTF-8; the C++ keeps the
 // bytes); `check_text` keeps the raw bytes, valid while the value stays on
 // the Lua stack, for code that compares or prints them byte for byte.
@@ -34,8 +34,8 @@ pub union LuaRaise : Copy {
   Type(i32, i32),
   // luaL_checkinteger on a number without an integer value.
   NoInteger(i32),
-  // luaL_error-style: the message alone (raised as a string error value).
-  Message(str),
+  // luaL_error-style: the message alone (a static C string, raised as a string error value).
+  Message(*const c_char),
 }
 
 // A Lua string's bytes, cut at the first NUL as a C string reads. Valid while
@@ -48,7 +48,7 @@ pub struct LuaText : Copy {
   // strcmp(text, s) == 0
   pub fn eq_str(self&, s: str): bool;
   // A String of the text, U+FFFD for each byte that is not UTF-8.
-  pub fn to_string(self&): String;
+  pub fn owned(self&): String;
   // The bytes [a, b) up to the first byte that is not ASCII, as a str: what
   // from_chars reads of a hex field (it stops at the first non-digit).
   pub fn ascii_run(self&, a: usize, b: usize): str;
@@ -67,7 +67,7 @@ fn LuaText::eq_str(self&, s: str): bool {
   return true;
 }
 
-fn LuaText::to_string(self&): String => lossy_utf8(self.bytes());
+fn LuaText::owned(self&): String => lossy_utf8(self.bytes());
 
 fn LuaText::ascii_run(self&, a: usize, b: usize): str {
   let bytes = self.bytes();
@@ -137,7 +137,7 @@ pub fn c_string(s: str): String {
   return out;
 }
 
-pub fn c_ptr(s&: String): *const c_char => @ptr(s.as_str()) as *const c_char;
+pub fn c_ptr(s&: String): *const c_char => unsafe (@ptr(s.as_str()) as *const c_char);
 
 // One native call: the Lua state, and the World and WidgetContext the
 // script runs with.
@@ -167,7 +167,7 @@ pub struct LuaCall<'w, 'a> {
   pub fn check_text(self&, arg: i32): LuaText ! LuaRaise;
   pub fn check_string(self&, arg: i32): String ! LuaRaise {
     let t = try self.check_text(arg);
-    return t.to_string();
+    return t.owned();
   }
   // luaL_checknumber
   pub fn check_number(self&, arg: i32): LuaNumber ! LuaRaise;
@@ -190,7 +190,7 @@ pub struct LuaCall<'w, 'a> {
     let t = self.to_text(arg) else {
       return none;
     };
-    return t.to_string();
+    return t.owned();
   }
   // lua_tonumber, lua_toboolean, lua_isnumber, lua_isboolean, lua_touserdata
   pub fn to_number(self&, arg: i32): LuaNumber => unsafe lua_tonumberx(self.l, arg, null);
