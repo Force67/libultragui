@@ -1,0 +1,5 @@
+panel p {
+  @frobnicate foo { a: b; }
+  c: d;
+}
+panel q { @ { } }

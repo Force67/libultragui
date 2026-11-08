@@ -1,0 +1,5 @@
+panel p {
+  :hover { color red; width: 3; }
+  :pressed color: blue;
+}
+panel after { z: 9; }

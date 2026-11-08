@@ -1,0 +1,8 @@
+panel p {
+  @keyframes k {
+    duration: 1s;
+    stray ;
+    0% { a: 1; }
+  }
+  after: 1;
+}

@@ -1,0 +1,2 @@
+class b_only { y: 2; :hover { z: 3; } }
+component b_comp { prop p: 1; text t { content: $p; } }
