@@ -146,10 +146,18 @@ pub struct FrameStats : Copy {
   pub var reused: bool = false  // the previous draw list was handed back unchanged
 }
 
-// What UIContext::PaintCallback is lent: the renderer and the Rhi.
+// What UIContext::PaintCallback is lent: the renderer and the Rhi (the C++
+// callback's arguments), and what a C++ callback reaches through the
+// UIContext it captures (`ui.root()`, `ui.time()`, the World, PaintWidgetTree's
+// widget context): `world`, `ctx` (the widget context, as for paint_tree),
+// `root`, `time` (platform time when the callback runs).
 pub struct PaintEnv<'a, R: Rhi> {
   pub var renderer: &'a var Renderer2D
   pub var rhi: &'a var R
+  pub var world: &'a var World
+  pub var ctx: WidgetContext<'a>
+  pub var root: WidgetId
+  pub var time: f64
 }
 
 // A script binding registered right after the runtime's init (the C++
@@ -461,7 +469,12 @@ pub struct UIContext<P: Platform = HostPlatform, R: Rhi = NullRhi, S: ScriptRunt
   // router's on_click (replacing any); the handlers run at the end of
   // pump_input, after the router has processed the frame's input, where the
   // C++ lambda runs inside it (router handlers get no World here).
-  pub fn set_script_click_dispatch(var self&);
+  // `left_only: false` is the previewer's lambda, which dispatches any button.
+  pub fn set_script_click_dispatch(var self&, left_only: bool = true);
+
+  // ScriptRuntime::Exec with UIContext's World and context, without the
+  // timer-clock sync exec_script does: `ui.script().Exec(src, name)`.
+  pub fn script_exec(var self&, script: str, name: str): bool;
 
   // Create an offscreen render target (delegates to the Rhi).
   pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle => self.rhi.create_render_target(width, height);
@@ -716,6 +729,22 @@ fn UIContext<P, R, S>::load_script(var self&, path: str): bool {
 
 fn UIContext<P, R, S>::exec_script(var self&, script: str, name: str): bool {
   self.script.sync_timer_clock(self.platform.time());
+  var ctx = WidgetContext {
+    text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+    current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    host: ScriptHost {
+      anims: self.vector_anims,
+      env: FrameEnv {
+        rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+        audio: self.audio,
+      },
+      widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
+    },
+  };
+  return self.script.exec(self.world, ctx, script, name);
+}
+
+fn UIContext<P, R, S>::script_exec(var self&, script: str, name: str): bool {
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
@@ -1138,7 +1167,15 @@ fn UIContext<P, R, S>::run_paint_callback(var self&): bool {
     return false;
   };
   {
-    var env = PaintEnv::<R> { renderer: self.renderer, rhi: self.rhi };
+    let time = self.time();
+    var env = PaintEnv::<R> {
+      renderer: self.renderer, rhi: self.rhi, world: self.world,
+      ctx: WidgetContext {
+        text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
+        current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+      },
+      root: self.root_, time,
+    };
     handler(env);
   }
   if (self.on_paint_cb == none) {
@@ -1471,11 +1508,11 @@ fn UIContext<P, R, S>::load_anim(var self&, path: str, width: u32, height: u32):
   return host.load_anim(path, width, height);
 }
 
-fn UIContext<P, R, S>::set_script_click_dispatch(var self&) {
+fn UIContext<P, R, S>::set_script_click_dispatch(var self&, left_only: bool) {
   let queue = Arc::<Mutex<List<WidgetId>>>(Mutex::<List<WidgetId>>(List::<WidgetId>()));
   let shared = queue.share();
   self.input.set_on_click(own fn(w: WidgetId, b: MouseButton) {
-    if (b != MouseButton::Left) {
+    if (left_only && b != MouseButton::Left) {
       return;
     }
     shared.get().with(fn(l: &var List<WidgetId>) {
