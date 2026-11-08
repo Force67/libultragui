@@ -382,9 +382,9 @@ fn Renderer2D::resolve_textures<R: Rhi>(var self&, var rhi&: R) {
     let real = texture_id_from_rhi_handle(
       rhi.create_texture(kGradientSize, kGradientSize, RhiFormat::Rgba8Unorm, p.pixels.as_slice() as bytes, RhiFilter::Linear));
     self.gradient_cache_.insert(key, real);
-    for (var b in self.batches_.iter_var()) {
-      if (b.texture == provisional) {
-        b.texture = real;
+    for (let j in 0..self.batches_.len()) {
+      if (self.batches_[j].texture == provisional) {
+        self.batches_[j].texture = real;
       }
     }
     if (self.current_texture_ == provisional) {
