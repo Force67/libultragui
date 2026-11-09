@@ -24,7 +24,25 @@ export LIBGL_ALWAYS_SOFTWARE=1 __GLX_VENDOR_LIBRARY_NAME=mesa
 export LD_LIBRARY_PATH="$mesa/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec xvfb-run -a -s "-screen 0 1280x720x24" \
   nix develop "$root" -c bash -c '
+    set -eu
+    # Never leave an older image looking like the result of this run.
+    rm -f -- "$XSHOT_OUT"
     "$@" & pid=$!
+    cleanup() {
+      rc=$?
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      if [ "$rc" -ne 0 ]; then rm -f -- "$XSHOT_OUT"; fi
+    }
+    trap cleanup EXIT
+    require_running() {
+      if ! kill -0 "$pid" 2>/dev/null; then
+        rc=0
+        wait "$pid" || rc=$?
+        echo "xshot: application exited before capture (status $rc)" >&2
+        exit 1
+      fi
+    }
     if [ -n "$XSHOT_KEYS" ]; then
       sleep "$XSHOT_KEYS_AT"
       for k in $XSHOT_KEYS; do
@@ -39,5 +57,6 @@ exec xvfb-run -a -s "-screen 0 1280x720x24" \
     else
       sleep "$XSHOT_SECS"
     fi
+    require_running
     import -window root "$XSHOT_OUT"
-    kill $pid 2>/dev/null; wait $pid 2>/dev/null; true' xshot "$@"
+    require_running' xshot "$@"
