@@ -144,6 +144,7 @@ fn check_platform(var t&: Expect) {
   feed.push_mouse_move(Vec2::new(12.0, 34.0));
   feed.push_mouse_button(MouseButton::Left, true);
   var p = DynPlatform::of(host);
+  t.that(p.host_fed(), "DynPlatform preserves the host platform flag");
   t.that(mouse_x(p) == 12.0, "events reach the queue through DynPlatform");
   t.that(p.window_size().x == 800.0 && p.dpi_scale() == 2.0, "viewport and dpi");
   p.set_clipboard_text("copied");

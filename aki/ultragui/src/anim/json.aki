@@ -2,7 +2,7 @@
 //
 // Differences in shape: `JsonValue::type` is `kind` (`type` is a C++ field
 // name only), the accessors that returned a nullable pointer return
-// `(&JsonValue)?`, `AsString` returns a `str` view of the value.
+// `(&JsonValue)?`, `AsString` returns a `str` view ending at the first NUL.
 // Behavior is the C++'s, quirks included: a `\u` escape keeps the `u`; no
 // check for trailing data after the top-level value; a string left open at
 // the end of the text ends there and succeeds; numbers are read by C's
@@ -12,6 +12,17 @@ module ultragui::anim::json;
 
 import {List} from akikit::containers::list;
 import {String, with_nul} from akikit::strings::string;
+
+// A const char* argument/result ends at its first NUL, even though a JSON
+// string's backing String can hold embedded NULs.
+fn c_string_prefix(s: str): str {
+  for (let i in 0..#s) {
+    if (s[i] == '\0') {
+      return s[..i];
+    }
+  }
+  return s;
+}
 
 pub enum JsonKind as u8 { Null, Bool, Number, String, Array, Object }
 
@@ -33,8 +44,9 @@ pub struct JsonValue {
     if (self.kind != JsonKind::Object) {
       return none;
     }
+    let c_key = c_string_prefix(key);
     for (let i in 0..self.object_keys.len()) {
-      if (self.object_keys[i] == key) {
+      if (self.object_keys[i] == c_key) {
         return self.object_vals[i];
       }
     }
@@ -53,7 +65,8 @@ pub struct JsonValue {
 
   pub fn as_float(self&, def: f32 = 0.0): f32 => self.kind == JsonKind::Number ? self.number_val as f32 : def;
 
-  pub fn as_string(self&, def: str<'static> = ""): str => self.kind == JsonKind::String ? self.string_val.as_str() : def;
+  pub fn as_string(self&, def: str<'static> = ""): str =>
+    c_string_prefix(self.kind == JsonKind::String ? self.string_val.as_str() : def);
 
   pub fn as_bool(self&, def: bool = false): bool => self.kind == JsonKind::Bool ? self.bool_val : def;
 
@@ -153,8 +166,11 @@ fn JsonParser::parse_string(var self&, var out&: JsonValue): bool {
         out.string_val.push_c8('\r');
       } else {
         // '"', '\\', '/' and every other escape: the character itself
-        // (including 'u', which is not decoded).
-        out.string_val.push_c8(e);
+        // (including 'u', which is not decoded). Keep it in the next run:
+        // it may begin a multi-byte UTF-8 character, not a standalone c8.
+        run = self.p;
+        self.p += 1;
+        continue;
       }
       self.p += 1;
       run = self.p;

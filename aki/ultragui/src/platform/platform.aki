@@ -92,6 +92,7 @@ fn framebuffer_size_thunk<P: Platform>(p: *var u8): Vec2 => unsafe (*(p as *var 
 fn dpi_scale_thunk<P: Platform>(p: *var u8): f32 => unsafe (*(p as *var P)).dpi_scale();
 fn time_thunk<P: Platform>(p: *var u8): f64 => unsafe (*(p as *var P)).time();
 fn native_handle_thunk<P: Platform>(p: *var u8): *var u8 => unsafe (*(p as *var P)).native_handle();
+fn host_fed_thunk<P: Platform>(p: *var u8): bool => unsafe (*(p as *var P)).host_fed();
 fn set_cursor_thunk<P: Platform>(p: *var u8, cursor: Cursor) {
   unsafe (*(p as *var P)).set_cursor(cursor);
 }
@@ -124,6 +125,7 @@ struct PlatformFns : Copy {
   pub let dpi_scale: static fn(*var u8): f32
   pub let time: static fn(*var u8): f64
   pub let native_handle: static fn(*var u8): *var u8
+  pub let host_fed: static fn(*var u8): bool
   pub let set_cursor: static fn(*var u8, Cursor): ()
   pub let clipboard_text: static fn(*var u8): str
   pub let set_clipboard_text: static fn(*var u8, str): ()
@@ -153,6 +155,7 @@ pub struct DynPlatform<'a> : Platform {
   pub fn dpi_scale(self&): f32 => (self.fns.dpi_scale)(self.raw());
   pub fn time(self&): f64 => (self.fns.time)(self.raw());
   pub fn native_handle(self&): *var u8 => (self.fns.native_handle)(self.raw());
+  pub fn host_fed(self&): bool => (self.fns.host_fed)(self.raw());
   pub fn set_cursor(var self&, cursor: Cursor) {
     (self.fns.set_cursor)(self.object.ptr(), cursor);
   }
@@ -178,6 +181,7 @@ fn DynPlatform::of<'a, P: Platform>(platform: &'a var P): DynPlatform<'a> => Dyn
     dpi_scale: dpi_scale_thunk::<P>,
     time: time_thunk::<P>,
     native_handle: native_handle_thunk::<P>,
+    host_fed: host_fed_thunk::<P>,
     set_cursor: set_cursor_thunk::<P>,
     clipboard_text: clipboard_text_thunk::<P>,
     set_clipboard_text: set_clipboard_text_thunk::<P>,
