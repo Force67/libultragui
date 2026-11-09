@@ -19,7 +19,7 @@ the C++ quirks that were kept, the compiler pitfalls.
 
 | Package | What it is | Needs |
 |---|---|---|
-| `ultragui` | The core: style, animation, layout (Yoga), text (FreeType, HarfBuzz), widgets, input, SVG, vector animation, the `.ugui` parser and builder, `UIContext`, and the seams (`Rhi`, `Platform`, `ScriptRuntime`, `TextureBackend`, `AudioBackend`) | FreeType, HarfBuzz, libstdc++ (Yoga is compiled from `third_party/`) |
+| `ultragui` | The core: style, animation, layout (an Aki flexbox engine that gives yoga's results bit for bit), text (FreeType, HarfBuzz), widgets, input, SVG, vector animation, the `.ugui` parser and builder, `UIContext`, and the seams (`Rhi`, `Platform`, `ScriptRuntime`, `TextureBackend`, `AudioBackend`) | FreeType, HarfBuzz (no C++ compiler: yoga in `third_party/` is only the layout tests' oracle) |
 | `ultragui_glfw` | `GlfwPlatform` (window, input, clipboard, cursors) and the shared GLFW binding | GLFW |
 | `ultragui_vulkan` | `VulkanRhi` (windowed) and `VulkanBackend` (draw-data renderer for a host that owns the device); the shared Vulkan binding (generated from `vulkan.h`) | Vulkan loader; GLFW |
 | `ultragui_opengl` | `OpenGlRhi` and `GlRenderer` (GL 3.3 core, entry points loaded at run time) | a GL 3.3 context (via GLFW) |
@@ -185,7 +185,11 @@ with the C++ itself, in three ways:
    regenerates them from the C++, e.g. `aki/ultragui/tools/gen_reference.cc`.
    The SVG rasterizer is byte-identical on a 62-render corpus, vector
    animation on 330 frames, the `.ugui` parser's AST on every example UI plus a
-   25-file corpus.
+   25-file corpus. Layout, where the C++ uses yoga and the port its own
+   engine, is fuzzed against yoga itself: `tests/yoga_fuzz_test.aki` builds
+   `aki/ultragui/tools/yoga_fuzz.cc` (seeded random trees through
+   `third_party/yoga`, relaid out incrementally) and compares every result
+   float of 20,000 trees bit for bit.
 2. **Golden draw-data comparison.** Both implementations play the same
    scenario (a `.ugui`, optionally its Lua, and a seeded stream of input) in
    draw-data mode with a fixed clock, and dump every frame: vertex and index

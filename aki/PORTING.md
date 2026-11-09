@@ -14,7 +14,7 @@ depend on, write it down here in the same commit.
 aki/
   PORTING.md             this file
   ultragui/              package `ultragui` (kind lib): the core
-    aki.toml             yoga from third_party via c_sources; -lfreetype -lharfbuzz
+    aki.toml             -lfreetype -lharfbuzz; no C or C++ sources (layout is layout::flex_tree)
     src/<dir>/<file>.aki ugui/<dir>/<file>.{h,cc}  ->  module ultragui::<dir>::<file>
     src/sys/             hand-written C bindings (freetype, harfbuzz, c_long)
     os/<os>/ultragui/sys/c_long.aki   C `long` per target OS (CLong, CULong)
@@ -25,6 +25,8 @@ aki/
     tools/gen_svg_reference.cc, gen_svg_table.py, gen_svg_corpus.py
                          SVG pixel hashes from the C++ -> tests/support/svg_corpus.aki
     tests/data/svg/      the SVG corpus (@embed'ed by tests/support/svg_corpus.aki)
+    tools/yoga_fuzz.cc   the layout engine's oracle: random trees through third_party/yoga, traced;
+                         tests/yoga_fuzz_test.aki builds it, runs it and replays the traces bit for bit
   ultragui_audio/        miniaudio AudioBackend (csrc/ugui_ma.c shim)
   ultragui_lottie/       rlottie from third_party via c_sources; tools/gen_reference.cc + gen_tables.py
   ultragui_video/        pl_mpeg via [build.implement]; tools/{gen_reference,recording_rhi}.cc + gen_tables.py
@@ -188,7 +190,8 @@ in the table, and none is unported.
 | widgets/{text,button,image,checkbox,radio,toggle,slider,dropdown,text_input,scroll_view,context_menu,modal,rich_text,message_box}.{h,cc} | ultragui::widgets::<kind> | ported, every vtable arm in; draw entries now run on the real renderer2d |
 | (callbacks in widget components) | ultragui::widgets::callbacks | ported: CallbackEnv + handler types, see below |
 | ui_context.{h,cc}: OverlayEntry, overlays_, ShowOverlay, HideOverlay | ultragui::widgets::overlays (`Overlays`) | ported; UIContext holds one, see below |
-| layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} (+ sys::yoga) | ported (test_layout_retained.cc ported) |
+| layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} | ported (test_layout_retained.cc ported) |
+| (yoga, third_party/yoga) | ultragui::layout::{flex_style,flex_tree} | replaced: an aki flexbox engine with yoga's results bit for bit for every style layout.cc can write (tests/yoga_fuzz_test.aki; "The layout engine" below) |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -660,9 +663,114 @@ engine.compute_store(root_id, vp); // Compute over store_for(root_id).nodes (bor
 engine.reset();
 ```
 
-`kNoNode` is the C++ `~0u`. Yoga's C API is bound by hand in `sys::yoga`;
-the measure callback is an `extern fn` reading the node's context, which
-compute re-points at the caller's LayoutNode on every call.
+`kNoNode` is the C++ `~0u`. Where layout.cc drives yoga, layout.aki drives
+`layout::flex_tree` (next section) with the same calls in the same order: a
+retained `FlexTree` per root whose node i is LayoutNode i, apply_style's
+comparing setters, and in place of the measure callback that reads the
+context layout.cc re-points every call, `set_intrinsic` on every call (what
+that callback would read) and `mark_dirty` when the size changed.
+
+### The layout engine — `ultragui::layout::{flex_style,flex_tree}`
+
+The C++ lays out with yoga; the port has its own flexbox engine, so the core
+package compiles no C++ and links no libstdc++. It is yoga (`third_party/yoga`
+at 8c5ea16d) cut down to what layout.cc writes, and its contract is yoga's
+results, bit for bit, on retained trees relaid out frame after frame:
+
+```aki
+var tree = FlexTree();
+let n = tree.add_node();                                     // YGNodeNewWithConfig
+tree.insert_child(parent, n, index);                         // YGNodeInsertChild
+tree.set_measured(n);                                        // YGNodeSetMeasureFunc
+tree.set_intrinsic(n, w, h);                                 // what the measure function reports
+tree.mark_dirty(n);                                          // YGNodeMarkDirty
+tree.set_dimension(n, kWidth, StyleLength::percent(50.0));   // YGNodeStyleSetWidthPercent: compares, stores, dirties
+tree.set_margin(n, kTop, 4.0);                               // ... and the other YGNodeStyleSet* layout.cc calls
+tree.calculate_layout(root, vw, vh);                         // YGNodeCalculateLayout(root, vw, vh, LTR)
+tree.layout_left(n); tree.layout_width(n); tree.layout_margin(n, kTop); tree.layout_padding(n, kLeft);
+```
+
+**Scope.** Flex direction (all four), justify-content (flex-start, center,
+flex-end, space-between/around/evenly), align-items/self/content (auto,
+flex-start, center, flex-end, stretch, baseline without a baseline function,
+space-*), wrap and wrap-reverse, overflow visible/hidden/scroll, position
+relative/absolute with insets in points, display flex/none, grow, shrink,
+basis (auto, points, percent), width/height (points, percent, auto), min/max
+(points, percent, undefined), margins and padding per physical edge in points,
+gaps (all/row/column, points or undefined), aspect ratio; a measure function
+that reports a fixed intrinsic size whatever the constraints (libultragui's);
+yoga's default config (point scale factor 1, pixel-grid rounding, no errata,
+no experimental features). Not there, rather than stubbed: RTL, margin auto,
+percent margins/padding/insets/gaps, borders, static position, display
+contents, box-sizing content-box, the `flex` shorthand, baseline functions,
+constraint-dependent measure functions, cloning, events, logging. A style
+feature layout.cc starts writing must be added from yoga's code (and to the
+oracle's copy of apply_style) before it is used.
+
+**How it matches.** flex_tree follows yoga's CalculateLayout, AbsoluteLayout,
+FlexLine, Cache, PixelGrid and Baseline step for step (each function names the
+yoga one it ports) and keeps the state yoga carries between passes, because
+yoga's incremental results are not those of a fresh layout: on the oracle's
+trees about 23% of relayouts give a different left/top/width/height somewhere
+than laying the same final tree out from scratch (the caches, the kept flex
+basis and the style pool's history together; turning the caches off alone
+changes 11,845 of 5.4 million result floats). So it has yoga's dirty flags (propagation stops at the first dirty
+ancestor), its layout cache and eight measurement cache entries with their
+tolerant, pixel-grid-rounded comparisons, the computed flex basis that only a
+dirtied node forgets, the line index each child keeps (baseline alignment
+reads it again), and rounding to the pixel grid only after a pass that laid
+the root out, which rounds the already rounded positions of cached subtrees
+again. Also kept on purpose:
+
+- style values stored as yoga's StyleValuePool stores them: an integer from
+  -2047 to 2047 is packed into the handle, so -0.0 reads back as +0.0 (a
+  negative percent inset resolves to -0.0 in layout.cc), unless the slot has
+  held a non-integer before, which makes it keep exact bits from then on;
+  setters compare against what reads back (aspect ratio against the value as
+  passed, before 0 and infinities become undefined);
+- yoga's +0.0 borders are added where yoga adds them (`kBorder`): they turn a
+  -0.0 padding into +0.0;
+- the gap is counted for every child when checking for main-axis overflow,
+  absolute and display: none ones included;
+- multi-line align flex-start offsets a child by its inset, not its margin;
+- display: none children of a wrap-reverse container get a NaN position (their
+  measured size is NaN when the mirroring reads it);
+- a single child that can both grow and shrink in an exactly sized line gets a
+  flex basis of 0 without being measured;
+- the two-pass flexible-length resolution, not the spec's loop.
+
+**Floats.** akiko fuses a product into the add or subtract that takes it
+inside one expression, and so does clang at its default `-ffp-contract=on`,
+which the C++ library and the oracle are built with. So each yoga expression
+keeps its shape here, and where yoga's add takes a conditional whose arm is a
+product (stretched aspect-ratio children in STEP 7), the conditional goes into
+a local first: clang never fuses through it, and the local keeps akiko from
+it.
+
+**Verification.** `tests/yoga_fuzz_test.aki` builds `tools/yoga_fuzz.cc` and
+yoga with clang++ into `build/yoga_oracle/` (once; again when the tool is
+newer) and plays 10 seeded chunks of 2000 trees: up to 40 nodes in depth-first
+order as layout_tree numbers them, styles drawn at libultragui's level (px, %,
+vw, vh, frac, auto, a ui scale, min 0 / max 1e6 meaning none, equal and
+conflicting min/max) and written through a copy of layout.cc's apply_style,
+measured leaves, absolute children, display: none leaves and a few with
+children, every enum value, then up to six more passes of restyles,
+re-measured leaves with MarkDirty, unchanged rewrites and viewport/scale
+changes. 79,941 layouts, 18,196,740 result floats (left, top, width, height,
+margins, paddings), all equal by their bits. `YOGA_FUZZ_SEED`,
+`YOGA_FUZZ_CHUNKS` and `YOGA_FUZZ_TREES` change the run; a failing chunk's
+trace is kept and the first differences are printed by tree, pass and node;
+`akiko test tests/yoga_fuzz_test.aki -- trace...` replays recorded traces.
+Breaking one reproduced behavior at a time (keeping the flex basis, the -0.0
+packing, the sticky pool bit, the layout or measurement cache, the cache's
+rounded or max-content comparisons, a fused grow or shrink step, rounding when
+the root was cached, the multi-line inset, the overflow gap count, the
+wrap-reverse NaN, dirty propagation stopping, the inexact min = max test, text
+rounding) makes the test fail: 17 such mutations are caught. Three are not,
+being too rare to show or hidden by the pixel-grid rounding: the +0.0 border
+adds, a zero-out resetting line indices, and fusing the STEP 7 aspect-ratio
+add (which clang's assembly confirms is not fused). The golden draw-data
+comparison (tools/golden) stays 21/21 `same` on the engine.
 
 ### Paint and the widget tree
 
@@ -1463,8 +1571,9 @@ so bit-exact tables are aarch64's.
   akikit::containers::list. `arguments()` (akikit::process::command_line)
   leaves out the program path. `none` and `module` are keywords.
 - `extern struct` fields may have defaults (the Vulkan binding relies on it).
-- yoga's sources warn about `_FORTIFY_SOURCE` without `-O`; `-Wno-#warnings`
-  in `c_flags` silences it.
+- C sources compiled through `c_sources` warn about `_FORTIFY_SOURCE` without
+  `-O` (rlottie, pl_mpeg, miniaudio; yoga did before the flex engine replaced
+  it); `-Wno-#warnings` in `c_flags` silences it.
 - **Private fields of a module-private struct are private to its methods**:
   helper structs used by free functions in the same file (`SoundSlot`, `Impl`
   in ugui_impl_miniaudio) need `pub var` fields.
