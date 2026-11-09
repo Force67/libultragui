@@ -117,6 +117,9 @@ fn check_button_text_image(var t&: Expect, var world&: World, var ctx&: WidgetCo
   t.that(widget_revision() != rev, "changed text marks dirty");
 
   t.that(apply_text_transform("hello wide-world x", TextTransform::Capitalize) == "Hello Wide-world X", "capitalize");
+  // C++ C-locale capitalization preserves UTF-8 bytes and capitalizes the
+  // first ASCII letter after a space, even after a non-ASCII character.
+  t.that(apply_text_transform("éclair über café 世界hello", TextTransform::Capitalize) == "éClair üBer Café 世界Hello", "capitalize preserves UTF-8");
   t.that(apply_text_transform("MiXeD é", TextTransform::Uppercase) == "MIXED é", "uppercase is ASCII only");
   t.that(apply_text_transform("MiXeD", TextTransform::Lowercase) == "mixed", "lowercase");
 

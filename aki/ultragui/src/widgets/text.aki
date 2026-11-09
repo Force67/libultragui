@@ -45,17 +45,22 @@ pub fn apply_text_transform(s: str, t: TextTransform): String {
   if (t == TextTransform::Capitalize) {
     var out = String();
     var next = true;
+    var run: usize = 0;
     for (let i in 0..#s) {
-      var c = s[i];
+      let c = s[i];
       if (next && is_alpha(c)) {
-        c = c >= 'a' && c <= 'z' ? ((c as u8) - 32) as c8 : c;
+        // Copy UTF-8 runs whole; push_c8 accepts only ASCII. Both ends
+        // of this split are at an ASCII letter, hence character boundaries.
+        out.push_str(s[run..i]);
+        out.push_c8(c >= 'a' && c <= 'z' ? ((c as u8) - 32) as c8 : c);
+        run = i + 1;
         next = false;
       }
       if (c == ' ') {
         next = true;
       }
-      out.push_c8(c);
     }
+    out.push_str(s[run..]);
     return out;
   }
   return from_str(s);
