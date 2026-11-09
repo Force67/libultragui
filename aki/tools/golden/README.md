@@ -42,7 +42,9 @@ operation per line; `#` starts a comment:
 | `char CODEPOINT` | text input |
 | `ui_scale S` | `set_ui_scale(S)` |
 
-The first line that needs a context initializes it.
+The first line that needs a context initializes it. Left clicks on named
+widgets dispatch to Lua's `on_<name>` handler, as in the showcase and game
+overlay examples.
 
 ## Extra scenarios
 
@@ -70,6 +72,18 @@ the texture backend and viewport are set); without ULTRAGUI_LUA it is a
 no-op.
 
 ## The C++ side
+
+Both runners fail if a requested UI or script cannot be loaded or executed.
+The end marker follows shutdown, so texture destruction is included in the
+comparison. `compare.py` requires a complete version-1 dump with no bytes
+after the end marker and compares float bit patterns, including signed zero.
+
+Regression tests for the harness itself:
+
+```
+python3 -m unittest discover -s aki/tools/golden -p test_compare.py
+nix develop -c python3 aki/tools/golden/test_runners.py /tmp/ugui-golden/ugui_golden aki/tools/golden/aki_golden/build/aki_golden
+```
 
 `ugui_golden.cc` documents the dump format. `golden_platform.cc` is
 `ugui/platform/platform_host.cc` with `Platform::time()` reading the

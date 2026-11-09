@@ -280,6 +280,7 @@ fn Runner::ensure_init(var self&): bool {
   }
   // Lua 5.4 seeds math.random per state from the clock: both runners seed it.
   let _ = self.ui.exec_script("math.randomseed(42)", "chunk");
+  self.ui.set_script_click_dispatch();
   let p = unsafe (self.out.as_ptr() as *var Writer);
   self.ui.set_texture_backend(TextureBackendBox::of(RecordingTextures { out: p }));
   self.ui.platform.host.set_viewport(self.window, self.framebuffer);
@@ -398,13 +399,19 @@ fn main(): i32 {
       if (!r.ensure_init()) {
         return 1;
       }
-      let _ = r.ui.load_ui(path);
+      if (!r.ui.load_ui(path).valid()) {
+        eprintln(f"ugui_golden:{lineno}: cannot load UI {path}");
+        return 1;
+      }
     } else if (op == "script") {
       let path = ops.word() ?? "";
       if (!r.ensure_init()) {
         return 1;
       }
-      let _ = r.ui.load_script(path);
+      if (!r.ui.load_script(path)) {
+        eprintln(f"ugui_golden:{lineno}: cannot load script {path}");
+        return 1;
+      }
     } else if (op == "frame") {
       var dt: f64 = 1.0 / 60.0;
       ops.f64_into(dt);
@@ -474,10 +481,10 @@ fn main(): i32 {
       return 2;
     }
   }
-  r.out.get_var().u8v('E' as u8);
   if (r.initialized) {
     r.ui.shutdown();
   }
+  r.out.get_var().u8v('E' as u8);
   let _written = write_bytes(args[1], r.out.get().buf.as_slice()) else {
     eprintln(f"ugui_golden: cannot write {args[1]}");
     return 2;

@@ -7,5 +7,16 @@
 #   aki/tools/compare_shots.sh /tmp/aki.png /tmp/cpp.png
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
-n=$(nix develop "$root" -c compare -metric AE "$1" "$2" "${3:-null:}" 2>&1 | tail -1 | awk '{print $1}')
-if [ "$n" = "0" ]; then echo "identical: $1 $2"; else echo "DIFFERENT: $n pixels differ ($1 $2)"; exit 1; fi
+rc=0
+metric=$(nix develop "$root" -c compare -metric AE "$1" "$2" "${3:-null:}" 2>&1) || rc=$?
+if [ "$rc" -gt 1 ]; then
+  echo "compare_shots: comparison failed: $metric" >&2
+  exit "$rc"
+fi
+n=$(printf '%s\n' "$metric" | tail -1 | awk '{print $1}')
+if [ "$rc" -eq 0 ] && [ "$n" = "0" ]; then
+  echo "identical: $1 $2"
+else
+  echo "DIFFERENT: $n pixels differ ($1 $2)"
+  exit 1
+fi
