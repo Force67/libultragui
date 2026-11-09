@@ -15,12 +15,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
 class RunnerTests(unittest.TestCase):
-    def run_scenario(self, source, status, script=None):
+    def run_scenario(self, source, status, script=None, stdout_contains=None):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             if script is not None:
                 (d / "script.lua").write_text(script)
                 source = source.replace("SCRIPT", str(d / "script.lua"))
+            (d / "ui.ugui").write_text('panel root { width: 200; height: 100; '
+                                       'button clicked { width: 100; height: 60; } }')
+            source = source.replace("UI", str(d / "ui.ugui"))
             scenario = d / "scenario.txt"
             scenario.write_text(source)
             for runner in RUNNERS:
@@ -28,6 +31,8 @@ class RunnerTests(unittest.TestCase):
                     result = subprocess.run([runner, str(scenario), str(d / "out.bin")],
                                             cwd=ROOT, capture_output=True, text=True)
                     self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                    if stdout_contains is not None:
+                        self.assertIn(stdout_contains, result.stdout)
 
     def test_valid_frame(self):
         self.run_scenario("frame\n", 0)
@@ -43,6 +48,12 @@ class RunnerTests(unittest.TestCase):
 
     def test_script_runtime_error(self):
         self.run_scenario("script SCRIPT\nframe\n", 1, 'error("review-test")')
+
+    def test_lua_click_handler_runs(self):
+        self.run_scenario("viewport 200 100 200 100\nui UI\nscript SCRIPT\nframe\n"
+                          "move 20 20\nframe\ndown left\nframe\nup left\nframe\n", 0,
+                          'function on_clicked(w) print("review-click-handler:" .. w.name) end',
+                          "review-click-handler:clicked")
 
 
 if __name__ == "__main__":

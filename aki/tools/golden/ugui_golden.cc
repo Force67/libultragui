@@ -197,6 +197,15 @@ int main(int argc, char** argv) {
     // both runners seed it, so scripts that draw random numbers (neon,
     // glass, terminal) replay. A no-op without ULTRAGUI_LUA.
     ui.ExecScript("math.randomseed(42)");
+    // Match the examples' on_<name> dispatch; loading a script alone only
+    // wires change handlers, so otherwise button clicks never exercise Lua.
+    ui.input().set_on_click([&ui](wid widget, MouseButton button) {
+      if (button != MouseButton::kLeft) return;
+      WidgetNode* n = ui.world().Get<WidgetNode>(widget);
+      if (!n || n->name.empty()) return;
+      const std::string handler = "on_" + n->name;
+      ui.script().CallHandler(handler.c_str(), widget);
+    });
     ui.set_texture_backend(&textures);
     host::SetViewport(*ui.platform(), window, framebuffer);
     initialized = true;

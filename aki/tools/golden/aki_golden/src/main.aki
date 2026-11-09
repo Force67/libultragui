@@ -280,6 +280,7 @@ fn Runner::ensure_init(var self&): bool {
   }
   // Lua 5.4 seeds math.random per state from the clock: both runners seed it.
   let _ = self.ui.exec_script("math.randomseed(42)", "chunk");
+  self.ui.set_script_click_dispatch();
   let p = unsafe (self.out.as_ptr() as *var Writer);
   self.ui.set_texture_backend(TextureBackendBox::of(RecordingTextures { out: p }));
   self.ui.platform.host.set_viewport(self.window, self.framebuffer);

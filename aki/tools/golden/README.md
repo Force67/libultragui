@@ -42,7 +42,9 @@ operation per line; `#` starts a comment:
 | `char CODEPOINT` | text input |
 | `ui_scale S` | `set_ui_scale(S)` |
 
-The first line that needs a context initializes it.
+The first line that needs a context initializes it. Left clicks on named
+widgets dispatch to Lua's `on_<name>` handler, as in the showcase and game
+overlay examples.
 
 ## Extra scenarios
 
