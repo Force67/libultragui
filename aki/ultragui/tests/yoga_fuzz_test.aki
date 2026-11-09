@@ -385,9 +385,9 @@ fn build_oracle(root: str, out_dir: str): String? {
 pub fn main(): i32 {
   var totals = Totals {};
   var ok = true;
-  let args = arguments();
-  if (args.len() > 1) {
-    for (let i in 1..args.len()) {
+  let args = arguments();  // without the program path
+  if (args.len() > 0) {
+    for (let i in 0..args.len()) {
       let text = read_file(args[i]) else {
         eprintln(f"cannot read {args[i]}");
         return 1;
