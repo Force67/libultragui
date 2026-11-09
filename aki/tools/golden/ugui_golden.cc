@@ -261,12 +261,18 @@ int main(int argc, char** argv) {
       std::string path;
       ls >> path;
       if (!ensure_init()) return 1;
-      ui.LoadUi(path.c_str());
+      if (!ui.LoadUi(path.c_str()).valid()) {
+        fprintf(stderr, "ugui_golden:%d: cannot load UI %s\n", lineno, path.c_str());
+        return 1;
+      }
     } else if (op == "script") {
       std::string path;
       ls >> path;
       if (!ensure_init()) return 1;
-      ui.LoadScript(path.c_str());
+      if (!ui.LoadScript(path.c_str())) {
+        fprintf(stderr, "ugui_golden:%d: cannot load script %s\n", lineno, path.c_str());
+        return 1;
+      }
     } else if (op == "frame") {
       double dt = 1.0 / 60.0;
       ls >> dt;
@@ -314,8 +320,12 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  w.u8v('E');
   if (initialized) ui.Shutdown();
-  fclose(w.f);
+  w.u8v('E');
+  const bool failed = ferror(w.f) != 0;
+  if (fclose(w.f) != 0 || failed) {
+    fprintf(stderr, "ugui_golden: cannot write %s\n", argv[2]);
+    return 2;
+  }
   return 0;
 }

@@ -21,20 +21,24 @@ assert VERTEX.size == 48
 
 class Reader:
     def __init__(self, path):
-        self.data = open(path, "rb").read()
+        self.path = path
+        with open(path, "rb") as f:
+            self.data = f.read()
         self.pos = 0
-        if self.data[:4] != b"UGGD":
-            sys.exit(f"{path}: not a golden dump")
+        if len(self.data) < 8 or self.data[:4] != b"UGGD":
+            raise ValueError(f"{path}: not a golden dump")
         (self.version,) = struct.unpack_from("<I", self.data, 4)
+        if self.version != 1:
+            raise ValueError(f"{path}: unsupported dump version {self.version}")
         self.pos = 8
 
     def take(self, fmt):
         s = struct.Struct("<" + fmt)
-        v = s.unpack_from(self.data, self.pos)
-        self.pos += s.size
-        return v
+        return s.unpack(self.raw(s.size))
 
     def raw(self, n):
+        if n > len(self.data) - self.pos:
+            raise ValueError(f"{self.path}: truncated record at {self.pos} (need {n} bytes)")
         b = self.data[self.pos:self.pos + n]
         self.pos += n
         return b
@@ -52,7 +56,9 @@ class Reader:
             elif tag == "A":
                 yield ("A",) + self.take("IIIQ")
             elif tag == "F":
-                head = self.take("I6fB")
+                # Preserve float bits: +0/-0 differ and equal NaN payloads
+                # must compare equal, just as the vertex buffers do.
+                head = self.raw(struct.calcsize("<I6fB"))
                 bufs = []
                 for size in (48, 4, 48, 4):
                     (n,) = self.take("I")
@@ -61,24 +67,27 @@ class Reader:
                 cmds = self.raw(ncmd * CMD.size)
                 yield ("F", head, bufs, (ncmd, cmds))
             elif tag == "E":
+                if self.pos != len(self.data):
+                    raise ValueError(f"{self.path}: data after end marker at {self.pos}")
                 yield ("E",)
                 return
             else:
                 raise ValueError(f"bad tag {tag!r} at {self.pos - 1}")
+        raise ValueError(f"{self.path}: missing end marker")
 
 
 def describe(rec):
     if rec is None:
         return "end of file"
     if rec[0] == "F":
-        return f"frame {rec[1][0]}"
+        return f"frame {struct.unpack_from('<I', rec[1])[0]}"
     return repr(rec)
 
 
 def diff_frame(a, b, out, limit):
-    frame = a[1][0]
+    frame = struct.unpack_from("<I", a[1])[0]
     if a[1] != b[1]:
-        out.append(f"frame {frame}: header {a[1]} != {b[1]}")
+        out.append(f"frame {frame}: header {a[1].hex()} != {b[1].hex()}")
     names = ["quad vertices", "quad indices", "text vertices", "text indices"]
     for name, (na, ba), (nb, bb) in zip(names, a[2], b[2]):
         if na != nb:
@@ -89,8 +98,10 @@ def diff_frame(a, b, out, limit):
             for i in range(min(na, nb)):
                 va = VERTEX.unpack_from(ba, i * 48)
                 vb = VERTEX.unpack_from(bb, i * 48)
-                if va != vb:
+                if ba[i * 48:(i + 1) * 48] != bb[i * 48:(i + 1) * 48]:
                     fields = [f"{f}: {x!r} != {y!r}" for f, x, y in zip(VERTEX_FIELDS, va, vb) if x != y]
+                    if not fields:
+                        fields = ["float bit patterns differ"]
                     out.append(f"frame {frame}: {name}[{i}] " + ", ".join(fields))
                     if len(out) >= limit:
                         return
@@ -108,8 +119,10 @@ def diff_frame(a, b, out, limit):
     for i in range(min(ca, cb)):
         x = CMD.unpack_from(da, i * CMD.size)
         y = CMD.unpack_from(db, i * CMD.size)
-        if x != y:
+        if da[i * CMD.size:(i + 1) * CMD.size] != db[i * CMD.size:(i + 1) * CMD.size]:
             fields = [f"{f}: {p!r} != {q!r}" for f, p, q in zip(CMD_FIELDS, x, y) if p != q]
+            if not fields:
+                fields = ["float bit patterns differ"]
             out.append(f"frame {frame}: command[{i}] " + ", ".join(fields))
             if len(out) >= limit:
                 return
@@ -121,6 +134,8 @@ def main():
     ap.add_argument("actual")
     ap.add_argument("--max", type=int, default=20, help="differences to list")
     args = ap.parse_args()
+    if args.max < 1:
+        ap.error("--max must be positive")
     ea = Reader(args.expected).records()
     eb = Reader(args.actual).records()
     frames = 0
@@ -139,7 +154,7 @@ def main():
             if a != b:
                 out = []
                 diff_frame(a, b, out, args.max)
-                print(f"record {index}: frame {a[1][0]} differs")
+                print(f"record {index}: {describe(a)} differs")
                 for line in out:
                     print("  " + line)
                 return 1
@@ -150,4 +165,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, struct.error) as e:
+        sys.exit(str(e))

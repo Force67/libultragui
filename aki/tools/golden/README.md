@@ -71,6 +71,18 @@ no-op.
 
 ## The C++ side
 
+Both runners fail if a requested UI or script cannot be loaded or executed.
+The end marker follows shutdown, so texture destruction is included in the
+comparison. `compare.py` requires a complete version-1 dump with no bytes
+after the end marker and compares float bit patterns, including signed zero.
+
+Regression tests for the harness itself:
+
+```
+python3 -m unittest discover -s aki/tools/golden -p test_compare.py
+nix develop -c python3 aki/tools/golden/test_runners.py /tmp/ugui-golden/ugui_golden aki/tools/golden/aki_golden/build/aki_golden
+```
+
 `ugui_golden.cc` documents the dump format. `golden_platform.cc` is
 `ugui/platform/platform_host.cc` with `Platform::time()` reading the
 scenario's clock; `gen_platform.py` regenerates it when the host platform
