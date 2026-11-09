@@ -19,6 +19,7 @@ ultragui_testing = { path = "../ultragui_testing" }
 # Linux: vkd3d (D3D12 over Vulkan) and its utils for D3D12SerializeRootSignature.
 [build.os.linux]
 link = ["-lvulkan", "-lglfw", "-lvkd3d", "-lvkd3d-utils"]
+c_sources = ["csrc/d3d12_abi.c"]
 
 # The C++ backend is Linux-only (no DXGI swapchain); on Windows the same names
 # come from the D3D12 loader and the Vulkan SDK's import libraries.
