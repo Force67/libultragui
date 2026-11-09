@@ -84,9 +84,7 @@ pub fn main(): i32 {
     var rc = RhiConfig {};
     rc.native_window = unsafe (window as *var u8);
     rc.shader_dir = from_str("/nonexistent-shader-dir");
-    if (rhi.init(rc)) {
-      // vkd3d or Vulkan is not there at all: cannot run the rest
-    }
+    check(!rhi.init(rc), "initialization rejects missing shader files");
     rhi.shutdown();
   }
   suite.pass("init fails without shaders");
