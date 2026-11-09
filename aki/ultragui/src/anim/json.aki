@@ -153,8 +153,11 @@ fn JsonParser::parse_string(var self&, var out&: JsonValue): bool {
         out.string_val.push_c8('\r');
       } else {
         // '"', '\\', '/' and every other escape: the character itself
-        // (including 'u', which is not decoded).
-        out.string_val.push_c8(e);
+        // (including 'u', which is not decoded). Keep it in the next run:
+        // it may begin a multi-byte UTF-8 character, not a standalone c8.
+        run = self.p;
+        self.p += 1;
+        continue;
       }
       self.p += 1;
       run = self.p;
