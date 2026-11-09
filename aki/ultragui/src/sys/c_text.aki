@@ -38,8 +38,12 @@ fn CText::from_parts(s: str): CText {
 }
 
 // strtof(p, &end) at byte `pos`: the value and the offset `end` points to
-// (`pos` itself when nothing converts).
+// (`pos` itself when nothing converts). At or past the end converts nothing,
+// as at(pos) returns NUL; never pass an out-of-bounds pointer to libc.
 fn CText::strtof_at(self&, pos: usize): (f32, usize) {
+  if (pos >= self.len()) {
+    return (0.0, pos);
+  }
   let base = @ptr(self.bytes.as_str());
   var end: *var c8 = null;
   let v = unsafe strtof(base + pos, &raw var end);
@@ -47,6 +51,9 @@ fn CText::strtof_at(self&, pos: usize): (f32, usize) {
 }
 
 fn CText::strtod_at(self&, pos: usize): (f64, usize) {
+  if (pos >= self.len()) {
+    return (0.0, pos);
+  }
   let base = @ptr(self.bytes.as_str());
   var end: *var c8 = null;
   let v = unsafe strtod(base + pos, &raw var end);
