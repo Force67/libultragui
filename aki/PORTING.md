@@ -966,6 +966,12 @@ file. Notes for whoever builds on it:
   rules, the 256-texture limit, frames with offscreen/video/scissor/dedup, buffer
   growth, swapchain recreation on resize).
 
+On Linux, COM methods and `D3D12SerializeRootSignature` are called through
+the generated `csrc/d3d12_abi.c`: vkd3d uses Microsoft's calling convention
+on x86-64, while aki extern functions use the platform C ABI. Regenerate the
+wrappers and the bridge together with `tools/gen_d3d12.py ... com`, and call
+COM methods through the wrappers, never through vtable fields directly.
+
 ### ultragui_opengl
 
 `OpenGlRhi` (`pub struct OpenGlRhi : Rhi`) is opengl_rhi.cc and `GlRenderer`
@@ -1108,6 +1114,9 @@ Differences:
   `set_script_click_dispatch(false)`: any button, the previewer's), run at
   the end of pump_input instead of inside the router (router handlers get no
   World).
+* Per-widget updates also lend the ScriptHost: slider and dropdown updates
+  can invoke wired change handlers, which need the animation and media hooks
+  in both frame modes.
 
 Golden check (draw data of whole example UIs, frame by frame, against the
 C++; see tools/golden/README.md):
@@ -1247,6 +1256,25 @@ so bit-exact tables are aarch64's.
   border-color) re-applies the style unchanged and still clears the
   animation style. Lua 5.4 seeds `math.random` per state from the clock: the
   tests call `math.randomseed(42)` on both sides.
+- Lua runtime shutdown keeps its timers, tweens and timer clock, as
+  `ScriptRuntime::Shutdown` does: reinitializing the same runtime can reuse
+  stale registry references, fire a new callback early and then invalidate
+  its reference (reproduced in the C++). Clear timers and tweens before
+  shutdown when reusing a runtime.
+- TextEngine::Shutdown leaves `atlas_texture_` unchanged: after an atlas
+  upload, reinitializing the same engine updates the destroyed texture
+  handle on FlushAtlas and destroys it again on the next Shutdown
+  (reproduced in the C++).
+- UIContext's frame start returns after a failed acquisition or frame
+  (ui_context.cc:469, :491) without resetting `input_pumped_this_frame_`, so
+  input polling stays suppressed until an update reaches its normal end.
+- Backends: destroying a texture drops its descriptor set without returning
+  it to the pool (Vulkan, vulkan_rhi.cc / ugui_impl_vulkan.cc), so heavy
+  texture churn can exhaust the pool; D3D12 RTV indices only grow, and
+  swapchain recreation resets the allocator while surviving render targets
+  keep their indices (d3d12_rhi.cc:796, :1827); Vulkan's present semaphores
+  cover the first swapchain's image count (at most 8) and are not added when
+  a recreated swapchain has more images (vulkan_rhi.cc:349, :740).
 - UIContext::DrawTooltip clamps against `rhi_.display_size()`, which the
   null RHI (draw-data mode) reports as 0x0: every draw-data tooltip is moved
   left of and above its target. Kept (the golden scenarios depend on it).
