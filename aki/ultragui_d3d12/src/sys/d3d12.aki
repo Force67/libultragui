@@ -19,6 +19,9 @@
 //   called method named `<iface>_<method>`: `dev_create_fence`,
 //   `cl_draw_instanced`). The wrappers are `unsafe fn`: they call through the
 //   object's vtable.
+// * On Linux those wrappers call csrc/d3d12_abi.c: vkd3d uses Microsoft's
+//   calling convention on x86-64, while aki extern fn uses the platform C ABI.
+//   Call COM methods through the wrappers, not directly through the vtable.
 // * The C++ `ID3D12Resource_GetDesc(res)` style calls that return a struct
 //   use vkd3d's hidden result pointer; the wrappers return the struct.
 // * D3D12 on Linux is vkd3d over Vulkan, which has no DXGI: the C++ backend
@@ -567,8 +570,20 @@ pub extern("vkd3d_resource_decref") fn vkd3d_resource_decref(resource: *var ID3D
 
 // libvkd3d-utils
 pub extern("vkd3d_signal_event") fn vkd3d_signal_event(event: Handle): Hresult;
-pub extern("D3D12SerializeRootSignature") fn d3d12_serialize_root_signature(desc: *const RootSignatureDesc, version: u32,
+extern("D3D12SerializeRootSignature") fn raw_serialize_root_signature(desc: *const RootSignatureDesc, version: u32,
   blob: *var *var ID3D10Blob, error_blob: *var *var ID3D10Blob): Hresult;
+extern("ugui_d3d12_serialize_root_signature") fn shim_serialize_root_signature(desc: *const RootSignatureDesc, version: u32,
+  blob: *var *var ID3D10Blob, error_blob: *var *var ID3D10Blob): Hresult;
+
+pub unsafe fn d3d12_serialize_root_signature(desc: *const RootSignatureDesc, version: u32,
+  blob: *var *var ID3D10Blob, error_blob: *var *var ID3D10Blob): Hresult {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_serialize_root_signature(desc, version, blob, error_blob);
+    }
+    return raw_serialize_root_signature(desc, version, blob, error_blob);
+  }
+}
 
 // BEGIN GENERATED COM (tools/gen_d3d12.py)
 // IIDs (the values <vkd3d_d3d12.h> defines with INITGUID in the C++).
@@ -592,7 +607,13 @@ pub extern struct IUnknownVtbl {
 }
 
 // IUnknown::Release on any COM object (the C++ ID3D12*_Release macros); returns the new count.
-pub unsafe fn com_release<T>(object: *var T): u32 => unsafe ((*(*(object as *var IUnknown)).vtbl).release)(object as *var IUnknown);
+extern("ugui_d3d12_release") fn shim_release(object: *var u8): u32;
+pub unsafe fn com_release<T>(object: *var T): u32 {
+  unsafe {
+    if (comptime @target_os() == "linux") { return shim_release(object as *var u8); }
+    return ((*(*(object as *var IUnknown)).vtbl).release)(object as *var IUnknown);
+  }
+}
 
 pub extern struct ID3D12Device { pub var vtbl: *const ID3D12DeviceVtbl = null }
 
@@ -850,144 +871,483 @@ pub extern struct ID3D10BlobVtbl {
 }
 
 // One wrapper per method the port calls: `<iface>_<method>(this, ...)`.
-pub unsafe fn dev_create_command_queue(this: *var ID3D12Device, desc: *const CommandQueueDesc, riid: *const Guid, command_queue: *var *var u8): i32 => unsafe (*(*this).vtbl).create_command_queue(this, desc, riid, command_queue);
-
-pub unsafe fn dev_create_command_allocator(this: *var ID3D12Device, type_: u32, riid: *const Guid, command_allocator: *var *var u8): i32 => unsafe (*(*this).vtbl).create_command_allocator(this, type_, riid, command_allocator);
-
-pub unsafe fn dev_create_graphics_pipeline_state(this: *var ID3D12Device, desc: *const GraphicsPipelineStateDesc, riid: *const Guid, pipeline_state: *var *var u8): i32 => unsafe (*(*this).vtbl).create_graphics_pipeline_state(this, desc, riid, pipeline_state);
-
-pub unsafe fn dev_create_command_list(this: *var ID3D12Device, node_mask: u32, type_: u32, command_allocator: *var ID3D12CommandAllocator, initial_pipeline_state: *var ID3D12PipelineState, riid: *const Guid, command_list: *var *var u8): i32 => unsafe (*(*this).vtbl).create_command_list(this, node_mask, type_, command_allocator, initial_pipeline_state, riid, command_list);
-
-pub unsafe fn dev_create_descriptor_heap(this: *var ID3D12Device, desc: *const DescriptorHeapDesc, riid: *const Guid, descriptor_heap: *var *var u8): i32 => unsafe (*(*this).vtbl).create_descriptor_heap(this, desc, riid, descriptor_heap);
-
-pub unsafe fn dev_get_descriptor_handle_increment_size(this: *var ID3D12Device, descriptor_heap_type: u32): u32 => unsafe (*(*this).vtbl).get_descriptor_handle_increment_size(this, descriptor_heap_type);
-
-pub unsafe fn dev_create_root_signature(this: *var ID3D12Device, node_mask: u32, bytecode: *const u8, bytecode_length: usize, riid: *const Guid, root_signature: *var *var u8): i32 => unsafe (*(*this).vtbl).create_root_signature(this, node_mask, bytecode, bytecode_length, riid, root_signature);
-
-pub unsafe fn dev_create_shader_resource_view(this: *var ID3D12Device, resource: *var ID3D12Resource, desc: *const ShaderResourceViewDesc, descriptor: CpuDescriptorHandle) {
-  unsafe { (*(*this).vtbl).create_shader_resource_view(this, resource, desc, descriptor); }
+extern("ugui_d3d12_dev_create_command_queue") fn shim_dev_create_command_queue(this: *var ID3D12Device, desc: *const CommandQueueDesc, riid: *const Guid, command_queue: *var *var u8): i32;
+pub unsafe fn dev_create_command_queue(this: *var ID3D12Device, desc: *const CommandQueueDesc, riid: *const Guid, command_queue: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_create_command_queue(this, desc, riid, command_queue);
+    } else {
+      return (*(*this).vtbl).create_command_queue(this, desc, riid, command_queue);
+    }
+  }
 }
 
-pub unsafe fn dev_create_render_target_view(this: *var ID3D12Device, resource: *var ID3D12Resource, desc: *const RenderTargetViewDesc, descriptor: CpuDescriptorHandle) {
-  unsafe { (*(*this).vtbl).create_render_target_view(this, resource, desc, descriptor); }
+extern("ugui_d3d12_dev_create_command_allocator") fn shim_dev_create_command_allocator(this: *var ID3D12Device, type_: u32, riid: *const Guid, command_allocator: *var *var u8): i32;
+pub unsafe fn dev_create_command_allocator(this: *var ID3D12Device, type_: u32, riid: *const Guid, command_allocator: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_create_command_allocator(this, type_, riid, command_allocator);
+    } else {
+      return (*(*this).vtbl).create_command_allocator(this, type_, riid, command_allocator);
+    }
+  }
 }
 
-pub unsafe fn dev_create_committed_resource(this: *var ID3D12Device, heap_properties: *const HeapProperties, heap_flags: u32, desc: *const ResourceDesc, initial_state: u32, optimized_clear_value: *const ClearValue, riid: *const Guid, resource: *var *var u8): i32 => unsafe (*(*this).vtbl).create_committed_resource(this, heap_properties, heap_flags, desc, initial_state, optimized_clear_value, riid, resource);
-
-pub unsafe fn dev_create_fence(this: *var ID3D12Device, initial_value: u64, flags: u32, riid: *const Guid, fence: *var *var u8): i32 => unsafe (*(*this).vtbl).create_fence(this, initial_value, flags, riid, fence);
-
-pub unsafe fn dev_get_copyable_footprints(this: *var ID3D12Device, desc: *const ResourceDesc, first_sub_resource: u32, sub_resource_count: u32, base_offset: u64, layouts: *var PlacedSubresourceFootprint, row_count: *var u32, row_size: *var u64, total_bytes: *var u64) {
-  unsafe { (*(*this).vtbl).get_copyable_footprints(this, desc, first_sub_resource, sub_resource_count, base_offset, layouts, row_count, row_size, total_bytes); }
+extern("ugui_d3d12_dev_create_graphics_pipeline_state") fn shim_dev_create_graphics_pipeline_state(this: *var ID3D12Device, desc: *const GraphicsPipelineStateDesc, riid: *const Guid, pipeline_state: *var *var u8): i32;
+pub unsafe fn dev_create_graphics_pipeline_state(this: *var ID3D12Device, desc: *const GraphicsPipelineStateDesc, riid: *const Guid, pipeline_state: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_create_graphics_pipeline_state(this, desc, riid, pipeline_state);
+    } else {
+      return (*(*this).vtbl).create_graphics_pipeline_state(this, desc, riid, pipeline_state);
+    }
+  }
 }
 
-pub unsafe fn queue_execute_command_lists(this: *var ID3D12CommandQueue, command_list_count: u32, command_lists: *const *var ID3D12CommandList) {
-  unsafe { (*(*this).vtbl).execute_command_lists(this, command_list_count, command_lists); }
+extern("ugui_d3d12_dev_create_command_list") fn shim_dev_create_command_list(this: *var ID3D12Device, node_mask: u32, type_: u32, command_allocator: *var ID3D12CommandAllocator, initial_pipeline_state: *var ID3D12PipelineState, riid: *const Guid, command_list: *var *var u8): i32;
+pub unsafe fn dev_create_command_list(this: *var ID3D12Device, node_mask: u32, type_: u32, command_allocator: *var ID3D12CommandAllocator, initial_pipeline_state: *var ID3D12PipelineState, riid: *const Guid, command_list: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_create_command_list(this, node_mask, type_, command_allocator, initial_pipeline_state, riid, command_list);
+    } else {
+      return (*(*this).vtbl).create_command_list(this, node_mask, type_, command_allocator, initial_pipeline_state, riid, command_list);
+    }
+  }
 }
 
-pub unsafe fn queue_signal(this: *var ID3D12CommandQueue, fence: *var ID3D12Fence, value: u64): i32 => unsafe (*(*this).vtbl).signal(this, fence, value);
-
-pub unsafe fn alloc_reset(this: *var ID3D12CommandAllocator): i32 => unsafe (*(*this).vtbl).reset(this);
-
-pub unsafe fn cl_close(this: *var ID3D12GraphicsCommandList): i32 => unsafe (*(*this).vtbl).close(this);
-
-pub unsafe fn cl_reset(this: *var ID3D12GraphicsCommandList, allocator: *var ID3D12CommandAllocator, initial_state: *var ID3D12PipelineState): i32 => unsafe (*(*this).vtbl).reset(this, allocator, initial_state);
-
-pub unsafe fn cl_draw_instanced(this: *var ID3D12GraphicsCommandList, vertex_count_per_instance: u32, instance_count: u32, start_vertex_location: u32, start_instance_location: u32) {
-  unsafe { (*(*this).vtbl).draw_instanced(this, vertex_count_per_instance, instance_count, start_vertex_location, start_instance_location); }
+extern("ugui_d3d12_dev_create_descriptor_heap") fn shim_dev_create_descriptor_heap(this: *var ID3D12Device, desc: *const DescriptorHeapDesc, riid: *const Guid, descriptor_heap: *var *var u8): i32;
+pub unsafe fn dev_create_descriptor_heap(this: *var ID3D12Device, desc: *const DescriptorHeapDesc, riid: *const Guid, descriptor_heap: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_create_descriptor_heap(this, desc, riid, descriptor_heap);
+    } else {
+      return (*(*this).vtbl).create_descriptor_heap(this, desc, riid, descriptor_heap);
+    }
+  }
 }
 
-pub unsafe fn cl_draw_indexed_instanced(this: *var ID3D12GraphicsCommandList, index_count_per_instance: u32, instance_count: u32, start_vertex_location: u32, base_vertex_location: i32, start_instance_location: u32) {
-  unsafe { (*(*this).vtbl).draw_indexed_instanced(this, index_count_per_instance, instance_count, start_vertex_location, base_vertex_location, start_instance_location); }
+extern("ugui_d3d12_dev_get_descriptor_handle_increment_size") fn shim_dev_get_descriptor_handle_increment_size(this: *var ID3D12Device, descriptor_heap_type: u32): u32;
+pub unsafe fn dev_get_descriptor_handle_increment_size(this: *var ID3D12Device, descriptor_heap_type: u32): u32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_get_descriptor_handle_increment_size(this, descriptor_heap_type);
+    } else {
+      return (*(*this).vtbl).get_descriptor_handle_increment_size(this, descriptor_heap_type);
+    }
+  }
 }
 
-pub unsafe fn cl_copy_texture_region(this: *var ID3D12GraphicsCommandList, dst: *const TextureCopyLocation, dst_x: u32, dst_y: u32, dst_z: u32, src: *const TextureCopyLocation, src_box: *const D3dBox) {
-  unsafe { (*(*this).vtbl).copy_texture_region(this, dst, dst_x, dst_y, dst_z, src, src_box); }
+extern("ugui_d3d12_dev_create_root_signature") fn shim_dev_create_root_signature(this: *var ID3D12Device, node_mask: u32, bytecode: *const u8, bytecode_length: usize, riid: *const Guid, root_signature: *var *var u8): i32;
+pub unsafe fn dev_create_root_signature(this: *var ID3D12Device, node_mask: u32, bytecode: *const u8, bytecode_length: usize, riid: *const Guid, root_signature: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_create_root_signature(this, node_mask, bytecode, bytecode_length, riid, root_signature);
+    } else {
+      return (*(*this).vtbl).create_root_signature(this, node_mask, bytecode, bytecode_length, riid, root_signature);
+    }
+  }
 }
 
-pub unsafe fn cl_ia_set_primitive_topology(this: *var ID3D12GraphicsCommandList, primitive_topology: u32) {
-  unsafe { (*(*this).vtbl).ia_set_primitive_topology(this, primitive_topology); }
+extern("ugui_d3d12_dev_create_shader_resource_view") fn shim_dev_create_shader_resource_view(this: *var ID3D12Device, resource: *var ID3D12Resource, desc: *const ShaderResourceViewDesc, descriptor: CpuDescriptorHandle): ();
+pub unsafe fn dev_create_shader_resource_view(this: *var ID3D12Device, resource: *var ID3D12Resource, desc: *const ShaderResourceViewDesc, descriptor: CpuDescriptorHandle): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_dev_create_shader_resource_view(this, resource, desc, descriptor);
+    } else {
+      (*(*this).vtbl).create_shader_resource_view(this, resource, desc, descriptor);
+    }
+  }
 }
 
-pub unsafe fn cl_rs_set_viewports(this: *var ID3D12GraphicsCommandList, viewport_count: u32, viewports: *const Viewport) {
-  unsafe { (*(*this).vtbl).rs_set_viewports(this, viewport_count, viewports); }
+extern("ugui_d3d12_dev_create_render_target_view") fn shim_dev_create_render_target_view(this: *var ID3D12Device, resource: *var ID3D12Resource, desc: *const RenderTargetViewDesc, descriptor: CpuDescriptorHandle): ();
+pub unsafe fn dev_create_render_target_view(this: *var ID3D12Device, resource: *var ID3D12Resource, desc: *const RenderTargetViewDesc, descriptor: CpuDescriptorHandle): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_dev_create_render_target_view(this, resource, desc, descriptor);
+    } else {
+      (*(*this).vtbl).create_render_target_view(this, resource, desc, descriptor);
+    }
+  }
 }
 
-pub unsafe fn cl_rs_set_scissor_rects(this: *var ID3D12GraphicsCommandList, rect_count: u32, rects: *const D3dRect) {
-  unsafe { (*(*this).vtbl).rs_set_scissor_rects(this, rect_count, rects); }
+extern("ugui_d3d12_dev_create_committed_resource") fn shim_dev_create_committed_resource(this: *var ID3D12Device, heap_properties: *const HeapProperties, heap_flags: u32, desc: *const ResourceDesc, initial_state: u32, optimized_clear_value: *const ClearValue, riid: *const Guid, resource: *var *var u8): i32;
+pub unsafe fn dev_create_committed_resource(this: *var ID3D12Device, heap_properties: *const HeapProperties, heap_flags: u32, desc: *const ResourceDesc, initial_state: u32, optimized_clear_value: *const ClearValue, riid: *const Guid, resource: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_create_committed_resource(this, heap_properties, heap_flags, desc, initial_state, optimized_clear_value, riid, resource);
+    } else {
+      return (*(*this).vtbl).create_committed_resource(this, heap_properties, heap_flags, desc, initial_state, optimized_clear_value, riid, resource);
+    }
+  }
 }
 
-pub unsafe fn cl_set_pipeline_state(this: *var ID3D12GraphicsCommandList, pipeline_state: *var ID3D12PipelineState) {
-  unsafe { (*(*this).vtbl).set_pipeline_state(this, pipeline_state); }
+extern("ugui_d3d12_dev_create_fence") fn shim_dev_create_fence(this: *var ID3D12Device, initial_value: u64, flags: u32, riid: *const Guid, fence: *var *var u8): i32;
+pub unsafe fn dev_create_fence(this: *var ID3D12Device, initial_value: u64, flags: u32, riid: *const Guid, fence: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_dev_create_fence(this, initial_value, flags, riid, fence);
+    } else {
+      return (*(*this).vtbl).create_fence(this, initial_value, flags, riid, fence);
+    }
+  }
 }
 
-pub unsafe fn cl_resource_barrier(this: *var ID3D12GraphicsCommandList, barrier_count: u32, barriers: *const ResourceBarrier) {
-  unsafe { (*(*this).vtbl).resource_barrier(this, barrier_count, barriers); }
+extern("ugui_d3d12_dev_get_copyable_footprints") fn shim_dev_get_copyable_footprints(this: *var ID3D12Device, desc: *const ResourceDesc, first_sub_resource: u32, sub_resource_count: u32, base_offset: u64, layouts: *var PlacedSubresourceFootprint, row_count: *var u32, row_size: *var u64, total_bytes: *var u64): ();
+pub unsafe fn dev_get_copyable_footprints(this: *var ID3D12Device, desc: *const ResourceDesc, first_sub_resource: u32, sub_resource_count: u32, base_offset: u64, layouts: *var PlacedSubresourceFootprint, row_count: *var u32, row_size: *var u64, total_bytes: *var u64): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_dev_get_copyable_footprints(this, desc, first_sub_resource, sub_resource_count, base_offset, layouts, row_count, row_size, total_bytes);
+    } else {
+      (*(*this).vtbl).get_copyable_footprints(this, desc, first_sub_resource, sub_resource_count, base_offset, layouts, row_count, row_size, total_bytes);
+    }
+  }
 }
 
-pub unsafe fn cl_set_descriptor_heaps(this: *var ID3D12GraphicsCommandList, heap_count: u32, heaps: *const *var ID3D12DescriptorHeap) {
-  unsafe { (*(*this).vtbl).set_descriptor_heaps(this, heap_count, heaps); }
+extern("ugui_d3d12_queue_execute_command_lists") fn shim_queue_execute_command_lists(this: *var ID3D12CommandQueue, command_list_count: u32, command_lists: *const *var ID3D12CommandList): ();
+pub unsafe fn queue_execute_command_lists(this: *var ID3D12CommandQueue, command_list_count: u32, command_lists: *const *var ID3D12CommandList): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_queue_execute_command_lists(this, command_list_count, command_lists);
+    } else {
+      (*(*this).vtbl).execute_command_lists(this, command_list_count, command_lists);
+    }
+  }
 }
 
-pub unsafe fn cl_set_graphics_root_signature(this: *var ID3D12GraphicsCommandList, root_signature: *var ID3D12RootSignature) {
-  unsafe { (*(*this).vtbl).set_graphics_root_signature(this, root_signature); }
+extern("ugui_d3d12_queue_signal") fn shim_queue_signal(this: *var ID3D12CommandQueue, fence: *var ID3D12Fence, value: u64): i32;
+pub unsafe fn queue_signal(this: *var ID3D12CommandQueue, fence: *var ID3D12Fence, value: u64): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_queue_signal(this, fence, value);
+    } else {
+      return (*(*this).vtbl).signal(this, fence, value);
+    }
+  }
 }
 
-pub unsafe fn cl_set_graphics_root_descriptor_table(this: *var ID3D12GraphicsCommandList, root_parameter_index: u32, base_descriptor: GpuDescriptorHandle) {
-  unsafe { (*(*this).vtbl).set_graphics_root_descriptor_table(this, root_parameter_index, base_descriptor); }
+extern("ugui_d3d12_alloc_reset") fn shim_alloc_reset(this: *var ID3D12CommandAllocator): i32;
+pub unsafe fn alloc_reset(this: *var ID3D12CommandAllocator): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_alloc_reset(this);
+    } else {
+      return (*(*this).vtbl).reset(this);
+    }
+  }
 }
 
-pub unsafe fn cl_set_graphics_root32_bit_constants(this: *var ID3D12GraphicsCommandList, root_parameter_index: u32, constant_count: u32, data: *const u8, dst_offset: u32) {
-  unsafe { (*(*this).vtbl).set_graphics_root32_bit_constants(this, root_parameter_index, constant_count, data, dst_offset); }
+extern("ugui_d3d12_cl_close") fn shim_cl_close(this: *var ID3D12GraphicsCommandList): i32;
+pub unsafe fn cl_close(this: *var ID3D12GraphicsCommandList): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_cl_close(this);
+    } else {
+      return (*(*this).vtbl).close(this);
+    }
+  }
 }
 
-pub unsafe fn cl_ia_set_index_buffer(this: *var ID3D12GraphicsCommandList, view: *const IndexBufferView) {
-  unsafe { (*(*this).vtbl).ia_set_index_buffer(this, view); }
+extern("ugui_d3d12_cl_reset") fn shim_cl_reset(this: *var ID3D12GraphicsCommandList, allocator: *var ID3D12CommandAllocator, initial_state: *var ID3D12PipelineState): i32;
+pub unsafe fn cl_reset(this: *var ID3D12GraphicsCommandList, allocator: *var ID3D12CommandAllocator, initial_state: *var ID3D12PipelineState): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_cl_reset(this, allocator, initial_state);
+    } else {
+      return (*(*this).vtbl).reset(this, allocator, initial_state);
+    }
+  }
 }
 
-pub unsafe fn cl_ia_set_vertex_buffers(this: *var ID3D12GraphicsCommandList, start_slot: u32, view_count: u32, views: *const VertexBufferView) {
-  unsafe { (*(*this).vtbl).ia_set_vertex_buffers(this, start_slot, view_count, views); }
+extern("ugui_d3d12_cl_draw_instanced") fn shim_cl_draw_instanced(this: *var ID3D12GraphicsCommandList, vertex_count_per_instance: u32, instance_count: u32, start_vertex_location: u32, start_instance_location: u32): ();
+pub unsafe fn cl_draw_instanced(this: *var ID3D12GraphicsCommandList, vertex_count_per_instance: u32, instance_count: u32, start_vertex_location: u32, start_instance_location: u32): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_draw_instanced(this, vertex_count_per_instance, instance_count, start_vertex_location, start_instance_location);
+    } else {
+      (*(*this).vtbl).draw_instanced(this, vertex_count_per_instance, instance_count, start_vertex_location, start_instance_location);
+    }
+  }
 }
 
-pub unsafe fn cl_om_set_render_targets(this: *var ID3D12GraphicsCommandList, render_target_descriptor_count: u32, render_target_descriptors: *const CpuDescriptorHandle, single_descriptor_handle: i32, depth_stencil_descriptor: *const CpuDescriptorHandle) {
-  unsafe { (*(*this).vtbl).om_set_render_targets(this, render_target_descriptor_count, render_target_descriptors, single_descriptor_handle, depth_stencil_descriptor); }
+extern("ugui_d3d12_cl_draw_indexed_instanced") fn shim_cl_draw_indexed_instanced(this: *var ID3D12GraphicsCommandList, index_count_per_instance: u32, instance_count: u32, start_vertex_location: u32, base_vertex_location: i32, start_instance_location: u32): ();
+pub unsafe fn cl_draw_indexed_instanced(this: *var ID3D12GraphicsCommandList, index_count_per_instance: u32, instance_count: u32, start_vertex_location: u32, base_vertex_location: i32, start_instance_location: u32): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_draw_indexed_instanced(this, index_count_per_instance, instance_count, start_vertex_location, base_vertex_location, start_instance_location);
+    } else {
+      (*(*this).vtbl).draw_indexed_instanced(this, index_count_per_instance, instance_count, start_vertex_location, base_vertex_location, start_instance_location);
+    }
+  }
 }
 
-pub unsafe fn cl_clear_render_target_view(this: *var ID3D12GraphicsCommandList, rtv: CpuDescriptorHandle, color: *const f32, rect_count: u32, rects: *const D3dRect) {
-  unsafe { (*(*this).vtbl).clear_render_target_view(this, rtv, color, rect_count, rects); }
+extern("ugui_d3d12_cl_copy_texture_region") fn shim_cl_copy_texture_region(this: *var ID3D12GraphicsCommandList, dst: *const TextureCopyLocation, dst_x: u32, dst_y: u32, dst_z: u32, src: *const TextureCopyLocation, src_box: *const D3dBox): ();
+pub unsafe fn cl_copy_texture_region(this: *var ID3D12GraphicsCommandList, dst: *const TextureCopyLocation, dst_x: u32, dst_y: u32, dst_z: u32, src: *const TextureCopyLocation, src_box: *const D3dBox): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_copy_texture_region(this, dst, dst_x, dst_y, dst_z, src, src_box);
+    } else {
+      (*(*this).vtbl).copy_texture_region(this, dst, dst_x, dst_y, dst_z, src, src_box);
+    }
+  }
 }
 
-pub unsafe fn fence_get_completed_value(this: *var ID3D12Fence): u64 => unsafe (*(*this).vtbl).get_completed_value(this);
+extern("ugui_d3d12_cl_ia_set_primitive_topology") fn shim_cl_ia_set_primitive_topology(this: *var ID3D12GraphicsCommandList, primitive_topology: u32): ();
+pub unsafe fn cl_ia_set_primitive_topology(this: *var ID3D12GraphicsCommandList, primitive_topology: u32): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_ia_set_primitive_topology(this, primitive_topology);
+    } else {
+      (*(*this).vtbl).ia_set_primitive_topology(this, primitive_topology);
+    }
+  }
+}
 
-pub unsafe fn fence_signal(this: *var ID3D12Fence, value: u64): i32 => unsafe (*(*this).vtbl).signal(this, value);
+extern("ugui_d3d12_cl_rs_set_viewports") fn shim_cl_rs_set_viewports(this: *var ID3D12GraphicsCommandList, viewport_count: u32, viewports: *const Viewport): ();
+pub unsafe fn cl_rs_set_viewports(this: *var ID3D12GraphicsCommandList, viewport_count: u32, viewports: *const Viewport): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_rs_set_viewports(this, viewport_count, viewports);
+    } else {
+      (*(*this).vtbl).rs_set_viewports(this, viewport_count, viewports);
+    }
+  }
+}
 
+extern("ugui_d3d12_cl_rs_set_scissor_rects") fn shim_cl_rs_set_scissor_rects(this: *var ID3D12GraphicsCommandList, rect_count: u32, rects: *const D3dRect): ();
+pub unsafe fn cl_rs_set_scissor_rects(this: *var ID3D12GraphicsCommandList, rect_count: u32, rects: *const D3dRect): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_rs_set_scissor_rects(this, rect_count, rects);
+    } else {
+      (*(*this).vtbl).rs_set_scissor_rects(this, rect_count, rects);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_set_pipeline_state") fn shim_cl_set_pipeline_state(this: *var ID3D12GraphicsCommandList, pipeline_state: *var ID3D12PipelineState): ();
+pub unsafe fn cl_set_pipeline_state(this: *var ID3D12GraphicsCommandList, pipeline_state: *var ID3D12PipelineState): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_set_pipeline_state(this, pipeline_state);
+    } else {
+      (*(*this).vtbl).set_pipeline_state(this, pipeline_state);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_resource_barrier") fn shim_cl_resource_barrier(this: *var ID3D12GraphicsCommandList, barrier_count: u32, barriers: *const ResourceBarrier): ();
+pub unsafe fn cl_resource_barrier(this: *var ID3D12GraphicsCommandList, barrier_count: u32, barriers: *const ResourceBarrier): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_resource_barrier(this, barrier_count, barriers);
+    } else {
+      (*(*this).vtbl).resource_barrier(this, barrier_count, barriers);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_set_descriptor_heaps") fn shim_cl_set_descriptor_heaps(this: *var ID3D12GraphicsCommandList, heap_count: u32, heaps: *const *var ID3D12DescriptorHeap): ();
+pub unsafe fn cl_set_descriptor_heaps(this: *var ID3D12GraphicsCommandList, heap_count: u32, heaps: *const *var ID3D12DescriptorHeap): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_set_descriptor_heaps(this, heap_count, heaps);
+    } else {
+      (*(*this).vtbl).set_descriptor_heaps(this, heap_count, heaps);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_set_graphics_root_signature") fn shim_cl_set_graphics_root_signature(this: *var ID3D12GraphicsCommandList, root_signature: *var ID3D12RootSignature): ();
+pub unsafe fn cl_set_graphics_root_signature(this: *var ID3D12GraphicsCommandList, root_signature: *var ID3D12RootSignature): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_set_graphics_root_signature(this, root_signature);
+    } else {
+      (*(*this).vtbl).set_graphics_root_signature(this, root_signature);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_set_graphics_root_descriptor_table") fn shim_cl_set_graphics_root_descriptor_table(this: *var ID3D12GraphicsCommandList, root_parameter_index: u32, base_descriptor: GpuDescriptorHandle): ();
+pub unsafe fn cl_set_graphics_root_descriptor_table(this: *var ID3D12GraphicsCommandList, root_parameter_index: u32, base_descriptor: GpuDescriptorHandle): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_set_graphics_root_descriptor_table(this, root_parameter_index, base_descriptor);
+    } else {
+      (*(*this).vtbl).set_graphics_root_descriptor_table(this, root_parameter_index, base_descriptor);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_set_graphics_root32_bit_constants") fn shim_cl_set_graphics_root32_bit_constants(this: *var ID3D12GraphicsCommandList, root_parameter_index: u32, constant_count: u32, data: *const u8, dst_offset: u32): ();
+pub unsafe fn cl_set_graphics_root32_bit_constants(this: *var ID3D12GraphicsCommandList, root_parameter_index: u32, constant_count: u32, data: *const u8, dst_offset: u32): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_set_graphics_root32_bit_constants(this, root_parameter_index, constant_count, data, dst_offset);
+    } else {
+      (*(*this).vtbl).set_graphics_root32_bit_constants(this, root_parameter_index, constant_count, data, dst_offset);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_ia_set_index_buffer") fn shim_cl_ia_set_index_buffer(this: *var ID3D12GraphicsCommandList, view: *const IndexBufferView): ();
+pub unsafe fn cl_ia_set_index_buffer(this: *var ID3D12GraphicsCommandList, view: *const IndexBufferView): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_ia_set_index_buffer(this, view);
+    } else {
+      (*(*this).vtbl).ia_set_index_buffer(this, view);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_ia_set_vertex_buffers") fn shim_cl_ia_set_vertex_buffers(this: *var ID3D12GraphicsCommandList, start_slot: u32, view_count: u32, views: *const VertexBufferView): ();
+pub unsafe fn cl_ia_set_vertex_buffers(this: *var ID3D12GraphicsCommandList, start_slot: u32, view_count: u32, views: *const VertexBufferView): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_ia_set_vertex_buffers(this, start_slot, view_count, views);
+    } else {
+      (*(*this).vtbl).ia_set_vertex_buffers(this, start_slot, view_count, views);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_om_set_render_targets") fn shim_cl_om_set_render_targets(this: *var ID3D12GraphicsCommandList, render_target_descriptor_count: u32, render_target_descriptors: *const CpuDescriptorHandle, single_descriptor_handle: i32, depth_stencil_descriptor: *const CpuDescriptorHandle): ();
+pub unsafe fn cl_om_set_render_targets(this: *var ID3D12GraphicsCommandList, render_target_descriptor_count: u32, render_target_descriptors: *const CpuDescriptorHandle, single_descriptor_handle: i32, depth_stencil_descriptor: *const CpuDescriptorHandle): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_om_set_render_targets(this, render_target_descriptor_count, render_target_descriptors, single_descriptor_handle, depth_stencil_descriptor);
+    } else {
+      (*(*this).vtbl).om_set_render_targets(this, render_target_descriptor_count, render_target_descriptors, single_descriptor_handle, depth_stencil_descriptor);
+    }
+  }
+}
+
+extern("ugui_d3d12_cl_clear_render_target_view") fn shim_cl_clear_render_target_view(this: *var ID3D12GraphicsCommandList, rtv: CpuDescriptorHandle, color: *const f32, rect_count: u32, rects: *const D3dRect): ();
+pub unsafe fn cl_clear_render_target_view(this: *var ID3D12GraphicsCommandList, rtv: CpuDescriptorHandle, color: *const f32, rect_count: u32, rects: *const D3dRect): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_cl_clear_render_target_view(this, rtv, color, rect_count, rects);
+    } else {
+      (*(*this).vtbl).clear_render_target_view(this, rtv, color, rect_count, rects);
+    }
+  }
+}
+
+extern("ugui_d3d12_fence_get_completed_value") fn shim_fence_get_completed_value(this: *var ID3D12Fence): u64;
+pub unsafe fn fence_get_completed_value(this: *var ID3D12Fence): u64 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_fence_get_completed_value(this);
+    } else {
+      return (*(*this).vtbl).get_completed_value(this);
+    }
+  }
+}
+
+extern("ugui_d3d12_fence_signal") fn shim_fence_signal(this: *var ID3D12Fence, value: u64): i32;
+pub unsafe fn fence_signal(this: *var ID3D12Fence, value: u64): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_fence_signal(this, value);
+    } else {
+      return (*(*this).vtbl).signal(this, value);
+    }
+  }
+}
+
+extern("ugui_d3d12_heap_get_cpu_descriptor_handle_for_heap_start") fn shim_heap_get_cpu_descriptor_handle_for_heap_start(this: *var ID3D12DescriptorHeap, result: *var CpuDescriptorHandle): *var CpuDescriptorHandle;
 pub unsafe fn heap_get_cpu_descriptor_handle_for_heap_start(this: *var ID3D12DescriptorHeap): CpuDescriptorHandle {
   var ret = CpuDescriptorHandle {};
-  unsafe { (*(*this).vtbl).get_cpu_descriptor_handle_for_heap_start(this, &raw var ret); }
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_heap_get_cpu_descriptor_handle_for_heap_start(this, &raw var ret);
+    } else {
+      (*(*this).vtbl).get_cpu_descriptor_handle_for_heap_start(this, &raw var ret);
+    }
+  }
   return ret;
 }
 
+extern("ugui_d3d12_heap_get_gpu_descriptor_handle_for_heap_start") fn shim_heap_get_gpu_descriptor_handle_for_heap_start(this: *var ID3D12DescriptorHeap, result: *var GpuDescriptorHandle): *var GpuDescriptorHandle;
 pub unsafe fn heap_get_gpu_descriptor_handle_for_heap_start(this: *var ID3D12DescriptorHeap): GpuDescriptorHandle {
   var ret = GpuDescriptorHandle {};
-  unsafe { (*(*this).vtbl).get_gpu_descriptor_handle_for_heap_start(this, &raw var ret); }
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_heap_get_gpu_descriptor_handle_for_heap_start(this, &raw var ret);
+    } else {
+      (*(*this).vtbl).get_gpu_descriptor_handle_for_heap_start(this, &raw var ret);
+    }
+  }
   return ret;
 }
 
-pub unsafe fn res_map(this: *var ID3D12Resource, sub_resource: u32, read_range: *const Range, data: *var *var u8): i32 => unsafe (*(*this).vtbl).map(this, sub_resource, read_range, data);
-
-pub unsafe fn res_unmap(this: *var ID3D12Resource, sub_resource: u32, written_range: *const Range) {
-  unsafe { (*(*this).vtbl).unmap(this, sub_resource, written_range); }
+extern("ugui_d3d12_res_map") fn shim_res_map(this: *var ID3D12Resource, sub_resource: u32, read_range: *const Range, data: *var *var u8): i32;
+pub unsafe fn res_map(this: *var ID3D12Resource, sub_resource: u32, read_range: *const Range, data: *var *var u8): i32 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_res_map(this, sub_resource, read_range, data);
+    } else {
+      return (*(*this).vtbl).map(this, sub_resource, read_range, data);
+    }
+  }
 }
 
+extern("ugui_d3d12_res_unmap") fn shim_res_unmap(this: *var ID3D12Resource, sub_resource: u32, written_range: *const Range): ();
+pub unsafe fn res_unmap(this: *var ID3D12Resource, sub_resource: u32, written_range: *const Range): () {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_res_unmap(this, sub_resource, written_range);
+    } else {
+      (*(*this).vtbl).unmap(this, sub_resource, written_range);
+    }
+  }
+}
+
+extern("ugui_d3d12_res_get_desc") fn shim_res_get_desc(this: *var ID3D12Resource, result: *var ResourceDesc): *var ResourceDesc;
 pub unsafe fn res_get_desc(this: *var ID3D12Resource): ResourceDesc {
   var ret = ResourceDesc {};
-  unsafe { (*(*this).vtbl).get_desc(this, &raw var ret); }
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      shim_res_get_desc(this, &raw var ret);
+    } else {
+      (*(*this).vtbl).get_desc(this, &raw var ret);
+    }
+  }
   return ret;
 }
 
-pub unsafe fn res_get_gpu_virtual_address(this: *var ID3D12Resource): u64 => unsafe (*(*this).vtbl).get_gpu_virtual_address(this);
+extern("ugui_d3d12_res_get_gpu_virtual_address") fn shim_res_get_gpu_virtual_address(this: *var ID3D12Resource): u64;
+pub unsafe fn res_get_gpu_virtual_address(this: *var ID3D12Resource): u64 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_res_get_gpu_virtual_address(this);
+    } else {
+      return (*(*this).vtbl).get_gpu_virtual_address(this);
+    }
+  }
+}
 
-pub unsafe fn blob_get_buffer_pointer(this: *var ID3D10Blob): *var u8 => unsafe (*(*this).vtbl).get_buffer_pointer(this);
+extern("ugui_d3d12_blob_get_buffer_pointer") fn shim_blob_get_buffer_pointer(this: *var ID3D10Blob): *var u8;
+pub unsafe fn blob_get_buffer_pointer(this: *var ID3D10Blob): *var u8 {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_blob_get_buffer_pointer(this);
+    } else {
+      return (*(*this).vtbl).get_buffer_pointer(this);
+    }
+  }
+}
 
-pub unsafe fn blob_get_buffer_size(this: *var ID3D10Blob): usize => unsafe (*(*this).vtbl).get_buffer_size(this);
+extern("ugui_d3d12_blob_get_buffer_size") fn shim_blob_get_buffer_size(this: *var ID3D10Blob): usize;
+pub unsafe fn blob_get_buffer_size(this: *var ID3D10Blob): usize {
+  unsafe {
+    if (comptime @target_os() == "linux") {
+      return shim_blob_get_buffer_size(this);
+    } else {
+      return (*(*this).vtbl).get_buffer_size(this);
+    }
+  }
+}
 
 // END GENERATED COM
