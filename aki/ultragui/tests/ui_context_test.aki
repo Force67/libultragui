@@ -28,6 +28,7 @@ import {Length} from ultragui::style::property_types;
 import {kInvalidFont} from ultragui::text::text_engine;
 import {FrameReuse, PaintEnv, UIConfig, UIContext} from ultragui::ui_context;
 import {set_button_click} from ultragui::widgets::button;
+import {set_slider_change, slider_value} from ultragui::widgets::slider;
 import {CallbackEnv} from ultragui::widgets::callbacks;
 import {create_panel} from ultragui::widgets::panel;
 import {kTextContent} from ultragui::widgets::text;
@@ -449,6 +450,47 @@ panel root {
   ui.shutdown();
 }
 
+// A held slider changes during UpdateWidgetTree, after input processing.
+// C++ handlers retain UIContext's [this] hooks in this phase too.
+static let kSliderChanges: Atomic<u32> = Atomic::<u32>(0);
+static let kSliderHostHits: Atomic<u32> = Atomic::<u32>(0);
+
+fn check_update_callback_host(var t&: Expect, draw_data: bool) {
+  kSliderChanges.store(0);
+  kSliderHostHits.store(0);
+  var ui = UIContext::<ClockPlatform, CountingRhi, NoScript>(ClockPlatform(), CountingRhi {}, NoScript());
+  t.that(ui.init(UIConfig { draw_data, width: 640, height: 480 }), "callback host init");
+  ui.platform.host.set_viewport(Vec2 { x: 640.0, y: 480.0 }, Vec2 { x: 640.0, y: 480.0 });
+  let _ = ui.load_ui_string("panel root { width: 640; height: 480; slider volume { width: 200; height: 24; } }", "callback host");
+  let volume = ui.find_widget("volume");
+  set_slider_change(ui.world, volume, own fn(env: &var CallbackEnv, value: f32) {
+    let _ = kSliderChanges.fetch_add(1);
+    if (var h& = env.ctx.host) {
+      if (h.find_widget(env.world, "volume") == volume) {
+        let _ = kSliderHostHits.fetch_add(1);
+      }
+    }
+  });
+  if (draw_data) {
+    let _ = ui.render_draw_data();
+  } else {
+    ui.update();
+  }
+  let r = ui.world.get(kTransform, volume)!.content_rect;
+  ui.platform.host.push_mouse_move(Vec2 { x: r.x + r.w * 0.75, y: r.y + r.h * 0.5 });
+  ui.platform.host.push_mouse_button(MouseButton::Left, true);
+  ui.platform.clock += 0.1;
+  if (draw_data) {
+    let _ = ui.render_draw_data();
+  } else {
+    ui.update();
+  }
+  t.that(slider_value(ui.world, volume) == 0.75, "held slider changes during widget update");
+  t.eq_u32(kSliderChanges.load(), 1, "widget update fires its change handler");
+  t.eq_u32(kSliderHostHits.load(), 1, "widget update callback can use UIContext's script host");
+  ui.shutdown();
+}
+
 pub fn main(): i32 {
   var t = Expect();
   check_tooltip(t);
@@ -459,5 +501,7 @@ pub fn main(): i32 {
   check_errors(t);
   check_legacy_update(t);
   check_script_hooks(t);
+  check_update_callback_host(t, true);
+  check_update_callback_host(t, false);
   return t.finish();
 }

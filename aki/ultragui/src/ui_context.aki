@@ -970,6 +970,15 @@ fn UIContext<P, R, S>::update_widgets(var self&) {
   var ctx = WidgetContext {
     text_engine: self.text_engine, default_font: self.default_font, animator: self.animator,
     current_time: self.last_time, platform: DynPlatform::of(self.platform), ui_scale: self.ui_scale_,
+    // Slider and dropdown updates can run wired script change handlers.
+    host: ScriptHost {
+      anims: self.vector_anims,
+      env: FrameEnv {
+        rhi: DynRhi::of(self.rhi), dt: self.dt_, host_textures: self.renderer.texture_backend(), rhi_textures: self.rhi_textures,
+        audio: self.audio,
+      },
+      widgets: self.widget_cache, root: self.root_, extensions: self.extensions,
+    },
   };
   update_widget_tree(self.world, ctx, self.root_, self.dt_);
 }
