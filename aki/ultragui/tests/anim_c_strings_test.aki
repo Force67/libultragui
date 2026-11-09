@@ -1,0 +1,32 @@
+// ugui/anim/json.cc and anim_parser.cc: strings keep their stored bytes,
+// but AsString and the parser's const char* arguments end at the first NUL.
+// C++ reference: name=head, shape=1 (circle), fill=#112233, track0=0 (x),
+// animated fill=(1,1,1,1); the underlying name still has nine bytes.
+module anim_c_strings_test;
+
+import {AnimDocument, AnimProperty, AnimShapeType} from ultragui::anim::anim_types;
+import {parse_anim_data} from ultragui::anim::anim_parser;
+import {JsonValue, parse_json} from ultragui::anim::json;
+import {Expect} from ultragui_testing::expect;
+
+pub fn main(): i32 {
+  var t = Expect();
+  let source = "{\"layers\":[{\"name\":\"head\0tail\",\"shape\":\"circle\0tail\",\"fill\":\"#112233\0extra\",\"keyframes\":{\"x\0tail\":[{\"t\":0,\"v\":3}],\"fill\":[{\"t\":0,\"v\":\"white\0tail\"}]}}]}";
+  var doc = AnimDocument {};
+  t.that(parse_anim_data(source, doc), "embedded NUL strings parse as in the C++");
+  let layer& = doc.layers[0];
+  t.that(layer.name == "head", "name uses its C string prefix");
+  t.that(layer.shape_type == AnimShapeType::Circle, "shape uses its C string prefix");
+  t.that(layer.fill_str == "#112233", "fill uses its C string prefix");
+  t.that(layer.tracks[0].property == AnimProperty::X, "property name uses its C string prefix");
+  let color = layer.tracks[1].keyframes[0].color;
+  t.that(color.r == 1.0 && color.g == 1.0 && color.b == 1.0 && color.a == 1.0, "keyframe color uses its C string prefix");
+
+  var v = JsonValue {};
+  t.that(parse_json("\"head\0tail\"", v), "raw NUL in JSON string is accepted");
+  t.that(v.string_val.len() == 9 && v.as_string() == "head", "stored string stays whole, AsString ends at NUL");
+  t.that(parse_json("{\"name\":true,\"name\0tail\":false}", v), "keys keep their stored bytes");
+  let value = v.get("name\0query");
+  t.that(value != none && value!.as_bool(), "lookup argument uses its C string prefix");
+  return t.finish();
+}

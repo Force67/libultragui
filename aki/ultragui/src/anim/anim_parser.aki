@@ -15,6 +15,7 @@ import {JsonKind, JsonValue, parse_json} from ultragui::anim::json;
 import {Color} from ultragui::core::color;
 import {from_chars_u32} from ultragui::core::from_chars;
 import {EasingType} from ultragui::style::transition;
+import {CText} from ultragui::sys::c_text;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -143,7 +144,9 @@ fn is_color_property(p: AnimProperty): bool => p == AnimProperty::Fill || p == A
 
 fn parse_track(prop_name: str, arr&: JsonValue): AnimPropertyTrack {
   var track = AnimPropertyTrack {};
-  track.property = parse_property_name(prop_name);
+  // The C++ passes the stored key's c_str(), not its full byte length.
+  let name = CText(prop_name);
+  track.property = parse_property_name(name.as_str());
   let is_color = is_color_property(track.property);
 
   for (let kf_val& in arr.array_val) {
