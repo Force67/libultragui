@@ -1,0 +1,439 @@
+// The flexbox engine (layout::flex_tree) against real yoga, bit for bit.
+//
+// tools/yoga_fuzz.cc builds random trees over the style space libultragui
+// writes, lays them out with third_party/yoga over several passes on a
+// retained tree (restyles, re-measured text, MarkDirty, viewport and ui scale
+// changes), and prints every operation and every result as a trace. This test
+// replays each trace on a FlexTree and compares every result float (left,
+// top, width, height, and the margin and padding of each edge) with yoga's by
+// its bits.
+//
+// With no arguments it builds the oracle with clang++ (YOGA_FUZZ_CXX
+// overrides; it must be clang, see the tool's header) into
+// build/yoga_oracle/, once, and plays YOGA_FUZZ_CHUNKS (default 10) chunks
+// of YOGA_FUZZ_TREES (default 2000) trees, seeded YOGA_FUZZ_SEED (default 1)
+// plus the chunk number. Arguments are trace files to replay instead
+// (`akiko test tests/yoga_fuzz_test.aki -- /tmp/yoga.trace`). A failing chunk's
+// trace stays in build/yoga_oracle/ and the first differences are printed
+// with their tree, pass and node.
+
+module yoga_fuzz_test;
+
+import {List} from akikit::containers::list;
+import {create_directories} from akikit::filesystem::directory;
+import {delete_file, file_info, read_file, real_path} from akikit::filesystem::file_util;
+import {parent} from akikit::filesystem::path;
+import {eprintln, println} from akikit::logging;
+import {Child, Command, exit_code} from akikit::process::child;
+import {arguments} from akikit::process::command_line;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {String, from_str} from akikit::strings::string;
+import {parse_f32, parse_u64} from akikit::strings::string_to_number;
+import {
+  FlexAlign, FlexDir, FlexDisplay, FlexJustify, FlexOverflow, FlexPositionType, FlexWrapMode, StyleLength, kBottom, kGutterAll,
+  kGutterColumn, kGutterRow, kHeight, kLeft, kRight, kTop, kWidth,
+} from ultragui::layout::flex_style;
+import {FlexTree} from ultragui::layout::flex_tree;
+
+// yoga's sources, from the repository root (the list the core package
+// compiled before the engine replaced them).
+comptime let kYogaSources: [str; 19] = [
+  "algorithm/AbsoluteLayout.cpp", "algorithm/Baseline.cpp", "algorithm/Cache.cpp", "algorithm/CalculateLayout.cpp",
+  "algorithm/FlexLine.cpp", "algorithm/PixelGrid.cpp", "config/Config.cpp", "debug/AssertFatal.cpp", "debug/Log.cpp",
+  "event/event.cpp", "node/LayoutResults.cpp", "node/Node.cpp", "YGConfig.cpp", "YGEnums.cpp", "YGNode.cpp",
+  "YGNodeLayout.cpp", "YGNodeStyle.cpp", "YGPixelGrid.cpp", "YGValue.cpp",
+];
+
+comptime let kResultNames: [str; 12] = [
+  "left", "top", "width", "height", "margin.left", "margin.top", "margin.right", "margin.bottom", "padding.left",
+  "padding.top", "padding.right", "padding.bottom",
+];
+
+comptime let kMaxReported: u64 = 20;
+
+// --- Tokens ------------------------------------------------------------------------
+
+// A cursor over the trace text, one space-separated token at a time.
+struct Reader {
+  pub let text: str
+  pub var pos: usize = 0
+
+  pub fn at_end(self&): bool => self.pos >= #self.text;
+
+  pub fn token(var self&): str {
+    while (self.pos < #self.text && self.text[self.pos] == ' ') {
+      self.pos += 1;
+    }
+    let start = self.pos;
+    while (self.pos < #self.text && self.text[self.pos] != ' ' && self.text[self.pos] != '\n') {
+      self.pos += 1;
+    }
+    return self.text[start..self.pos];
+  }
+
+  pub fn next_line(var self&) {
+    while (self.pos < #self.text && self.text[self.pos] != '\n') {
+      self.pos += 1;
+    }
+    self.pos += 1;
+  }
+
+  pub fn int(var self&): u32 {
+    let t = self.token();
+    var v: u32 = 0;
+    for (let i in 0..#t) {
+      v = v * 10 + (t[i] as u32 - '0' as u32);
+    }
+    return v;
+  }
+
+  pub fn float(var self&): f32 => parse_float(self.token());
+
+  // a, <v> or <v>%.
+  pub fn length(var self&): StyleLength {
+    let t = self.token();
+    if (t == "a") {
+      return StyleLength::of_auto();
+    }
+    if (#t > 0 && t[#t - 1] == '%') {
+      return StyleLength::percent(parse_float(t[..#t - 1]));
+    }
+    return StyleLength::points(parse_float(t));
+  }
+}
+
+// Short integers (most results, after rounding) directly, exactly; the rest
+// through strtof, which reads the shortest decimal back to the same float.
+fn parse_float(t: str): f32 {
+  let negative = #t > 0 && t[0] == '-';
+  let digits = negative ? t[1..] : t;
+  var integral = #digits > 0 && #digits <= 7;
+  var v: i32 = 0;
+  if (integral) {
+    for (let i in 0..#digits) {
+      let c = digits[i];
+      if (c < '0' || c > '9') {
+        integral = false;
+        break;
+      }
+      v = v * 10 + (c as i32 - '0' as i32);
+    }
+  }
+  if (integral) {
+    let f = v as f32;
+    return negative ? -f : f;
+  }
+  return parse_f32(t) ?? @stop("bad float in trace");
+}
+
+fn hex_digit(c: c8): u32 => c >= 'a' ? c as u32 - 'a' as u32 + 10 : c as u32 - '0' as u32;
+
+// A result's bits: nan:<hex> spells a NaN's exactly.
+fn result_bits(t: str): u32 {
+  if (#t > 4 && t[..4] == "nan:") {
+    var v: u32 = 0;
+    for (let i in 4..#t) {
+      v = (v << 4) | hex_digit(t[i]);
+    }
+    return v;
+  }
+  return @bit_cast(u32, parse_float(t));
+}
+
+// --- Replay ------------------------------------------------------------------------
+
+fn flex_dir(code: u32): FlexDir => match (code) {
+  0 => FlexDir::Column,
+  1 => FlexDir::ColumnReverse,
+  2 => FlexDir::Row,
+  _ => FlexDir::RowReverse,
+};
+
+fn justify(code: u32): FlexJustify => match (code) {
+  0 => FlexJustify::FlexStart,
+  1 => FlexJustify::Center,
+  2 => FlexJustify::FlexEnd,
+  3 => FlexJustify::SpaceBetween,
+  4 => FlexJustify::SpaceAround,
+  _ => FlexJustify::SpaceEvenly,
+};
+
+// YGAlign's numbering.
+fn align(code: u32): FlexAlign => match (code) {
+  0 => FlexAlign::Auto,
+  1 => FlexAlign::FlexStart,
+  2 => FlexAlign::Center,
+  3 => FlexAlign::FlexEnd,
+  4 => FlexAlign::Stretch,
+  5 => FlexAlign::Baseline,
+  6 => FlexAlign::SpaceBetween,
+  7 => FlexAlign::SpaceAround,
+  _ => FlexAlign::SpaceEvenly,
+};
+
+fn wrap(code: u32): FlexWrapMode => match (code) {
+  0 => FlexWrapMode::NoWrap,
+  1 => FlexWrapMode::Wrap,
+  _ => FlexWrapMode::WrapReverse,
+};
+
+fn overflow(code: u32): FlexOverflow => match (code) {
+  0 => FlexOverflow::Visible,
+  1 => FlexOverflow::Hidden,
+  _ => FlexOverflow::Scroll,
+};
+
+// The setter calls of one apply_style, in its order.
+fn apply_style(var tree&: FlexTree, var r&: Reader) {
+  let n = r.int();
+  tree.set_flex_direction(n, flex_dir(r.int()));
+  tree.set_justify_content(n, justify(r.int()));
+  tree.set_align_items(n, align(r.int()));
+  tree.set_align_self(n, align(r.int()));
+  tree.set_align_content(n, align(r.int()));
+  tree.set_flex_wrap(n, wrap(r.int()));
+  tree.set_overflow(n, overflow(r.int()));
+  tree.set_position_type(n, r.int() == 1 ? FlexPositionType::Absolute : FlexPositionType::Relative);
+  tree.set_display(n, r.int() == 1 ? FlexDisplay::None : FlexDisplay::Flex);
+  tree.set_flex_grow(n, r.float());
+  tree.set_flex_shrink(n, r.float());
+  tree.set_flex_basis(n, r.length());
+  tree.set_dimension(n, kWidth, r.length());
+  tree.set_dimension(n, kHeight, r.length());
+  tree.set_min_dimension(n, kWidth, r.length());
+  tree.set_min_dimension(n, kHeight, r.length());
+  tree.set_max_dimension(n, kWidth, r.length());
+  tree.set_max_dimension(n, kHeight, r.length());
+  for (let edge in [kTop, kRight, kBottom, kLeft]) {
+    tree.set_margin(n, edge, r.float());
+  }
+  for (let edge in [kTop, kRight, kBottom, kLeft]) {
+    tree.set_padding(n, edge, r.float());
+  }
+  tree.set_gap(n, kGutterAll, r.float());
+  tree.set_gap(n, kGutterRow, r.float());
+  tree.set_gap(n, kGutterColumn, r.float());
+  tree.set_aspect_ratio(n, r.float());
+  for (let edge in [kTop, kRight, kBottom, kLeft]) {
+    tree.set_position(n, edge, r.float());
+  }
+}
+
+struct Totals {
+  pub var trees: u64 = 0
+  pub var layouts: u64 = 0
+  pub var floats: u64 = 0
+  pub var mismatches: u64 = 0
+}
+
+fn results_of(tree&: FlexTree, n: u32): [f32; 12] => [
+  tree.layout_left(n), tree.layout_top(n), tree.layout_width(n), tree.layout_height(n),
+  tree.layout_margin(n, kLeft), tree.layout_margin(n, kTop), tree.layout_margin(n, kRight), tree.layout_margin(n, kBottom),
+  tree.layout_padding(n, kLeft), tree.layout_padding(n, kTop), tree.layout_padding(n, kRight), tree.layout_padding(n, kBottom),
+];
+
+// Replays one trace; false when it is malformed or truncated.
+fn replay(text: str, label: str, var totals&: Totals): bool {
+  var r = Reader { text };
+  var tree = FlexTree();
+  var tree_index: u32 = 0;
+  var pass: u32 = 0;
+  while (!r.at_end()) {
+    let op = r.token();
+    if (op == "T") {
+      tree = FlexTree();
+      tree_index = r.int();
+      pass = 0;
+      totals.trees += 1;
+    } else if (op == "N") {
+      let count = r.int();
+      for (let i in 0..count) {
+        tree.add_node();
+      }
+    } else if (op == "C") {
+      let owner = r.int();
+      let child = r.int();
+      let index = r.int();
+      tree.insert_child(owner, child, index as usize);
+    } else if (op == "M") {
+      tree.set_measured(r.int());
+    } else if (op == "I") {
+      let n = r.int();
+      let w = r.float();
+      let h = r.float();
+      tree.set_intrinsic(n, w, h);
+    } else if (op == "D") {
+      tree.mark_dirty(r.int());
+    } else if (op == "S") {
+      apply_style(tree, r);
+    } else if (op == "L") {
+      let w = r.float();
+      let h = r.float();
+      tree.calculate_layout(0, w, h);
+      totals.layouts += 1;
+      pass += 1;
+    } else if (op == "R") {
+      let n = r.int();
+      let got = results_of(tree, n);
+      for (let k in 0usize..12) {
+        let want = result_bits(r.token());
+        let have = @bit_cast(u32, got[k]);
+        totals.floats += 1;
+        if (have != want) {
+          totals.mismatches += 1;
+          if (totals.mismatches <= kMaxReported) {
+            eprintln(f"{label}: tree {tree_index} pass {pass} node {n} {kResultNames[k]}: got {got[k]} (0x{have:08x}), yoga {@bit_cast(f32, want)} (0x{want:08x})");
+          }
+        }
+      }
+    } else if (op == "E") {
+      return true;
+    } else if (op != "") {
+      eprintln(f"{label}: unknown trace operation '{op}'");
+      return false;
+    }
+    r.next_line();
+  }
+  eprintln(f"{label}: trace ends without E");
+  return false;
+}
+
+// --- The oracle --------------------------------------------------------------------
+
+fn env_u64(name: str, fallback: u64): u64 {
+  if (let v = get_environment_variable(name)) {
+    return parse_u64(v.as_str()) ?? fallback;
+  }
+  return fallback;
+}
+
+fn modified(path: str): i64 {
+  if (let info = file_info(path)) {
+    return info.modified_ns;
+  }
+  return -1;
+}
+
+fn run(var cmd&: Command, what: str): bool {
+  if (let status = cmd.status()) {
+    if (exit_code(status) == 0) {
+      return true;
+    }
+    eprintln(f"{what} failed (exit {exit_code(status)})");
+  } else (let e) {
+    eprintln(f"cannot start {what}");
+  }
+  return false;
+}
+
+// Builds build/yoga_oracle/yoga_fuzz unless it is newer than the tool's
+// source: every translation unit at once, then the link.
+fn build_oracle(root: str, out_dir: str): String? {
+  let tool = f"{root}/aki/ultragui/tools/yoga_fuzz.cc";
+  let exe = f"{out_dir}/yoga_fuzz";
+  if (modified(exe.as_str()) > modified(tool.as_str())) {
+    return exe;
+  }
+  let cxx = get_environment_variable("YOGA_FUZZ_CXX") ?? from_str("clang++");
+  let yoga = f"{root}/third_party/yoga";
+  var sources: List<String> = List();
+  sources.push(tool);
+  for (let s in kYogaSources) {
+    sources.push(f"{yoga}/yoga/{s}");
+  }
+  var children: List<Child> = List();
+  var objects: List<String> = List();
+  for (let i in 0..sources.len()) {
+    let obj = f"{out_dir}/{i}.o";
+    var cmd = Command(cxx.as_str());
+    for (let a in ["-std=c++20", "-O2", "-c", "-I"]) {
+      cmd.arg(a);
+    }
+    cmd.arg(yoga.as_str());
+    cmd.arg(sources[i].as_str());
+    cmd.arg("-o");
+    cmd.arg(obj.as_str());
+    if (let child = cmd.spawn()) {
+      children.push(child);
+    } else (let e) {
+      eprintln(f"cannot start {cxx}");
+      return none;
+    }
+    objects.push(obj);
+  }
+  var ok = true;
+  for (var child& in children) {
+    let status = child.wait();
+    ok = ok && exit_code(status) == 0;
+  }
+  if (!ok) {
+    eprintln("compiling the yoga oracle failed");
+    return none;
+  }
+  var link = Command(cxx.as_str());
+  for (let o in objects) {
+    link.arg(o.as_str());
+  }
+  link.arg("-o");
+  link.arg(exe.as_str());
+  if (!run(link, "linking the yoga oracle")) {
+    return none;
+  }
+  return exe;
+}
+
+pub fn main(): i32 {
+  var totals = Totals {};
+  var ok = true;
+  let args = arguments();
+  if (args.len() > 1) {
+    for (let i in 1..args.len()) {
+      let text = read_file(args[i]) else {
+        eprintln(f"cannot read {args[i]}");
+        return 1;
+      };
+      ok = replay(text.as_str(), args[i], totals) && ok;
+    }
+  } else {
+    let pkg = real_path(@package_dir()) else {
+      eprintln("cannot resolve the package dir");
+      return 1;
+    };
+    let root = parent(parent(pkg.as_str()));
+    let out_dir = f"{pkg}/build/yoga_oracle";
+    create_directories(out_dir.as_str());
+    let exe = build_oracle(root, out_dir.as_str()) else {
+      return 1;
+    };
+    let seed = env_u64("YOGA_FUZZ_SEED", 1);
+    let chunks = env_u64("YOGA_FUZZ_CHUNKS", 10);
+    let trees = env_u64("YOGA_FUZZ_TREES", 2000);
+    for (let c in 0..chunks) {
+      let trace = f"{out_dir}/seed{seed + c}.trace";
+      var cmd = Command(exe.as_str());
+      cmd.arg(f"{seed + c}".as_str());
+      cmd.arg(f"{trees}".as_str());
+      cmd.stdout_to(trace.as_str());
+      if (!run(cmd, "the yoga oracle")) {
+        return 1;
+      }
+      let text = read_file(trace.as_str()) else {
+        eprintln(f"cannot read {trace}");
+        return 1;
+      };
+      let before = totals.mismatches;
+      let chunk_ok = replay(text.as_str(), trace.as_str(), totals) && totals.mismatches == before;
+      if (chunk_ok) {
+        if (let e = delete_file(trace.as_str())) {
+        } else (let err) {
+          eprintln(f"cannot delete {trace}");
+        }
+      } else {
+        eprintln(f"kept {trace}");
+      }
+      ok = chunk_ok && ok;
+    }
+  }
+  println(f"{totals.trees} trees, {totals.layouts} layouts, {totals.floats} result floats compared bit for bit, {totals.mismatches} differ");
+  return ok && totals.mismatches == 0 ? 0 : 1;
+}
