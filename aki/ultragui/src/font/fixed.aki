@@ -1,0 +1,230 @@
+// FreeType's fixed-point arithmetic, as the 64-bit (FT_INT64, LP64) build
+// computes it: base/ftcalc.c (FT_MulFix, FT_MulDiv, FT_MulDiv_No_Round,
+// FT_DivFix, FT_Vector_NormLen, FT_MSB), base/fttrigon.c (FT_Vector_Length,
+// which FT_Hypot calls: the CORDIC pseudo-polarization), the 26.6 rounding
+// macros of freetype.h/ftobjs.h, and truetype/ttinterp.c's TT_MulFix14 and
+// TT_DotFix14.
+//
+// FT_Long, FT_Pos and FT_Fixed are 64-bit here, as on every LP64 Linux the
+// C++ library runs on. ADD_LONG/SUB_LONG/MUL_LONG/NEG_LONG wrap; so do these.
+
+module ultragui::font::fixed;
+
+// FT_MulFix_64: (a * b + 0x8000 (- 1 when negative)) >> 16.
+pub fn mul_fix(a: i64, b: i64): i64 {
+  var ab = a *% b;
+  ab = ab +% (0x8000 + (ab >> 63));
+  return ab >> 16;
+}
+
+// FT_MOVE_SIGN for the unsigned 64-bit forms.
+fn magnitude(x: i64): u64 => x < 0 ? 0u64 -% (x as u64) : x as u64;
+
+// FT_MulDiv: (a * b + c / 2) / c with the signs moved out, unsigned 64-bit
+// wrapping products; 0x7FFFFFFF when c is 0.
+pub fn mul_div(a: i64, b: i64, c: i64): i64 {
+  let negative = ((a < 0) != (b < 0)) != (c < 0);
+  let ua = magnitude(a);
+  let ub = magnitude(b);
+  let uc = magnitude(c);
+  let d = uc > 0 ? ((ua *% ub) +% (uc >> 1)) / uc : 0x7FFF_FFFFu64;
+  let r = d as i64;
+  return negative ? 0 -% r : r;
+}
+
+// FT_MulDiv_No_Round.
+pub fn mul_div_no_round(a: i64, b: i64, c: i64): i64 {
+  let negative = ((a < 0) != (b < 0)) != (c < 0);
+  let ua = magnitude(a);
+  let ub = magnitude(b);
+  let uc = magnitude(c);
+  let d = uc > 0 ? (ua *% ub) / uc : 0x7FFF_FFFFu64;
+  let r = d as i64;
+  return negative ? 0 -% r : r;
+}
+
+// FT_DivFix: (a << 16 + b / 2) / b.
+pub fn div_fix(a: i64, b: i64): i64 {
+  let negative = (a < 0) != (b < 0);
+  let ua = magnitude(a);
+  let ub = magnitude(b);
+  let q = ub > 0 ? ((ua << 16) +% (ub >> 1)) / ub : 0x7FFF_FFFFu64;
+  let r = q as i64;
+  return negative ? 0 -% r : r;
+}
+
+// TT_MulFix14_64: a * b / 2^14, rounded as mul_fix rounds.
+pub fn mul_fix14(a: i64, b: i64): i64 {
+  var ab = a *% b;
+  ab = ab +% (0x2000 + (ab >> 63));
+  return ab >> 14;
+}
+
+// TT_DotFix14_64: (ax * bx + ay * by) / 2^14.
+pub fn dot_fix14(ax: i64, ay: i64, bx: i64, by: i64): i64 {
+  var c = (ax *% bx) +% (ay *% by);
+  c = c +% (0x2000 + (c >> 63));
+  return c >> 14;
+}
+
+// FT_PIX_FLOOR, FT_PIX_ROUND(_LONG), FT_PIX_CEIL(_LONG), FT_PAD_ROUND_LONG.
+pub fn pix_floor(x: i64): i64 => x & -64;
+pub fn pix_round(x: i64): i64 => pix_floor(x +% 32);
+pub fn pix_ceil(x: i64): i64 => pix_floor(x +% 63);
+pub fn pad_floor(x: i64, n: i64): i64 => x & (0 - n);
+pub fn pad_round(x: i64, n: i64): i64 => pad_floor(x +% n / 2, n);
+
+// FT_MSB: the index of the highest set bit (z != 0).
+pub fn msb(z: u32): i32 => 31 - @leading_zeros(z) as i32;
+
+// FT_Vector_NormLen: scales (x, y) to unit length in 16.16 in place and
+// returns the original length, with 32-bit arithmetic as ftcalc.c does it.
+pub fn vector_norm_len(x0: i64, y0: i64): (i64, i64, i64) {
+  var xi = x0 as i32;
+  var yi = y0 as i32;
+  var sx: i32 = 1;
+  var sy: i32 = 1;
+  var x: u32 = 0;
+  var y: u32 = 0;
+  if (xi < 0) {
+    x = 0u32 -% (xi as u32);
+    sx = -1;
+  } else {
+    x = xi as u32;
+  }
+  if (yi < 0) {
+    y = 0u32 -% (yi as u32);
+    sy = -1;
+  } else {
+    y = yi as u32;
+  }
+  var rx = x0;
+  var ry = y0;
+  if (x == 0) {
+    if (y > 0) {
+      ry = (sy * 0x10000) as i64;
+    }
+    return (rx, ry, y as i64);
+  } else if (y == 0) {
+    if (x > 0) {
+      rx = (sx * 0x10000) as i64;
+    }
+    return (rx, ry, x as i64);
+  }
+  var l: u32 = x > y ? x +% (y >> 1) : y +% (x >> 1);
+  var shift: i32 = 31 - msb(l);
+  shift -= 15 + (l >= (0xAAAA_AAAAu32 >> (shift as u32)) ? 1 : 0);
+  if (shift > 0) {
+    x = x << (shift as u32);
+    y = y << (shift as u32);
+    l = x > y ? x +% (y >> 1) : y +% (x >> 1);
+  } else {
+    x = x >> ((0 - shift) as u32);
+    y = y >> ((0 - shift) as u32);
+    l = l >> ((0 - shift) as u32);
+  }
+  var b: i32 = 0x10000 - (l as i32);
+  xi = x as i32;
+  yi = y as i32;
+  var u: u32 = 0;
+  var v: u32 = 0;
+  var z: i32 = 0;
+  while (true) {
+    u = (xi +% ((xi *% b) >> 16)) as u32;
+    v = (yi +% ((yi *% b) >> 16)) as u32;
+    z = (0 -% ((u *% u +% v *% v) as i32)) / 0x200;
+    z = z *% ((0x10000 + b) >> 8) / 0x10000;
+    b += z;
+    if (!(z > 0)) {
+      break;
+    }
+  }
+  rx = sx < 0 ? 0 - (u as i64) : u as i64;
+  ry = sy < 0 ? 0 - (v as i64) : v as i64;
+  l = (0x10000i32 +% ((u *% x +% v *% y) as i32) / 0x10000) as u32;
+  if (shift > 0) {
+    l = (l +% (1u32 << ((shift - 1) as u32))) >> (shift as u32);
+  } else {
+    l = l << ((0 - shift) as u32);
+  }
+  return (rx, ry, l as i64);
+}
+
+// --- fttrigon.c ---------------------------------------------------------------------
+
+comptime let kTrigScale: u64 = 0xDBD9_5B16;
+comptime let kTrigSafeMsb: i32 = 29;
+comptime let kTrigMaxIters: i32 = 23;
+comptime let kAnglePi: i64 = 180 << 16;
+comptime let kAnglePi2: i64 = 90 << 16;
+
+static let kTrigArctan: [i64; 22] = [
+  1740967, 919879, 466945, 234379, 117304, 58666, 29335, 14668, 7334, 3667, 1833, 917, 458, 229, 115, 57, 29, 14, 7,
+  4, 2, 1,
+];
+
+fn trig_downscale(v: i64): i64 {
+  let negative = v < 0;
+  let m = negative ? 0 -% v : v;
+  let r = (((m as u64) *% kTrigScale +% 0x4000_0000) >> 32) as i64;
+  return negative ? 0 -% r : r;
+}
+
+fn abs64(x: i64): i64 => x < 0 ? 0 -% x : x;
+
+// FT_Vector_Length: the CORDIC length FT_Hypot returns.
+pub fn vector_length(x0: i64, y0: i64): i64 {
+  if (x0 == 0) {
+    return abs64(y0);
+  } else if (y0 == 0) {
+    return abs64(x0);
+  }
+  // ft_trig_prenorm
+  var x = x0;
+  var y = y0;
+  var shift = msb((abs64(x) | abs64(y)) as u32);
+  if (shift <= kTrigSafeMsb) {
+    shift = kTrigSafeMsb - shift;
+    x = ((x as u64) << (shift as u64)) as i64;
+    y = ((y as u64) << (shift as u64)) as i64;
+  } else {
+    shift -= kTrigSafeMsb;
+    x = x >> (shift as i64);
+    y = y >> (shift as i64);
+    shift = 0 - shift;
+  }
+  // ft_trig_pseudo_polarize (only x matters for the length)
+  var t: i64 = 0;
+  if (y > x) {
+    if (y > 0 -% x) {
+      t = y;
+      y = 0 -% x;
+      x = t;
+    } else {
+      x = 0 -% x;
+      y = 0 -% y;
+    }
+  } else if (y < 0 -% x) {
+    t = 0 -% y;
+    y = x;
+    x = t;
+  }
+  var b: i64 = 1;
+  for (let i in 1..kTrigMaxIters) {
+    if (y > 0) {
+      t = x +% ((y +% b) >> (i as i64));
+      y = y -% ((x +% b) >> (i as i64));
+      x = t;
+    } else {
+      t = x -% ((y +% b) >> (i as i64));
+      y = y +% ((x +% b) >> (i as i64));
+      x = t;
+    }
+    b = b << 1;
+  }
+  x = trig_downscale(x);
+  if (shift > 0) {
+    return (x +% (1i64 << ((shift - 1) as i64))) >> (shift as i64);
+  }
+  return (((x as u32) << ((0 - shift) as u32)) as u32) as i64;
+}

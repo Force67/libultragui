@@ -1,0 +1,286 @@
+// The sfnt container as FreeType 2.14.3 reads it: sfnt/sfobjs.c
+// (sfnt_open_font: the collection header and the accepted format tags),
+// sfnt/ttload.c (check_table_dir, tt_face_load_font_dir, tt_face_lookup_table)
+// and the big-endian readers of ftstream.h. WOFF/WOFF2, Mac resource forks
+// and Type 1 in sfnt wrappers ('typ1') are not read: none is in the corpus.
+//
+// Reads go to absolute offsets in the whole file, bounded by the file and not
+// by the table, as FreeType's stream reads are (a short table reads on into the
+// next one).
+
+module ultragui::font::sfnt;
+
+import {List} from akikit::containers::list;
+
+// FreeType's error codes, the ones this engine can report.
+pub enum FontError {
+  UnknownFileFormat,
+  InvalidArgument,
+  InvalidTable,
+  TableMissing,
+  InvalidStreamOperation,
+  ArrayTooLarge,
+  LocationsMissing,
+  HmtxTableMissing,
+  HorizHeaderMissing,
+  InvalidPostTableFormat,
+  InvalidGlyphIndex,
+  InvalidOutline,
+  InvalidComposite,
+  TooManyHints,
+  InvalidPixelSize,
+  InvalidPpem,
+  InvalidSizeHandle,
+  DivideByZero,
+  MissingBitmap,
+  InvalidFileFormat,
+  UnimplementedFeature,
+  // The bytecode interpreter's (ttinterp.c).
+  BadArgument,
+  InvalidCodeRange,
+  CodeOverflow,
+  StackOverflow,
+  TooFewArguments,
+  InvalidReference,
+  InvalidOpcode,
+  DebugOpCode,
+  ExecutionTooLong,
+  TooManyFunctionDefs,
+  TooManyInstructionDefs,
+  NestedDefs,
+  EndfInExecStream,
+  DefInGlyfBytecode,
+  // A CFF-flavored face: glyphs come from the CFF loader (font/cff).
+  CffNotLoaded,
+}
+
+// --- Tags ---------------------------------------------------------------------------
+
+pub fn tag(s: str): u32 =>
+  ((s[0] as u32) << 24) | ((s[1] as u32) << 16) | ((s[2] as u32) << 8) | (s[3] as u32);
+
+pub comptime let kTagTtcf: u32 = 0x7474_6366;  // 'ttcf'
+pub comptime let kTagOtto: u32 = 0x4F54_544F;  // 'OTTO'
+pub comptime let kTagTrue: u32 = 0x7472_7565;  // 'true'
+pub comptime let kTagTyp1: u32 = 0x7479_7031;  // 'typ1'
+pub comptime let kTagHead: u32 = 0x6865_6164;
+pub comptime let kTagBhed: u32 = 0x6268_6564;
+pub comptime let kTagSing: u32 = 0x5349_4E47;
+pub comptime let kTagMeta: u32 = 0x4D45_5441;
+pub comptime let kTagHmtx: u32 = 0x686D_7478;
+pub comptime let kTagVmtx: u32 = 0x766D_7478;
+pub comptime let kTagHhea: u32 = 0x6868_6561;
+pub comptime let kTagVhea: u32 = 0x7668_6561;
+pub comptime let kTagMaxp: u32 = 0x6D61_7870;
+pub comptime let kTagOs2: u32 = 0x4F53_2F32;
+pub comptime let kTagPost: u32 = 0x706F_7374;
+pub comptime let kTagName: u32 = 0x6E61_6D65;
+pub comptime let kTagGlyf: u32 = 0x676C_7966;
+pub comptime let kTagLoca: u32 = 0x6C6F_6361;
+pub comptime let kTagCvt: u32 = 0x6376_7420;
+pub comptime let kTagFpgm: u32 = 0x6670_676D;
+pub comptime let kTagPrep: u32 = 0x7072_6570;
+pub comptime let kTagHdmx: u32 = 0x6864_6D78;
+pub comptime let kTagCff: u32 = 0x4346_4620;
+pub comptime let kTagCff2: u32 = 0x4346_4632;
+pub comptime let kTagEblc: u32 = 0x4542_4C43;
+pub comptime let kTagEbdt: u32 = 0x4542_4454;
+pub comptime let kTagCblc: u32 = 0x4342_4C43;
+pub comptime let kTagCbdt: u32 = 0x4342_4454;
+pub comptime let kTagBloc: u32 = 0x626C_6F63;
+pub comptime let kTagBdat: u32 = 0x6264_6174;
+pub comptime let kTagSbix: u32 = 0x7362_6978;
+pub comptime let kTagFvar: u32 = 0x6676_6172;
+pub comptime let kTagColr: u32 = 0x434F_4C52;
+pub comptime let kTagCpal: u32 = 0x4350_414C;
+pub comptime let kTagSvg: u32 = 0x5356_4720;
+pub comptime let kTagKern: u32 = 0x6B65_726E;
+pub comptime let kTagGpos: u32 = 0x4750_4F53;
+
+// --- Big-endian reads (callers check the bounds) ------------------------------------
+
+pub fn u8_at(d&: [u8], o: usize): u8 => d[o];
+pub fn i8_at(d&: [u8], o: usize): i8 => d[o] as i8;
+pub fn u16_at(d&: [u8], o: usize): u16 => ((d[o] as u16) << 8) | (d[o + 1] as u16);
+pub fn i16_at(d&: [u8], o: usize): i16 => u16_at(d, o) as i16;
+pub fn u32_at(d&: [u8], o: usize): u32 =>
+  ((d[o] as u32) << 24) | ((d[o + 1] as u32) << 16) | ((d[o + 2] as u32) << 8) | (d[o + 3] as u32);
+pub fn i32_at(d&: [u8], o: usize): i32 => u32_at(d, o) as i32;
+
+// Whether n bytes at o lie inside the data (FT_STREAM_SEEK + FT_FRAME_ENTER).
+pub fn fits(d&: [u8], o: u64, n: u64): bool => o <= #d as u64 && n <= #d as u64 - o;
+
+// --- The table directory --------------------------------------------------------------
+
+pub struct TableRecord : Copy {
+  pub var tag: u32
+  pub var checksum: u32
+  pub var offset: u32
+  pub var length: u32
+}
+
+pub struct Directory {
+  pub var format_tag: u32 = 0
+  pub var tables: List<TableRecord> = List()
+  // ttc_header.count (1 for a single font).
+  pub var num_faces: u32 = 1
+
+  // tt_face_lookup_table: the first entry with this tag and a nonzero length.
+  pub fn find(self&, t: u32): TableRecord? {
+    for (let r in self.tables) {
+      if (r.tag == t && r.length != 0) {
+        return r;
+      }
+    }
+    return none;
+  }
+
+  pub fn has(self&, t: u32): bool {
+    if (let r = self.find(t)) {
+      return true;
+    }
+    return false;
+  }
+}
+
+// check_table_dir: counts the usable entries; a font without 'head' (or
+// 'bhed', or 'SING' + 'META') is rejected.
+fn check_table_dir(d&: [u8], offset: u64, var num_tables&: u32): u32 ! FontError {
+  let size = #d as u64;
+  var valid: u32 = 0;
+  var has_head = false;
+  var has_sing = false;
+  var has_meta = false;
+  for (let nn in 0..num_tables) {
+    let e = offset + 12 + 16 * (nn as u64);
+    if (!fits(d, e, 16)) {
+      num_tables = nn;
+      break;
+    }
+    let t = u32_at(d, e as usize);
+    let off = u32_at(d, (e + 8) as usize) as u64;
+    let len = u32_at(d, (e + 12) as usize) as u64;
+    if (off > size) {
+      continue;
+    } else if (len > size - off) {
+      if (t == kTagHmtx || t == kTagVmtx) {
+        valid += 1;
+      } else {
+        continue;
+      }
+    } else {
+      valid += 1;
+    }
+    if (t == kTagHead || t == kTagBhed) {
+      has_head = true;
+      if (len < 0x36) {
+        return fail FontError::TableMissing;
+      }
+      if (!fits(d, off + 12, 4)) {
+        return fail FontError::InvalidStreamOperation;
+      }
+    } else if (t == kTagSing) {
+      has_sing = true;
+    } else if (t == kTagMeta) {
+      has_meta = true;
+    }
+  }
+  if (valid == 0) {
+    return fail FontError::UnknownFileFormat;
+  }
+  if (has_head || (has_sing && has_meta)) {
+    return valid;
+  }
+  return fail FontError::TableMissing;
+}
+
+// tt_face_load_font_dir at `offset`.
+fn load_font_dir(d&: [u8], offset: u64, var dir&: Directory): () ! FontError {
+  if (!fits(d, offset, 12)) {
+    return fail FontError::InvalidStreamOperation;
+  }
+  let format_tag = u32_at(d, offset as usize);
+  var num_tables = u16_at(d, (offset + 4) as usize) as u32;
+  if (format_tag != kTagOtto) {
+    let _ = try check_table_dir(d, offset, num_tables);
+  } else if (num_tables == 0) {
+    return fail FontError::UnknownFileFormat;
+  }
+  dir.format_tag = format_tag;
+  let size = #d as u64;
+  if (!fits(d, offset + 12, (num_tables as u64) * 16)) {
+    return fail FontError::InvalidStreamOperation;
+  }
+  dir.tables.clear();
+  for (let nn in 0..num_tables) {
+    let e = (offset + 12 + 16 * (nn as u64)) as usize;
+    var r = TableRecord {
+      tag: u32_at(d, e),
+      checksum: u32_at(d, e + 4),
+      offset: u32_at(d, e + 8),
+      length: u32_at(d, e + 12),
+    };
+    let off = r.offset as u64;
+    if (off > size) {
+      continue;
+    } else if (r.length as u64 > size - off) {
+      if (r.tag == kTagHmtx || r.tag == kTagVmtx) {
+        r.length = ((size - off) as u32) & ~3u32;
+      } else {
+        continue;
+      }
+    }
+    var duplicate = false;
+    for (let q in dir.tables) {
+      if (q.tag == r.tag) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) {
+      dir.tables.push(r);
+    }
+  }
+  if (dir.tables.len() == 0) {
+    return fail FontError::UnknownFileFormat;
+  }
+}
+
+// sfnt_open_font + the face selection of sfnt_init_face: the directory of
+// face `index` of the file.
+pub fn open_directory(d&: [u8], index: u32): Directory ! FontError {
+  if (!fits(d, 0, 4)) {
+    return fail FontError::UnknownFileFormat;
+  }
+  let t = u32_at(d, 0);
+  if (t != 0x0001_0000 && t != kTagTtcf && t != kTagOtto && t != kTagTrue && t != kTagTyp1 && t != 0xA56B_6264 &&
+      t != 0xA56C_7374 && t != 0x0002_0000) {
+    return fail FontError::UnknownFileFormat;
+  }
+  var dir = Directory {};
+  var face_offset: u64 = 0;
+  if (t == kTagTtcf) {
+    if (!fits(d, 4, 8)) {
+      return fail FontError::InvalidStreamOperation;
+    }
+    let count = u32_at(d, 8);
+    if (count == 0) {
+      return fail FontError::InvalidTable;
+    }
+    if (count as u64 > (#d as u64) / (28 + 4)) {
+      return fail FontError::ArrayTooLarge;
+    }
+    if (!fits(d, 12, (count as u64) * 4)) {
+      return fail FontError::InvalidStreamOperation;
+    }
+    if (index >= count) {
+      return fail FontError::InvalidArgument;
+    }
+    dir.num_faces = count;
+    face_offset = u32_at(d, 12 + 4 * index as usize) as u64;
+  } else if (index >= 1) {
+    return fail FontError::InvalidArgument;
+  }
+  try load_font_dir(d, face_offset, dir);
+  return dir;
+}
