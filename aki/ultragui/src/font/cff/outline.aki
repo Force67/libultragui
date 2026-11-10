@@ -47,6 +47,7 @@ fn Path::point(var self&, p: CffPoint, tag: u8): () ! CffError {
 }
 
 fn Path::start_path(var self&): () ! CffError {
+  if (self.hints.hstems.len() + self.hints.vstems > 96) { return fail CffError::InvalidFileFormat; }
   if (!self.hints.ready) { self.hints.build(); self.first_map = to_list(self.hints.current.as_slice()); }
   self.device = self.mapped(self.current, false);
   self.contour_first = self.outline.points.len(); self.open = true;
@@ -69,6 +70,7 @@ fn Path::flush(var self&, closing: bool): () ! CffError {
 }
 
 fn Path::move_to(var self&, p: CffPoint): () ! CffError {
+  if (self.hints.hstems.len() + self.hints.vstems > 96) { return fail CffError::InvalidFileFormat; }
   try self.close(); self.start = p; self.current = p;
   if (!self.hints.ready || self.hints.pending) { self.hints.build(); }
   self.first_map = to_list(self.hints.current.as_slice());

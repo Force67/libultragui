@@ -1,5 +1,6 @@
 // CFF outlines against FreeType 2.14.3. No arguments: five representative
-// fonts, all glyphs, sizes 6..48,64,96. CFF_SWEEP=1 selects all OTTO fonts
+// fonts, all glyphs, sizes 7,12,24,48. CFF_SIZES=default expands to
+// 6..48,64,96 (including CJK: several minutes). CFF_SWEEP=1 selects all OTTO fonts
 // at 7,9,11,12,13,14,16,18,20,24,32,48,72. Arguments select font paths.
 // CFF_SIZES=quick or an integer limits sizes for development. CFF_UNHINTED=1
 // compares only unhinted loads. Every mismatching glyph is recorded in a
@@ -69,19 +70,25 @@ struct Totals {
   pub var points: u64 = 0
   pub var mismatches: u64 = 0
   pub var failures: u64 = 0
+  pub var errors: u64 = 0
 }
 fn compare(var r&: Words, have: i32, var diff&: u64) { if (r.int() != have) { diff += 1; } }
-fn glyph(var r&: Words, g&: CffGlyph, var totals&: Totals): u64 {
+fn field(var r&: Words, have: i32, name: str, var diff&: u64, var details&: String) {
+  let want = r.int();
+  if (want != have) { diff += 1; details.push_str(f"{name}:got={have},want={want};".as_str()); }
+}
+fn glyph(var r&: Words, g&: CffGlyph, var totals&: Totals, var details&: String): u64 {
   var diff = 0u64;
-  compare(r, g.advance_x, diff); compare(r, g.linear_hori_advance, diff);
-  compare(r, g.width, diff); compare(r, g.height, diff); compare(r, g.hori_bearing_x, diff); compare(r, g.hori_bearing_y, diff); compare(r, g.hori_advance, diff);
-  compare(r, g.flags, diff); let points = r.int() as usize; let contours = r.int() as usize;
-  if (points != g.points.len()) { diff += 1; } if (contours != g.contours.len()) { diff += 1; }
+  field(r, g.advance_x, "advance_x", diff, details); field(r, g.linear_hori_advance, "linear_hori_advance", diff, details);
+  field(r, g.width, "width", diff, details); field(r, g.height, "height", diff, details); field(r, g.hori_bearing_x, "bearing_x", diff, details); field(r, g.hori_bearing_y, "bearing_y", diff, details); field(r, g.hori_advance, "hori_advance", diff, details);
+  field(r, g.flags, "outline_flags", diff, details); let points = r.int() as usize; let contours = r.int() as usize;
+  if (points != g.points.len()) { diff += 1; details.push_str(f"point_count:got={g.points.len()},want={points};".as_str()); }
+  if (contours != g.contours.len()) { diff += 1; details.push_str(f"contour_count:got={g.contours.len()},want={contours};".as_str()); }
   for (let i in 0..points) {
     let x = r.int(); let y = r.int(); let tag = r.int();
-    if (i < g.points.len() && (x != g.points[i].x || y != g.points[i].y || tag != g.tags[i] as i32)) { diff += 1; }
+    if (i < g.points.len() && (x != g.points[i].x || y != g.points[i].y || tag != g.tags[i] as i32)) { diff += 1; details.push_str(f"point[{i}]:got=({g.points[i].x},{g.points[i].y},{g.tags[i]}),want=({x},{y},{tag});".as_str()); }
   }
-  for (let i in 0..contours) { let c = r.int(); if (i < g.contours.len() && c != g.contours[i] as i32) { diff += 1; } }
+  for (let i in 0..contours) { let c = r.int(); if (i < g.contours.len() && c != g.contours[i] as i32) { diff += 1; details.push_str(f"contour[{i}]:got={g.contours[i]},want={c};".as_str()); } }
   totals.points += points as u64; return diff;
 }
 fn skip_glyph(var r&: Words) {
@@ -92,7 +99,7 @@ fn skip_glyph(var r&: Words) {
 fn write_line(var report&: File, text: str) { if (let result = report.write(str_as_bytes(text))) {} }
 
 fn check_font(path: str, exe: str, mode: str, unhinted: bool, index: usize, var totals&: Totals): bool {
-  let trace = f"{@package_dir()}/build/cff_oracle/{index}.bin";
+  let trace = f"{@package_dir()}/build/cff_oracle/{index}-{mode}.bin";
   var cmd = Command(exe); cmd.arg(path); cmd.arg(trace.as_str()); cmd.arg(mode); if (unhinted) { cmd.arg("unhinted"); }
   if (!run(cmd)) { eprintln(f"oracle failed: {path}"); return false; }
   let raw = read_bytes(path) else { return false; };
@@ -113,9 +120,9 @@ fn check_font(path: str, exe: str, mode: str, unhinted: bool, index: usize, var 
     eprintln(f"CFF parse failed: {path}"); totals.failures += 1; return false;
   };
   if (let seed = get_environment_variable("CFF_RANDOM_SEED")) { if (seed == "0") { font.set_random_seed(0); } }
-  let report_path = f"{@package_dir()}/build/cff_oracle/{index}.tsv";
+  let report_path = f"{@package_dir()}/build/cff_oracle/{index}-{mode}.tsv";
   var report = open(report_path.as_str(), OpenMode::Write) else { return false; };
-  write_line(report, f"# {path}\nsize\tgid\thinted\tdifferences\taki_error\n".as_str());
+  write_line(report, f"# {path}\nsize\tgid\thinted\tdifferences\taki_error\toracle_error\tdetails\n".as_str());
   let before = totals.mismatches;
   if (font.glyph_count() != count) { eprintln(f"glyph count differs: {path}"); return false; }
   for (let _ in 0..sizes) {
@@ -128,9 +135,10 @@ fn check_font(path: str, exe: str, mode: str, unhinted: bool, index: usize, var 
     if (diff != 0) { eprintln(f"size metrics differ: {path} px={px} differences={diff}"); totals.mismatches += 1; }
     totals.sizes += 1;
     for (let gid in 0..count) { for (let h in 0..modes) {
-      let error = r.int(); var d = 0u64; var aki_error = 0i32;
+      let error = r.int(); var d = 0u64; var aki_error = 0i32; var details = String();
+      if (error != 0) { totals.errors += 1; }
       if (let g = font.load_glyph(gid, h != 0)) {
-        if (error != 0) { d = 1; } else { d = glyph(r, g, totals); }
+        if (error != 0) { d = 1; } else { d = glyph(r, g, totals, details); }
       } else (let e) {
         aki_error = e as i32;
         if (aki_error != error) { d = 1; }
@@ -139,7 +147,7 @@ fn check_font(path: str, exe: str, mode: str, unhinted: bool, index: usize, var 
       totals.glyphs += 1;
       if (d != 0) {
         totals.mismatches += 1;
-        write_line(report, f"{px}\t{gid}\t{h}\t{d}\t{aki_error}\n".as_str());
+        write_line(report, f"{px}\t{gid}\t{h}\t{d}\t{aki_error}\t{error}\t{details}\n".as_str());
         if (totals.mismatches <= 20) { eprintln(f"{path} px={px} gid={gid} hinted={h} differences={d} aki_error={aki_error}"); }
       }
     } }
@@ -170,9 +178,14 @@ pub fn main(): i32 {
       "/usr/share/fonts/opentype/cantarell/Cantarell-Regular.otf", "/usr/share/fonts/opentype/malayalam/Chilanka-Regular.otf",
       "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]) { if (let info = file_info(p)) { fonts.push(from_str(p)); } }
   }
-  let mode = get_environment_variable("CFF_SIZES") ?? from_str(sweep == "1" ? "broad" : "default");
+  if (args.len() == 0 && sweep != "1") {
+    for (let p in ["operators.otf", "default-cff2.otf", "private-blend-cff2.otf", "malformed.otf", "subroutines.otf", "cid.otf", "zero-peak-cff2.otf", "multi-fd-cff2.otf"]) {
+      fonts.push(f"{@package_dir()}/tests/data/cff/{p}");
+    }
+  }
+  let mode = get_environment_variable("CFF_SIZES") ?? from_str(sweep == "1" ? "broad" : "quick");
   var totals = Totals {}; var ok = fonts.len() > 0;
   for (let i in 0..fonts.len()) { ok = check_font(fonts[i].as_str(), exe.as_str(), mode.as_str(), unhinted_env == "1", i, totals) && ok; }
-  println(f"CFF TOTAL fonts={totals.fonts} sizes={totals.sizes} glyph-loads={totals.glyphs} points={totals.points} mismatches={totals.mismatches} failures={totals.failures}");
+  println(f"CFF TOTAL fonts={totals.fonts} sizes={totals.sizes} glyph-loads={totals.glyphs} points={totals.points} mismatches={totals.mismatches} failures={totals.failures} expected-errors={totals.errors}");
   return ok && totals.mismatches == 0 && totals.failures == 0 ? 0 : 1;
 }

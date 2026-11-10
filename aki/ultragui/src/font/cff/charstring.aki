@@ -75,7 +75,6 @@ fn Machine::stems(var self&, horizontal: bool): () ! CffError {
     if (horizontal) { self.path.hints.hstems.push(Stem { low, high }); }
     else { self.path.hints.vstems += 1; }
   }
-  if (self.path.hints.hstems.len() + self.path.hints.vstems > 96) { return fail CffError::InvalidFileFormat; }
 }
 
 fn Machine::escaped(var self&, op: u8, var seed&: u32): () ! CffError {
@@ -201,7 +200,7 @@ fn evaluate_inner(font&: Program, var seeds&: [u32], gid: usize, scale: i32, hin
     if (frame.pos >= frame.limit) { op = frames.len() > 0 ? 11u8 : 14u8; }
     else {
       op = font.data[frame.pos]; frame.pos += 1;
-      if (font.cff2 && (op == 11 || op == 14)) { continue; }
+      if (font.cff2 && (op == 11 || op == 14)) { m.clear(); continue; }
     }
     var r = Reader { data: font.data.as_slice()[..frame.limit], pos: frame.pos };
     if (op >= 32 || op == 28) {
@@ -217,7 +216,7 @@ fn evaluate_inner(font&: Program, var seeds&: [u32], gid: usize, scale: i32, hin
     if (op == 10 || op == 29) {
       let subrs& = op == 10 ? font.privates[fd].local_subrs : font.global_subrs;
       let i = (try m.pop_int()) + subr_bias(subrs.entries.len());
-      if (i < 0 || i as usize >= subrs.entries.len() || frames.len() >= 10) { return fail CffError::InvalidFileFormat; }
+      if (i < 0 || i as usize >= subrs.entries.len() || frames.len() >= 16) { return fail CffError::InvalidFileFormat; }
       frames.push(frame); let s = subrs.entries[i as usize]; frame = Frame { pos: s.start, limit: s.limit() }; continue;
     }
     if (op == 11) { let previous = frames.pop() else { return fail CffError::InvalidFileFormat; }; frame = previous; continue; }
@@ -227,6 +226,7 @@ fn evaluate_inner(font&: Program, var seeds&: [u32], gid: usize, scale: i32, hin
       if (!(n > 1 && m.path.hints.mask_valid)) {
         try m.stems(false);
         let count = m.path.hints.hstems.len() + m.path.hints.vstems;
+        if (count > 96) { return fail CffError::InvalidFileFormat; }
         var mask = filled(count, false);
         for (let i in 0..(count + 7) / 8) {
           let b = cs_byte(r); for (let j in 0..8usize) { if (i * 8 + j < count) { mask[i * 8 + j] = (b & (128u8 >> j as u8)) != 0; } }
@@ -296,6 +296,7 @@ fn evaluate_inner(font&: Program, var seeds&: [u32], gid: usize, scale: i32, hin
         let bc = try evaluate(font, seeds, base, scale, hinted, 0, 0, true);
         for (let part in [ac.outline, bc.outline]) {
           let first = m.path.outline.points.len();
+          if (part.points.len() > 32767 - first) { return fail CffError::InvalidFileFormat; }
           for (let p in part.points) { m.path.outline.points.push(p); }
           for (let t in part.tags) { m.path.outline.tags.push(t); }
           for (let end_ in part.contours) { m.path.outline.contours.push((first + end_ as usize) as u16); }

@@ -6,6 +6,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_TRUETYPE_TABLES_H
+#include FT_MODULE_H
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +28,10 @@ int main(int argc,char **argv) {
   if(argc==2 && !strcmp(argv[1],"--list")) { list("/usr/share/fonts"); return 0; }
   if(argc<3) return 2;
   FT_Library lib; FT_Face face;
-  if(FT_Init_FreeType(&lib) || FT_New_Face(lib,argv[1],0,&face)) return 3;
+  if(FT_Init_FreeType(&lib)) return 3;
+  if(getenv("CFF_RANDOM_SEED")) { FT_Int32 seed=atoi(getenv("CFF_RANDOM_SEED")); if(FT_Property_Set(lib,"cff","random-seed",&seed)) return 7; }
+  int open_error=FT_New_Face(lib,argv[1],0,&face);
+  if(open_error) { fprintf(stderr,"FT_New_Face error=%d: %s\n",open_error,argv[1]); return 3; }
   int major,minor,patch; FT_Library_Version(lib,&major,&minor,&patch);
   if(major!=2 || minor!=14 || patch!=3) { fprintf(stderr,"need FreeType 2.14.3, got %d.%d.%d\n",major,minor,patch); return 4; }
   out=fopen(argv[2],"wb"); if(!out) return 5;

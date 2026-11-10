@@ -19,9 +19,10 @@ pub struct Program {
   pub fn parse(data&: [u8]): Program ! CffError;
 }
 
-fn get_private(data&: [u8], span: Span, cff2: bool, weights&: [List<i32>]): PrivateDict ! CffError {
+fn get_private(data&: [u8], span: Span, cff2: bool, weights&: [List<i32>], subfont: bool = false): PrivateDict ! CffError {
   let entries = try dict(data, span);
   for (let e in entries) {
+    if (subfont && e.op == 0x107) { return fail CffError::Unsupported; }
     if (e.op == 18 && e.args.len() >= 2) {
       let n = e.args[0] >> 16; let p = e.args[1] >> 16;
       if (n < 0 || p < 0) { return fail CffError::InvalidTable; }
@@ -52,6 +53,7 @@ fn Program::parse(data&: [u8]): Program ! CffError {
   var chars = 0usize; var fdarray = 0usize; var fdselect = 0usize; var charset = 0usize; var vstore = 0usize;
   for (let e in entries) {
     if (e.args.len() == 0) { continue; }
+    if (e.op == 0x107 && e.args[0] <= 0) { return fail CffError::Unsupported; }
     let v = e.args[0] >> 16;
     if (v < 0) { continue; }
     if (e.op == 17) { chars = v as usize; }
@@ -109,25 +111,25 @@ fn Program::parse(data&: [u8]): Program ! CffError {
   if (fdarray != 0) {
     let fds = try Index::parse(data, fdarray, out.cff2);
     if (fds.entries.len() == 0 || fds.entries.len() > 256) { return fail CffError::InvalidTable; }
-    for (let fd in fds.entries) { out.privates.push(try get_private(data, fd, out.cff2, out.blend_weights.as_slice())); }
+    for (let fd in fds.entries) { out.privates.push(try get_private(data, fd, out.cff2, out.blend_weights.as_slice(), true)); }
     if (fdselect != 0 || !out.cff2) {
     var r = Reader { data, pos: fdselect }; let format = try r.byte();
     if (format == 0) {
       for (let gid in 0..count) { out.fd_select[gid] = try r.byte() as usize; }
-    } else if (format == 3 || (format == 4 && out.cff2)) {
-      let wide = format == 4; let n = try r.uint(wide ? 4usize : 2usize) as usize;
+    } else if (format == 3) {
+      let n = try r.uint(2) as usize;
       if (n == 0 || n > count) { return fail CffError::InvalidTable; }
-      var first = try r.uint(wide ? 4usize : 2usize) as usize;
+      var first = try r.uint(2) as usize;
       if (first != 0) { return fail CffError::InvalidTable; }
       for (let _ in 0..n) {
-        let fd = try r.uint(wide ? 2usize : 1usize) as usize;
-        let last = try r.uint(wide ? 4usize : 2usize) as usize;
+        let fd = try r.uint(1) as usize;
+        let last = try r.uint(2) as usize;
         if (last < first || last > count) { return fail CffError::InvalidTable; }
         for (let gid in first..last) { out.fd_select[gid] = fd; }
         first = last;
       }
       if (first != count) { return fail CffError::InvalidTable; }
-    } else { return fail CffError::InvalidTable; }
+    } else { return fail CffError::InvalidFileFormat; }
     }
     for (let fd in out.fd_select) { if (fd >= out.privates.len()) { return fail CffError::InvalidTable; } }
   } else { out.privates.push(try get_private(data, top, out.cff2, out.blend_weights.as_slice())); }
