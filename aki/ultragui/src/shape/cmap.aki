@@ -1,0 +1,568 @@
+// Character to glyph mapping as the C++ library gets it: HarfBuzz's hb_ft
+// font asks FreeType (FT_Get_Char_Index, FT_Face_GetCharVariantIndex), so this
+// is FreeType 2.14.3's cmap handling (sfnt/ttcmap.c, base/ftobjs.c): the
+// subtables FT_VALIDATE_DEFAULT accepts, the charmap find_unicode_charmap
+// selects, each format's lookup (format 4's sorted/overlapping variants
+// included), the rejection of glyph ids >= num_glyphs, and format 14 for
+// variation selectors.
+//
+// Formats 0, 4, 6, 12, 13 and 14 are read; a Unicode subtable in format 2, 8
+// or 10 is skipped (FreeType reads them; no font of the corpus has one), and
+// so is the Unicode charmap FreeType synthesizes from glyph names for fonts
+// without any (none in the corpus).
+
+module ultragui::shape::cmap;
+
+// The chosen subtables: positions in the font data, or none.
+pub struct Cmap : Copy {
+  pub var unicode: usize? = none   // the selected charmap's subtable
+  pub var format: u32 = 0
+  pub var flags: u32 = 0           // TT_CMAP_FLAG_UNSORTED (1) / OVERLAPPING (2) of a format 4
+  pub var variations: usize? = none  // the format 14 subtable, when the charmap is Unicode
+  pub var symbol: bool = false     // the charmap is MS Symbol (hb_ft's `symbol`)
+  pub var cmap_start: usize = 0
+  pub var cmap_end: usize = 0
+  pub var num_glyphs: u32 = 0
+}
+
+fn u8_at(d: &[u8], o: usize): u32 => o < #d ? d[o] as u32 : 0;
+fn u16_at(d: &[u8], o: usize): u32 => o + 2 <= #d ? (d[o] as u32 << 8) | d[o + 1] as u32 : 0;
+fn s16_at(d: &[u8], o: usize): i32 => (u16_at(d, o) as u16 as i16) as i32;
+fn u24_at(d: &[u8], o: usize): u32 => (u16_at(d, o) << 8) | u8_at(d, o + 2);
+fn u32_at(d: &[u8], o: usize): u32 => (u16_at(d, o) << 16) | u16_at(d, o + 2);
+
+// One validated subtable (FT_CMap): its encoding record and FreeType encoding.
+struct Sub : Copy {
+  pub var platform: u32
+  pub var encoding: u32
+  pub var at: usize
+  pub var format: u32
+  pub var flags: u32
+  pub var unicode: bool   // FT_ENCODING_UNICODE
+  pub var symbol: bool    // FT_ENCODING_MS_SYMBOL
+}
+
+// tt_cmap4_validate at FT_VALIDATE_DEFAULT: the flags, or none if invalid.
+fn validate4(d: &[u8], t: usize, limit: usize): u32? {
+  if (t + 4 > limit) {
+    return none;
+  }
+  var length = u16_at(d, t + 2) as usize;
+  if (t + length > limit) {
+    length = limit - t;
+  }
+  if (length < limit - t) {
+    length = limit - t;
+  }
+  if (length < 16) {
+    return none;
+  }
+  let num_segs = (u16_at(d, t + 6) / 2) as usize;
+  if (length < 16 + num_segs * 2 * 4) {
+    return none;
+  }
+  let ends = t + 14;
+  let starts = t + 16 + num_segs * 2;
+  let deltas = starts + num_segs * 2;
+  let offsets = deltas + num_segs * 2;
+  let glyph_ids = offsets + num_segs * 2;
+  var flags = 0u32;
+  var last_start = 0u32;
+  var last_end = 0u32;
+  for (let n in 0..num_segs) {
+    let start = u16_at(d, starts + n * 2);
+    let end = u16_at(d, ends + n * 2);
+    let offset = u16_at(d, offsets + n * 2);
+    if (start > end) {
+      return none;
+    }
+    if (start <= last_end && n > 0) {
+      if (last_start > start || last_end > end) {
+        flags |= 1;
+      } else {
+        flags |= 2;
+      }
+    }
+    if (offset != 0 && offset != 0xFFFF) {
+      let p = offsets + n * 2 + offset as usize;
+      if (n != num_segs - 1 || !(start == 0xFFFF && end == 0xFFFF)) {
+        if (p < glyph_ids || p + (end - start + 1) as usize * 2 > limit) {
+          return none;
+        }
+      }
+    } else if (offset == 0xFFFF) {
+      if (n != num_segs - 1 || !(start == 0xFFFF && end == 0xFFFF)) {
+        return none;
+      }
+    }
+    last_start = start;
+    last_end = end;
+  }
+  return flags;
+}
+
+fn validate12(d: &[u8], t: usize, limit: usize): bool {
+  if (t + 16 > limit) {
+    return false;
+  }
+  let length = u32_at(d, t + 4) as usize;
+  let num_groups = u32_at(d, t + 12) as usize;
+  if (length > limit - t || length < 16 || (length - 16) / 12 < num_groups) {
+    return false;
+  }
+  var last = 0u32;
+  for (let n in 0..num_groups) {
+    let g = t + 16 + n * 12;
+    let start = u32_at(d, g);
+    let end = u32_at(d, g + 4);
+    if (start > end) {
+      return false;
+    }
+    if (n > 0 && start <= last) {
+      return false;
+    }
+    last = end;
+  }
+  return true;
+}
+
+fn validate14(d: &[u8], t: usize, limit: usize): bool {
+  if (t + 10 > limit) {
+    return false;
+  }
+  let length = u32_at(d, t + 2) as usize;
+  let num_selectors = u32_at(d, t + 6) as usize;
+  if (length > limit - t || length < 10 || (length - 10) / 11 < num_selectors) {
+    return false;
+  }
+  var last_sel = 1u32;
+  for (let n in 0..num_selectors) {
+    let r = t + 10 + n * 11;
+    let sel = u24_at(d, r);
+    let def_off = u32_at(d, r + 3) as usize;
+    let nondef_off = u32_at(d, r + 7) as usize;
+    if (def_off >= length || nondef_off >= length) {
+      return false;
+    }
+    if (sel < last_sel) {
+      return false;
+    }
+    last_sel = sel + 1;
+    if (def_off != 0) {
+      let p = t + def_off;
+      if (p + 4 > limit) {
+        return false;
+      }
+      let num = u32_at(d, p) as usize;
+      if (num > (limit - p - 4) / 4) {
+        return false;
+      }
+      var last_base = 0u32;
+      for (let i in 0..num) {
+        let base = u24_at(d, p + 4 + i * 4);
+        let cnt = u8_at(d, p + 4 + i * 4 + 3);
+        if (base + cnt >= 0x110000 || base < last_base) {
+          return false;
+        }
+        last_base = base + cnt + 1;
+      }
+    }
+    if (nondef_off != 0) {
+      let p = t + nondef_off;
+      if (p + 4 > limit) {
+        return false;
+      }
+      let num = u32_at(d, p) as usize;
+      if (num > (limit - p - 4) / 5) {
+        return false;
+      }
+      var last_uni = 0u32;
+      for (let i in 0..num) {
+        let uni = u24_at(d, p + 4 + i * 5);
+        if (uni >= 0x110000 || uni < last_uni) {
+          return false;
+        }
+        last_uni = uni + 1;
+      }
+    }
+  }
+  return true;
+}
+
+// sfnt_find_encoding: (unicode, symbol)
+fn encoding_of(platform: u32, encoding: u32): (bool, bool) => match (platform) {
+  0 | 2 => (true, false),
+  3 => (encoding == 1 || encoding == 10, encoding == 0),
+  _ => (false, false),
+};
+
+// tt_face_build_cmaps + find_unicode_charmap + find_variant_selector_charmap
+// over the cmap table at [start, end) of the font data.
+pub fn select_cmap(d: &[u8], start: usize, end: usize, num_glyphs: u32): Cmap {
+  var c = Cmap { cmap_start: start, cmap_end: end, num_glyphs };
+  let size = end - start;
+  if (size < 4) {
+    return c;
+  }
+  var subs: [Sub; 64] = [Sub { platform: 0, encoding: 0, at: 0, format: 0, flags: 0, unicode: false, symbol: false }; 64];
+  var n = 0usize;
+  var num = u16_at(d, start + 2);
+  var p = start + 4;
+  while (num > 0 && p + 8 <= end && n < 64) {
+    let platform = u16_at(d, p);
+    let encoding = u16_at(d, p + 2);
+    let offset = u32_at(d, p + 4) as usize;
+    p += 8;
+    num -= 1;
+    if (offset == 0 || offset > size - 2) {
+      continue;
+    }
+    let t = start + offset;
+    let format = u16_at(d, t);
+    var ok = false;
+    var flags = 0u32;
+    if (format == 4) {
+      if (let f = validate4(d, t, end)) {
+        ok = true;
+        flags = f;
+      }
+    } else if (format == 12 || format == 13) {
+      ok = validate12(d, t, end);
+    } else if (format == 14) {
+      ok = validate14(d, t, end);
+    } else if (format == 0) {
+      ok = t + 6 <= end && u16_at(d, t + 2) as usize <= end - t && u16_at(d, t + 2) >= 262;
+    } else if (format == 6) {
+      let count = u16_at(d, t + 8) as usize;
+      ok = t + 10 + count * 2 <= end;
+    }
+    if (!ok) {
+      continue;
+    }
+    let (uni, sym) = encoding_of(platform, encoding);
+    subs[n] = Sub { platform, encoding, at: t, format, flags, unicode: uni, symbol: sym };
+    n += 1;
+  }
+  // find_unicode_charmap: a UCS-4 charmap first, then any Unicode one, last first.
+  var chosen: usize? = none;
+  var i = n;
+  while (i > 0) {
+    i -= 1;
+    let s = subs[i];
+    if (s.unicode &&
+        ((s.platform == 3 && s.encoding == 10) || (s.platform == 0 && s.encoding == 4) ||
+         (s.platform == 0 && s.encoding == 6 && s.format == 13))) {
+      chosen = i;
+      break;
+    }
+  }
+  if (chosen == none) {
+    i = n;
+    while (i > 0) {
+      i -= 1;
+      if (subs[i].unicode) {
+        chosen = i;
+        break;
+      }
+    }
+  }
+  if (let k = chosen) {
+    c.unicode = subs[k].at;
+    c.format = subs[k].format;
+    c.flags = subs[k].flags;
+    c.symbol = subs[k].symbol;
+    for (let j in 0..n) {
+      if (subs[j].platform == 0 && subs[j].encoding == 5 && subs[j].format == 14) {
+        c.variations = subs[j].at;
+        break;
+      }
+    }
+  }
+  return c;
+}
+
+// tt_cmap4_char_map_linear (next = 0)
+fn cmap4_linear(d: &[u8], c&: Cmap, t: usize, code: u32): u32 {
+  let num_segs = (u16_at(d, t + 6) >> 1) as usize;
+  if (num_segs == 0) {
+    return 0;
+  }
+  let num_segs2 = num_segs * 2;
+  for (let i in 0..num_segs) {
+    let end = u16_at(d, t + 14 + i * 2);
+    let start = u16_at(d, t + 16 + num_segs2 + i * 2);
+    if (code < start) {
+      break;
+    }
+    if (code <= end) {
+      let rq = t + 16 + num_segs2 + i * 2 + num_segs2;  // delta
+      var delta = s16_at(d, rq);
+      let ro = rq + num_segs2;                            // offset
+      var offset = u16_at(d, ro);
+      if (i >= num_segs - 1 && start == 0xFFFF && end == 0xFFFF) {
+        if (offset != 0 && ro + offset as usize + 2 > c.cmap_end) {
+          delta = 1;
+          offset = 0;
+        }
+      }
+      if (offset == 0xFFFF) {
+        continue;
+      }
+      var gindex = 0u32;
+      if (offset != 0) {
+        gindex = u16_at(d, ro + offset as usize + (code - start) as usize * 2);
+        if (gindex != 0) {
+          gindex = ((gindex as i32 + delta) & 0xFFFF) as u32;
+          if (gindex >= c.num_glyphs) {
+            gindex = 0;
+          }
+        }
+      } else {
+        gindex = ((code as i32 + delta) & 0xFFFF) as u32;
+      }
+      return gindex;
+    }
+  }
+  return 0;
+}
+
+// tt_cmap4_char_map_binary (next = 0)
+fn cmap4_binary(d: &[u8], c&: Cmap, t: usize, code: u32): u32 {
+  let num_segs = (u16_at(d, t + 6) >> 1) as usize;
+  if (num_segs == 0) {
+    return 0;
+  }
+  let num_segs2 = num_segs * 2;
+  var min = 0usize;
+  var max = num_segs;
+  // The segment fields of segment k.
+  let end_of = fn(k: usize): u32 => u16_at(d, t + 14 + k * 2);
+  let start_of = fn(k: usize): u32 => u16_at(d, t + 16 + num_segs2 + k * 2);
+  let delta_at = fn(k: usize): usize => t + 16 + num_segs2 * 2 + k * 2;
+  while (min < max) {
+    var mid = (min + max) >> 1;
+    var end = end_of(mid);
+    var start = start_of(mid);
+    if (code < start) {
+      max = mid;
+    } else if (code > end) {
+      min = mid + 1;
+    } else {
+      var p = delta_at(mid);
+      var delta = s16_at(d, p);
+      p += num_segs2;
+      var offset = u16_at(d, p);
+      if (mid >= num_segs - 1 && start == 0xFFFF && end == 0xFFFF) {
+        if (offset != 0 && p + offset as usize + 2 > c.cmap_end) {
+          delta = 1;
+          offset = 0;
+        }
+      }
+      if ((c.flags & 2) != 0) {
+        // search the first segment containing `code'
+        let maxs = mid;
+        if (offset == 0xFFFF) {
+          mid = maxs + 1;
+        }
+        var i = maxs;
+        while (i > 0) {
+          let prev_end = end_of(i - 1);
+          if (code > prev_end) {
+            break;
+          }
+          end = prev_end;
+          start = start_of(i - 1);
+          p = delta_at(i - 1);
+          delta = s16_at(d, p);
+          p += num_segs2;
+          offset = u16_at(d, p);
+          if (offset != 0xFFFF) {
+            mid = i - 1;
+          }
+          i -= 1;
+        }
+        if (mid == maxs + 1) {
+          if (i != maxs) {
+            end = end_of(maxs);
+            start = start_of(maxs);
+            p = delta_at(maxs);
+            delta = s16_at(d, p);
+            p += num_segs2;
+            offset = u16_at(d, p);
+          }
+          mid = maxs;
+          i = maxs + 1;
+          while (i < num_segs) {
+            let next_end = end_of(i);
+            let next_start = start_of(i);
+            if (code < next_start) {
+              break;
+            }
+            end = next_end;
+            start = next_start;
+            p = delta_at(i);
+            delta = s16_at(d, p);
+            p += num_segs2;
+            offset = u16_at(d, p);
+            if (offset != 0xFFFF) {
+              mid = i;
+            }
+            i += 1;
+          }
+          i -= 1;
+          if (mid == maxs) {
+            return 0;  // still no luck: gindex stays 0
+          }
+        }
+        if (mid != i) {
+          end = end_of(mid);
+          start = start_of(mid);
+          p = delta_at(mid);
+          delta = s16_at(d, p);
+          p += num_segs2;
+          offset = u16_at(d, p);
+        }
+      } else if (offset == 0xFFFF) {
+        return 0;
+      }
+      if (offset != 0) {
+        var gindex = u16_at(d, p + offset as usize + (code - start) as usize * 2);
+        if (gindex != 0) {
+          gindex = ((gindex as i32 + delta) & 0xFFFF) as u32;
+          if (gindex >= c.num_glyphs) {
+            gindex = 0;
+          }
+        }
+        return gindex;
+      }
+      return ((code as i32 + delta) & 0xFFFF) as u32;
+    }
+  }
+  return 0;
+}
+
+// The subtable's char_index (no num_glyphs check: FT_Get_Char_Index adds it).
+fn char_index_raw(d: &[u8], c&: Cmap, t: usize, code: u32): u32 {
+  return match (c.format) {
+    0 => code < 256 ? u8_at(d, t + 6 + code as usize) : 0,
+    4 => code >= 0x10000 ? 0 : ((c.flags & 1) != 0 ? cmap4_linear(d, c, t, code) : cmap4_binary(d, c, t, code)),
+    6 => {
+      let first = u16_at(d, t + 6);
+      let count = u16_at(d, t + 8);
+      let idx = code -% first;
+      idx < count ? u16_at(d, t + 10 + idx as usize * 2) : 0
+    },
+    12 | 13 => {
+      let num_groups = u32_at(d, t + 12);
+      var min = 0u32;
+      var max = num_groups;
+      var gindex = 0u32;
+      while (min < max) {
+        let mid = (min + max) >> 1;
+        let g = t + 16 + 12 * mid as usize;
+        let start = u32_at(d, g);
+        let end = u32_at(d, g + 4);
+        if (code < start) {
+          max = mid;
+        } else if (code > end) {
+          min = mid + 1;
+        } else {
+          let start_id = u32_at(d, g + 8);
+          if (c.format == 13) {
+            gindex = start_id;
+          } else if (start_id > 0xFFFFFFFF - (code - start)) {
+            gindex = 0;
+          } else {
+            gindex = start_id + (code - start);
+          }
+          break;
+        }
+      }
+      gindex
+    },
+    _ => 0,
+  };
+}
+
+// FT_Get_Char_Index
+pub fn char_index(d: &[u8], c&: Cmap, code: u32): u32 {
+  let t = c.unicode else {
+    return 0;
+  };
+  let g = char_index_raw(d, c, t, code);
+  return g >= c.num_glyphs ? 0 : g;
+}
+
+// FT_Face_GetCharVariantIndex
+pub fn char_variant_index(d: &[u8], c&: Cmap, code: u32, selector: u32): u32 {
+  let t = c.unicode else {
+    return 0;
+  };
+  let v = c.variations else {
+    return 0;
+  };
+  if (c.symbol) {
+    return 0;
+  }
+  // tt_cmap14_find_variant
+  let num_var = u32_at(d, v + 6);
+  var min = 0u32;
+  var max = num_var;
+  var rec: usize? = none;
+  while (min < max) {
+    let mid = (min + max) >> 1;
+    let p = v + 10 + 11 * mid as usize;
+    let sel = u24_at(d, p);
+    if (selector < sel) {
+      max = mid;
+    } else if (selector > sel) {
+      min = mid + 1;
+    } else {
+      rec = p + 3;
+      break;
+    }
+  }
+  let r = rec else {
+    return 0;
+  };
+  let def_off = u32_at(d, r) as usize;
+  let nondef_off = u32_at(d, r + 4) as usize;
+  if (def_off != 0) {
+    let base = v + def_off;
+    let num = u32_at(d, base);
+    var lo = 0u32;
+    var hi = num;
+    while (lo < hi) {
+      let mid = (lo + hi) >> 1;
+      let p = base + 4 + 4 * mid as usize;
+      let start = u24_at(d, p);
+      let cnt = u8_at(d, p + 3);
+      if (code < start) {
+        hi = mid;
+      } else if (code > start + cnt) {
+        lo = mid + 1;
+      } else {
+        return char_index_raw(d, c, t, code);
+      }
+    }
+  }
+  if (nondef_off != 0) {
+    let base = v + nondef_off;
+    let num = u32_at(d, base);
+    var lo = 0u32;
+    var hi = num;
+    while (lo < hi) {
+      let mid = (lo + hi) >> 1;
+      let p = base + 4 + 5 * mid as usize;
+      let uni = u24_at(d, p);
+      if (code < uni) {
+        hi = mid;
+      } else if (code > uni) {
+        lo = mid + 1;
+      } else {
+        return u16_at(d, p + 3);
+      }
+    }
+  }
+  return 0;
+}
