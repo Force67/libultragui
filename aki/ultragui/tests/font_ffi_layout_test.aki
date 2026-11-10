@@ -5,8 +5,8 @@
 // are compared. Compile-time checks also run during the Windows target check.
 module font_ffi_layout_test;
 
-import {FtGeneric, FtVector, FtBBox, FtBitmap, FtGlyphMetrics, FtGlyphSlotRec, FtSizeMetrics, FtSizeRec, FtFaceRec, FtOpenArgs} from ultragui::sys::freetype;
-import {HbGlyphInfo, HbGlyphPosition} from ultragui::sys::harfbuzz;
+import {FtGeneric, FtVector, FtBBox, FtBitmap, FtGlyphMetrics, FtGlyphSlotRec, FtSizeMetrics, FtSizeRec, FtFaceRec, FtOpenArgs} from ultragui_ft_oracle::freetype;
+import {HbGlyphInfo, HbGlyphPosition} from ultragui_ft_oracle::harfbuzz;
 import {Expect} from ultragui_testing::expect;
 
 comptime let kWindows: bool = @target_os() == "windows";

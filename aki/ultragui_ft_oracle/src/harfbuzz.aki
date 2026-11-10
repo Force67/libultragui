@@ -2,9 +2,9 @@
 // hand (hb.h, hb-ft.h). Only what the text engine calls or reads is here.
 // Every field is 32 bits wide on every target, so one layout serves all.
 
-module ultragui::sys::harfbuzz;
+module ultragui_ft_oracle::harfbuzz;
 
-import {FtFace} from ultragui::sys::freetype;
+import {FtFace} from ultragui_ft_oracle::freetype;
 
 pub extern type HbFont;
 pub extern type HbBuffer;

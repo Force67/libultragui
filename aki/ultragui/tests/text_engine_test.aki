@@ -16,8 +16,8 @@ import {kNullTextureId} from ultragui::render::draw_data;
 import {Rhi, RhiConfig} from ultragui::rhi::rhi;
 import {RhiFilter, RhiFormat, RhiTextureHandle} from ultragui::rhi::rhi_types;
 import {FontStyle, FontWeight} from ultragui::style::enums;
-import {FtBitmap, FtFaceRec, FtGlyphSlotRec, FtOpenArgs, FtSizeMetrics, FtSizeRec} from ultragui::sys::freetype;
-import {HbGlyphInfo, HbGlyphPosition} from ultragui::sys::harfbuzz;
+import {FtBitmap, FtFaceRec, FtGlyphSlotRec, FtOpenArgs, FtSizeMetrics, FtSizeRec} from ultragui_ft_oracle::freetype;
+import {HbGlyphInfo, HbGlyphPosition} from ultragui_ft_oracle::harfbuzz;
 import {Glyph, TextEngine, TextLayoutConfig, TextRun, kInvalidFont} from ultragui::text::text_engine;
 import {Expect} from ultragui_testing::expect;
 

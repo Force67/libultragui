@@ -1,0 +1,7 @@
+// C's `long` and `unsigned long` on Windows (LLP64): 32 bits. os/lp64 holds
+// the twin for the other targets; aki.toml picks one per target OS.
+
+module ultragui_ft_oracle::c_long;
+
+pub type CLong = i32;
+pub type CULong = u32;

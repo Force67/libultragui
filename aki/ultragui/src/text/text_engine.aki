@@ -1,5 +1,7 @@
-// ugui/text/text_engine.{h,cc}: the font atlas and text shaping engine,
-// FreeType for rasterization and HarfBuzz for shaping (ultragui::sys).
+// ugui/text/text_engine.{h,cc}: the font atlas and text shaping engine. The
+// C++ rasterizes with FreeType and shapes with HarfBuzz; this engine does both
+// in aki (text::font_face over font:: and shape::), with the same results bit
+// for bit (PORTING.md, "Text without FreeType and HarfBuzz").
 //
 // Differences in shape from the C++, none in behavior:
 //
@@ -20,23 +22,17 @@ import {HashMap} from akikit::containers::hash_map;
 import {List, filled} from akikit::containers::list;
 import {Arc, make_arc} from akikit::memory::arc;
 import {eprintln, println} from akikit::logging;
-import {String, from_str, with_nul} from akikit::strings::string;
+import {read_bytes} from akikit::filesystem::file_util;
+import {String, from_str} from akikit::strings::string;
 import {Vec2} from ultragui::core::math;
 import {TextureId} from ultragui::render::draw_data;
 import {texture_id_from_rhi_handle} from ultragui::render::texture_backend;
 import {Rhi} from ultragui::rhi::rhi;
 import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
 import {FontStyle, FontWeight, TextAlign} from ultragui::style::enums;
-import {CLong} from ultragui::sys::c_long;
-import {
-  FtFace, FtLibrary, FtOpenArgs, ft_done_face, ft_done_freetype, ft_init_freetype, ft_load_glyph, ft_open_face,
-  ft_set_pixel_sizes, kFtLoadRender, kFtOpenMemory, kFtOpenPathname,
-} from ultragui::sys::freetype;
-import {
-  HbFont, HbGlyphInfo, HbGlyphPosition, hb_buffer_add_utf8, hb_buffer_create, hb_buffer_destroy, hb_buffer_get_glyph_infos,
-  hb_buffer_get_glyph_positions, hb_buffer_guess_segment_properties, hb_font_destroy, hb_ft_font_changed,
-  hb_ft_font_create_referenced, hb_shape,
-} from ultragui::sys::harfbuzz;
+import {SizeMetrics} from ultragui::font::face;
+import {ShapedGlyph} from ultragui::shape::shape;
+import {FontFace} from ultragui::text::font_face;
 
 // Opaque handle to a loaded font face
 pub type FontHandle = u32;
@@ -161,13 +157,10 @@ struct CachedGlyph : Copy {
   pub var advance_x: f32 = 0.0
 }
 
+// A font slot: the face (FT_Face + its hb_ft font in the C++).
 struct FontSlot {
-  pub unowned var ft_face: FtFace = null
-  pub unowned var hb_font: *var HbFont = null
+  pub var face: FontFace? = none
   pub var in_use: bool = false
-  // Only set for a font loaded from memory. FreeType reads the buffer for the
-  // life of the face instead of copying it, so the slot has to hold it.
-  pub var data: List<u8> = List()
 }
 
 struct FontInfo {
@@ -226,7 +219,6 @@ fn hash_text(text: str): u64 {
 }
 
 struct EngineState {
-  pub unowned var ft_library: FtLibrary = null
   pub var fonts: List<FontSlot> = List()
   pub var font_info: List<FontInfo> = List()
 
@@ -248,30 +240,6 @@ struct EngineState {
   // The size FT_Set_Pixel_Sizes last saw per font, so a run at the size the
   // face is already set to skips the size change and the HarfBuzz reload.
   pub var font_pixel_size: List<u32> = List()
-
-  fn ~EngineState();
-}
-
-// TextEngine::Shutdown's FreeType part: the faces' HarfBuzz fonts, the faces,
-// then the library.
-fn EngineState::~EngineState() {
-  for (let slot in self.fonts) {
-    if (slot.in_use) {
-      unsafe {
-        if (slot.hb_font != null) {
-          hb_font_destroy(slot.hb_font);
-        }
-        if (slot.ft_face != null) {
-          let _ = ft_done_face(slot.ft_face);
-        }
-      }
-    }
-  }
-  if (self.ft_library != null) {
-    unsafe {
-      let _ = ft_done_freetype(self.ft_library);
-    }
-  }
 }
 
 // --- TextEngine ----------------------------------------------------------------
@@ -355,14 +323,10 @@ pub struct TextEngine {
   pub fn shape_hits(self&): u32;
 }
 
+// Never fails: there is no FreeType library to start (the C++ returns false
+// when FT_Init_FreeType fails).
 fn TextEngine::init(var self&): bool {
-  var library: FtLibrary = null;
-  if (unsafe ft_init_freetype(&raw var library) != 0) {
-    eprintln("ultragui: FT_Init_FreeType failed");
-    self.state = none;
-    return false;
-  }
-  var st = EngineState { ft_library: library };
+  var st = EngineState {};
   for (let i in 0..kMaxFonts) {
     st.fonts.push(FontSlot {});
     st.font_info.push(FontInfo {});
@@ -407,69 +371,49 @@ fn TextEngine::open_face(var self&, path: str?, data: bytes, origin: str): FontH
     return kInvalidFont;
   }
 
-  var slot& = st.fonts.at_var(handle as usize);
-  var args = FtOpenArgs {
-    flags: 0, memory_base: null, memory_size: 0, pathname: null, stream: null, driver: null, num_params: 0, params: null,
-  };
-  // The path's NUL-terminated copy lives until FT_Open_Face returns.
-  var c_path = String();
+  // FT_Open_Face reads a path itself and a memory font in place; the aki face
+  // owns a copy of the bytes either way.
+  var bytes_in: List<u8> = List();
   if (let p = path) {
-    c_path = with_nul(p);
-    args.flags = kFtOpenPathname;
-    args.pathname = unsafe (@ptr(c_path.as_str()) as *const c_char);
-  } else {
-    // Copied before the face is opened: FT_Open_Face reads through the
-    // pointer at once, and it must stay the slot's own buffer.
-    slot.data.clear();
-    for (let b in data) {
-      slot.data.push(b as u8);
+    if (let raw = read_bytes(p)) {
+      bytes_in.reserve(raw.len());
+      for (let b in raw) {
+        bytes_in.push(b as u8);
+      }
     }
-    args.flags = kFtOpenMemory;
-    args.memory_base = unsafe (@ptr(slot.data.as_slice()) as *const u8);
-    args.memory_size = slot.data.len() as CLong;
+  } else {
+    bytes_in.reserve(#data);
+    for (let b in data) {
+      bytes_in.push(b as u8);
+    }
   }
-
-  var face: FtFace = null;
-  if (unsafe ft_open_face(st.ft_library, &raw args, 0, &raw var face) != 0) {
+  var slot& = st.fonts.at_var(handle as usize);
+  let face = FontFace::open(bytes_in) else {
     eprintln(f"ultragui: failed to load font '{origin}'");
-    slot.data = List();  // clear + shrink_to_fit
-    slot.ft_face = null;
+    slot.face = none;
     return kInvalidFont;
-  }
-  slot.ft_face = face;
-  slot.hb_font = unsafe hb_ft_font_create_referenced(face);
-  slot.in_use = true;
-
+  };
   // Store family metadata with default weight/style. printf("%s") of a null
   // family name prints "(null)" with glibc.
-  let family_ptr = unsafe (*face).family_name;
   var family = String();
-  if (family_ptr != null) {
-    family = unsafe from_c_string(family_ptr);
+  var has_family = false;
+  if (let name = face.family_name()) {
+    has_family = true;
+    if (!family.push_utf8(name.as_slice() as bytes)) {
+      family = String();
+    }
   }
+  slot.face = face;
+  slot.in_use = true;
+
   var info& = st.font_info.at_var(handle as usize);
   info.family_name = family.clone();
   info.weight = FontWeight::Regular;
   info.style = FontStyle::Normal;
 
-  let shown = family_ptr == null ? from_str("(null)") : family;
+  let shown = has_family ? family : from_str("(null)");
   println(f"ultragui: loaded font '{origin}' ({shown})");
   return handle;
-}
-
-extern("strlen") fn c_strlen(s: *const c_char): usize;
-
-// A NUL-terminated C string as text; bytes that are not UTF-8 make the text
-// empty (FreeType family names are ASCII in practice).
-unsafe fn from_c_string(s: *const c_char): String {
-  unsafe {
-    let raw = @slice(s as *const byte, c_strlen(s));
-    var out = String();
-    if (!out.push_utf8(raw)) {
-      return String();
-    }
-    return out;
-  }
 }
 
 fn TextEngine::load_font(var self&, path: str): FontHandle {
@@ -556,17 +500,16 @@ fn EngineState::rasterize_glyph(var self&, font: FontHandle, glyph_id: u32, pixe
     return hit;
   }
 
-  let face = self.fonts[font as usize].ft_face;
+  var face& = self.fonts.at_var(font as usize).face else {
+    return none;
+  };
   if (self.font_pixel_size[font as usize] != pixel_size) {
-    let _ = unsafe ft_set_pixel_sizes(face, 0, pixel_size);
+    face.set_pixel_size(pixel_size);
     self.font_pixel_size[font as usize] = pixel_size;
   }
-  if (unsafe ft_load_glyph(face, glyph_id, kFtLoadRender) != 0) {
+  let bmp = face.render(glyph_id) else {
     return none;
-  }
-
-  let slot = unsafe *(*face).glyph;
-  let bmp = slot.bitmap;
+  };
   let bw = bmp.width;
   let bh = bmp.rows;
 
@@ -592,7 +535,8 @@ fn EngineState::rasterize_glyph(var self&, font: FontHandle, glyph_id: u32, pixe
   let max: u32 = (1u32 << bits) - 1;
   for (let row in 0..bh) {
     let dst = ((self.atlas_cursor_y + row) * kAtlasSize + self.atlas_cursor_x) as usize;
-    let src = unsafe @slice(bmp.buffer + (row as i64 * bmp.pitch as i64) as usize, row_bytes);
+    let at = (row as i64 * bmp.pitch as i64) as usize;
+    let src = bmp.buffer.as_slice()[at..at + row_bytes];
     let out = self.atlas_pixels.as_slice_var()[dst..dst + bw as usize];
     for (let i in 0..bw as usize) {
       if (bits == 8) {
@@ -612,9 +556,9 @@ fn EngineState::rasterize_glyph(var self&, font: FontHandle, glyph_id: u32, pixe
     v1: (self.atlas_cursor_y + bh) as f32 / kAtlasSize as f32,
     bmp_w: bw as f32,
     bmp_h: bh as f32,
-    bearing_x: slot.bitmap_left as f32,
-    bearing_y: slot.bitmap_top as f32,
-    advance_x: slot.advance.x as f32 / 64.0,
+    bearing_x: bmp.left as f32,
+    bearing_y: bmp.top as f32,
+    advance_x: bmp.advance_x as f32 / 64.0,
   };
 
   self.atlas_cursor_x += bw + 1;
@@ -699,66 +643,58 @@ fn TextEngine::shape(var self&, font: FontHandle, text: str, font_size: f32, let
     return TextRun::from_parts(cr.glyphs.share(), cr.total_advance, cr.ascent, cr.descent, cr.line_height);
   }
 
-  let ft_face = st.fonts[font as usize].ft_face;
-  let hb_font = st.fonts[font as usize].hb_font;
-
   // FT_Set_Pixel_Sizes and the HarfBuzz reload behind it are not cheap, and a
   // screen mostly asks for one size per face.
   if (st.font_pixel_size[font as usize] != pixel_size) {
-    unsafe {
-      let _ = ft_set_pixel_sizes(ft_face, 0, pixel_size);
-      hb_ft_font_changed(hb_font);
+    if (var face& = st.fonts.at_var(font as usize).face) {
+      face.set_pixel_size(pixel_size);
+      face.font_changed();
     }
     st.font_pixel_size[font as usize] = pixel_size;
   }
 
+  var shaped: List<ShapedGlyph> = List();
+  if (var face& = st.fonts.at_var(font as usize).face) {
+    shaped = face.shape(text as &[u8]);
+  }
   var glyphs: List<Glyph> = List();
   var all_packed = true;
   var cursor_x = 0.0f32;
-  unsafe {
-    let buf = hb_buffer_create();
-    hb_buffer_add_utf8(buf, @ptr(text) as *const c_char, text_len as i32, 0, text_len as i32);
-    hb_buffer_guess_segment_properties(buf);
-    hb_shape(hb_font, buf, null, 0);
+  glyphs.reserve(shaped.len());
+  for (let sg in shaped) {
+    var g = Glyph {};
+    g.glyph_id = sg.glyph_id;
+    // HarfBuzz positions are in FreeType 26.6 fixed-point at the
+    // DPI-scaled size; scale back to window coords.
+    g.x_offset = sg.x_offset as f32 / 64.0 * inv_dpi;
+    g.y_offset = sg.y_offset as f32 / 64.0 * inv_dpi;
+    g.x_advance = sg.x_advance as f32 / 64.0 * inv_dpi + letter_spacing;
 
-    var glyph_count: u32 = 0;
-    let infos = @slice(hb_buffer_get_glyph_infos(buf, &raw var glyph_count) as *const HbGlyphInfo, glyph_count as usize);
-    let positions = @slice(hb_buffer_get_glyph_positions(buf, &raw var glyph_count) as *const HbGlyphPosition, glyph_count as usize);
-
-    glyphs.reserve(glyph_count as usize);
-    for (let i in 0..glyph_count as usize) {
-      var g = Glyph {};
-      g.glyph_id = infos[i].codepoint;
-      // HarfBuzz positions are in FreeType 26.6 fixed-point at the
-      // DPI-scaled size; scale back to window coords.
-      g.x_offset = positions[i].x_offset as f32 / 64.0 * inv_dpi;
-      g.y_offset = positions[i].y_offset as f32 / 64.0 * inv_dpi;
-      g.x_advance = positions[i].x_advance as f32 / 64.0 * inv_dpi + letter_spacing;
-
-      if (let cached = st.rasterize_glyph(font, g.glyph_id, pixel_size)) {
-        g.u0 = cached.u0;
-        g.v0 = cached.v0;
-        g.u1 = cached.u1;
-        g.v1 = cached.v1;
-        // Atlas stores full-resolution bitmaps; scale dimensions to window
-        // coords so the vertex quad covers the right screen area.
-        g.bmp_w = cached.bmp_w * inv_dpi;
-        g.bmp_h = cached.bmp_h * inv_dpi;
-        g.bearing_x = cached.bearing_x * inv_dpi;
-        g.bearing_y = cached.bearing_y * inv_dpi;
-      } else {
-        all_packed = false;
-      }
-
-      cursor_x += g.x_advance;
-      glyphs.push(g);
+    if (let cached = st.rasterize_glyph(font, g.glyph_id, pixel_size)) {
+      g.u0 = cached.u0;
+      g.v0 = cached.v0;
+      g.u1 = cached.u1;
+      g.v1 = cached.v1;
+      // Atlas stores full-resolution bitmaps; scale dimensions to window
+      // coords so the vertex quad covers the right screen area.
+      g.bmp_w = cached.bmp_w * inv_dpi;
+      g.bmp_h = cached.bmp_h * inv_dpi;
+      g.bearing_x = cached.bearing_x * inv_dpi;
+      g.bearing_y = cached.bearing_y * inv_dpi;
+    } else {
+      all_packed = false;
     }
-    hb_buffer_destroy(buf);
+
+    cursor_x += g.x_advance;
+    glyphs.push(g);
   }
 
   // Font metrics from FreeType are at the DPI-scaled size; convert to window
   // coords.
-  let metrics = unsafe (*(*ft_face).size).metrics;
+  var metrics = SizeMetrics {};
+  if (let face& = st.fonts[font as usize].face) {
+    metrics = face.size_metrics();
+  }
   let ascent = metrics.ascender as f32 / 64.0 * inv_dpi;
   let descent = metrics.descender as f32 / 64.0 * inv_dpi;
   let line_height = metrics.height as f32 / 64.0 * inv_dpi * line_height_mult;

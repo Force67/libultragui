@@ -4,16 +4,16 @@
 //
 // Layouts are C's, as `extern struct`s, and portable: FT_Long, FT_Pos and
 // FT_Fixed are C `long`, which is 64 bits on LP64 (Linux, macOS, FreeBSD,
-// Android) and 32 bits on Windows; CLong (ultragui::sys::c_long, one module
+// Android) and 32 bits on Windows; CLong (ultragui_ft_oracle::c_long, one module
 // per OS under os/) follows the target. Records FreeType allocates and the
 // engine only reads through a pointer (FT_FaceRec, FT_GlyphSlotRec,
 // FT_SizeRec) are declared up to the last field read: a prefix of the C
 // struct has the same offsets. FT_Open_Args, which the engine fills in and
 // passes, is declared whole.
 
-module ultragui::sys::freetype;
+module ultragui_ft_oracle::freetype;
 
-import {CLong} from ultragui::sys::c_long;
+import {CLong} from ultragui_ft_oracle::c_long;
 
 pub type FtError = i32;
 

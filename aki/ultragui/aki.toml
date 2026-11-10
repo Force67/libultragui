@@ -1,7 +1,9 @@
 # libultragui's core, ported from ugui/ (C++) to aki. Everything here needs only
-# FreeType, HarfBuzz and libc: no C++ compiler. Layout runs on an aki flexbox
-# engine (src/layout/flex_tree.aki) that gives yoga's results bit for bit;
-# third_party/yoga is only the test oracle (tools/yoga_fuzz.cc).
+# libc and libm: no C++ compiler, no third-party library. Layout runs on an
+# aki flexbox engine (src/layout/flex_tree.aki) that gives yoga's results bit
+# for bit; text on an aki font engine, rasterizer and shaper (src/font,
+# src/shape) that give FreeType's and HarfBuzz's bit for bit. yoga, FreeType
+# and HarfBuzz are only the tests' oracles (tools/*, ../ultragui_ft_oracle).
 # Optional backends (GLFW, Vulkan, OpenGL, D3D11/12, Lua, Lottie, video, audio)
 # are separate packages that depend on this one. See ../PORTING.md.
 [package]
@@ -12,12 +14,12 @@ description = "libultragui's core in aki: style, text, widgets ECS, seams for RH
 
 [dev-dependencies]
 ultragui_testing = { path = "../ultragui_testing" }
+ultragui_ft_oracle = { path = "../ultragui_ft_oracle" }
 
 [build]
-link = ["-lfreetype", "-lharfbuzz", "-lm"]
+link = ["-lm"]
 
-# C `long` differs per OS (FreeType's FT_Long, FT_Pos, FT_Fixed): see
-# src/sys/freetype.aki.
+# C `long` differs per OS (sys::c_long, for libc calls).
 [build.os.linux]
 sources = ["os/linux"]
 

@@ -6,10 +6,10 @@
 module support::shape_ft;
 
 import {GlyphExtents, ShapeFontFuncs} from ultragui::shape::font_funcs;
-import {CLong} from ultragui::sys::c_long;
+import {CLong} from ultragui_ft_oracle::c_long;
 import {
   FtFace, FtLibrary, ft_done_face, ft_init_freetype, ft_load_glyph, ft_set_pixel_sizes,
-} from ultragui::sys::freetype;
+} from ultragui_ft_oracle::freetype;
 import {with_nul} from akikit::strings::string;
 
 extern("FT_New_Face") fn ft_new_face(library: FtLibrary, path: *const c_char, index: CLong, face: *var FtFace): i32;

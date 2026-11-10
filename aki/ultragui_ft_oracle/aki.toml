@@ -1,0 +1,29 @@
+# Test-only bindings of the real FreeType and HarfBuzz (no C++ counterpart).
+# The core package renders and shapes text in aki (font::, shape::) and links
+# neither library; its differential tests compare against the real ones, and
+# take these bindings through [dev-dependencies], so only `akiko test` links
+# FreeType and HarfBuzz.
+[package]
+name = "ultragui_ft_oracle"
+kind = "lib"
+version = "0.1.0"
+description = "FreeType and HarfBuzz bindings for the ultragui core's differential tests"
+
+[build]
+link = ["-lfreetype", "-lharfbuzz"]
+
+# C `long` differs per OS (FreeType's FT_Long, FT_Pos, FT_Fixed).
+[build.os.linux]
+sources = ["os/linux"]
+
+[build.os.android]
+sources = ["os/android"]
+
+[build.os.macos]
+sources = ["os/macos"]
+
+[build.os.freebsd]
+sources = ["os/freebsd"]
+
+[build.os.windows]
+sources = ["os/windows"]
