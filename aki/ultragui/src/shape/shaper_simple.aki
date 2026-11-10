@@ -1,0 +1,449 @@
+// The small script shapers: Hebrew (hb-ot-shaper-hebrew.cc: presentation
+// form composition for fonts without GPOS marks, mark reordering), Thai and
+// Lao (hb-ot-shaper-thai.cc: SARA AM decomposition, and the PUA fallback for
+// Thai fonts without Thai GSUB), Hangul (hb-ot-shaper-hangul.cc: jamo
+// composition/decomposition, tone marks, ljmo/vjmo/tjmo).
+
+module ultragui::shape::shaper_simple;
+
+import {Buffer, GlyphInfo} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {MapBuilder} from ultragui::shape::map;
+import {ShapePlan} from ultragui::shape::plan;
+import {info_cc, set_continuation, set_gc} from ultragui::shape::props;
+import {compose, kGcNonSpacingMark, tag} from ultragui::shape::ucd;
+
+// --- Hebrew -------------------------------------------------------------------------------------
+
+static let kDageshForms: [u32; 27] = [
+  0xFB30, 0xFB31, 0xFB32, 0xFB33, 0xFB34, 0xFB35, 0xFB36, 0x0000, 0xFB38, 0xFB39, 0xFB3A, 0xFB3B, 0xFB3C, 0x0000, 0xFB3E, 0x0000,
+  0xFB40, 0xFB41, 0x0000, 0xFB43, 0xFB44, 0x0000, 0xFB46, 0xFB47, 0xFB48, 0xFB49, 0xFB4A,
+];
+
+// compose_hebrew
+pub fn compose_hebrew(plan&: ShapePlan, a: u32, b: u32): u32? {
+  if (let ab = compose(a, b)) {
+    return ab;
+  }
+  if (plan.has_gpos_mark) {
+    return none;
+  }
+  return match (b) {
+    0x05B4 => a == 0x05D9 ? 0xFB1Du32 : none,
+    0x05B7 => a == 0x05F2 ? 0xFB1Fu32 : (a == 0x05D0 ? 0xFB2Eu32 : none),
+    0x05B8 => a == 0x05D0 ? 0xFB2Fu32 : none,
+    0x05B9 => a == 0x05D5 ? 0xFB4Bu32 : none,
+    0x05BC => {
+      if (a >= 0x05D0 && a <= 0x05EA) {
+        let f = kDageshForms[(a - 0x05D0) as usize];
+        f != 0 ? f : none
+      } else if (a == 0xFB2A) {
+        0xFB2Cu32
+      } else if (a == 0xFB2B) {
+        0xFB2Du32
+      } else {
+        none
+      }
+    },
+    0x05BF => match (a) {
+      0x05D1 => 0xFB4Cu32,
+      0x05DB => 0xFB4Du32,
+      0x05E4 => 0xFB4Eu32,
+      _ => none,
+    },
+    0x05C1 => a == 0x05E9 ? 0xFB2Au32 : (a == 0xFB49 ? 0xFB2Cu32 : none),
+    0x05C2 => a == 0x05E9 ? 0xFB2Bu32 : (a == 0xFB49 ? 0xFB2Du32 : none),
+    _ => none,
+  };
+}
+
+// reorder_marks_hebrew
+pub fn reorder_marks_hebrew(var buf&: Buffer, start: usize, end: usize) {
+  var i = start + 2;
+  while (i < end) {
+    let c0 = info_cc(buf.info[i - 2]);
+    let c1 = info_cc(buf.info[i - 1]);
+    let c2 = info_cc(buf.info[i]);
+    // patach or qamats (CCC17, CCC18), sheva or hiriq (CCC10, CCC14), meteg (CCC22) or below
+    if ((c0 == 20 || c0 == 21) && (c1 == 22 || c1 == 23) && (c2 == 25 || c2 == 220)) {
+      buf.merge_clusters(i - 1, i + 1);
+      buf.info.swap(i - 1, i);
+      break;
+    }
+    i += 1;
+  }
+}
+
+// --- Thai and Lao ---------------------------------------------------------------------------------
+
+comptime let kNc: u32 = 0;
+comptime let kAc: u32 = 1;
+comptime let kRc: u32 = 2;
+comptime let kDc: u32 = 3;
+comptime let kNotConsonant: u32 = 4;
+
+fn consonant_type(u: u32): u32 {
+  if (u == 0x0E1B || u == 0x0E1D || u == 0x0E1F) {
+    return kAc;
+  }
+  if (u == 0x0E0D || u == 0x0E10) {
+    return kRc;
+  }
+  if (u == 0x0E0E || u == 0x0E0F) {
+    return kDc;
+  }
+  if (u >= 0x0E01 && u <= 0x0E2E) {
+    return kNc;
+  }
+  return kNotConsonant;
+}
+
+comptime let kAv: u32 = 0;
+comptime let kBv: u32 = 1;
+comptime let kT: u32 = 2;
+comptime let kNotMark: u32 = 3;
+
+fn mark_type(u: u32): u32 {
+  if (u == 0x0E31 || (u >= 0x0E34 && u <= 0x0E37) || u == 0x0E47 || (u >= 0x0E4D && u <= 0x0E4E)) {
+    return kAv;
+  }
+  if (u >= 0x0E38 && u <= 0x0E3A) {
+    return kBv;
+  }
+  if (u >= 0x0E48 && u <= 0x0E4C) {
+    return kT;
+  }
+  return kNotMark;
+}
+
+comptime let kNop: u32 = 0;
+comptime let kSd: u32 = 1;
+comptime let kSl: u32 = 2;
+comptime let kSdl: u32 = 3;
+comptime let kRd: u32 = 4;
+
+// (u, Windows PUA, Mac PUA) per action.
+static let kSdMappings: [u32; 24] = [
+  0x0E48, 0xF70A, 0xF88B, 0x0E49, 0xF70B, 0xF88E, 0x0E4A, 0xF70C, 0xF891, 0x0E4B, 0xF70D, 0xF894, 0x0E4C, 0xF70E, 0xF897,
+  0x0E38, 0xF718, 0xF89B, 0x0E39, 0xF719, 0xF89C, 0x0E3A, 0xF71A, 0xF89D,
+];
+static let kSdlMappings: [u32; 15] = [
+  0x0E48, 0xF705, 0xF88C, 0x0E49, 0xF706, 0xF88F, 0x0E4A, 0xF707, 0xF892, 0x0E4B, 0xF708, 0xF895, 0x0E4C, 0xF709, 0xF898,
+];
+static let kSlMappings: [u32; 36] = [
+  0x0E48, 0xF713, 0xF88A, 0x0E49, 0xF714, 0xF88D, 0x0E4A, 0xF715, 0xF890, 0x0E4B, 0xF716, 0xF893, 0x0E4C, 0xF717, 0xF896,
+  0x0E31, 0xF710, 0xF884, 0x0E34, 0xF701, 0xF885, 0x0E35, 0xF702, 0xF886, 0x0E36, 0xF703, 0xF887, 0x0E37, 0xF704, 0xF888,
+  0x0E47, 0xF712, 0xF889, 0x0E4D, 0xF711, 0xF899,
+];
+static let kRdMappings: [u32; 6] = [0x0E0D, 0xF70F, 0xF89A, 0x0E10, 0xF700, 0xF89E];
+
+fn pua_lookup(face&: ShapeFace, u: u32, m: &[u32]): u32 {
+  var i = 0usize;
+  while (i + 2 < #m) {
+    if (m[i] == u) {
+      if (face.has_glyph(m[i + 1])) {
+        return m[i + 1];
+      }
+      if (face.has_glyph(m[i + 2])) {
+        return m[i + 2];
+      }
+      break;
+    }
+    i += 3;
+  }
+  return u;
+}
+
+// thai_pua_shape
+fn thai_pua_shape(face&: ShapeFace, u: u32, action: u32): u32 => match (action) {
+  kSd => pua_lookup(face, u, kSdMappings[..]),
+  kSdl => pua_lookup(face, u, kSdlMappings[..]),
+  kSl => pua_lookup(face, u, kSlMappings[..]),
+  kRd => pua_lookup(face, u, kRdMappings[..]),
+  _ => u,
+};
+
+// T0..T3 x AV, BV, T: (action, next)
+static let kAboveMachine: [(u32, u32); 12] = [
+  (kNop, 3), (kNop, 0), (kSd, 3),
+  (kSl, 2), (kNop, 1), (kSdl, 2),
+  (kNop, 3), (kNop, 2), (kSl, 3),
+  (kNop, 3), (kNop, 3), (kNop, 3),
+];
+static let kAboveStart: [u32; 5] = [0, 1, 0, 0, 3];
+// B0..B2 x AV, BV, T
+static let kBelowMachine: [(u32, u32); 9] = [
+  (kNop, 0), (kNop, 2), (kNop, 0),
+  (kNop, 1), (kRd, 2), (kNop, 1),
+  (kNop, 2), (kSd, 2), (kNop, 2),
+];
+static let kBelowStart: [u32; 5] = [0, 0, 1, 2, 2];
+
+// do_thai_pua_shaping
+fn thai_pua_shaping(face&: ShapeFace, var buf&: Buffer) {
+  var above_state = kAboveStart[kNotConsonant as usize];
+  var below_state = kBelowStart[kNotConsonant as usize];
+  var base = 0usize;
+  for (let i in 0..buf.len()) {
+    let mt = mark_type(buf.info[i].codepoint);
+    if (mt == kNotMark) {
+      let ct = consonant_type(buf.info[i].codepoint);
+      above_state = kAboveStart[ct as usize];
+      below_state = kBelowStart[ct as usize];
+      base = i;
+      continue;
+    }
+    let above_edge = kAboveMachine[(above_state * 3 + mt) as usize];
+    let below_edge = kBelowMachine[(below_state * 3 + mt) as usize];
+    above_state = above_edge.1;
+    below_state = below_edge.1;
+    let action = above_edge.0 != kNop ? above_edge.0 : below_edge.0;
+    if (action == kRd) {
+      buf.info[base].codepoint = thai_pua_shape(face, buf.info[base].codepoint, action);
+    } else {
+      buf.info[i].codepoint = thai_pua_shape(face, buf.info[i].codepoint, action);
+    }
+  }
+}
+
+fn is_sara_am(x: u32): bool => (x & ~0x0080u32) == 0x0E33;
+fn is_above_base_mark(x_: u32): bool {
+  let x = x_ & ~0x0080u32;
+  return (x >= 0x0E34 && x <= 0x0E37) || (x >= 0x0E47 && x <= 0x0E4E) || x == 0x0E31 || x == 0x0E3B;
+}
+
+// preprocess_text_thai
+pub fn preprocess_text_thai(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
+  buf.clear_output();
+  let count = buf.len();
+  buf.idx = 0;
+  while (buf.idx < count) {
+    let u = buf.info[buf.idx].codepoint;
+    if (!is_sara_am(u)) {
+      buf.next_glyph();
+      continue;
+    }
+    // Is SARA AM. Decompose and reorder.
+    buf.output_glyph(u - 0x0E33 + 0x0E4D);
+    let n = buf.out_info.len();
+    var nk = buf.out_info[n - 1];
+    set_continuation(nk, buf);
+    buf.out_info[n - 1] = nk;
+    buf.replace_glyph(u - 1);
+    let end = buf.out_info.len();
+    // Make Nikhahit be recognized as a ccc=0 mark when zeroing widths.
+    var m = buf.out_info[end - 2];
+    set_gc(m, kGcNonSpacingMark);
+    buf.out_info[end - 2] = m;
+    var start = end - 2;
+    while (start > 0 && is_above_base_mark(buf.out_info[start - 1].codepoint)) {
+      start -= 1;
+    }
+    if (start + 2 < end) {
+      // Move Nikhahit (end-2) to the beginning
+      buf.merge_out_clusters(start, end);
+      let t = buf.out_info[end - 2];
+      var k = end - 2;
+      while (k > start) {
+        buf.out_info[k] = buf.out_info[k - 1];
+        k -= 1;
+      }
+      buf.out_info[start] = t;
+    }
+    if (start > 0) {
+      buf.merge_out_clusters(start - 1, end);
+    }
+  }
+  buf.sync();
+  // If font has Thai GSUB, we are done.
+  if (plan.script == tag("Thai") && !plan.map.found_script0) {
+    thai_pua_shaping(face, buf);
+  }
+}
+
+// --- Hangul -------------------------------------------------------------------------------------
+
+comptime let kLjmo: u32 = 1;
+comptime let kVjmo: u32 = 2;
+comptime let kTjmo: u32 = 3;
+
+pub fn collect_features_hangul(var b&: MapBuilder) {
+  b.add_feature(tag("ljmo"));
+  b.add_feature(tag("vjmo"));
+  b.add_feature(tag("tjmo"));
+}
+
+pub fn override_features_hangul(var b&: MapBuilder) {
+  b.disable_feature(tag("calt"));
+}
+
+comptime let kLBase: u32 = 0x1100;
+comptime let kVBase: u32 = 0x1161;
+comptime let kTBase: u32 = 0x11A7;
+comptime let kLCount: u32 = 19;
+comptime let kVCount: u32 = 21;
+comptime let kTCount: u32 = 28;
+comptime let kSBase: u32 = 0xAC00;
+comptime let kNCount: u32 = kVCount * kTCount;
+comptime let kSCount: u32 = kLCount * kNCount;
+
+fn is_combining_l(u: u32): bool => u >= kLBase && u <= kLBase + kLCount - 1;
+fn is_combining_v(u: u32): bool => u >= kVBase && u <= kVBase + kVCount - 1;
+fn is_combining_t(u: u32): bool => u >= kTBase + 1 && u <= kTBase + kTCount - 1;
+fn is_combined_s(u: u32): bool => u >= kSBase && u <= kSBase + kSCount - 1;
+fn is_l(u: u32): bool => (u >= 0x1100 && u <= 0x115F) || (u >= 0xA960 && u <= 0xA97C);
+fn is_v(u: u32): bool => (u >= 0x1160 && u <= 0x11A7) || (u >= 0xD7B0 && u <= 0xD7C6);
+fn is_t(u: u32): bool => (u >= 0x11A8 && u <= 0x11FF) || (u >= 0xD7CB && u <= 0xD7FB);
+fn is_hangul_tone(u: u32): bool => u >= 0x302E && u <= 0x302F;
+
+fn is_zero_width_char<F: ShapeFontFuncs>(face&: ShapeFace, var funcs&: F, u: u32): bool {
+  if (let g = face.nominal_glyph(u)) {
+    return funcs.h_advance(g) == 0;
+  }
+  return false;
+}
+
+// preprocess_text_hangul
+pub fn preprocess_text_hangul<F: ShapeFontFuncs>(var buf&: Buffer, face&: ShapeFace, var funcs&: F) {
+  buf.clear_output();
+  var start = 0usize;
+  var end = 0usize;
+  let count = buf.len();
+  buf.idx = 0;
+  while (buf.idx < count && buf.successful) {
+    let u = buf.info[buf.idx].codepoint;
+    if (is_hangul_tone(u)) {
+      if (start < end && end == buf.out_info.len()) {
+        buf.next_glyph();
+        if (!is_zero_width_char(face, funcs, u)) {
+          buf.merge_out_clusters(start, end + 1);
+          let tone = buf.out_info[end];
+          var k = end;
+          while (k > start) {
+            buf.out_info[k] = buf.out_info[k - 1];
+            k -= 1;
+          }
+          buf.out_info[start] = tone;
+        }
+      } else {
+        if (face.has_glyph(0x25CC)) {
+          if (!is_zero_width_char(face, funcs, u)) {
+            buf.replace_glyphs(1, [u, 0x25CC]);
+          } else {
+            buf.replace_glyphs(1, [0x25CCu32, u]);
+          }
+        } else {
+          buf.next_glyph();
+        }
+      }
+      start = buf.out_info.len();
+      end = start;
+      continue;
+    }
+    start = buf.out_info.len();
+    if (is_l(u) && buf.idx + 1 < count) {
+      let l = u;
+      let v = buf.info[buf.idx + 1].codepoint;
+      if (is_v(v)) {
+        var t = 0u32;
+        var tindex = 0u32;
+        if (buf.idx + 2 < count) {
+          t = buf.info[buf.idx + 2].codepoint;
+          if (is_t(t)) {
+            tindex = t -% kTBase;
+          } else {
+            t = 0;
+          }
+        }
+        if (is_combining_l(l) && is_combining_v(v) && (t == 0 || is_combining_t(t))) {
+          let s = kSBase + (l - kLBase) * kNCount + (v - kVBase) * kTCount + tindex;
+          if (face.has_glyph(s)) {
+            buf.replace_glyphs(t != 0 ? 3usize : 2, [s]);
+            end = start + 1;
+            continue;
+          }
+        }
+        let i0 = buf.idx;
+        buf.info[i0].aux = kLjmo;
+        buf.next_glyph();
+        let i1 = buf.idx;
+        buf.info[i1].aux = kVjmo;
+        buf.next_glyph();
+        if (t != 0) {
+          let i2 = buf.idx;
+          buf.info[i2].aux = kTjmo;
+          buf.next_glyph();
+          end = start + 3;
+        } else {
+          end = start + 2;
+        }
+        if (!buf.successful) {
+          break;
+        }
+        buf.merge_out_clusters(start, end);
+        continue;
+      }
+    } else if (is_combined_s(u)) {
+      let s = u;
+      let has_glyph = face.has_glyph(s);
+      let lindex = (s - kSBase) / kNCount;
+      let nindex = (s - kSBase) % kNCount;
+      let vindex = nindex / kTCount;
+      let tindex = nindex % kTCount;
+      if (tindex == 0 && buf.idx + 1 < count && is_combining_t(buf.info[buf.idx + 1].codepoint)) {
+        let new_tindex = buf.info[buf.idx + 1].codepoint - kTBase;
+        let new_s = s + new_tindex;
+        if (face.has_glyph(new_s)) {
+          buf.replace_glyphs(2, [new_s]);
+          end = start + 1;
+          continue;
+        }
+      }
+      if (!has_glyph || (tindex == 0 && buf.idx + 1 < count && is_t(buf.info[buf.idx + 1].codepoint))) {
+        let d0 = kLBase + lindex;
+        let d1 = kVBase + vindex;
+        let d2 = kTBase + tindex;
+        if (face.has_glyph(d0) && face.has_glyph(d1) && (tindex == 0 || face.has_glyph(d2))) {
+          var s_len = tindex != 0 ? 3usize : 2;
+          if (tindex != 0) {
+            buf.replace_glyphs(1, [d0, d1, d2]);
+          } else {
+            buf.replace_glyphs(1, [d0, d1]);
+          }
+          if (has_glyph && tindex == 0) {
+            buf.next_glyph();
+            s_len += 1;
+          }
+          if (!buf.successful) {
+            break;
+          }
+          end = start + s_len;
+          var i = start;
+          buf.out_info[i].aux = kLjmo;
+          i += 1;
+          buf.out_info[i].aux = kVjmo;
+          i += 1;
+          if (i < end) {
+            buf.out_info[i].aux = kTjmo;
+          }
+          buf.merge_out_clusters(start, end);
+          continue;
+        }
+      }
+      if (has_glyph) {
+        end = start + 1;
+      }
+    }
+    buf.next_glyph();
+  }
+  buf.sync();
+}
+
+// setup_masks_hangul
+pub fn setup_masks_hangul(plan&: ShapePlan, var buf&: Buffer) {
+  let masks = [0u32, plan.map.get_1_mask(tag("ljmo")), plan.map.get_1_mask(tag("vjmo")), plan.map.get_1_mask(tag("tjmo"))];
+  for (var g& in buf.info) {
+    g.mask |= masks[(g.aux & 3) as usize];
+  }
+}

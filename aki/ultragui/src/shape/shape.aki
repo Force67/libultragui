@@ -1,0 +1,475 @@
+// The shaper's entry point: what the C++ library gets from
+// hb_buffer_add_utf8 (whole text, no context) + hb_buffer_guess_segment_properties
+// + hb_shape (no features) on an hb_ft font, computed in aki: HarfBuzz
+// 13.2.1's OpenType shaping pipeline (hb-ot-shape.cc, hb_ot_shape_internal)
+// over ultragui::shape's face, plan, normalizer, GSUB/GPOS engine and script
+// shapers.
+//
+//   var face = ShapeFace::from_bytes(font_bytes);       // once per font
+//   let glyphs = shape(face, metrics, x_scale, y_scale, "Hello");
+//
+// `metrics` is the font engine (ShapeFontFuncs: advances and extents at the
+// current size); x_scale / y_scale are hb_ft's font scale,
+// (FT_Size_Metrics.x_scale * units_per_EM + 0x8000) >> 16. Positions come out
+// in 26.6 at that size, glyphs in HarfBuzz's output order (right-to-left runs
+// reversed).
+
+module ultragui::shape::shape;
+
+import {List} from akikit::containers::list;
+import {
+  Buffer, GlyphInfo, kScratchHasContinuations, kScratchHasDefaultIgnorables, kScratchHasFractionSlash, kScratchHasSpaceFallback,
+  kScratchHasVariationSelectorFallback,
+} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {apply_kern, fallback_mark_position, fallback_spaces, recategorize_marks} from ultragui::shape::fallback;
+import {ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {Scale, apply_string, is_default_ignorable, new_ctx, position_finish_offsets, set_lookup} from ultragui::shape::layout;
+import {normalize} from ultragui::shape::normalize;
+import {gdef_glyph_props} from ultragui::shape::otl;
+import {ShapePlan, kZeroByGdefEarly, kZeroByGdefLate, plan_index, zero_width_marks} from ultragui::shape::plan;
+import {gc_of, is_unicode_mark, set_continuation, set_unicode_props} from ultragui::shape::props;
+import {postprocess_glyphs, preprocess_text, run_pause, setup_masks} from ultragui::shape::shapers;
+import {
+  dir_is_backward, dir_is_forward, dir_is_horizontal, dir_is_valid, dir_is_vertical, dir_reverse, gc_flag, gc_is_letter, is_extended_pictographic,
+  kDirInvalid, kDirLtr, kGcDecimalNumber, kGcLowercaseLetter, kGcModifierSymbol, kGcNonSpacingMark, kGcOtherLetter, kGcSpaceSeparator,
+  kGcTitlecaseLetter, kGcUppercaseLetter, kScriptCommon, kScriptInherited, kScriptInvalid, kScriptUnknown, mirroring, script,
+  script_horizontal_direction,
+} from ultragui::shape::ucd;
+
+pub struct ShapedGlyph : Copy {
+  pub var glyph_id: u32 = 0
+  pub var cluster: u32 = 0
+  pub var x_advance: i32 = 0
+  pub var y_advance: i32 = 0
+  pub var x_offset: i32 = 0
+  pub var y_offset: i32 = 0
+}
+
+// hb_utf8_t::next: the code point at p and the position after it; an
+// ill-formed sequence gives U+FFFD and consumes one byte.
+fn utf8_next(t: &[u8], p: usize): (u32, usize) {
+  let end = #t;
+  let c = t[p] as u32;
+  if (c <= 0x7F) {
+    return (c, p + 1);
+  }
+  if (c >= 0xC2 && c <= 0xDF) {
+    if (p + 1 < end) {
+      let t1 = (t[p + 1] as u32) -% 0x80;
+      if (t1 <= 0x3F) {
+        return (((c & 0x1F) << 6) | t1, p + 2);
+      }
+    }
+    return (0xFFFD, p + 1);
+  }
+  if (c >= 0xE0 && c <= 0xEF) {
+    if (p + 2 < end) {
+      let t1 = (t[p + 1] as u32) -% 0x80;
+      let t2 = (t[p + 2] as u32) -% 0x80;
+      if (t1 <= 0x3F && t2 <= 0x3F) {
+        let v = ((c & 0xF) << 12) | (t1 << 6) | t2;
+        if (v < 0x0800 || (v >= 0xD800 && v <= 0xDFFF)) {
+          return (0xFFFD, p + 1);
+        }
+        return (v, p + 3);
+      }
+    }
+    return (0xFFFD, p + 1);
+  }
+  if (c >= 0xF0 && c <= 0xF4) {
+    if (p + 3 < end) {
+      let t1 = (t[p + 1] as u32) -% 0x80;
+      let t2 = (t[p + 2] as u32) -% 0x80;
+      let t3 = (t[p + 3] as u32) -% 0x80;
+      if (t1 <= 0x3F && t2 <= 0x3F && t3 <= 0x3F) {
+        let v = ((c & 0x7) << 18) | (t1 << 12) | (t2 << 6) | t3;
+        if (v < 0x10000 || v > 0x10FFFF) {
+          return (0xFFFD, p + 1);
+        }
+        return (v, p + 4);
+      }
+    }
+    return (0xFFFD, p + 1);
+  }
+  return (0xFFFD, p + 1);
+}
+
+fn is_regional_indicator(u: u32): bool => u >= 0x1F1E6 && u <= 0x1F1FF;
+
+// hb_set_unicode_props
+fn set_unicode_props_all(var buf&: Buffer) {
+  let count = buf.len();
+  var i = 0usize;
+  while (i < count) {
+    var g = buf.info[i];
+    set_unicode_props(g, buf);
+    buf.info[i] = g;
+    let u = buf.info[i].codepoint;
+    if (u < 0x80) {
+      i += 1;
+      continue;
+    }
+    let gen_cat = gc_of(buf.info[i]);
+    let letters = gc_flag(kGcLowercaseLetter) | gc_flag(kGcUppercaseLetter) | gc_flag(kGcTitlecaseLetter) | gc_flag(kGcOtherLetter) |
+                  gc_flag(kGcSpaceSeparator);
+    if ((gc_flag(gen_cat) & letters) != 0) {
+      i += 1;
+      continue;
+    }
+    if (gen_cat == kGcModifierSymbol && u >= 0x1F3FB && u <= 0x1F3FF) {
+      var h = buf.info[i];
+      set_continuation(h, buf);
+      buf.info[i] = h;
+    } else if (i > 0 && is_regional_indicator(u)) {
+      if (is_regional_indicator(buf.info[i - 1].codepoint) && (buf.info[i - 1].unicode_props & 0x80) == 0) {
+        var h = buf.info[i];
+        set_continuation(h, buf);
+        buf.info[i] = h;
+      }
+    } else if (gen_cat == 1 && (buf.info[i].unicode_props & 0x100) != 0) {
+      // ZWJ
+      var h = buf.info[i];
+      set_continuation(h, buf);
+      buf.info[i] = h;
+      if (i + 1 < count && is_extended_pictographic(buf.info[i + 1].codepoint)) {
+        i += 1;
+        var k = buf.info[i];
+        set_unicode_props(k, buf);
+        set_continuation(k, buf);
+        buf.info[i] = k;
+      }
+    } else if ((u >= 0xFF9E && u <= 0xFF9F) || (u >= 0xE0020 && u <= 0xE007F)) {
+      var h = buf.info[i];
+      set_continuation(h, buf);
+      buf.info[i] = h;
+    } else if (u == 0x2044) {
+      buf.scratch_flags |= kScratchHasFractionSlash;
+    }
+    i += 1;
+  }
+}
+
+// hb_insert_dotted_circle
+fn insert_dotted_circle(var buf&: Buffer, face&: ShapeFace) {
+  if (!buf.bot || !is_unicode_mark(buf.info[0])) {
+    return;
+  }
+  if (!face.has_glyph(0x25CC)) {
+    return;
+  }
+  var dc = GlyphInfo { codepoint: 0x25CC };
+  set_unicode_props(dc, buf);
+  buf.clear_output();
+  buf.idx = 0;
+  dc.cluster = buf.info[0].cluster;
+  dc.mask = buf.info[0].mask;
+  buf.output_info(dc);
+  buf.sync();
+}
+
+// hb_form_clusters
+fn form_clusters(var buf&: Buffer) {
+  if ((buf.scratch_flags & kScratchHasContinuations) == 0) {
+    return;
+  }
+  let n = buf.len();
+  var start = 0usize;
+  while (start < n) {
+    let end = buf.next_grapheme(start);
+    buf.merge_clusters(start, end);
+    start = end;
+  }
+}
+
+// hb_ensure_native_direction
+fn ensure_native_direction(var buf&: Buffer) {
+  let direction = buf.direction;
+  var horiz_dir = script_horizontal_direction(buf.script);
+  if (horiz_dir == 5 && direction == kDirLtr) {
+    var found_number = false;
+    var found_letter = false;
+    var found_ri = false;
+    for (let g in buf.info) {
+      let gc = gc_of(g);
+      if (gc_is_letter(gc)) {
+        found_letter = true;
+        break;
+      } else if (gc == kGcDecimalNumber) {
+        found_number = true;
+      } else if (is_regional_indicator(g.codepoint)) {
+        found_ri = true;
+      }
+    }
+    if ((found_number || found_ri) && !found_letter) {
+      horiz_dir = kDirLtr;
+    }
+  }
+  if ((dir_is_horizontal(direction) && direction != horiz_dir && dir_is_valid(horiz_dir)) || (dir_is_vertical(direction) && direction != 6)) {
+    buf.reverse_graphemes();
+    buf.direction = dir_reverse(buf.direction);
+  }
+}
+
+// hb_ot_rotate_chars
+fn rotate_chars(plan&: ShapePlan, face&: ShapeFace, var buf&: Buffer, target_direction: u32) {
+  if (dir_is_backward(target_direction)) {
+    let rtlm_mask = plan.rtlm_mask;
+    for (let i in 0..buf.len()) {
+      let u = buf.info[i].codepoint;
+      let m = mirroring(u);
+      if (m != u && face.has_glyph(m)) {
+        buf.info[i].codepoint = m;
+      } else {
+        buf.info[i].mask |= rtlm_mask;
+      }
+    }
+  }
+}
+
+// hb_ot_shape_setup_masks_fraction
+fn setup_masks_fraction(plan&: ShapePlan, var buf&: Buffer) {
+  if ((buf.scratch_flags & kScratchHasFractionSlash) == 0 || !plan.has_frac) {
+    return;
+  }
+  var pre_mask = 0u32;
+  var post_mask = 0u32;
+  if (dir_is_forward(buf.direction)) {
+    pre_mask = plan.numr_mask | plan.frac_mask;
+    post_mask = plan.frac_mask | plan.dnom_mask;
+  } else {
+    pre_mask = plan.frac_mask | plan.dnom_mask;
+    post_mask = plan.numr_mask | plan.frac_mask;
+  }
+  let count = buf.len();
+  var i = 0usize;
+  while (i < count) {
+    if (buf.info[i].codepoint == 0x2044) {
+      var start = i;
+      var end = i + 1;
+      while (start > 0 && gc_of(buf.info[start - 1]) == kGcDecimalNumber) {
+        start -= 1;
+      }
+      while (end < count && gc_of(buf.info[end]) == kGcDecimalNumber) {
+        end += 1;
+      }
+      if (start == i || end == i + 1) {
+        i += 1;
+        continue;
+      }
+      for (let j in start..i) {
+        buf.info[j].mask |= pre_mask;
+      }
+      buf.info[i].mask |= plan.frac_mask;
+      for (let j in i + 1..end) {
+        buf.info[j].mask |= post_mask;
+      }
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+}
+
+fn hide_filter(g&: GlyphInfo): bool => is_default_ignorable(g);
+
+// hb_ot_hide_default_ignorables
+fn hide_default_ignorables(var buf&: Buffer, face&: ShapeFace) {
+  if ((buf.scratch_flags & kScratchHasDefaultIgnorables) == 0) {
+    return;
+  }
+  if (let invisible = face.nominal_glyph(0x20)) {
+    for (var g& in buf.info) {
+      if (is_default_ignorable(g)) {
+        g.codepoint = invisible;
+      }
+    }
+  } else {
+    buf.delete_glyphs_inplace(hide_filter);
+  }
+}
+
+// hb_synthesize_glyph_classes
+fn synthesize_glyph_classes(var buf&: Buffer) {
+  for (var g& in buf.info) {
+    let mark = gc_of(g) == kGcNonSpacingMark && !is_default_ignorable(g);
+    g.glyph_props = mark ? 0x08 : 0x02;
+  }
+}
+
+// One table's lookups by stage, with the pauses between them (hb_ot_map_t::apply).
+fn apply_map(plan&: ShapePlan, face&: ShapeFace, var buf&: Buffer, scale: Scale, table: u32) {
+  let t = table == 0 ? face.gsub_t() : face.gpos_t();
+  let gg = table == 0 ? face.gsub : face.gpos;
+  var c = new_ctx(t, face.gdef_t(), face.gdef, gg, table, scale, buf);
+  let lookups& = table == 0 ? plan.map.lookups0 : plan.map.lookups1;
+  let stages& = table == 0 ? plan.map.stages0 : plan.map.stages1;
+  var i = 0usize;
+  for (let stage in stages) {
+    while (i < stage.last_lookup) {
+      let l = lookups[i];
+      i += 1;
+      set_lookup(c, l.index, l.mask, l.auto_zwj, l.auto_zwnj, l.random, l.per_syllable);
+      apply_string(c, buf, l.index);
+    }
+    if (stage.pause != 0) {
+      run_pause(stage.pause, plan, buf, face);
+    }
+  }
+}
+
+fn zero_mark_widths_by_gdef(var buf&: Buffer, adjust_offsets: bool) {
+  for (let i in 0..buf.len()) {
+    if ((buf.info[i].glyph_props & 0x08) != 0) {
+      if (adjust_offsets) {
+        buf.pos[i].x_offset -= buf.pos[i].x_advance;
+        buf.pos[i].y_offset -= buf.pos[i].y_advance;
+      }
+      buf.pos[i].x_advance = 0;
+      buf.pos[i].y_advance = 0;
+    }
+  }
+}
+
+// hb_ot_shape_internal on a filled buffer.
+fn shape_buffer<F: ShapeFontFuncs>(plan&: ShapePlan, face&: ShapeFace, var funcs&: F, scale: Scale, var buf&: Buffer) {
+  let target_direction = buf.direction;
+  buf.reset_masks(plan.map.global_mask);
+  set_unicode_props_all(buf);
+  insert_dotted_circle(buf, face);
+  form_clusters(buf);
+  ensure_native_direction(buf);
+  preprocess_text(plan, buf, face, funcs);
+
+  // hb_ot_substitute_pre: hb_ot_substitute_default
+  rotate_chars(plan, face, buf, target_direction);
+  normalize(plan, face, buf);
+  setup_masks_fraction(plan, buf);
+  setup_masks(plan, buf, face);
+  if (plan.fallback_mark_positioning) {
+    recategorize_marks(buf);
+  }
+  for (var g& in buf.info) {
+    g.codepoint = g.glyph_index;
+  }
+  // hb_ot_substitute_plan
+  let gdef_t = face.gdef_t();
+  for (var g& in buf.info) {
+    g.glyph_props = gdef_glyph_props(gdef_t, face.gdef, g.codepoint);
+    g.lig_props = 0;
+    g.syllable = (g.glyph_index >> 24) & 0xFF;
+  }
+  if (plan.fallback_glyph_classes) {
+    synthesize_glyph_classes(buf);
+  }
+  apply_map(plan, face, buf, scale, 0);
+
+  // hb_ot_position
+  buf.clear_positions();
+  // hb_ot_position_default
+  for (let i in 0..buf.len()) {
+    buf.pos[i].x_advance = funcs.h_advance(buf.info[i].codepoint);
+  }
+  if ((buf.scratch_flags & kScratchHasSpaceFallback) != 0) {
+    fallback_spaces(face, funcs, scale.x_scale, scale.y_scale, buf);
+  }
+  // hb_ot_position_plan
+  let adjust_offsets_when_zeroing = plan.adjust_mark_positioning_when_zeroing && dir_is_forward(buf.direction);
+  for (var p& in buf.pos) {
+    p.attach_chain = 0;
+    p.attach_type = 0;
+  }
+  let zwm = zero_width_marks(plan.shaper);
+  if (plan.zero_marks && zwm == kZeroByGdefEarly) {
+    zero_mark_widths_by_gdef(buf, adjust_offsets_when_zeroing);
+  }
+  if (plan.apply_gpos) {
+    apply_map(plan, face, buf, scale, 1);
+  }
+  if (plan.apply_kern) {
+    apply_kern(plan, face, scale, buf);
+  }
+  if (plan.zero_marks && zwm == kZeroByGdefLate) {
+    zero_mark_widths_by_gdef(buf, adjust_offsets_when_zeroing);
+  }
+  // hb_ot_zero_width_default_ignorables
+  if ((buf.scratch_flags & kScratchHasDefaultIgnorables) != 0) {
+    let horizontal = dir_is_horizontal(buf.direction);
+    for (let i in 0..buf.len()) {
+      if (is_default_ignorable(buf.info[i])) {
+        buf.pos[i].x_advance = 0;
+        buf.pos[i].y_advance = 0;
+        if (horizontal) {
+          buf.pos[i].x_offset = 0;
+        } else {
+          buf.pos[i].y_offset = 0;
+        }
+      }
+    }
+  }
+  position_finish_offsets(buf);
+  if (plan.fallback_mark_positioning) {
+    fallback_mark_position(plan, funcs, scale.y_scale, buf, adjust_offsets_when_zeroing);
+  }
+  if (dir_is_backward(buf.direction)) {
+    buf.reverse();
+  }
+
+  // hb_ot_substitute_post
+  if ((buf.scratch_flags & kScratchHasVariationSelectorFallback) != 0) {
+    // not_found_variation_selector is HB_CODEPOINT_INVALID by default: nothing to do.
+  }
+  hide_default_ignorables(buf, face);
+  postprocess_glyphs(plan, buf, face, funcs, scale.x_scale);
+  buf.direction = target_direction;
+}
+
+// hb_buffer_t::guess_segment_properties
+fn guess_script(buf&: Buffer): u32 {
+  for (let g in buf.info) {
+    let s = script(g.codepoint);
+    if (s != kScriptCommon && s != kScriptInherited && s != kScriptUnknown) {
+      return s;
+    }
+  }
+  return kScriptInvalid;
+}
+
+// Shapes UTF-8 bytes (ill-formed sequences become U+FFFD, as HarfBuzz reads them).
+pub fn shape_utf8<F: ShapeFontFuncs>(var face&: ShapeFace, var funcs&: F, x_scale: i32, y_scale: i32, text: &[u8]): List<ShapedGlyph> {
+  var out: List<ShapedGlyph> = List();
+  var buf = Buffer();
+  var p = 0usize;
+  while (p < #text) {
+    let (u, next) = utf8_next(text, p);
+    buf.info.push(GlyphInfo { codepoint: u, cluster: p as u32 });
+    p = next;
+  }
+  if (buf.len() == 0) {
+    return out;
+  }
+  buf.script = guess_script(buf);
+  var direction = script_horizontal_direction(buf.script);
+  if (direction == kDirInvalid) {
+    direction = kDirLtr;
+  }
+  buf.direction = direction;
+  buf.enter();
+
+  let pi = plan_index(face, buf.script, buf.direction);
+  let scale = Scale::of(x_scale, y_scale, face.upem);
+  let plan& = face.plans[pi];
+  shape_buffer(plan, face, funcs, scale, buf);
+
+  for (let i in 0..buf.len()) {
+    let g = buf.info[i];
+    let q = buf.pos[i];
+    out.push(ShapedGlyph {
+      glyph_id: g.codepoint, cluster: g.cluster, x_advance: q.x_advance, y_advance: q.y_advance, x_offset: q.x_offset, y_offset: q.y_offset,
+    });
+  }
+  return out;
+}
+
+pub fn shape<F: ShapeFontFuncs>(var face&: ShapeFace, var funcs&: F, x_scale: i32, y_scale: i32, text: str): List<ShapedGlyph> =>
+  shape_utf8(face, funcs, x_scale, y_scale, text as &[u8]);

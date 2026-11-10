@@ -1,0 +1,29 @@
+// What the shaper asks of the font engine: the numbers hb_ft's font
+// functions take from FreeType (hb-ft.cc), at the size the font is set to.
+//
+// - h_advance: hb_ft_get_glyph_h_advances: FT_Get_Advance with
+//   FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING (16.16 v), then
+//   (int) ((float) abs (v) + 512.f) >> 10 (computed in float), i.e. 26.6.
+// - glyph_extents: hb_ft_get_glyph_extents: FT_Load_Glyph with the same flags,
+//   x_bearing = roundf (horiBearingX), y_bearing = roundf (horiBearingY),
+//   width = roundf (horiBearingX + width) - x_bearing,
+//   height = roundf (horiBearingY - height) - y_bearing, in float, where
+//   roundf is HarfBuzz's floorf (x + .5f); none when the glyph does not load
+//   (or is a COLR glyph).
+//
+// The shaper never needs contour points: hb_ft leaves the font's ppem at 0,
+// so AnchorFormat2 never reads them.
+
+module ultragui::shape::font_funcs;
+
+pub struct GlyphExtents : Copy {
+  pub var x_bearing: i32 = 0
+  pub var y_bearing: i32 = 0
+  pub var width: i32 = 0
+  pub var height: i32 = 0
+}
+
+pub capability ShapeFontFuncs {
+  fn h_advance(var self&, glyph: u32): i32;
+  fn glyph_extents(var self&, glyph: u32): GlyphExtents?;
+}

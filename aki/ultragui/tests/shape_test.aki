@@ -1,0 +1,459 @@
+// The shaper (ultragui::shape) against HarfBuzz 13.2.1 on FreeType 2.14.3,
+// bit for bit: glyph ids, clusters, advances and offsets, in HarfBuzz's order.
+//
+// tools/shape_oracle.c shapes a list of strings with the dev shell's
+// FreeType + HarfBuzz exactly as text/text_engine does; this test builds it
+// with clang into build/shape_oracle/ (once; again when the tool is newer),
+// shapes the same strings with ultragui::shape (font metrics from the real
+// FreeType through support::shape_ft, so only the shaping is compared) and
+// compares every value.
+//
+// Strings: the quoted strings of examples/**/*.ugui and *.lua, the per-script
+// samples of support::shape_samples, and strings generated from each font's
+// cmap (random runs of its letters, marks, digits, punctuation, spaces,
+// joiners, variation selectors and ill-formed UTF-8).
+//
+// Default: a curated set of fonts at 12, 16 and 24 px. SHAPE_SWEEP=1 runs
+// every font of /usr/share/fonts at 9, 12, 16, 24 and 37 px with
+// SHAPE_GENERATED (default 400) generated strings per font; SHAPE_FONTS=a:b
+// picks fonts by path; SHAPE_SEED changes the generated strings. The first
+// differences are printed with the font, size and string.
+
+module shape_test;
+
+import {List} from akikit::containers::list;
+import {create_directories, list_directory} from akikit::filesystem::directory;
+import {enumerate_files} from akikit::filesystem::file_enumerator;
+import {file_info, read_bytes, read_file, real_path, write_file} from akikit::filesystem::file_util;
+import {parent} from akikit::filesystem::path;
+import {eprintln, println} from akikit::logging;
+import {Command, exit_code} from akikit::process::child;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {String, from_str} from akikit::strings::string;
+import {ends_with} from akikit::strings::string_search;
+import {parse_u64} from akikit::strings::string_to_number;
+import {ShapeFace} from ultragui::shape::face;
+import {ShapedGlyph, shape_utf8} from ultragui::shape::shape;
+import {gc_is_mark, general_category, is_variation_selector} from ultragui::shape::ucd;
+import {FtFont, open_ft_font, set_pixel_size} from support::shape_ft;
+import {kSamples} from support::shape_samples;
+
+comptime let kCurated: [str; 9] = [
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+  "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/kacst/KacstBook.ttf",
+  "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
+  "/usr/share/fonts/truetype/tlwg/Garuda.ttf",
+  "/usr/share/fonts/truetype/ttf-khmeros-core/KhmerOS.ttf",
+  "/usr/share/fonts/truetype/freefont/FreeSerif.ttf",
+];
+
+comptime let kMaxReported: u64 = 30;
+
+struct Totals {
+  pub var fonts: u64 = 0
+  pub var strings: u64 = 0
+  pub var glyphs: u64 = 0
+  pub var mismatches: u64 = 0
+  pub var reported: u64 = 0
+  pub var skipped_graphite: u64 = 0
+}
+
+// --- Strings ----------------------------------------------------------------------------------
+
+fn hex_digit(v: u32): c32 => (v < 10 ? '0' as u32 + v : 'a' as u32 + v - 10) as c32;
+
+fn push_hex(var out&: String, s: &[u8]) {
+  for (let b in s) {
+    out.push_char(hex_digit(b as u32 >> 4));
+    out.push_char(hex_digit(b as u32 & 15));
+  }
+  out.push_char('\n');
+}
+
+// The UTF-8 bytes of a code point.
+fn push_utf8(var out&: List<u8>, u: u32) {
+  if (u < 0x80) {
+    out.push(u as u8);
+  } else if (u < 0x800) {
+    out.push((0xC0 | (u >> 6)) as u8);
+    out.push((0x80 | (u & 0x3F)) as u8);
+  } else if (u < 0x10000) {
+    out.push((0xE0 | (u >> 12)) as u8);
+    out.push((0x80 | ((u >> 6) & 0x3F)) as u8);
+    out.push((0x80 | (u & 0x3F)) as u8);
+  } else {
+    out.push((0xF0 | (u >> 18)) as u8);
+    out.push((0x80 | ((u >> 12) & 0x3F)) as u8);
+    out.push((0x80 | ((u >> 6) & 0x3F)) as u8);
+    out.push((0x80 | (u & 0x3F)) as u8);
+  }
+}
+
+// Quoted strings of the examples' .ugui and .lua files.
+fn example_strings(root: str, var out&: List<List<u8>>) {
+  let files = enumerate_files(f"{root}/examples", true) else {
+    return;
+  };
+  for (let path in files) {
+    let p = path.path.as_str();
+    if (!(ends_with(p, ".ugui") || ends_with(p, ".lua"))) {
+      continue;
+    }
+    let text = read_file(p) else {
+      continue;
+    };
+    let t = text.as_str() as &[u8];
+    var i = 0usize;
+    while (i < #t) {
+      if (t[i] == '"' as u8) {
+        var j = i + 1;
+        while (j < #t && t[j] != '"' as u8 && t[j] != '\n' as u8) {
+          j += 1;
+        }
+        if (j < #t && t[j] == '"' as u8 && j > i + 1) {
+          var s: List<u8> = List();
+          for (let k in i + 1..j) {
+            s.push(t[k]);
+          }
+          out.push(s);
+        }
+        i = j + 1;
+      } else {
+        i += 1;
+      }
+    }
+  }
+}
+
+struct Rng {
+  pub var s: u64
+  pub fn next(var self&): u64 {
+    self.s ^= self.s << 13;
+    self.s ^= self.s >> 7;
+    self.s ^= self.s << 17;
+    return self.s;
+  }
+  pub fn below(var self&, n: u64): u64 => n == 0 ? 0 : self.next() % n;
+}
+
+// Strings from the font's coverage: letters, marks, digits, punctuation,
+// spaces, joiners, variation selectors, and a few ill-formed bytes.
+fn generated_strings(var face&: ShapeFace, count: u64, seed: u64, var out&: List<List<u8>>) {
+  var letters: List<u32> = List();
+  var marks: List<u32> = List();
+  var others: List<u32> = List();
+  for (let u in 0x20u32..0x30000) {
+    if (u >= 0xD800 && u <= 0xDFFF) {
+      continue;
+    }
+    if (!face.has_glyph(u)) {
+      continue;
+    }
+    let gc = general_category(u);
+    if (gc_is_mark(gc)) {
+      marks.push(u);
+    } else if (gc >= 5 && gc <= 9) {
+      letters.push(u);
+    } else {
+      others.push(u);
+    }
+  }
+  if (letters.len() == 0) {
+    letters.push(0x41);
+  }
+  var rng = Rng { s: seed * 2654435761 + 1 };
+  let specials = [0x20u32, 0x20, 0x200C, 0x200D, 0xFE0F, 0xFE0E, 0x34F, 0x2060, 0xA0, 0x2009, 0x30, 0x31, 0x2E, 0x2C, 0x25CC];
+  for (let n in 0..count) {
+    var s: List<u8> = List();
+    let len = 1 + rng.below(12);
+    // Mostly one region of the letters, so runs look like words of one script.
+    let base = rng.below(letters.len() as u64);
+    for (let k in 0..len) {
+      let r = rng.below(100);
+      if (r < 55) {
+        let off = rng.below(64);
+        let i = (base + off) % letters.len() as u64;
+        push_utf8(s, letters[i as usize]);
+      } else if (r < 75 && marks.len() > 0) {
+        push_utf8(s, marks[rng.below(marks.len() as u64) as usize]);
+      } else if (r < 85 && others.len() > 0) {
+        push_utf8(s, others[rng.below(others.len() as u64) as usize]);
+      } else if (r < 98) {
+        push_utf8(s, specials[rng.below(#specials as u64) as usize]);
+      } else {
+        // ill-formed UTF-8
+        let bad = [0x80u8, 0xC0, 0xE2, 0xF5, 0xFF, 0xED];
+        s.push(bad[rng.below(#bad as u64) as usize]);
+      }
+    }
+    out.push(s);
+  }
+}
+
+// --- The oracle ----------------------------------------------------------------------------
+
+fn modified(path: str): i64 {
+  if (let info = file_info(path)) {
+    return info.modified_ns;
+  }
+  return -1;
+}
+
+fn build_oracle(root: str, out_dir: str): String? {
+  let tool = f"{root}/aki/ultragui/tools/shape_oracle.c";
+  let exe = f"{out_dir}/shape_oracle";
+  if (modified(exe.as_str()) > modified(tool.as_str())) {
+    return exe;
+  }
+  // The dev shell's pkg-config gives the FreeType and HarfBuzz flags.
+  var cmd = Command("sh");
+  cmd.arg("-c");
+  cmd.arg(f"clang -O2 {tool} $(pkg-config --cflags --libs freetype2 harfbuzz) -o {exe}".as_str());
+  if (let status = cmd.status()) {
+    if (exit_code(status) != 0) {
+      eprintln("building the shape oracle failed");
+      return none;
+    }
+  } else (let e) {
+    eprintln("cannot start the compiler");
+    return none;
+  }
+  return exe;
+}
+
+struct Reader {
+  pub let text: str
+  pub var pos: usize = 0
+  pub fn token(var self&): str {
+    while (self.pos < #self.text && (self.text[self.pos] == ' ' || self.text[self.pos] == '\n')) {
+      self.pos += 1;
+    }
+    let start = self.pos;
+    while (self.pos < #self.text && self.text[self.pos] != ' ' && self.text[self.pos] != '\n') {
+      self.pos += 1;
+    }
+    return self.text[start..self.pos];
+  }
+  pub fn int(var self&): i64 {
+    let t = self.token();
+    var neg = false;
+    var v: i64 = 0;
+    for (let i in 0..#t) {
+      if (t[i] == '-') {
+        neg = true;
+      } else {
+        v = v * 10 + (t[i] as i64 - '0' as i64);
+      }
+    }
+    return neg ? -v : v;
+  }
+}
+
+fn describe(s&: List<u8>): String {
+  var out = String();
+  var shown = 0usize;
+  for (let b in s) {
+    if (shown >= 40) {
+      out.push_str("...");
+      break;
+    }
+    out.push_str(f"{b:02x}");
+    shown += 1;
+  }
+  return out;
+}
+
+fn glyphs_text(g&: List<ShapedGlyph>): String {
+  var out = String();
+  for (let x in g) {
+    out.push_str(f"[{x.glyph_id} c{x.cluster} {x.x_advance},{x.y_advance} {x.x_offset},{x.y_offset}]");
+  }
+  return out;
+}
+
+fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], generated: u64, seed: u64, var totals&: Totals): bool {
+  var strings: List<List<u8>> = List();
+  example_strings(root, strings);
+  for (let s in kSamples) {
+    var b: List<u8> = List();
+    for (let c in s as &[u8]) {
+      b.push(c);
+    }
+    strings.push(b);
+  }
+  let bytes_b = read_bytes(path) else {
+    eprintln(f"cannot read {path}");
+    return false;
+  };
+  var bytes: List<u8> = List();
+  for (let b in bytes_b) {
+    bytes.push(b as u8);
+  }
+  var ft = open_ft_font(path) else {
+    eprintln(f"FreeType cannot open {path}");
+    return false;
+  };
+  var face = ShapeFace::from_bytes(bytes, 0, ft.num_glyphs);
+  if (generated > 0) {
+    generated_strings(face, generated, seed, strings);
+  }
+  var hex = String();
+  for (let s in strings) {
+    push_hex(hex, s.as_slice());
+  }
+  let strings_path = f"{out_dir}/strings.hex";
+  let out_path = f"{out_dir}/oracle.out";
+  if (let e = write_file(strings_path.as_str(), hex.as_str())) {
+  } else (let err) {
+    eprintln("cannot write the strings");
+    return false;
+  }
+  var cmd = Command(oracle);
+  cmd.arg(path);
+  cmd.arg(strings_path.as_str());
+  for (let px in sizes) {
+    cmd.arg(f"{px}".as_str());
+  }
+  cmd.stdout_to(out_path.as_str());
+  if (let status = cmd.status()) {
+    if (exit_code(status) != 0) {
+      eprintln(f"the oracle failed on {path}");
+      return false;
+    }
+  } else (let e) {
+    eprintln("cannot start the oracle");
+    return false;
+  }
+  let text = read_file(out_path.as_str()) else {
+    eprintln("cannot read the oracle output");
+    return false;
+  };
+  var r = Reader { text: text.as_str() };
+  let f_tag = r.token();
+  let ft_glyphs = r.int();
+  let shaper = r.token();
+  totals.fonts += 1;
+  if (shaper == "graphite2") {
+    totals.skipped_graphite += 1;
+    println(f"{path}: HarfBuzz shapes it with graphite2; not compared");
+    return true;
+  }
+  var font_mismatches = 0u64;
+  for (let px in sizes) {
+    let s_tag = r.token();
+    let size = r.int();
+    let xs = r.int() as i32;
+    let ys = r.int() as i32;
+    set_pixel_size(ft, px);
+    if (ft.x_scale != xs || ft.y_scale != ys) {
+      eprintln(f"{path} {px}px: scale {ft.x_scale},{ft.y_scale} vs HarfBuzz {xs},{ys}");
+    }
+    for (let si in 0..strings.len()) {
+      let n = r.int() as usize;
+      var want: List<ShapedGlyph> = List();
+      for (let k in 0..n) {
+        let g = r.int() as u32;
+        let c = r.int() as u32;
+        let xa = r.int() as i32;
+        let ya = r.int() as i32;
+        let xo = r.int() as i32;
+        let yo = r.int() as i32;
+        want.push(ShapedGlyph { glyph_id: g, cluster: c, x_advance: xa, y_advance: ya, x_offset: xo, y_offset: yo });
+      }
+      let got = shape_utf8(face, ft, xs, ys, strings[si].as_slice());
+      totals.strings += 1;
+      totals.glyphs += n as u64;
+      var same = got.len() == want.len();
+      if (same) {
+        for (let k in 0..n) {
+          let a = got[k];
+          let b = want[k];
+          if (a.glyph_id != b.glyph_id || a.cluster != b.cluster || a.x_advance != b.x_advance || a.y_advance != b.y_advance ||
+              a.x_offset != b.x_offset || a.y_offset != b.y_offset) {
+            same = false;
+            break;
+          }
+        }
+      }
+      if (!same) {
+        totals.mismatches += 1;
+        font_mismatches += 1;
+        if (totals.reported < kMaxReported) {
+          totals.reported += 1;
+          eprintln(f"MISMATCH {path} {px}px string {si} ({describe(strings[si])}):");
+          eprintln(f"  harfbuzz: {glyphs_text(want)}");
+          eprintln(f"  aki:      {glyphs_text(got)}");
+        }
+      }
+    }
+  }
+  println(f"{path}: {strings.len()} strings x {#sizes} sizes, {font_mismatches} differ");
+  return true;
+}
+
+fn env_u64(name: str, fallback: u64): u64 {
+  if (let v = get_environment_variable(name)) {
+    return parse_u64(v.as_str()) ?? fallback;
+  }
+  return fallback;
+}
+
+fn all_fonts(var out&: List<String>) {
+  let files = enumerate_files("/usr/share/fonts", true) else {
+    return;
+  };
+  for (let path in files) {
+    let p = path.path.as_str();
+    if (ends_with(p, ".ttf") || ends_with(p, ".otf") || ends_with(p, ".ttc")) {
+      out.push(from_str(p));
+    }
+  }
+}
+
+pub fn main(): i32 {
+  let pkg = real_path(@package_dir()) else {
+    eprintln("cannot resolve the package dir");
+    return 1;
+  };
+  let root = parent(parent(pkg.as_str()));
+  let out_dir = f"{pkg}/build/shape_oracle";
+  create_directories(out_dir.as_str());
+  let oracle = build_oracle(root, out_dir.as_str()) else {
+    return 1;
+  };
+  let sweep = get_environment_variable("SHAPE_SWEEP") != none;
+  let seed = env_u64("SHAPE_SEED", 1);
+  var fonts: List<String> = List();
+  if (let list = get_environment_variable("SHAPE_FONTS")) {
+    var start = 0usize;
+    let l = list.as_str();
+    for (let i in 0..#l + 1) {
+      if (i == #l || l[i] == ':') {
+        if (i > start) {
+          fonts.push(from_str(l[start..i]));
+        }
+        start = i + 1;
+      }
+    }
+  } else if (sweep) {
+    all_fonts(fonts);
+  } else {
+    for (let f in kCurated) {
+      fonts.push(from_str(f));
+    }
+  }
+  let sizes_default = [12u32, 16, 24];
+  let sizes_sweep = [9u32, 12, 16, 24, 37];
+  let generated = env_u64("SHAPE_GENERATED", sweep ? 400 : 60);
+  var totals = Totals {};
+  var ok = true;
+  for (let f in fonts) {
+    let sizes = sweep ? sizes_sweep[..] : sizes_default[..];
+    ok = check_font(f.as_str(), root, out_dir.as_str(), oracle.as_str(), sizes, generated, seed, totals) && ok;
+  }
+  println(f"{totals.fonts} fonts ({totals.skipped_graphite} shaped by graphite2, not compared), {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
+  return ok && totals.mismatches == 0 ? 0 : 1;
+}

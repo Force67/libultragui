@@ -1,0 +1,538 @@
+// The glyph buffer the shaper works on: hb_buffer_t's shaping half
+// (hb-buffer.hh, hb-buffer.cc), with its in/out-buffer protocol (idx walks
+// `info`, finished glyphs go to `out_info`, sync swaps them), cluster merging
+// as the default cluster level (monotone graphemes) does it, and the per-glyph
+// scratch values HarfBuzz keeps in var1/var2 as named fields.
+//
+// Differences in shape: the out-buffer is always its own list (HarfBuzz
+// shares memory with info until it must not; the glyphs that reach each side
+// are the same). Glyph flags (unsafe-to-break, ...) are not tracked: they do
+// not change glyphs, clusters or positions.
+
+module ultragui::shape::buffer;
+
+import {swap} from akikit::algorithm;
+import {List} from akikit::containers::list;
+
+// hb_glyph_info_t with its var1/var2 views as fields.
+pub struct GlyphInfo : Copy {
+  pub var codepoint: u32 = 0  // a character until the glyphs are mapped, then a glyph id
+  pub var mask: u32 = 0
+  pub var cluster: u32 = 0
+  pub var unicode_props: u32 = 0  // var2.u16[0]
+  pub var glyph_props: u32 = 0    // var1.u16[0]
+  pub var lig_props: u32 = 0      // var1.u8[2]
+  pub var syllable: u32 = 0       // var1.u8[3]
+  pub var category: u32 = 0       // var2.u8[2] (ot_shaper_var_u8_category)
+  pub var aux: u32 = 0            // var2.u8[3] (ot_shaper_var_u8_auxiliary)
+  pub var glyph_index: u32 = 0    // var1.u32 during normalization (normalizer_glyph_index)
+}
+
+// hb_glyph_position_t with its var as fields.
+pub struct GlyphPos : Copy {
+  pub var x_advance: i32 = 0
+  pub var y_advance: i32 = 0
+  pub var x_offset: i32 = 0
+  pub var y_offset: i32 = 0
+  pub var attach_chain: i32 = 0  // var.i16[0]
+  pub var attach_type: u32 = 0   // var.u8[2]
+}
+
+// HB_BUFFER_SCRATCH_FLAG_*
+pub comptime let kScratchHasDefaultIgnorables: u32 = 0x1;
+pub comptime let kScratchHasSpaceFallback: u32 = 0x2;
+pub comptime let kScratchHasGposAttachment: u32 = 0x4;
+pub comptime let kScratchHasCgj: u32 = 0x8;
+pub comptime let kScratchHasBrokenSyllable: u32 = 0x10;
+pub comptime let kScratchHasVariationSelectorFallback: u32 = 0x20;
+pub comptime let kScratchHasContinuations: u32 = 0x40;
+pub comptime let kScratchHasFractionSlash: u32 = 0x80;
+pub comptime let kScratchShaper0: u32 = 0x01000000;
+pub comptime let kScratchShaper1: u32 = 0x02000000;
+
+// HB_BUFFER_MAX_LEN_FACTOR / _MIN, HB_BUFFER_MAX_OPS_FACTOR / _MIN
+comptime let kMaxLenFactor: i64 = 64;
+comptime let kMaxLenMin: i64 = 16384;
+comptime let kMaxOpsFactor: i64 = 1024;
+comptime let kMaxOpsMin: i64 = 16384;
+
+pub struct Buffer {
+  pub var info: List<GlyphInfo> = List()
+  pub var pos: List<GlyphPos> = List()
+  pub var out_info: List<GlyphInfo> = List()
+  pub var idx: usize = 0
+  pub var have_output: bool = false
+  pub var have_positions: bool = false
+  pub var successful: bool = true
+  pub var script: u32 = 0
+  pub var direction: u32 = 0
+  pub var scratch_flags: u32 = 0
+  pub var serial: u32 = 0
+  pub var random_state: u32 = 1
+  pub var max_len: i64 = 0
+  pub var max_ops: i64 = 0
+  // HB_BUFFER_FLAG_BOT / EOT: the C++ library leaves the buffer flags at
+  // their default (none set).
+  pub var bot: bool = false
+  pub var eot: bool = false
+  pub var not_found_variation_selector_set: bool = false
+
+  pub fn Buffer(): Buffer => Buffer {};
+
+  pub fn len(self&): usize => self.info.len();
+  pub fn out_len(self&): usize => self.out_info.len();
+  pub fn cur(var self&): &var GlyphInfo => self.info[self.idx];
+  pub fn cur_at(var self&, i: usize): &var GlyphInfo => self.info[self.idx + i];
+  pub fn backtrack_len(self&): usize => self.have_output ? self.out_info.len() : self.idx;
+  pub fn lookahead_len(self&): usize => self.info.len() - self.idx;
+
+  // hb_buffer_t::next_serial
+  pub fn next_serial(var self&): u32 {
+    self.serial = (self.serial + 1) & 0xFF;
+    if (self.serial == 0) {
+      self.serial = 1;
+    }
+    return self.serial;
+  }
+
+  // hb_buffer_t::enter: the limits for this many glyphs.
+  pub fn enter(var self&) {
+    self.serial = 0;
+    self.scratch_flags = 0;
+    let n = self.info.len() as i64;
+    self.max_len = n * kMaxLenFactor > kMaxLenMin ? n * kMaxLenFactor : kMaxLenMin;
+    self.max_ops = n * kMaxOpsFactor > kMaxOpsMin ? n * kMaxOpsFactor : kMaxOpsMin;
+  }
+
+  pub fn clear_output(var self&) {
+    self.have_output = true;
+    self.have_positions = false;
+    self.idx = 0;
+    self.out_info.clear();
+  }
+
+  pub fn clear_positions(var self&) {
+    self.have_output = false;
+    self.have_positions = true;
+    self.out_info.clear();
+    self.pos.clear();
+    for (let i in 0..self.info.len()) {
+      self.pos.push(GlyphPos {});
+    }
+  }
+
+  // hb_buffer_t::sync
+  pub fn sync(var self&): bool {
+    var ret = false;
+    if (self.successful) {
+      let n = self.info.len() - self.idx;
+      self.next_glyphs(n);
+      swap(self.info, self.out_info);
+      ret = true;
+    }
+    self.have_output = false;
+    self.out_info.clear();
+    self.idx = 0;
+    return ret;
+  }
+
+  pub fn next_glyph(var self&) {
+    if (self.have_output) {
+      let g = self.info[self.idx];
+      self.out_info.push(g);
+    }
+    self.idx += 1;
+  }
+
+  pub fn next_glyphs(var self&, n: usize) {
+    if (self.have_output) {
+      for (let i in 0..n) {
+        let g = self.info[self.idx + i];
+        self.out_info.push(g);
+      }
+    }
+    self.idx += n;
+  }
+
+  pub fn skip_glyph(var self&) {
+    self.idx += 1;
+  }
+
+  // out_info[out_len - 1], or out_info[0] when empty (as HarfBuzz reads it).
+  pub fn prev(self&): GlyphInfo {
+    let n = self.out_info.len();
+    if (n > 0) {
+      return self.out_info[n - 1];
+    }
+    return self.info.len() > 0 ? self.info[0] : GlyphInfo {};
+  }
+
+  // hb_buffer_t::replace_glyphs
+  pub fn replace_glyphs(var self&, num_in: usize, glyphs: &[u32]) {
+    self.merge_clusters(self.idx, self.idx + num_in);
+    let orig = self.idx < self.info.len() ? self.info[self.idx] : self.prev();
+    for (let g in glyphs) {
+      var o = orig;
+      o.codepoint = g;
+      self.out_info.push(o);
+    }
+    self.idx += num_in;
+  }
+
+  pub fn replace_glyph(var self&, g: u32) {
+    let orig = self.idx < self.info.len() ? self.info[self.idx] : self.prev();
+    var o = orig;
+    o.codepoint = g;
+    self.out_info.push(o);
+    self.idx += 1;
+  }
+
+  // A copy of the glyph at idx with another codepoint, idx unchanged.
+  pub fn output_glyph(var self&, g: u32) {
+    let orig = self.idx < self.info.len() ? self.info[self.idx] : self.prev();
+    var o = orig;
+    o.codepoint = g;
+    self.out_info.push(o);
+  }
+
+  pub fn output_info(var self&, g: GlyphInfo) {
+    self.out_info.push(g);
+  }
+
+  pub fn copy_glyph(var self&) {
+    let g = self.info[self.idx];
+    self.out_info.push(g);
+  }
+
+  // hb_buffer_t::shift_forward: count slots at idx.
+  fn shift_forward(var self&, count: usize): bool {
+    self.max_ops -= (self.info.len() - self.idx) as i64;
+    if (self.max_ops < 0) {
+      self.successful = false;
+      return false;
+    }
+    for (let i in 0..count) {
+      self.info.insert(self.idx, GlyphInfo {});
+    }
+    self.idx += count;
+    return true;
+  }
+
+  // hb_buffer_t::move_to: i is an output-buffer index.
+  pub fn move_to(var self&, i: usize): bool {
+    if (!self.have_output) {
+      self.idx = i;
+      return true;
+    }
+    if (!self.successful) {
+      return false;
+    }
+    let out_len = self.out_info.len();
+    if (out_len < i) {
+      let count = i - out_len;
+      for (let k in 0..count) {
+        let g = self.info[self.idx + k];
+        self.out_info.push(g);
+      }
+      self.idx += count;
+    } else if (out_len > i) {
+      let count = out_len - i;
+      if (self.idx < count && !self.shift_forward(count - self.idx)) {
+        return false;
+      }
+      self.idx -= count;
+      for (let k in 0..count) {
+        self.info[self.idx + k] = self.out_info[i + k];
+      }
+      self.out_info.truncate(i);
+    }
+    return true;
+  }
+
+  pub fn reset_masks(var self&, mask: u32) {
+    for (var g& in self.info) {
+      g.mask = mask;
+    }
+  }
+
+  // hb_buffer_t::set_masks over the whole buffer (the only form the shaper needs).
+  pub fn set_masks_all(var self&, value: u32, mask: u32) {
+    if (mask == 0) {
+      return;
+    }
+    self.max_ops -= self.info.len() as i64;
+    if (self.max_ops < 0) {
+      self.successful = false;
+    }
+    let v = value & mask;
+    for (var g& in self.info) {
+      g.mask = (g.mask & ~mask) | v;
+    }
+  }
+
+  // hb_buffer_t::merge_clusters (monotone cluster level).
+  pub fn merge_clusters(var self&, start: usize, end: usize) {
+    if (end < start + 2) {
+      return;
+    }
+    self.merge_clusters_impl(start, end);
+  }
+
+  // hb_buffer_t::merge_clusters_impl
+  pub fn merge_clusters_impl(var self&, start_: usize, end_: usize) {
+    var start = start_;
+    var end = end_;
+    self.max_ops -= (end - start) as i64;
+    if (self.max_ops < 0) {
+      self.successful = false;
+    }
+    var cluster = self.info[start].cluster;
+    for (let i in start + 1..end) {
+      cluster = cluster < self.info[i].cluster ? cluster : self.info[i].cluster;
+    }
+    // Extend end
+    if (cluster != self.info[end - 1].cluster) {
+      while (end < self.info.len() && self.info[end - 1].cluster == self.info[end].cluster) {
+        end += 1;
+      }
+    }
+    // Extend start
+    if (cluster != self.info[start].cluster) {
+      while (self.idx < start && self.info[start - 1].cluster == self.info[start].cluster) {
+        start -= 1;
+      }
+    }
+    // If we hit the start of buffer, continue in out-buffer.
+    if (self.idx == start && self.info[start].cluster != cluster) {
+      let c0 = self.info[start].cluster;
+      var i = self.out_info.len();
+      while (i > 0 && self.out_info[i - 1].cluster == c0) {
+        self.out_info[i - 1].cluster = cluster;
+        i -= 1;
+      }
+    }
+    for (let i in start..end) {
+      self.info[i].cluster = cluster;
+    }
+  }
+
+  // hb_buffer_t::merge_out_clusters (monotone cluster level).
+  pub fn merge_out_clusters(var self&, start_: usize, end_: usize) {
+    if (end_ < start_ + 2) {
+      return;
+    }
+    var start = start_;
+    var end = end_;
+    self.max_ops -= (end - start) as i64;
+    if (self.max_ops < 0) {
+      self.successful = false;
+    }
+    var cluster = self.out_info[start].cluster;
+    for (let i in start + 1..end) {
+      cluster = cluster < self.out_info[i].cluster ? cluster : self.out_info[i].cluster;
+    }
+    while (start > 0 && self.out_info[start - 1].cluster == self.out_info[start].cluster) {
+      start -= 1;
+    }
+    while (end < self.out_info.len() && self.out_info[end - 1].cluster == self.out_info[end].cluster) {
+      end += 1;
+    }
+    // If we hit the end of out-buffer, continue in buffer.
+    if (end == self.out_info.len()) {
+      let c_end = self.out_info[end - 1].cluster;
+      var i = self.idx;
+      while (i < self.info.len() && self.info[i].cluster == c_end) {
+        self.info[i].cluster = cluster;
+        i += 1;
+      }
+    }
+    for (let i in start..end) {
+      self.out_info[i].cluster = cluster;
+    }
+  }
+
+  // hb_buffer_t::delete_glyph: merge the clusters for deleting the current
+  // glyph, and skip it.
+  pub fn delete_glyph(var self&) {
+    let cluster = self.info[self.idx].cluster;
+    let out_len = self.out_info.len();
+    if ((self.idx + 1 < self.info.len() && cluster == self.info[self.idx + 1].cluster) ||
+        (out_len > 0 && cluster == self.out_info[out_len - 1].cluster)) {
+      // Cluster survives; do nothing.
+    } else if (out_len > 0) {
+      // Merge cluster backward.
+      if (cluster < self.out_info[out_len - 1].cluster) {
+        let old = self.out_info[out_len - 1].cluster;
+        var i = out_len;
+        while (i > 0 && self.out_info[i - 1].cluster == old) {
+          self.out_info[i - 1].cluster = cluster;
+          i -= 1;
+        }
+      }
+    } else if (self.idx + 1 < self.info.len()) {
+      // Merge cluster forward.
+      self.merge_clusters(self.idx, self.idx + 2);
+    }
+    self.skip_glyph();
+  }
+
+  // hb_buffer_t::delete_glyphs_inplace
+  pub fn delete_glyphs_inplace(var self&, filter: fn(&GlyphInfo): bool) {
+    var j = 0usize;
+    let count = self.info.len();
+    for (let i in 0..count) {
+      let gi = self.info[i];
+      if (filter(gi)) {
+        let cluster = gi.cluster;
+        if (i + 1 < count && cluster == self.info[i + 1].cluster) {
+          continue;  // Cluster survives; do nothing.
+        }
+        if (j > 0) {
+          // Merge cluster backward.
+          if (cluster < self.info[j - 1].cluster) {
+            let old = self.info[j - 1].cluster;
+            var k = j;
+            while (k > 0 && self.info[k - 1].cluster == old) {
+              self.info[k - 1].cluster = cluster;
+              k -= 1;
+            }
+          }
+          continue;
+        }
+        if (i + 1 < count) {
+          self.merge_clusters(i, i + 2);  // Merge cluster forward.
+        }
+        continue;
+      }
+      if (j != i) {
+        self.info[j] = self.info[i];
+        if (self.pos.len() > i) {
+          self.pos[j] = self.pos[i];
+        }
+      }
+      j += 1;
+    }
+    self.info.truncate(j);
+    if (self.pos.len() > j) {
+      self.pos.truncate(j);
+    }
+  }
+
+  pub fn reverse_range(var self&, start: usize, end: usize) {
+    if (end < start + 2) {
+      return;
+    }
+    var a = start;
+    var b = end - 1;
+    while (a < b) {
+      self.info.swap(a, b);
+      if (self.have_positions) {
+        self.pos.swap(a, b);
+      }
+      a += 1;
+      b -= 1;
+    }
+  }
+
+  pub fn reverse(var self&) {
+    let n = self.info.len();
+    self.reverse_range(0, n);
+  }
+
+  // hb_buffer_t::reverse_groups with the grapheme group function
+  // (continuations join the previous glyph), without merging.
+  pub fn reverse_graphemes(var self&) {
+    let n = self.info.len();
+    if (n == 0) {
+      return;
+    }
+    var start = 0usize;
+    var i = 1usize;
+    while (i < n) {
+      if ((self.info[i].unicode_props & 0x80) == 0) {
+        self.reverse_range(start, i);
+        start = i;
+      }
+      i += 1;
+    }
+    self.reverse_range(start, i);
+    self.reverse();
+  }
+
+  // hb_buffer_t::reverse_clusters
+  pub fn reverse_clusters(var self&) {
+    let n = self.info.len();
+    if (n == 0) {
+      return;
+    }
+    var start = 0usize;
+    var i = 1usize;
+    while (i < n) {
+      if (self.info[i - 1].cluster != self.info[i].cluster) {
+        self.reverse_range(start, i);
+        start = i;
+      }
+      i += 1;
+    }
+    self.reverse_range(start, i);
+    self.reverse();
+  }
+
+  // The end of the cluster starting at start (foreach_cluster).
+  pub fn next_cluster(self&, start: usize): usize {
+    let n = self.info.len();
+    let c = self.info[start].cluster;
+    var i = start + 1;
+    while (i < n && self.info[i].cluster == c) {
+      i += 1;
+    }
+    return i;
+  }
+
+  // The end of the syllable starting at start (foreach_syllable).
+  pub fn next_syllable(self&, start: usize): usize {
+    let n = self.info.len();
+    let s = self.info[start].syllable;
+    var i = start + 1;
+    while (i < n && self.info[i].syllable == s) {
+      i += 1;
+    }
+    return i;
+  }
+
+  // The end of the grapheme starting at start (foreach_grapheme).
+  pub fn next_grapheme(self&, start: usize): usize {
+    let n = self.info.len();
+    var i = start + 1;
+    while (i < n && (self.info[i].unicode_props & 0x80) != 0) {
+      i += 1;
+    }
+    return i;
+  }
+
+  // hb_buffer_t::sort (a stable insertion sort of info[start..end] by `less`,
+  // merging the clusters of whatever moved).
+  pub fn sort(var self&, start: usize, end: usize, less: fn(&GlyphInfo, &GlyphInfo): bool) {
+    var i = start + 1;
+    while (i < end) {
+      var j = i;
+      while (j > start && less(self.info[i], self.info[j - 1])) {
+        j -= 1;
+      }
+      if (i == j) {
+        i += 1;
+        continue;
+      }
+      // Move item i to occupy place for item j, shift what's in between.
+      self.merge_clusters(j, i + 1);
+      let t = self.info[i];
+      var k = i;
+      while (k > j) {
+        self.info[k] = self.info[k - 1];
+        k -= 1;
+      }
+      self.info[j] = t;
+      i += 1;
+    }
+  }
+}
