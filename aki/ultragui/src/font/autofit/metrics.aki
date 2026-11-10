@@ -178,7 +178,7 @@ fn scan_cluster(var face&: Face, var shaper&: AfShaper, text: &[u8], feature: u3
   }
   let top = (props & kPropTop) != 0;
   let top_or_sub = (props & (kPropTop | kPropSubTop)) != 0;
-  let flat_threshold = 4 * upem / 2048;  // FLAT_THRESHOLD
+  let flat_threshold = upem / 14;  // FLAT_THRESHOLD
   var best_y_extremum = top ? kLongMin : kLongMax;
   var best_round = false;
   for (let g in glyphs) {
