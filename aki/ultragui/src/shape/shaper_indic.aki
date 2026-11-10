@@ -10,14 +10,13 @@ module ultragui::shape::shaper_indic;
 import {List} from akikit::containers::list;
 import {Buffer, GlyphInfo} from ultragui::shape::buffer;
 import {ShapeFace} from ultragui::shape::face;
-import {LookupMap, MapBuilder, OtMap, kFGlobal, kFGlobalManualJoiners, kFManualJoiners, kFPerSyllable} from ultragui::shape::map;
+import {MapBuilder, OtMap, kFGlobal, kFGlobalManualJoiners, kFManualJoiners, kFPerSyllable} from ultragui::shape::map;
 import {
   kIndicActStart, kIndicActionStart, kIndicEofTrans, kIndicFromStateActions, kIndicIndexOffsets, kIndicIndicies, kIndicKeySpans, kIndicOps,
   kIndicStart, kIndicToStateActions, kIndicTransActions, kIndicTransKeys, kIndicTransTargs, kKhmerActStart, kKhmerActionStart, kKhmerEofTrans,
   kKhmerFromStateActions, kKhmerIndexOffsets, kKhmerIndicies, kKhmerKeySpans, kKhmerOps, kKhmerStart, kKhmerToStateActions, kKhmerTransActions,
   kKhmerTransKeys, kKhmerTransTargs,
 } from ultragui::shape::machines;
-import {GsubGpos} from ultragui::shape::otl;
 import {gc_of} from ultragui::shape::props;
 import {Digest, Machine, find_syllables, insert_dotted_circles, lookup_digest, preprocess_vowel_constraints, would_substitute} from ultragui::shape::syllabic;
 import {compose, decompose, gc_is_mark, general_category, indic_categories, tag} from ultragui::shape::ucd;

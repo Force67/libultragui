@@ -6,7 +6,7 @@
 
 module ultragui::shape::shaper_simple;
 
-import {Buffer, GlyphInfo} from ultragui::shape::buffer;
+import {Buffer} from ultragui::shape::buffer;
 import {ShapeFace} from ultragui::shape::face;
 import {ShapeFontFuncs} from ultragui::shape::font_funcs;
 import {MapBuilder} from ultragui::shape::map;
