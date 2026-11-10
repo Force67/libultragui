@@ -29,7 +29,7 @@ import {
 } from ultragui::font::sfnt;
 import {StrikeTable, load_strikes} from ultragui::font::sbit;
 import {LoadedGlyph, Vec26} from ultragui::font::outline;
-import {load_sbit_glyph, load_tt} from ultragui::font::tt_glyph;
+import {Loader, load_sbit_glyph, load_tt} from ultragui::font::tt_glyph;
 
 // FT_FACE_FLAG_*.
 pub comptime let kFaceFlagScalable: u32 = 0x1;
@@ -163,6 +163,8 @@ pub struct Face {
   pub var hdmx: List<(u8, u32)> = List()
   pub var strikes: StrikeTable = StrikeTable {}
   pub var size: Size = Size {}
+  // The glyph loader's buffers, kept between loads.
+  pub var scratch: Loader = Loader {}
 
   // FT_Open_Face(face index) on the bytes of a TrueType, OpenType or
   // collection file.

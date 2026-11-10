@@ -62,8 +62,9 @@ struct SubGlyph : Copy {
 
 fn v(x: i64, y: i64): Vec26 => Vec26 { x, y };
 
-// TT_LoaderRec + the FT_GlyphLoader it fills.
-struct Loader {
+// TT_LoaderRec + the FT_GlyphLoader it fills. Its lists are kept between
+// loads (Face::scratch), as FreeType keeps its glyph loader's buffers.
+pub struct Loader {
   // FT_GlyphLoader: points (cur), extra_points (org), extra_points2 (orus).
   pub var points: List<Vec26> = List()
   pub var org: List<Vec26> = List()
@@ -138,6 +139,17 @@ fn Loader::add(var self&) {
   self.base_contours += self.cur_contours;
   self.cur_points = 0;
   self.cur_contours = 0;
+}
+
+// Moves the point/tag/contour/subglyph buffers from one loader to another
+// (their contents are only scratch: every slot a load reads it wrote first).
+fn lend_buffers(var from&: Loader, var to&: Loader) {
+  swap(from.points, to.points);
+  swap(from.org, to.org);
+  swap(from.orus, to.orus);
+  swap(from.tags, to.tags);
+  swap(from.contours, to.contours);
+  swap(from.subglyphs, to.subglyphs);
 }
 
 // tt_get_metrics (hmtx/vmtx through TT_Get_HMetrics/TT_Get_VMetrics).
@@ -813,6 +825,7 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
   }
   let sm = hinted ? face.size.hinted : face.size.metrics;
   var ld = Loader {};
+  lend_buffers(face.scratch, ld);
   ld.x_scale = no_scale ? 0x10000 : sm.x_scale;
   ld.y_scale = no_scale ? 0x10000 : sm.y_scale;
   var widthp: usize? = none;
@@ -876,6 +889,7 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
     }
   }
   compute_metrics(face, ld, g, gid, widthp);
+  lend_buffers(ld, face.scratch);
   // FT_Load_Glyph's tail.
   if (!outline_ok(g.outline)) {
     return fail FontError::InvalidOutline;
