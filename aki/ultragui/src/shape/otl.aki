@@ -1,0 +1,485 @@
+// Reading OpenType layout tables in place: the big-endian accessors, Coverage,
+// ClassDef, GDEF, and the script/language/feature/lookup lists of GSUB and GPOS
+// (HarfBuzz's hb-ot-layout-common.hh, OT/Layout/Common, OT/Layout/GDEF, and
+// the selection functions of hb-ot-layout.cc).
+//
+// A table is a byte slice; positions are offsets into it. HarfBuzz reads a
+// zero offset, and anything its sanitizer rejects, as the all-zero Null
+// object: here a zero offset gives kNull, a position past every table, and
+// every read past the end of the table gives 0, so a Null object reads as
+// zeros the same way.
+
+module ultragui::shape::otl;
+
+pub comptime let kNull: usize = 1usize << 40;
+pub comptime let kNotCovered: u32 = 0xFFFFFFFF;
+pub comptime let kNotFound: u32 = 0xFFFF;  // Index::NOT_FOUND_INDEX
+
+pub fn rd8(t: &[u8], o: usize): u32 => o < #t ? t[o] as u32 : 0;
+pub fn rd16(t: &[u8], o: usize): u32 => o + 2 <= #t ? (t[o] as u32 << 8) | t[o + 1] as u32 : 0;
+pub fn rds16(t: &[u8], o: usize): i32 => (rd16(t, o) as u16 as i16) as i32;
+pub fn rd24(t: &[u8], o: usize): u32 => o + 3 <= #t ? (t[o] as u32 << 16) | (t[o + 1] as u32 << 8) | t[o + 2] as u32 : 0;
+pub fn rd32(t: &[u8], o: usize): u32 =>
+  o + 4 <= #t ? (t[o] as u32 << 24) | (t[o + 1] as u32 << 16) | (t[o + 2] as u32 << 8) | t[o + 3] as u32 : 0;
+
+// base + Offset16 read at o; kNull for a zero offset (or a Null base).
+pub fn off16(t: &[u8], base: usize, o: usize): usize {
+  if (base >= kNull) {
+    return kNull;
+  }
+  let v = rd16(t, o);
+  return v == 0 ? kNull : base + v as usize;
+}
+
+pub fn off32(t: &[u8], base: usize, o: usize): usize {
+  if (base >= kNull) {
+    return kNull;
+  }
+  let v = rd32(t, o);
+  return v == 0 ? kNull : base + v as usize;
+}
+
+// --- Coverage and ClassDef ----------------------------------------------------------
+
+// Coverage::get_coverage (formats 1 and 2; the 24-bit formats are Null here).
+pub fn coverage_index(t: &[u8], c: usize, g: u32): u32 {
+  let format = rd16(t, c);
+  if (format == 1) {
+    let count = rd16(t, c + 2) as i64;
+    var lo: i64 = 0;
+    var hi: i64 = count - 1;
+    while (lo <= hi) {
+      let mid = (lo + hi) / 2;
+      let v = rd16(t, c + 4 + mid as usize * 2);
+      if (g < v) {
+        hi = mid - 1;
+      } else if (g > v) {
+        lo = mid + 1;
+      } else {
+        return mid as u32;
+      }
+    }
+    return kNotCovered;
+  }
+  if (format == 2) {
+    let count = rd16(t, c + 2) as i64;
+    var lo: i64 = 0;
+    var hi: i64 = count - 1;
+    while (lo <= hi) {
+      let mid = (lo + hi) / 2;
+      let r = c + 4 + mid as usize * 6;
+      let first = rd16(t, r);
+      let last = rd16(t, r + 2);
+      if (g < first) {
+        hi = mid - 1;
+      } else if (g > last) {
+        lo = mid + 1;
+      } else {
+        if (first <= last) {
+          return rd16(t, r + 4) + (g - first);
+        }
+        return kNotCovered;
+      }
+    }
+    return kNotCovered;
+  }
+  return kNotCovered;
+}
+
+// ClassDef::get_class (formats 1 and 2).
+pub fn class_of(t: &[u8], c: usize, g: u32): u32 {
+  let format = rd16(t, c);
+  if (format == 1) {
+    let start = rd16(t, c + 2);
+    let count = rd16(t, c + 4);
+    if (g >= start && g - start < count) {
+      return rd16(t, c + 6 + (g - start) as usize * 2);
+    }
+    return 0;
+  }
+  if (format == 2) {
+    let count = rd16(t, c + 2) as i64;
+    var lo: i64 = 0;
+    var hi: i64 = count - 1;
+    while (lo <= hi) {
+      let mid = (lo + hi) / 2;
+      let r = c + 4 + mid as usize * 6;
+      let first = rd16(t, r);
+      let last = rd16(t, r + 2);
+      if (g < first) {
+        hi = mid - 1;
+      } else if (g > last) {
+        lo = mid + 1;
+      } else {
+        return rd16(t, r + 4);
+      }
+    }
+    return 0;
+  }
+  return 0;
+}
+
+// --- GDEF -------------------------------------------------------------------------------
+
+// HB_OT_LAYOUT_GLYPH_PROPS_*
+pub comptime let kPropsBaseGlyph: u32 = 0x02;
+pub comptime let kPropsLigature: u32 = 0x04;
+pub comptime let kPropsMark: u32 = 0x08;
+pub comptime let kPropsSubstituted: u32 = 0x10;
+pub comptime let kPropsLigated: u32 = 0x20;
+pub comptime let kPropsMultiplied: u32 = 0x40;
+pub comptime let kPropsPreserve: u32 = 0x70;
+
+// LookupFlag
+pub comptime let kLookupRightToLeft: u32 = 0x0001;
+pub comptime let kLookupIgnoreFlags: u32 = 0x000E;
+pub comptime let kLookupUseMarkFilteringSet: u32 = 0x0010;
+pub comptime let kLookupMarkAttachmentType: u32 = 0xFF00;
+
+// The parts of GDEF the shaper reads (GDEF::accelerator_t).
+pub struct Gdef : Copy {
+  pub var version: u32 = 0
+  pub var glyph_class_def: usize = kNull
+  pub var mark_attach_class_def: usize = kNull
+  pub var mark_glyph_sets: usize = kNull
+  pub var mark_glyph_set_count: u32 = 0
+  pub var lig_caret_list: usize = kNull
+  pub var var_store: usize = kNull
+}
+
+pub fn parse_gdef(t: &[u8]): Gdef {
+  var g = Gdef {};
+  if (#t < 4) {
+    return g;
+  }
+  g.version = rd32(t, 0);
+  if (rd16(t, 0) != 1) {
+    return g;  // GDEF version 2 (beyond 64K) is not read
+  }
+  g.glyph_class_def = off16(t, 0, 4);
+  g.lig_caret_list = off16(t, 0, 8);
+  g.mark_attach_class_def = off16(t, 0, 10);
+  if (g.version >= 0x00010002) {
+    g.mark_glyph_sets = off16(t, 0, 12);
+    if (rd16(t, g.mark_glyph_sets) == 1) {
+      g.mark_glyph_set_count = rd16(t, g.mark_glyph_sets + 2);
+    }
+  }
+  if (g.version >= 0x00010003) {
+    g.var_store = off32(t, 0, 14);
+  }
+  return g;
+}
+
+pub fn gdef_has_glyph_classes(g&: Gdef): bool => g.glyph_class_def < kNull;
+
+// GDEF::get_glyph_props
+pub fn gdef_glyph_props(t: &[u8], g&: Gdef, glyph: u32): u32 {
+  let klass = class_of(t, g.glyph_class_def, glyph);
+  return match (klass) {
+    1 => kPropsBaseGlyph,
+    2 => kPropsLigature,
+    3 => kPropsMark | (class_of(t, g.mark_attach_class_def, glyph) << 8),
+    _ => 0,
+  };
+}
+
+// GDEF::mark_set_covers
+pub fn gdef_mark_set_covers(t: &[u8], g&: Gdef, set_index: u32, glyph: u32): bool {
+  if (set_index >= g.mark_glyph_set_count) {
+    return false;
+  }
+  let cov = off32(t, g.mark_glyph_sets, g.mark_glyph_sets + 4 + set_index as usize * 4);
+  return coverage_index(t, cov, glyph) != kNotCovered;
+}
+
+// GDEF::accelerator_t::sanitize_lookup_props
+pub fn gdef_sanitize_lookup_props(g&: Gdef, props: u32): u32 {
+  if ((props & kLookupUseMarkFilteringSet) != 0 && (props >> 16) >= g.mark_glyph_set_count) {
+    return props & ~kLookupUseMarkFilteringSet;
+  }
+  return props;
+}
+
+// GDEF::is_blocklisted: fonts whose GDEF HarfBuzz ignores, by the lengths of
+// GDEF, GSUB and GPOS.
+pub fn gdef_is_blocklisted(gdef_len: usize, gsub_len: usize, gpos_len: usize): bool {
+  let k = [
+    (442usize, 2874usize, 42038usize), (430, 2874, 40662), (442, 2874, 39116), (430, 2874, 39374), (490, 3046, 41638),
+    (478, 3046, 41902), (898, 12554, 46470), (910, 12566, 47732), (928, 23298, 59332), (940, 23310, 60732),
+    (964, 23836, 60072), (976, 23832, 61456), (994, 24474, 60336), (1006, 24470, 61740), (1006, 24576, 61346),
+    (1018, 24572, 62828), (1006, 24576, 61352), (1018, 24572, 62834), (832, 7324, 47162), (844, 7302, 45474),
+    (180, 13054, 7254), (192, 12638, 7254), (192, 12690, 7254), (188, 248, 3852), (188, 264, 3426),
+    (1058, 47032, 11818), (1046, 47030, 12600), (1058, 71796, 16770), (1046, 71790, 17862), (1046, 71788, 17112),
+    (1058, 71794, 17514), (1330, 109904, 57938), (1330, 109904, 58972), (1004, 59092, 14836), (588, 5078, 14418),
+    (588, 5078, 14238), (894, 17162, 33960), (894, 17154, 34472), (816, 7868, 17052), (816, 7868, 17138),
+  ];
+  for (let e in k) {
+    if (e.0 == gdef_len && e.1 == gsub_len && e.2 == gpos_len) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// --- GSUB/GPOS headers ---------------------------------------------------------------
+
+pub struct GsubGpos : Copy {
+  pub var version: u32 = 0
+  pub var script_list: usize = kNull
+  pub var feature_list: usize = kNull
+  pub var lookup_list: usize = kNull
+  pub var feature_vars: usize = kNull
+}
+
+pub fn parse_gsubgpos(t: &[u8]): GsubGpos {
+  var g = GsubGpos {};
+  if (#t < 10 || rd16(t, 0) != 1) {
+    return g;  // no table, or version 2 (beyond 64K), which is not read
+  }
+  g.version = rd32(t, 0);
+  g.script_list = off16(t, 0, 4);
+  g.feature_list = off16(t, 0, 6);
+  g.lookup_list = off16(t, 0, 8);
+  if (g.version >= 0x00010001) {
+    g.feature_vars = off32(t, 0, 10);
+  }
+  return g;
+}
+
+pub fn has_data(g&: GsubGpos): bool => g.version != 0;
+
+pub fn lookup_count(t: &[u8], g&: GsubGpos): u32 => rd16(t, g.lookup_list);
+
+pub fn lookup_offset(t: &[u8], g&: GsubGpos, i: u32): usize {
+  if (i >= rd16(t, g.lookup_list)) {
+    return kNull;
+  }
+  return off16(t, g.lookup_list, g.lookup_list + 2 + i as usize * 2);
+}
+
+pub fn feature_count(t: &[u8], g&: GsubGpos): u32 => rd16(t, g.feature_list);
+
+// GSUBGPOS::get_feature_tag (HB_TAG_NONE for NOT_FOUND or out of range).
+pub fn feature_tag(t: &[u8], g&: GsubGpos, i: u32): u32 {
+  if (i == kNotFound || i >= rd16(t, g.feature_list)) {
+    return 0;
+  }
+  return rd32(t, g.feature_list + 2 + i as usize * 6);
+}
+
+pub fn feature_offset(t: &[u8], g&: GsubGpos, i: u32): usize {
+  if (i >= rd16(t, g.feature_list)) {
+    return kNull;
+  }
+  return off16(t, g.feature_list, g.feature_list + 2 + i as usize * 6 + 4);
+}
+
+// RecordListOf::find_index: hb_bsearch over 6-byte tag records.
+fn find_record(t: &[u8], list: usize, tag: u32): u32? {
+  let count = rd16(t, list) as i64;
+  var lo: i64 = 0;
+  var hi: i64 = count - 1;
+  while (lo <= hi) {
+    let mid = (lo + hi) / 2;
+    let v = rd32(t, list + 2 + mid as usize * 6);
+    if (tag < v) {
+      hi = mid - 1;
+    } else if (tag > v) {
+      lo = mid + 1;
+    } else {
+      return mid as u32;
+    }
+  }
+  return none;
+}
+
+// The Script table at index (Null for NOT_FOUND or out of range).
+pub fn script_offset(t: &[u8], g&: GsubGpos, i: u32): usize {
+  if (i >= rd16(t, g.script_list)) {
+    return kNull;
+  }
+  return off16(t, g.script_list, g.script_list + 2 + i as usize * 6 + 4);
+}
+
+// The LangSys of a script: the default one for language index NOT_FOUND.
+pub fn langsys_offset(t: &[u8], script: usize, i: u32): usize {
+  if (i == kNotFound) {
+    return off16(t, script, script);
+  }
+  if (i >= rd16(t, script + 2)) {
+    return kNull;
+  }
+  return off16(t, script, script + 4 + i as usize * 6 + 4);
+}
+
+// hb_ot_layout_table_select_script: (script index, chosen tag, found).
+pub fn select_script(t: &[u8], g&: GsubGpos, tags&: [u32]): (u32, u32, bool) {
+  for (let s in tags) {
+    if (let i = find_record(t, g.script_list, s)) {
+      return (i, s, true);
+    }
+  }
+  let dflt_s = 0x44464C54u32;  // 'DFLT'
+  if (let i = find_record(t, g.script_list, dflt_s)) {
+    return (i, dflt_s, false);
+  }
+  let dflt_l = 0x64666C74u32;  // 'dflt'
+  if (let i = find_record(t, g.script_list, dflt_l)) {
+    return (i, dflt_l, false);
+  }
+  let latn = 0x6C61746Eu32;  // 'latn'
+  if (let i = find_record(t, g.script_list, latn)) {
+    return (i, latn, false);
+  }
+  return (kNotFound, 0, false);
+}
+
+// hb_ot_layout_script_select_language with no language tags: 'dflt' if the
+// script has it, else the default language system.
+pub fn select_language(t: &[u8], g&: GsubGpos, script_index: u32): u32 {
+  let s = script_offset(t, g, script_index);
+  let count = rd16(t, s + 2) as i64;
+  var lo: i64 = 0;
+  var hi: i64 = count - 1;
+  let dflt = 0x64666C74u32;
+  while (lo <= hi) {
+    let mid = (lo + hi) / 2;
+    let v = rd32(t, s + 4 + mid as usize * 6);
+    if (dflt < v) {
+      hi = mid - 1;
+    } else if (dflt > v) {
+      lo = mid + 1;
+    } else {
+      return mid as u32;
+    }
+  }
+  return kNotFound;
+}
+
+// LangSys: required feature index (0xFFFF none) and feature indices.
+pub fn langsys_required_feature(t: &[u8], l: usize): u32 => l >= kNull ? kNotFound : rd16(t, l + 2);
+pub fn langsys_feature_count(t: &[u8], l: usize): u32 => rd16(t, l + 4);
+pub fn langsys_feature_index(t: &[u8], l: usize, i: u32): u32 => rd16(t, l + 6 + i as usize * 2);
+
+// The lookup indices of the Feature table at f.
+pub fn feature_lookup_count(t: &[u8], f: usize): u32 => rd16(t, f + 2);
+pub fn feature_lookup_index(t: &[u8], f: usize, i: u32): u32 => rd16(t, f + 4 + i as usize * 2);
+
+// hb_ot_layout_table_find_feature: the first feature with the tag, any script.
+pub fn find_feature_any(t: &[u8], g&: GsubGpos, tag: u32): u32 {
+  let n = feature_count(t, g);
+  for (let i in 0..n) {
+    if (feature_tag(t, g, i) == tag) {
+      return i;
+    }
+  }
+  return kNotFound;
+}
+
+// --- Feature variations (at the default instance: every axis at 0) -------------------
+
+fn condition_holds(t: &[u8], c: usize, depth: u32): bool {
+  if (depth > 32) {
+    return false;
+  }
+  let format = rd16(t, c);
+  return match (format) {
+    // ConditionAxisRange: the coordinate is 0.
+    1 => rds16(t, c + 4) <= 0 && 0 <= rds16(t, c + 6),
+    // ConditionValue: the default value (the delta is 0 at the default).
+    2 => rds16(t, c + 2) > 0,
+    // ConditionAnd / ConditionOr: Array8OfOffset24To<Condition>
+    3 => {
+      let n = rd8(t, c + 2);
+      var ok = true;
+      for (let i in 0..n) {
+        let o = rd24(t, c + 3 + i as usize * 3);
+        if (o == 0 || !condition_holds(t, c + o as usize, depth + 1)) {
+          ok = false;
+          break;
+        }
+      }
+      ok
+    },
+    4 => {
+      let n = rd8(t, c + 2);
+      var any = false;
+      for (let i in 0..n) {
+        let o = rd24(t, c + 3 + i as usize * 3);
+        if (o != 0 && condition_holds(t, c + o as usize, depth + 1)) {
+          any = true;
+          break;
+        }
+      }
+      any
+    },
+    5 => {
+      let o = rd24(t, c + 2);
+      !(o != 0 && condition_holds(t, c + o as usize, depth + 1))
+    },
+    _ => false,
+  };
+}
+
+// FeatureVariations::find_index with no coordinates.
+pub fn find_variations_index(t: &[u8], g&: GsubGpos): u32 {
+  let fv = g.feature_vars;
+  if (fv >= kNull) {
+    return 0xFFFFFFFF;
+  }
+  let count = rd32(t, fv + 4);
+  for (let i in 0..count) {
+    let rec = fv + 8 + i as usize * 8;
+    let cs = off32(t, fv, rec);
+    // ConditionSet: Array16OfOffset32To<Condition>
+    let n = rd16(t, cs);
+    var ok = true;
+    for (let k in 0..n) {
+      let c = off32(t, cs, cs + 2 + k as usize * 4);
+      if (!condition_holds(t, c, 0)) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) {
+      return i;
+    }
+  }
+  return 0xFFFFFFFF;
+}
+
+// GSUBGPOS::get_feature_variation
+pub fn feature_variation_offset(t: &[u8], g&: GsubGpos, feature_index: u32, variations_index: u32): usize {
+  if (variations_index != 0xFFFFFFFF && g.version >= 0x00010001) {
+    let fv = g.feature_vars;
+    if (variations_index < rd32(t, fv + 4)) {
+      let rec = fv + 8 + variations_index as usize * 8;
+      let subst = off32(t, fv, rec + 4);
+      let n = rd16(t, subst + 4);
+      for (let i in 0..n) {
+        let r = subst + 6 + i as usize * 6;
+        if (rd16(t, r) == feature_index) {
+          return off32(t, subst, r + 2);
+        }
+      }
+    }
+  }
+  return feature_offset(t, g, feature_index);
+}
+
+// --- Lookups ---------------------------------------------------------------------------
+
+pub fn lookup_type(t: &[u8], l: usize): u32 => rd16(t, l);
+pub fn lookup_subtable_count(t: &[u8], l: usize): u32 => rd16(t, l + 4);
+pub fn lookup_subtable(t: &[u8], l: usize, i: u32): usize => off16(t, l, l + 6 + i as usize * 2);
+
+// Lookup::get_props
+pub fn lookup_props(t: &[u8], l: usize): u32 {
+  var flag = rd16(t, l + 2);
+  if ((flag & kLookupUseMarkFilteringSet) != 0) {
+    let n = rd16(t, l + 4);
+    flag += rd16(t, l + 6 + n as usize * 2) << 16;
+  }
+  return flag;
+}
