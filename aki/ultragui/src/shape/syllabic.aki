@@ -1,0 +1,480 @@
+// What the syllable-based shapers share: running HarfBuzz's Ragel syllable
+// machines (the exec loop of hb-ot-shaper-*-machine.hh over the tables of
+// ultragui::shape::machines), dotted-circle insertion into broken syllables
+// (hb-ot-shaper-syllabic.cc), the vowel constraints
+// (hb-ot-shaper-vowel-constraints.cc), and lookup "would substitute" tests
+// (hb_ot_layout_lookup_would_substitute).
+
+module ultragui::shape::syllabic;
+
+import {List} from akikit::containers::list;
+import {Buffer, GlyphInfo, kScratchHasBrokenSyllable} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {
+  GsubGpos, class_of, coverage_index, kNotCovered, kNull, lookup_count, lookup_offset, lookup_subtable, lookup_subtable_count, lookup_type,
+  off16, off32, rd16,
+} from ultragui::shape::otl;
+import {kVowelConstraints} from ultragui::shape::machines;
+
+// The tables of one machine.
+pub struct Machine<'a> {
+  pub let start: i32
+  pub let trans_keys: &'a [u8]
+  pub let key_spans: &'a [u8]
+  pub let index_offsets: &'a [u16]
+  pub let indicies: &'a [u16]
+  pub let trans_targs: &'a [u16]
+  pub let trans_actions: &'a [u8]
+  pub let to_state_actions: &'a [u8]
+  pub let from_state_actions: &'a [u8]
+  pub let eof_trans: &'a [u16]
+  pub let ops: &'a [u8]
+  pub let action_start: &'a [u16]
+  pub let act_start: &'a [u16]
+}
+
+// The Ragel exec loop over cats (one category per machine position);
+// `orig` maps positions to buffer indices (identity for all but USE), and
+// found_syllable marks buffer indices orig[ts]..orig[te] (te at the end: the
+// buffer's length).
+pub fn find_syllables(m&: Machine, cats&: List<u8>, orig&: List<usize>, var buf&: Buffer) {
+  let pe = cats.len() as i64;
+  let eof = pe;
+  var p: i64 = 0;
+  var cs = m.start;
+  var ts: i64 = 0;
+  var te: i64 = 0;
+  var act: u32 = 0;
+  var syllable_serial: u32 = 1;
+  var trans: i64 = 0;
+  // 0 resume, 1 eof_trans, 2 test_eof
+  var state = p == pe ? 2u32 : 0;
+  while (true) {
+    if (state == 0) {
+      if (m.from_state_actions[cs as usize] != 0) {
+        ts = p;
+      }
+      let keys = cs as usize * 2;
+      let inds = m.index_offsets[cs as usize] as usize;
+      let slen = m.key_spans[cs as usize] as i64;
+      let c = cats[p as usize] as i64;
+      let k0 = m.trans_keys[keys] as i64;
+      let k1 = m.trans_keys[keys + 1] as i64;
+      let off = slen > 0 && k0 <= c && c <= k1 ? c - k0 : slen;
+      trans = m.indicies[inds + off as usize] as i64;
+      state = 1;
+    }
+    if (state == 1) {
+      cs = m.trans_targs[trans as usize] as i32;
+      let action = m.trans_actions[trans as usize] as usize;
+      if (action != 0) {
+        var o = m.action_start[action] as usize;
+        var depth = 0u32;
+        var resume_o = 0usize;
+        while (true) {
+          let op = m.ops[o * 2];
+          let arg = m.ops[o * 2 + 1] as u32;
+          if (op == 0) {
+            if (depth > 0) {
+              depth = 0;
+              o = resume_o;
+              continue;
+            }
+            break;
+          }
+          o += 1;
+          match (op) {
+            1 => { te = p + 1; },
+            2 => {
+              te = p;
+              p -= 1;
+            },
+            3 => { p = te - 1; },
+            4 => {
+              let start = ts < pe ? orig[ts as usize] : buf.len();
+              let end = te < pe ? orig[te as usize] : buf.len();
+              for (let i in start..end) {
+                buf.info[i].syllable = ((syllable_serial << 4) | arg) & 0xFF;
+              }
+              syllable_serial += 1;
+              if (syllable_serial == 16) {
+                syllable_serial = 1;
+              }
+            },
+            5 => { buf.scratch_flags |= kScratchHasBrokenSyllable; },
+            6 => { act = arg; },
+            7 => {
+              if ((act as usize) < m.act_start.len() && m.act_start[act as usize] != 0) {
+                resume_o = o;
+                depth = 1;
+                o = m.act_start[act as usize] as usize;
+              }
+            },
+            _ => {},
+          }
+        }
+      }
+      // _again
+      if (m.to_state_actions[cs as usize] != 0) {
+        ts = 0;
+      }
+      p += 1;
+      if (p != pe) {
+        state = 0;
+        continue;
+      }
+      state = 2;
+    }
+    // _test_eof
+    if (p == eof) {
+      if (m.eof_trans[cs as usize] > 0) {
+        trans = m.eof_trans[cs as usize] as i64 - 1;
+        state = 1;
+        continue;
+      }
+    }
+    break;
+  }
+}
+
+// hb_syllabic_insert_dotted_circles: whether it inserted any.
+pub fn insert_dotted_circles(face&: ShapeFace, var buf&: Buffer, broken_syllable_type: u32, dottedcircle_category: u32, repha_category: i32,
+                             dottedcircle_position: i32): bool {
+  if ((buf.scratch_flags & kScratchHasBrokenSyllable) == 0) {
+    return false;
+  }
+  let glyph = face.nominal_glyph(0x25CC) else {
+    return false;
+  };
+  var dc = GlyphInfo { codepoint: glyph, category: dottedcircle_category };
+  if (dottedcircle_position != -1) {
+    dc.aux = dottedcircle_position as u32;
+  }
+  buf.clear_output();
+  buf.idx = 0;
+  var last_syllable = 0u32;
+  while (buf.idx < buf.len() && buf.successful) {
+    let syllable = buf.info[buf.idx].syllable;
+    if (last_syllable != syllable && (syllable & 0x0F) == broken_syllable_type) {
+      last_syllable = syllable;
+      var ginfo = dc;
+      ginfo.cluster = buf.info[buf.idx].cluster;
+      ginfo.mask = buf.info[buf.idx].mask;
+      ginfo.syllable = buf.info[buf.idx].syllable;
+      if (repha_category != -1) {
+        while (buf.idx < buf.len() && buf.successful && last_syllable == buf.info[buf.idx].syllable &&
+               buf.info[buf.idx].category == repha_category as u32) {
+          buf.next_glyph();
+        }
+      }
+      buf.output_info(ginfo);
+    } else {
+      buf.next_glyph();
+    }
+  }
+  buf.sync();
+  return true;
+}
+
+// _hb_preprocess_text_vowel_constraints
+pub fn preprocess_vowel_constraints(var buf&: Buffer, script: u32) {
+  // Does the script have rules?
+  var any = false;
+  var i = 0usize;
+  while (i < #kVowelConstraints) {
+    if (kVowelConstraints[i] == script) {
+      any = true;
+      break;
+    }
+    i += 4;
+  }
+  buf.clear_output();
+  let count = buf.len();
+  if (any) {
+    buf.idx = 0;
+    while (buf.idx + 1 < count && buf.successful) {
+      var matched = false;
+      let first = buf.info[buf.idx].codepoint;
+      let second = buf.info[buf.idx + 1].codepoint;
+      var three = false;
+      var k = 0usize;
+      while (k < #kVowelConstraints) {
+        if (kVowelConstraints[k] == script && kVowelConstraints[k + 1] == first) {
+          let third = kVowelConstraints[k + 3];
+          if (third == 0) {
+            if (kVowelConstraints[k + 2] == second) {
+              matched = true;
+              break;
+            }
+          } else if (kVowelConstraints[k + 2] == second && buf.idx + 2 < count && buf.info[buf.idx + 2].codepoint == third) {
+            three = true;
+            matched = true;
+            break;
+          }
+        }
+        k += 4;
+      }
+      if (three) {
+        buf.next_glyph();
+      }
+      buf.next_glyph();
+      if (matched) {
+        // _output_with_dotted_circle
+        buf.output_glyph(0x25CC);
+        let n = buf.out_info.len();
+        buf.out_info[n - 1].unicode_props &= ~0x80u32;
+        buf.next_glyph();
+      }
+    }
+  }
+  buf.sync();
+}
+
+// --- would_substitute -------------------------------------------------------------------------
+
+// hb_set_digest_t (shifts 4, 0, 6 over 64-bit masks).
+pub struct Digest : Copy {
+  pub var m0: u64 = 0
+  pub var m1: u64 = 0
+  pub var m2: u64 = 0
+
+  pub fn add(var self&, g: u32) {
+    self.m0 |= 1u64 << ((g >> 4) & 63) as u64;
+    self.m1 |= 1u64 << (g & 63) as u64;
+    self.m2 |= 1u64 << ((g >> 6) & 63) as u64;
+  }
+
+  pub fn add_range(var self&, a: u32, b: u32): bool {
+    let all = 0xFFFFFFFFFFFFFFFFu64;
+    if (self.m0 == all && self.m1 == all && self.m2 == all) {
+      return false;
+    }
+    self.m0 = range_mask(self.m0, a, b, 4);
+    self.m1 = range_mask(self.m1, a, b, 0);
+    self.m2 = range_mask(self.m2, a, b, 6);
+    return true;
+  }
+
+  pub fn may_have(self&, g: u32): bool =>
+    (self.m0 & (1u64 << ((g >> 4) & 63) as u64)) != 0 && (self.m1 & (1u64 << (g & 63) as u64)) != 0 &&
+    (self.m2 & (1u64 << ((g >> 6) & 63) as u64)) != 0;
+}
+
+fn range_mask(m: u64, a: u32, b: u32, shift: u32): u64 {
+  if (((b >> shift) -% (a >> shift)) >= 63) {
+    return 0xFFFFFFFFFFFFFFFFu64;
+  }
+  let ma = 1u64 << ((a >> shift) & 63) as u64;
+  let mb = 1u64 << ((b >> shift) & 63) as u64;
+  return m | (mb +% (mb -% ma) -% (mb < ma ? 1u64 : 0));
+}
+
+// Coverage::collect_coverage into a digest.
+fn collect_coverage(t: &[u8], c: usize, var d&: Digest) {
+  let format = rd16(t, c);
+  if (format == 1) {
+    for (let i in 0..rd16(t, c + 2)) {
+      d.add(rd16(t, c + 4 + i as usize * 2));
+    }
+  } else if (format == 2) {
+    for (let i in 0..rd16(t, c + 2)) {
+      let r = c + 4 + i as usize * 6;
+      if (!d.add_range(rd16(t, r), rd16(t, r + 2))) {
+        return;
+      }
+    }
+  }
+}
+
+fn resolve(t: &[u8], type_: u32, s: usize): (u32, usize) {
+  if (type_ == 7) {
+    if (rd16(t, s) != 1) {
+      return (0, kNull);
+    }
+    return (rd16(t, s + 2), off32(t, s, s + 4));
+  }
+  return (type_, s);
+}
+
+// The coverage a GSUB subtable's get_coverage() names.
+fn subtable_coverage(t: &[u8], type_: u32, s: usize): usize {
+  let format = rd16(t, s);
+  if (type_ == 5 && format == 3) {
+    return off16(t, s, s + 6);
+  }
+  if (type_ == 6 && format == 3) {
+    let backtrack = rd16(t, s + 2) as usize;
+    return off16(t, s, s + 6 + backtrack * 2);
+  }
+  return off16(t, s, s + 2);
+}
+
+// The digest of a GSUB lookup's coverages (hb_ot_layout_lookup_accelerator_t::digest).
+pub fn lookup_digest(t: &[u8], gg&: GsubGpos, lookup_index: u32): Digest {
+  var d = Digest {};
+  if (lookup_index >= lookup_count(t, gg)) {
+    return d;
+  }
+  let l = lookup_offset(t, gg, lookup_index);
+  let type_ = lookup_type(t, l);
+  for (let i in 0..lookup_subtable_count(t, l)) {
+    let (st, s) = resolve(t, type_, lookup_subtable(t, l, i));
+    if (s >= kNull) {
+      continue;
+    }
+    var sd = Digest {};
+    collect_coverage(t, subtable_coverage(t, st, s), sd);
+    d.m0 |= sd.m0;
+    d.m1 |= sd.m1;
+    d.m2 |= sd.m2;
+  }
+  return d;
+}
+
+fn matches(t: &[u8], kind: u32, data: usize, g: u32, value: u32): bool => match (kind) {
+  0 => g == value,
+  1 => class_of(t, data, g) == value,
+  _ => coverage_index(t, value == 0 ? kNull : data + value as usize, g) != kNotCovered,
+};
+
+// would_match_input
+fn would_match_input(t: &[u8], glyphs: &[u32], count: u32, input: usize, kind: u32, data: usize): bool {
+  if (count as usize != #glyphs) {
+    return false;
+  }
+  for (let i in 1..count) {
+    if (!matches(t, kind, data, glyphs[i as usize], rd16(t, input + (i - 1) as usize * 2))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn subtable_would_apply(t: &[u8], type_: u32, s: usize, glyphs: &[u32], zero_context: bool): bool {
+  let format = rd16(t, s);
+  let g0 = glyphs[0];
+  if (type_ == 1 || type_ == 2 || type_ == 3 || type_ == 8) {
+    if ((type_ == 2 || type_ == 3 || type_ == 8) && format != 1) {
+      return false;
+    }
+    if (type_ == 1 && format != 1 && format != 2) {
+      return false;
+    }
+    return #glyphs == 1 && coverage_index(t, off16(t, s, s + 2), g0) != kNotCovered;
+  }
+  if (type_ == 4) {
+    if (format != 1) {
+      return false;
+    }
+    let index = coverage_index(t, off16(t, s, s + 2), g0);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let set = index < rd16(t, s + 4) ? off16(t, s, s + 6 + index as usize * 2) : kNull;
+    for (let i in 0..rd16(t, set)) {
+      let lig = off16(t, set, set + 2 + i as usize * 2);
+      let count = rd16(t, lig + 2);
+      if (#glyphs != count as usize) {
+        continue;
+      }
+      var ok = true;
+      for (let k in 1..count) {
+        if (glyphs[k as usize] != rd16(t, lig + 4 + (k - 1) as usize * 2)) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (type_ == 5) {
+    if (format == 1 || format == 2) {
+      var rs = kNull;
+      var kind = 0u32;
+      var data = kNull;
+      if (format == 1) {
+        let index = coverage_index(t, off16(t, s, s + 2), g0);
+        rs = index < rd16(t, s + 4) ? off16(t, s, s + 6 + index as usize * 2) : kNull;
+      } else {
+        data = off16(t, s, s + 4);
+        kind = 1;
+        let klass = class_of(t, data, g0);
+        rs = klass < rd16(t, s + 6) ? off16(t, s, s + 8 + klass as usize * 2) : kNull;
+      }
+      for (let i in 0..rd16(t, rs)) {
+        let r = off16(t, rs, rs + 2 + i as usize * 2);
+        if (would_match_input(t, glyphs, rd16(t, r), r + 4, kind, data)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (format == 3) {
+      return would_match_input(t, glyphs, rd16(t, s + 2), s + 8, 2, s);
+    }
+    return false;
+  }
+  if (type_ == 6) {
+    if (format == 1 || format == 2) {
+      var rs = kNull;
+      var kind = 0u32;
+      var data = kNull;
+      if (format == 1) {
+        let index = coverage_index(t, off16(t, s, s + 2), g0);
+        rs = index < rd16(t, s + 4) ? off16(t, s, s + 6 + index as usize * 2) : kNull;
+      } else {
+        data = off16(t, s, s + 6);
+        kind = 1;
+        let klass = class_of(t, data, g0);
+        rs = klass < rd16(t, s + 10) ? off16(t, s, s + 12 + klass as usize * 2) : kNull;
+      }
+      for (let i in 0..rd16(t, rs)) {
+        let r = off16(t, rs, rs + 2 + i as usize * 2);
+        let backtrack_count = rd16(t, r);
+        let ip = r + 2 + backtrack_count as usize * 2;
+        let input_count = rd16(t, ip);
+        let lp = ip + 2 + (input_count > 0 ? input_count - 1 : 0) as usize * 2;
+        let lookahead_count = rd16(t, lp);
+        if ((!zero_context || (backtrack_count == 0 && lookahead_count == 0)) && would_match_input(t, glyphs, input_count, ip + 2, kind, data)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (format == 3) {
+      let backtrack_count = rd16(t, s + 2);
+      let ip = s + 4 + backtrack_count as usize * 2;
+      let input_count = rd16(t, ip);
+      let lp = ip + 2 + input_count as usize * 2;
+      let lookahead_count = rd16(t, lp);
+      return (!zero_context || (backtrack_count == 0 && lookahead_count == 0)) && would_match_input(t, glyphs, input_count, ip + 4, 2, s);
+    }
+    return false;
+  }
+  return false;
+}
+
+// hb_ot_layout_lookup_would_substitute with the lookup's digest.
+pub fn would_substitute(t: &[u8], gg&: GsubGpos, lookup_index: u32, digest&: Digest, glyphs: &[u32], zero_context: bool): bool {
+  if (lookup_index >= lookup_count(t, gg) || #glyphs == 0) {
+    return false;
+  }
+  if (!digest.may_have(glyphs[0])) {
+    return false;
+  }
+  let l = lookup_offset(t, gg, lookup_index);
+  let type_ = lookup_type(t, l);
+  for (let i in 0..lookup_subtable_count(t, l)) {
+    let (st, s) = resolve(t, type_, lookup_subtable(t, l, i));
+    if (s >= kNull) {
+      continue;
+    }
+    if (subtable_would_apply(t, st, s, glyphs, zero_context)) {
+      return true;
+    }
+  }
+  return false;
+}
