@@ -13,14 +13,16 @@
  * included). Output, per size and string in that order:
  *   "S <size> <x_scale> <y_scale>" once per size, then per string
  *   "<n> <gid> <cluster> <x_advance> <y_advance> <x_offset> <y_offset> ..."
- * and first a line "F <num_glyphs> <shaper>" (the shaper HarfBuzz picked for
- * the first string, e.g. "ot" or "graphite2").
+ * and first a line "F <num_glyphs> <shaper> <gsub> <gpos> <gdef>" (the shaper
+ * HarfBuzz picked for the first string, e.g. "ot" or "graphite2", and whether
+ * HarfBuzz kept GSUB and GPOS and has GDEF glyph classes, after its sanitizer).
  */
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include <hb.h>
 #include <hb-ft.h>
+#include <hb-ot.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,7 +88,10 @@ int main(int argc, char **argv)
       hb_segment_properties_t props;
       hb_buffer_get_segment_properties(buf, &props);
       hb_shape_plan_t *plan = hb_shape_plan_create_cached(hb_font_get_face(font), &props, NULL, 0, NULL);
-      printf("F %ld %s\n", (long) face->num_glyphs, hb_shape_plan_get_shaper(plan));
+      hb_face_t *hface = hb_font_get_face(font);
+      printf("F %ld %s %d %d %d\n", (long) face->num_glyphs, hb_shape_plan_get_shaper(plan),
+             hb_ot_layout_has_substitution(hface), hb_ot_layout_has_positioning(hface),
+             hb_ot_layout_has_glyph_classes(hface));
       hb_shape_plan_destroy(plan);
       hb_buffer_destroy(buf);
       printed_shaper = 1;

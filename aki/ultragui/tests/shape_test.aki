@@ -22,7 +22,7 @@
 module shape_test;
 
 import {List} from akikit::containers::list;
-import {create_directories, list_directory} from akikit::filesystem::directory;
+import {create_directories} from akikit::filesystem::directory;
 import {enumerate_files} from akikit::filesystem::file_enumerator;
 import {file_info, read_bytes, read_file, real_path, write_file} from akikit::filesystem::file_util;
 import {parent} from akikit::filesystem::path;
@@ -33,9 +33,10 @@ import {String, from_str} from akikit::strings::string;
 import {ends_with} from akikit::strings::string_search;
 import {parse_u64} from akikit::strings::string_to_number;
 import {ShapeFace} from ultragui::shape::face;
+import {kNull} from ultragui::shape::otl;
 import {ShapedGlyph, shape_utf8} from ultragui::shape::shape;
-import {gc_is_mark, general_category, is_variation_selector} from ultragui::shape::ucd;
-import {FtFont, open_ft_font, set_pixel_size} from support::shape_ft;
+import {gc_is_mark, general_category} from ultragui::shape::ucd;
+import {open_ft_font, set_pixel_size} from support::shape_ft;
 import {kSamples} from support::shape_samples;
 
 comptime let kCurated: [str; 9] = [
@@ -334,9 +335,17 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
   var r = Reader { text: text.as_str() };
   let f_tag = r.token();
   let ft_glyphs = r.int();
-  let shaper = r.token();
+  let is_graphite = r.token() == "graphite2";
+  let hb_gsub = r.int() != 0;
+  let hb_gpos = r.int() != 0;
+  let hb_gdef = r.int() != 0;
   totals.fonts += 1;
-  if (shaper == "graphite2") {
+  // HarfBuzz's sanitizer and ours must keep the same tables.
+  if (hb_gsub != (face.gsub.version != 0) || hb_gpos != (face.gpos.version != 0) || hb_gdef != (face.gdef.glyph_class_def < kNull)) {
+    totals.mismatches += 1;
+    eprintln(f"TABLES {path}: HarfBuzz keeps GSUB {hb_gsub} GPOS {hb_gpos} GDEF classes {hb_gdef}, aki {face.gsub.version != 0} {face.gpos.version != 0} {face.gdef.glyph_class_def < kNull}");
+  }
+  if (is_graphite) {
     totals.skipped_graphite += 1;
     println(f"{path}: HarfBuzz shapes it with graphite2; not compared");
     return true;

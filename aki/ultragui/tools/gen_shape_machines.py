@@ -160,7 +160,7 @@ def vowel_constraints(src):
         body = blocks[i + 1]
         body = body[:body.index("\n      break;")] if "\n      break;" in body else body
         # Each "case 0x....u: [case ...:] <rule>" at the first-character level (8 tabs/1 tab + 2 spaces).
-        for m in re.finditer(r"((?:\t  case 0x[0-9A-F]+u:\s*)+)(.*?)\n\t    break;", body, re.S):
+        for m in re.finditer(r"\n\t  ((?:case 0x[0-9A-F]+u:\s*)+)(.*?)\n\t    break;", body, re.S):
             firsts = [int(x, 16) for x in re.findall(r"0x([0-9A-F]+)u", m.group(1))]
             rule = m.group(2)
             if "cur (2)" in rule:
@@ -173,6 +173,9 @@ def vowel_constraints(src):
             for f in firsts:
                 for s in seconds:
                     rows.append((script, f, s, 0))
+        # A script with a single pair: if (0xAu == cur ().codepoint && 0xBu == cur (1).codepoint)
+        for m in re.finditer(r"if \(0x([0-9A-F]+)u == buffer->cur \(\)\.codepoint &&\s*0x([0-9A-F]+)u == buffer->cur \(1\)\.codepoint\)", body):
+            rows.append((script, int(m.group(1), 16), int(m.group(2), 16), 0))
     return rows
 
 

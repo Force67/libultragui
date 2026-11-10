@@ -14,6 +14,7 @@ import {Cmap, char_index, char_variant_index, select_cmap} from ultragui::shape:
 import {Gdef, GsubGpos, find_variations_index, gdef_is_blocklisted, parse_gdef, parse_gsubgpos} from ultragui::shape::otl;
 import {ShapePlan} from ultragui::shape::plan;
 import {arabic_pua_map} from ultragui::shape::ucd;
+import {sanitize_gdef, sanitize_gsubgpos} from ultragui::shape::sanitize;
 
 fn u16_at(d: &[u8], o: usize): u32 => o + 2 <= #d ? (d[o] as u32 << 8) | d[o + 1] as u32 : 0;
 fn u32_at(d: &[u8], o: usize): u32 => (u16_at(d, o) << 16) | u16_at(d, o + 2);
@@ -111,14 +112,20 @@ fn ShapeFace::from_bytes(data: List<u8>, index: u32, ft_num_glyphs: u32?): Shape
   let os2_version = os2_r.end > os2_r.start ? u16_at(d, os2_r.start) : 0;
   f.font_page = os2_r.end > os2_r.start && os2_version == 0 ? u16_at(d, os2_r.start + 62) & 0xFF00 : 0;
   f.cmap = select_cmap(d, cmap_r.start, cmap_r.end, ft_num_glyphs ?? f.num_glyphs);
-  f.gsub = parse_gsubgpos(f.table(f.gsub_r));
-  f.gpos = parse_gsubgpos(f.table(f.gpos_r));
-  let gsub_len = f.gsub_r.end - f.gsub_r.start;
-  let gpos_len = f.gpos_r.end - f.gpos_r.start;
   let gdef_len = f.gdef_r.end - f.gdef_r.start;
-  if (gdef_len > 0 && gdef_is_blocklisted(gdef_len, gsub_len, gpos_len)) {
+  // HarfBuzz drops a table its sanitizer rejects (the blocklist compares the
+  // lengths of the tables as found).
+  if (!sanitize_gsubgpos(f.table(f.gsub_r), false)) {
+    f.gsub_r = TableRange {};
+  }
+  if (!sanitize_gsubgpos(f.table(f.gpos_r), true)) {
+    f.gpos_r = TableRange {};
+  }
+  if (gdef_len > 0 && (gdef_is_blocklisted(gdef_len, f.gsub_r.end - f.gsub_r.start, f.gpos_r.end - f.gpos_r.start) || !sanitize_gdef(f.table(f.gdef_r)))) {
     f.gdef_r = TableRange {};
   }
+  f.gsub = parse_gsubgpos(f.table(f.gsub_r));
+  f.gpos = parse_gsubgpos(f.table(f.gpos_r));
   f.gdef = parse_gdef(f.table(f.gdef_r));
   f.gsub_variations = find_variations_index(f.table(f.gsub_r), f.gsub);
   f.gpos_variations = find_variations_index(f.table(f.gpos_r), f.gpos);
