@@ -1159,7 +1159,7 @@ mismatches except 493 in 177 glyphs of the two Annapurna SIL faces (below);
 1m40 at -O2. tests/font_tt_test.aki with `FONT_AUTOFIT=1` compares the same
 default loads through its own C oracle (all 78 faces at 9, 12, 20 and 33 px,
 0 mismatches). End to end through the text engine, the
-golden comparison gives `same` on all 20 scenarios and the 17 extra ones,
+golden comparison gives `same` on all 20 scenarios and the 16 extra ones,
 text_ubuntu, text_kacst_book and text_uming_ttc included.
 
 `tests/autofit_stages_test.aki` (from the earlier stage work) still compares
