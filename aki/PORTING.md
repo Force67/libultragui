@@ -206,6 +206,7 @@ in the table, and none is unported.
 | (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,sanitize,cmap,normalize,fallback,buffer,props,ucd,font_funcs,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | new, not yet wired in: an aki OpenType shaper with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below); text_engine still calls HarfBuzz until the integration step |
 | (FreeType: autofit outline analysis) | ultragui::font::autofit::{hints,features,metrics,latin} | shared point interpolation, Latin metrics and normal-target edge fitting; internal-stage oracle; see "Automatic hinting" |
 | (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,sanitize,cmap,normalize,fallback,buffer,props,ucd,language,language_tables,font_funcs,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | Aki OpenType shaper used by text_engine through font_face, with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below) |
+| (graphite2 1.3.15 through HarfBuzz's graphite2 shaper, hb-graphite2.cc) | ultragui::shape::graphite::{tables,glyphs,features,code,silf,grface,segment,vm,passes,graphite} | new: the Graphite engine and HarfBuzz's glue, HarfBuzz's output bit for bit for the faces graphite2 accepts (Padauk, Abyssinica SIL, Annapurna SIL); shape_utf8 dispatches to it ("Graphite" below) |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -1149,9 +1150,10 @@ the same default language in Aki and HarfBuzz under C, C.UTF-8, en_US.UTF-8
 and de_DE.UTF-8 (`c`, `c`, `en-us`, `de-de`). Linux and Windows checks pass;
 all 29 core tests pass.
 
-**Known gaps.** HarfBuzz is built with graphite2 here and shapes fonts with a
-`Silf` table (Padauk, Abyssinica SIL, Annapurna SIL) with it; the aki shaper
-shapes them with OpenType, so they differ and the test skips them.
+(The sweeps above predate the Graphite engine and skip the 7 Graphite fonts;
+"Graphite" below has the numbers with them compared.)
+
+**Known gaps.** The Graphite engine's gaps are listed under "Graphite" below.
 Not implemented (no font of the corpus needs them): AAT
 (morx/kerx/trak), `kern` subtable formats 1-3 and Apple's kern table, the
 24-bit ("beyond 64K") GSUB/GPOS/GDEF formats, cmap formats 2, 8 and 10 and
@@ -1163,6 +1165,125 @@ offsets of malformed subtables, is not needed: HarfBuzz 13 drops a whole
 table its sanitizer rejects, and `shape::sanitize` ports those checks for
 GSUB, GPOS and GDEF (bounds, HarfBuzz's operation budget, the subtable limit;
 the 24-bit formats are accepted unchecked); the kern table is not sanitized.
+
+#### Graphite — `ultragui::shape::graphite`
+
+The dev shell's HarfBuzz is built with graphite2 1.3.15, and `hb_shape`
+picks the graphite2 shaper, ahead of ot, for any face graphite2 accepts:
+`_hb_graphite2_shaper_face_data_create` sees a nonempty `Silf` table and
+calls `gr_make_face_with_ops` with `gr_face_preloadAll`, which checks every
+table, loads every glyph and decodes and verifies every pass and rule
+program; when it fails, HarfBuzz shapes the face with OpenType.
+`ShapeFace::uses_graphite()` makes the same decision on first use
+(`grface::load_gr_face`, the face kept in `ShapeFace::graphite`), and
+`shape_utf8` dispatches to `graphite::shape_graphite` right after the
+segment properties are guessed, with the buffer's language. Padauk (×4),
+Abyssinica SIL and Annapurna SIL (×2) are the corpus's Silf fonts; graphite2
+accepts all seven. Nothing changes for callers: `shape` / `shape_utf8` pick
+the engine themselves.
+
+graphite2 gets no font from HarfBuzz (`gr_make_seg (nullptr, ...)`): it
+works in font units, with its own glyph advances (hmtx) and boxes (glyf), and
+HarfBuzz scales its results by `x_scale / upem`. So the engine reads no
+`ShapeFontFuncs`; the only callback HarfBuzz gives graphite2 is the table
+getter (`hb_graphite2_get_table`: the raw sfnt table).
+
+**Scope.** What graphite2 runs for these calls: `Face::Table` (TtfUtil's
+`CheckTable`, LZ4-compressed Silf 5 / Glat 3 tables); the glyph cache (hmtx
+advances, glyf boxes, Gloc/Glat 1-3 attributes as graphite2's sparse arrays,
+and every rule that rejects a glyph and so the face); `CachedCmap` (the
+format 12 then the format 4 subtable, walked as `cache_subtable` walks them);
+Feat and Sill (the features' bit packing, defaults, and per-language settings
+with the language in feature 1); Silf (pass bounds, attribute numbers, linear
+and lookup classes, pseudo-glyphs, justification levels); each pass's
+columns, rules, state machine and per-state rule lists (sorted as its qsort
+sorts them); the bytecode decoder and verifier of `Code.cpp` (opcode table,
+stack depth, slot-reference and context checks, CNTXT_ITEM's skips, the
+TEMP_COPY instructions it inserts); the rule machine (every opcode of
+`opcodes.h`, slot-map bounds, the "die" exits, the stack guard after each
+instruction, positioning before a position is read); the pass runner (the
+state machine with its 64-slot limit and rule merging, constraints, actions,
+garbage collection, `adjustSlot`, the high-water mark and loop limit, the
+pass bits that skip passes); the segment (slots allocated in blocks from a
+free list, whose sizes decide when an insertion fails; user attributes;
+attachment trees; justification values; mirroring; the reversal that keeps
+diacritics after their bases; character association; `Slot::finalise`),
+graphite2 1.3's direction handling (no Unicode bidi algorithm: a right-to-left
+run reverses the slots for each pass whose direction differs) and
+`gr_make_seg`'s final positioning. Then `_hb_graphite2_shape` exactly: the
+language's tag (the part before '-', zero-padded) selects the Sill features;
+`gr_make_seg` with script `HB_TAG_NONE` and direction `2 | rtl`; clusters
+grown from each slot's before/after character association (merged backwards
+when a slot reaches before the current cluster), one advance per cluster on
+its first glyph, offsets from the slot origins; `hb_buffer_reverse_clusters`
+for right-to-left runs. When `gr_make_seg` fails, `hb_shape` returns false
+and the buffer keeps its code points (as glyph ids) with zero positions; the
+engine returns the same.
+
+**Design.** `tables` (sfnt tables, CheckTable, LZ4, the TtfUtil readers),
+`glyphs` (GlyphCache, CachedCmap), `features` (FeatureMap, Sill), `code`
+(the decoder: an instruction is its opcode, its parameters in a data array
+in the C++'s layout), `silf` (Silf and Pass readers, class lookups), `grface`
+(the face), `segment` (Slot, CharInfo, Segment: slots refer to each other by
+index into one list, kNone for null; a slot's user attributes live at its
+index, which copies keep, as the C++'s per-slot pointer), `vm` (SlotMap and
+the machine), `passes` (FSM, pass and Silf runners, `make_segment`) and
+`graphite` (HarfBuzz's glue). With no font, graphite2's arithmetic is on
+font-unit integers held in floats, exact in f32 here as there. HarfBuzz's
+glue scales in single precision; the libharfbuzz.so of the dev shell (GCC 15,
+aarch64) contracted seven of its expressions into fused multiply-adds
+(`fmadd`/`fmsub`/`fnmsub`, read from the disassembly of `_hb_graphite2_shape`),
+which the glue writes as `@fma`, and the rest are rounded products in locals;
+float-to-integer conversions saturate as `fcvtzs`/`fcvtzu` do.
+
+**Verification.** `tests/shape_test.aki` compares the Graphite fonts like
+the others (the oracle is unchanged: HarfBuzz picks graphite2 itself), and
+checks that the aki face picks graphite2 exactly when HarfBuzz does. The
+default run has Padauk-Regular, Abyssinica SIL and Annapurna SIL among its
+twelve fonts, each also in the 28-locale matrix and, for a Graphite face, in
+each of its Sill languages bare and with a region (`ne`, `ne-XY`, `aio`,
+`shn`, `guk`, ...: 28 cases): 12 fonts, 364 locale/font cases,
+235,632 strings / 3,194,304 glyphs in all, 68,610 strings / 939,066 glyphs
+of them by graphite2 at 12, 16 and 24 px, all equal (about 28 s with the
+language checks). Ignoring the language there gives 96 differing strings,
+so the Sill settings are exercised. Graphite-only runs (`SHAPE_FONTS` = the
+seven fonts): every size from 5 to 80 px (`SHAPE_SIZES=5-80`, 200 generated
+strings): 1,065,064 strings / 11,648,064 glyphs; generated strings up to 120
+characters (`SHAPE_MAXLEN=120 SHAPE_GENERATED=3000`, 9/16/37 px): 100,842
+strings / 4,378,506 glyphs; up to 600 characters (past the state machine's
+64-slot window and the passes' loop limits): 15,414 strings / 1,026,050
+glyphs; all equal. Corpus sweeps before the language merge: `SHAPE_SWEEP=1`
+304 fonts, 3,347,040 strings / 35,105,005 glyphs (77,070 / 811,840 by
+graphite2), and `SHAPE_SEED=7 SHAPE_GENERATED=1500` 5,019,040 / 46,344,160
+(115,570 / 1,077,525 by graphite2), all equal; after it (with the 28 locales and the Sill languages):
+`SHAPE_SWEEP=1` 304 fonts, 8,600 locale/font cases, 10,331,280 strings /
+133,385,175 glyphs, 307,530 strings / 4,052,325 glyphs of them by graphite2,
+all equal.
+Right-to-left runs (the Hebrew and Arabic samples on these fonts) take the
+backward branch of the glue and match. The fused and the unfused forms of the
+seven contracted expressions give the same integers on all of these strings
+(no result lands within rounding of an integer boundary), so for them the
+disassembly is the evidence. Speed at -O2, face loaded: 9 µs for a 14-glyph
+Burmese string on Padauk, 3.6 µs for 13 Ethiopic glyphs on Abyssinica, 10 µs
+for 17 Devanagari glyphs on Annapurna; loading a face takes 1-2.5 ms (its
+first shape).
+
+**Known gaps.** Collision avoidance and kerning (Silf flag 0x20, the passes'
+collision and kern flags, SlotCollision attributes, `Collider`, `Intervals`,
+the Glat 3 octaboxes) are not implemented: no font of the corpus uses them
+(their Silf flags are 0x18 and 0x4, every pass's flags 0); a face that did
+would be shaped without the collision fixes and differ. Justification is
+not reached (HarfBuzz never calls `gr_seg_justify`; the justification slot
+attributes are stored and read as graphite2 does). Not exercised by the
+corpus and written from the source only: LZ4-compressed tables, the
+`gr_make_seg` failure path (no string makes graphite2 fail a segment), more
+than one Silf subtable (graphite2 always uses the first), vertical
+directions. Malformed fonts: reads past a table's end give 0 where graphite2
+reads raw memory; graphite2's bound on decoded program size per pass (which
+no valid program reaches) is not modeled; the table directory lookup takes
+the first entry with the tag. `Segment::linkClusters` (sibling links of base
+slots, which only gr_* calls HarfBuzz does not make read) is not run.
+
 ### Automatic hinting — `ultragui::font::autofit`
 
 `hints` owns font-unit and scaled points and implements contour topology,
