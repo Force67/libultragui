@@ -171,6 +171,7 @@ in the table, and none is unported.
 | platform/platform_open_url.cc | ultragui::platform::platform_open_url | ported |
 | platform/platform_glfw.cc | ultragui_glfw::platform_glfw (`GlfwPlatform`; + sys::glfw) | ported (pkg:ultragui_glfw) |
 | text/text_engine.{h,cc} | ultragui::text::text_engine (+ sys::freetype, sys::harfbuzz) | ported |
+| (FreeType smooth outline rendering) | ultragui::font::raster::{outline,curves,rasterizer} | pure Aki; byte-identical to FreeType 2.14.3 (see "Glyph rasterizer") |
 | audio/audio_backend.h | ultragui::audio::audio_backend | ported (seam) |
 | audio/miniaudio_impl.cc, backends/ugui_impl_miniaudio.* | ultragui_audio::ugui_impl_miniaudio (+ sys::miniaudio, csrc/ugui_ma.c) | ported (pkg:ultragui_audio; `AudioEngine`) |
 | scripting/script_runtime.h, script_runtime_none.cc | ultragui::scripting::script_runtime | ported (capability + NoScript) |
@@ -526,6 +527,89 @@ A `TextRun` shares its glyphs with the shaping cache (`Arc`), so it stays
 valid as long as it is held, past `begin_frame` (the C++ only promises until
 then). `TextRun()` is the empty run. Renderer2D's DrawTextLayout should draw
 `run.glyphs()[line.glyph_start..line.glyph_start + line.glyph_count]`.
+
+### Glyph rasterizer — `ultragui::font::raster::{outline,curves,rasterizer}`
+
+`rasterizer::render_outline(outline&: Outline): GrayBitmap ! RasterError`
+accepts an already scaled and hinted outline. `outline::Outline` holds
+`points: List<OutlinePoint>` (`x`, `y`: `i32`, signed 26.6 pixels),
+`tags: List<u8>` (low two bits: 0 conic control, 1 on-curve, 2 cubic control),
+`contours: List<u32>` (inclusive last-point indices), and `flags: i32`.
+The constants `kConic`, `kOnCurve`, `kCubic`, `kEvenOddFill`, `kReverseFill`,
+`kOverlap`, and `kHighPrecision` retain FreeType's numeric values. Loaders
+can copy their completed outlines into this type without C bindings.
+
+`GrayBitmap` owns `width: u32`, `rows: u32`, `pitch: i32`, `left: i32`,
+`top: i32`, and `pixels: List<u8>`. Pixels are tightly packed, top row first,
+with 256 gray levels and a positive pitch equal to width. `RasterError` is
+`InvalidOutline` or `RasterOverflow`; no partial bitmap escapes an error.
+The input is borrowed and never modified.
+
+The control box is rounded outward to whole pixels before translation.
+`curves` decomposes contours (including implicit quadratic points and
+closing curves) into 24.8 line segments. Quadratics use integer forward
+differences; cubics use adaptive bisection, adding coordinates before the
+right shifts. `rasterizer` integrates signed height and doubled area into
+a dense cell band, sweeps its winding sums, and applies the exact signed
+coverage mapping. It preserves the smooth renderer's biased reciprocal
+quotient at cell crossings. Scratch storage is at most 262144 cells
+(2 MiB); tall bitmaps are processed in bands. An overlap-flagged outline is
+scaled by four in both axes, rendered with the same coverage rules, then
+averaged with per-subpixel rounding and saturation to 255. Even-odd fill
+folds the winding coverage; reverse-fill and high-precision flags do not
+change smooth gray rendering, as in FreeType.
+
+`tests/raster_test.aki` builds `tools/raster_oracle.cc` with clang++ and the
+dev shell's FreeType, caches it in `build/raster_oracle/`, and compares the
+bitmap dimensions, pitch, placement, error kind, and **every coverage byte**.
+The binary traces include the original outline (before rendering); failing
+traces are retained and every mismatching glyph is reported. The oracle's
+version must be 2.14.3. The default test samples every font's first 128 glyphs
+and every 31st remaining glyph, at 7,12,18,32,48 px, hinted and unhinted. It
+compares 10810 font outlines plus 4065 synthetic outlines (14875 total),
+5391390 bitmap bytes, and has zero mismatches. Synthetics include random
+conics/cubics/polygons, even-odd/nonzero/reverse/high-precision/overlap flags,
+self intersections, overlapping contours in either direction, negative
+coordinates, implicit start points, single-point and zero-area outlines,
+empty contours, large absolute coordinates, maximum-width and maximum-height
+bitmaps, overflow rejection, and malformed outlines (326 expected errors).
+
+```
+nix develop -c bash -c 'cd aki/ultragui && akiko test tests/raster_test.aki'
+nix develop -c bash -c 'cd aki/ultragui && RASTER_SWEEP=curated akiko test tests/raster_test.aki'
+nix develop -c bash -c 'cd aki/ultragui && RASTER_SWEEP=all akiko test tests/raster_test.aki -O2'
+nix develop -c bash -c 'cd aki/ultragui && akiko test tests/raster_test.aki -- build/raster_oracle/failing.bin'
+```
+
+`curated` compares every glyph of DejaVuSans, LiberationSans-Regular,
+NotoSansMono-Regular, NimbusSans-Regular (CFF), and NimbusRoman-Regular
+(CFF), at each size 6..48 plus 64 and 96, both hinted and unhinted:
+1293300 font outlines plus 4065 synthetic (1297365 total), 580502855 bitmap
+bytes, zero mismatches and zero load/non-outline skips. This machine has no
+NotoSans-Regular; the oracle explicitly falls back to NotoSansMono-Regular.
+`all` visits every scalable font file under `/usr/share/fonts`, face index 0,
+every glyph at 7,9,11,12,13,14,16,18,20,24,32,48,72 px with default hinting.
+The broad sweep passed on 373 scalable font files, 13 sizes, default hinting:
+10511803 font outlines plus 4065 synthetic (10515868 total), 5350884041
+bitmap bytes, zero mismatches and zero load errors. There were 101813
+embedded-bitmap glyphs instead of outlines: 100853 from arphic/uming.ttc
+and 960 from kacst/mry_KacstQurn.ttf. These are counted as skips, not
+outline comparisons. `RASTER_FONT`,
+`RASTER_SIZE`, and `RASTER_STRIDE` narrow either mode for reproduction.
+Linux and Windows `akiko check` pass, as does the full core `akiko test`
+suite (25 programs, zero failures).
+
+Scope and integration: this implements normal/light smooth gray outline
+rendering only. Font loading, hinting, shaping, embedded bitmap selection,
+monochrome/LCD/color rendering and atlas uploads belong to other modules.
+`text_engine` still uses its existing FreeType binding until integration.
+The renderer enforces FreeType's coordinate, bitmap-size, and overlap-span
+limits. Its caller must enforce the additional glyph-slot face limit of
+`width/height <= 10 * ppem`, because an `Outline` has no face or ppem.
+Allocation failure follows akikit's allocator behavior (process stop),
+rather than returning FreeType's out-of-memory code. No rendering
+mismatches are known in the verified corpus. Linux and Windows type checks
+include these modules; runtime differential verification is on Linux.
 
 ### World and components — `ultragui::widgets::widget_registry`, `core::component_store`
 
