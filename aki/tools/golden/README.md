@@ -50,7 +50,13 @@ overlay examples.
 
 `extra/` holds hand-written scenarios for what the example UIs do not
 exercise: `media_scale.txt` (with `media_scale.ugui`) covers `scale_mode`,
-`ui_scale`, `@media` breakpoints across resizes and tooltip dwell. `run.sh`
+`ui_scale`, `@media` breakpoints across resizes and tooltip dwell.
+`text_<font>.txt` (with `text_matrix.ugui`) render text in many scripts
+(Latin, Greek, Cyrillic, Vietnamese, Arabic, Hebrew, Devanagari, Thai, Khmer,
+CJK, Hangul) at 6 to 72 px, typed input, HiDPI, `ui_scale` and a resize, one
+scenario per font: TrueType, CFF OpenType, collections (`.ttc`), and fonts
+with embedded bitmap strikes (uming). They compare every glyph bitmap the
+text engine puts in the atlas and every shaped position. `run.sh`
 takes them as arguments: `run.sh <c++> <aki> aki/tools/golden/extra/*.txt`.
 
 ## The aki side

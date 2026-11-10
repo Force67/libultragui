@@ -584,12 +584,24 @@ fn EngineState::rasterize_glyph(var self&, font: FontHandle, glyph_id: u32, pixe
   // Copy bitmap into atlas. The C++ steps the source by row * pitch in
   // unsigned arithmetic, which only works for the positive pitch FreeType
   // gives rendered glyphs; this computes the same offsets for those.
+  // Embedded bitmaps (EBDT strikes) can come back packed at 1, 2 or 4 bits
+  // per pixel (FT_PIXEL_MODE_MONO 1, GRAY2 3, GRAY4 4), with rows of fewer
+  // than `width` bytes: those expand to 8-bit coverage, as the C++ does.
+  let bits: u32 = bmp.pixel_mode == 1 ? 1 : bmp.pixel_mode == 3 ? 2 : bmp.pixel_mode == 4 ? 4 : 8;
+  let row_bytes = bits == 8 ? bw as usize : ((bw * bits + 7) / 8) as usize;
+  let max: u32 = (1u32 << bits) - 1;
   for (let row in 0..bh) {
     let dst = ((self.atlas_cursor_y + row) * kAtlasSize + self.atlas_cursor_x) as usize;
-    let src = unsafe @slice(bmp.buffer + (row as i64 * bmp.pitch as i64) as usize, bw as usize);
+    let src = unsafe @slice(bmp.buffer + (row as i64 * bmp.pitch as i64) as usize, row_bytes);
     let out = self.atlas_pixels.as_slice_var()[dst..dst + bw as usize];
     for (let i in 0..bw as usize) {
-      out[i] = src[i];
+      if (bits == 8) {
+        out[i] = src[i];
+      } else {
+        let bit = i as u32 * bits;
+        let v = (src[(bit >> 3) as usize] as u32 >> (8 - bits - (bit & 7))) & max;
+        out[i] = (v * 255 / max) as u8;
+      }
     }
   }
 
