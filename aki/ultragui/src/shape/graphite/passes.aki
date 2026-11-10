@@ -1,0 +1,406 @@
+// graphite2's passes over a segment (Pass.cpp's runners, Rule.h's
+// FiniteStateMachine, Silf::runGraphite, Face::runGraphite, gr_segment.cpp's
+// makeAndInitialize): each pass walks the slots, matches rules with its
+// state machine, tests their constraints, runs the first passing rule's
+// action and moves on as the action's result says, with the loop limits and
+// high-water mark of the C++; then gr_make_seg's final positioning.
+//
+// Not modeled: collision avoidance and kerning passes (no font of the corpus
+// asks for them; a pass with collision runs still runs its rules) and
+// justification (gr_seg_justify, which HarfBuzz never calls).
+
+module ultragui::shape::graphite::passes;
+
+import {List} from akikit::containers::list;
+import {Code} from ultragui::shape::graphite::code;
+import {Features} from ultragui::shape::graphite::features;
+import {GrFace} from ultragui::shape::graphite::grface;
+import {Segment, kNone, new_segment} from ultragui::shape::graphite::segment;
+import {Pass, Silf, State, kMaxRules} from ultragui::shape::graphite::silf;
+import {SlotMap, kFinished, kMaxSlots, run_code} from ultragui::shape::graphite::vm;
+
+// FiniteStateMachine::Rules: two halves of MAX_RULES entries the merges
+// alternate between.
+struct Rules {
+  pub var buf: List<u32> = List()
+  pub var begin: usize = 0
+  pub var end: usize = 0
+}
+
+fn entry_less(pass&: Pass, a: u32, b: u32): bool {
+  let sa = pass.rules[a as usize].sort;
+  let sb = pass.rules[b as usize].sort;
+  return sa > sb || (sa == sb && a < b);
+}
+
+// Rules::accumulate_rules
+fn accumulate(var rules&: Rules, pass&: Pass, st: State) {
+  if (st.end == st.begin) {
+    return;
+  }
+  var l = rules.begin;
+  var r = st.begin as usize;
+  let rend = st.end as usize;
+  var out = rules.begin == 0 ? kMaxRules as usize : 0;
+  let lrend = out + kMaxRules as usize;
+  rules.begin = out;
+  let lend = rules.end;
+  while (l != lend && out != lrend) {
+    let lv = rules.buf[l];
+    let rv = pass.rule_map[r] as u32;
+    if (entry_less(pass, lv, rv)) {
+      rules.buf[out] = lv;
+      out += 1;
+      l += 1;
+    } else if (entry_less(pass, rv, lv)) {
+      rules.buf[out] = rv;
+      out += 1;
+      r += 1;
+    } else {
+      rules.buf[out] = lv;
+      out += 1;
+      l += 1;
+      r += 1;
+    }
+    if (r == rend) {
+      while (l != lend && out != lrend) {
+        rules.buf[out] = rules.buf[l];
+        out += 1;
+        l += 1;
+      }
+      rules.end = out;
+      return;
+    }
+  }
+  while (r != rend && out != lrend) {
+    rules.buf[out] = pass.rule_map[r] as u32;
+    out += 1;
+    r += 1;
+  }
+  rules.end = out;
+}
+
+// The machine and its slot map for one Silf::runGraphite.
+struct Run {
+  pub var smap: SlotMap = SlotMap {}
+  pub var rules: Rules = Rules {}
+  pub var status: u32 = kFinished
+}
+
+fn run_program(gf&: GrFace, code&: Code, var seg&: Segment, var run&: Run, var map&: usize): i32 =>
+  run_code(gf, code, seg, run.smap, map, run.status);
+
+// Pass::runFSM: fills the slot map from the context before `slot0` and
+// gathers the rules of the states reached; false when no rule can match.
+fn run_fsm(gf&: GrFace, pass&: Pass, var seg&: Segment, var run&: Run, slot0: u32): bool {
+  // FiniteStateMachine::reset
+  run.rules.end = run.rules.begin;
+  var slot = slot0;
+  var ctxt = 0u32;
+  while (ctxt != pass.max_pre && seg.slots[slot as usize].prev != kNone) {
+    ctxt += 1;
+    slot = seg.slots[slot as usize].prev;
+  }
+  run.smap.reset(seg.slots[slot as usize].prev, ctxt);
+  if (run.smap.precontext < pass.min_pre) {
+    return false;
+  }
+  var state = pass.start_states[(pass.max_pre - run.smap.precontext) as usize] as u32;
+  var free_slots = kMaxSlots;
+  while (true) {
+    run.smap.push(slot);
+    let gid = seg.slots[slot as usize].glyphid;
+    if (gid >= pass.num_glyphs || pass.cols[gid as usize] == 0xFFFF) {
+      return free_slots != 0;
+    }
+    free_slots -= 1;
+    if (free_slots == 0 || state >= pass.num_transition) {
+      return free_slots != 0;
+    }
+    state = pass.transitions[(state * pass.num_columns + pass.cols[gid as usize] as u32) as usize] as u32;
+    if (state >= pass.success_start) {
+      accumulate(run.rules, pass, pass.states[state as usize]);
+    }
+    slot = seg.slots[slot as usize].next;
+    if (!(state != 0 && slot != kNone)) {
+      break;
+    }
+  }
+  run.smap.push(slot);
+  return true;
+}
+
+// Pass::testConstraint
+fn test_constraint(gf&: GrFace, pass&: Pass, rule_index: u32, var seg&: Segment, var run&: Run): bool {
+  let rule& = pass.rules[rule_index as usize];
+  let ctx = run.smap.precontext as i64;
+  let pre = rule.pre_context as i64;
+  let span = rule.sort as i64 + ctx - pre;
+  if (span < 0 || span > run.smap.size as i64 || ctx - pre < 0) {
+    return false;
+  }
+  var map = (1 + ctx - pre) as usize;
+  if (run.smap.map[map + rule.sort as usize - 1] == kNone) {
+    return false;
+  }
+  if (!rule.constraint.runnable) {
+    return true;
+  }
+  var n = rule.sort;
+  while (n != 0) {
+    if (run.smap.map[map] != kNone) {
+      let ret = run_program(gf, rule.constraint, seg, run, map);
+      if (ret == 0 || run.status != kFinished) {
+        return false;
+      }
+    }
+    n -= 1;
+    map += 1;
+  }
+  return true;
+}
+
+// SlotMap::collectGarbage
+fn collect_garbage(var seg&: Segment, var run&: Run, var a_slot&: u32) {
+  let n = run.smap.size as usize;
+  var i = 1usize;
+  while (i < n) {
+    let s = run.smap.map[i];
+    if (s != kNone && (seg.slots[s as usize].is_deleted() || seg.slots[s as usize].is_copied())) {
+      if (s == a_slot) {
+        let pv = seg.slots[s as usize].prev;
+        a_slot = pv != kNone ? pv : seg.slots[s as usize].next;
+      }
+      seg.free_slot(s);
+    }
+    i += 1;
+  }
+}
+
+// Pass::doAction: the action's result; `slot_out` becomes the slot it ends on.
+fn do_action(gf&: GrFace, code&: Code, var seg&: Segment, var run&: Run, var slot_out&: u32): i32 {
+  if (!code.runnable) {
+    return 0;
+  }
+  var map = (run.smap.precontext + 1) as usize;
+  run.smap.highpassed = false;
+  let ret = run_program(gf, code, seg, run, map);
+  if (run.status != kFinished) {
+    slot_out = kNone;
+    run.smap.set_highwater(kNone);
+    return 0;
+  }
+  slot_out = run.smap.map[map];
+  return ret;
+}
+
+// Pass::adjustSlot
+fn adjust_slot(delta0: i32, var slot_out&: u32, var seg&: Segment, var run&: Run) {
+  var delta = delta0;
+  if (slot_out == kNone) {
+    if (run.smap.highpassed || slot_out == run.smap.highwater) {
+      slot_out = seg.last;
+      delta += 1;
+      if (run.smap.highwater == kNone || run.smap.highwater == slot_out) {
+        run.smap.highpassed = false;
+      }
+    } else {
+      slot_out = seg.first;
+      delta -= 1;
+    }
+  }
+  if (delta < 0) {
+    while (true) {
+      delta += 1;
+      if (!(delta <= 0 && slot_out != kNone)) {
+        break;
+      }
+      slot_out = seg.slots[slot_out as usize].prev;
+      if (run.smap.highpassed && run.smap.highwater == slot_out) {
+        run.smap.highpassed = false;
+      }
+    }
+  } else if (delta > 0) {
+    while (true) {
+      delta -= 1;
+      if (!(delta >= 0 && slot_out != kNone)) {
+        break;
+      }
+      if (slot_out == run.smap.highwater && slot_out != kNone) {
+        run.smap.highpassed = true;
+      }
+      slot_out = seg.slots[slot_out as usize].next;
+    }
+  }
+}
+
+// Pass::findNDoRule
+fn find_and_do_rule(gf&: GrFace, pass&: Pass, var seg&: Segment, var run&: Run, var slot&: u32) {
+  if (run_fsm(gf, pass, seg, run, slot)) {
+    var i = run.rules.begin;
+    while (i != run.rules.end && !test_constraint(gf, pass, run.rules.buf[i], seg, run)) {
+      i += 1;
+      if (run.status != kFinished) {
+        return;
+      }
+    }
+    if (i != run.rules.end) {
+      let rule& = pass.rules[run.rules.buf[i] as usize];
+      let adv = do_action(gf, rule.action, seg, run, slot);
+      if (run.status != kFinished) {
+        return;
+      }
+      if (rule.action.deletes) {
+        collect_garbage(seg, run, slot);
+      }
+      adjust_slot(adv, slot, seg, run);
+      return;
+    }
+  }
+  slot = seg.slots[slot as usize].next;
+}
+
+// Pass::testPassConstraint
+fn test_pass_constraint(gf&: GrFace, pass&: Pass, var seg&: Segment, var run&: Run): bool {
+  if (!pass.constraint.runnable) {
+    return true;
+  }
+  let first = seg.first;
+  run.smap.reset(seg.slots[first as usize].prev, 0);
+  run.smap.push(first);
+  var map = 1usize;
+  let ret = run_program(gf, pass.constraint, seg, run, map);
+  return ret != 0 && run.status == kFinished;
+}
+
+// Pass::runGraphite (with no collision information, the collision phases
+// return at once).
+fn run_pass(gf&: GrFace, silf&: Silf, pass&: Pass, var seg&: Segment, var run&: Run, reverse: bool): bool {
+  var s = seg.first;
+  if (s == kNone || !test_pass_constraint(gf, pass, seg, run)) {
+    return true;
+  }
+  if (reverse) {
+    seg.reverse_slots(silf, gf.glyphs);
+    s = seg.first;
+  }
+  if (pass.num_rules != 0) {
+    run.smap.set_highwater(seg.slots[s as usize].next);
+    var lc = pass.max_loop;
+    while (true) {
+      find_and_do_rule(gf, pass, seg, run, s);
+      if (run.status != kFinished) {
+        return false;
+      }
+      if (s != kNone) {
+        var hit = s == run.smap.highwater || run.smap.highpassed;
+        if (!hit) {
+          lc -= 1;
+          hit = lc == 0;
+        }
+        if (hit) {
+          if (lc == 0) {
+            s = run.smap.highwater;
+          }
+          lc = pass.max_loop;
+          if (s != kNone) {
+            run.smap.set_highwater(seg.slots[s as usize].next);
+          }
+        }
+      }
+      if (s == kNone) {
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+// Silf::runGraphite
+fn run_silf(gf&: GrFace, silf&: Silf, var seg&: Segment, first_pass: u32, last_pass0: u32, dobidi: bool): bool {
+  let max_size = seg.slot_count() * 64;
+  var run = Run {};
+  run.smap.max_size = max_size;
+  run.smap.dir = silf.dir;
+  for (let i in 0..2 * kMaxRules) {
+    run.rules.buf.push(0);
+  }
+  var lbidi = silf.b_pass;
+  var last_pass = last_pass0;
+  if (last_pass == 0) {
+    if (first_pass == last_pass && lbidi == 0xFF) {
+      return true;
+    }
+    last_pass = silf.num_passes;
+  }
+  if ((first_pass < lbidi || (dobidi && first_pass == lbidi)) && (last_pass >= lbidi || (dobidi && last_pass + 1 == lbidi))) {
+    last_pass = (last_pass + 1) & 0xFF;
+  } else {
+    lbidi = 0xFF;
+  }
+  var i = first_pass as i64;
+  while (i < last_pass as i64) {
+    if (i == lbidi as i64) {
+      if (seg.currdir() != ((silf.dir & 1) != 0)) {
+        seg.reverse_slots(silf, gf.glyphs);
+      }
+      if (silf.a_mirror != 0 && (seg.dir & 3) == 3) {
+        seg.do_mirror(silf, gf.glyphs, silf.a_mirror);
+      }
+      lbidi = last_pass;
+      last_pass -= 1;
+      continue;  // --i; ++i
+    }
+    let pass& = silf.passes[i as usize];
+    let reverse = lbidi == 0xFF && seg.currdir() != (((silf.dir & 1) != 0) != pass.reverse_dir);
+    if ((i >= 32 || (seg.pass_bits & (1u32 << i as u32)) == 0 || pass.num_coll_runs != 0) && !run_pass(gf, silf, pass, seg, run, reverse)) {
+      return false;
+    }
+    if (run.status != kFinished || (seg.slot_count() != 0 && seg.slot_count() > max_size)) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// The result of gr_make_seg: the segment's slots with their final
+// positions, or none when graphite2 fails the segment.
+pub fn make_segment(gf&: GrFace, feats: Features, chars&: [u32], dir: i32): Segment? {
+  let silf& = gf.silfs[0];  // Face::chooseSilf
+  var seg = new_segment(#chars, silf, dir);
+  seg.feats.push(feats);
+  // Segment::read_text (utf32: code points from 0x110000 read as U+FFFD)
+  for (let i in 0..#chars) {
+    let usv = chars[i] < 0x110000 ? chars[i] : 0xFFFD;
+    var gid = gf.cmap.lookup(usv);
+    if (gid == 0) {
+      gid = silf.find_pseudo(usv);
+    }
+    seg.append_slot(silf, gf.glyphs, i, usv, gid, 0, i);
+  }
+  // Face::runGraphite
+  if ((seg.dir & 3) == 3 && silf.b_pass == 0xFF) {
+    seg.do_mirror(silf, gf.glyphs, silf.a_mirror);
+  }
+  var res = run_silf(gf, silf, seg, 0, silf.p_pass, true);
+  if (res) {
+    seg.associate_chars(0, seg.num_charinfo);
+    res = run_silf(gf, silf, seg, silf.p_pass, silf.num_passes, false);
+  }
+  if (!res) {
+    return none;
+  }
+  // Segment::finalise(font, true) (linkClusters only links siblings, which
+  // nothing reads afterwards)
+  if (seg.first == kNone || seg.last == kNone) {
+    return seg;
+  }
+  let first = seg.first;
+  let last = seg.last;
+  seg.advance = seg.position_slots(silf, gf.glyphs, first, last, silf.dir != 0);
+  if (seg.currdir() != ((seg.dir & 1) != 0)) {
+    seg.reverse_slots(silf, gf.glyphs);
+  }
+  return seg;
+}

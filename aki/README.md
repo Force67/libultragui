@@ -19,7 +19,7 @@ the C++ quirks that were kept, the compiler pitfalls.
 
 | Package | What it is | Needs |
 |---|---|---|
-| `ultragui` | The core: style, animation, layout (an Aki flexbox engine that gives yoga's results bit for bit), text (FreeType, HarfBuzz), widgets, input, SVG, vector animation, the `.ugui` parser and builder, `UIContext`, and the seams (`Rhi`, `Platform`, `ScriptRuntime`, `TextureBackend`, `AudioBackend`) | FreeType, HarfBuzz (no C++ compiler: yoga in `third_party/` is only the layout tests' oracle) |
+| `ultragui` | The core: style, animation, layout (an Aki flexbox engine that gives yoga's results bit for bit), text (an Aki font engine, rasterizer and shaper that give FreeType's and HarfBuzz's results bit for bit), widgets, input, SVG, vector animation, the `.ugui` parser and builder, `UIContext`, and the seams (`Rhi`, `Platform`, `ScriptRuntime`, `TextureBackend`, `AudioBackend`) | libc and libm only: no C++ compiler, no FreeType or HarfBuzz (yoga, FreeType and HarfBuzz are only the tests' oracles; the tests take FreeType and HarfBuzz from the dev-dependency `ultragui_ft_oracle`) |
 | `ultragui_glfw` | `GlfwPlatform` (window, input, clipboard, cursors) and the shared GLFW binding | GLFW |
 | `ultragui_vulkan` | `VulkanRhi` (windowed) and `VulkanBackend` (draw-data renderer for a host that owns the device); the shared Vulkan binding (generated from `vulkan.h`) | Vulkan loader; GLFW |
 | `ultragui_opengl` | `OpenGlRhi` and `GlRenderer` (GL 3.3 core, entry points loaded at run time) | a GL 3.3 context (via GLFW) |
@@ -189,12 +189,16 @@ with the C++ itself, in three ways:
    engine, is fuzzed against yoga itself: `tests/yoga_fuzz_test.aki` builds
    `aki/ultragui/tools/yoga_fuzz.cc` (seeded random trees through
    `third_party/yoga`, relaid out incrementally) and compares every result
-   float of 20,000 trees bit for bit. The font engine that is to replace
-   FreeType (`ultragui::font`, not wired into the text engine yet) is
-   compared with FreeType and hb_ft by `tests/font_tt_test.aki`, which builds
-   `aki/ultragui/tools/ft_oracle.c`: every glyph of four fonts at 45 sizes,
-   hinted outlines and metrics field by field (`FONT_SWEEP=1` for every font
-   in /usr/share/fonts).
+   float of 20,000 trees bit for bit. Text, where the C++ uses FreeType and
+   HarfBuzz and the port its own font engine and shaper, is compared with
+   the real libraries part by part (each test builds a C oracle linked to
+   them): `font_tt_test` (faces, sizes, TrueType hinting, embedded bitmaps,
+   hb_ft's unhinted numbers), `autofit_test` (FreeType's autohinter, outlines
+   to rendered bitmaps), `cff_differential_test` (CFF/CFF2 outlines),
+   `raster_test` (the smooth rasterizer, byte for byte), `shape_test`
+   (HarfBuzz's output, including graphite2 and the locale's language); each
+   has a sweep mode over every font in /usr/share/fonts (see PORTING.md,
+   "Text without FreeType and HarfBuzz").
 2. **Golden draw-data comparison.** Both implementations play the same
    scenario (a `.ugui`, optionally its Lua, and a seeded stream of input) in
    draw-data mode with a fixed clock, and dump every frame: vertex and index

@@ -1,0 +1,638 @@
+// graphite2's rule programs (Code.cpp, Code.h, opcode_table.h): the bytecode
+// of a rule's constraint or action, checked and decoded as Machine::Code
+// does it — the opcode table's parameter sizes and which machine (action or
+// constraint) implements each opcode, the decoder's stack-depth, slot-range
+// and context checks, CNTXT_ITEM's skip rewritten into instruction and data
+// counts, and the TEMP_COPY instructions inserted before slots that change
+// and are referenced later. A program that fails any check fails the face.
+//
+// Differences in shape: an instruction is its opcode (the C++ stores the
+// address of its implementation; COPY_NEXT runs NEXT's), its parameters are
+// in `data` in instruction order, as the C++ lays them out.
+
+module ultragui::shape::graphite::code;
+
+import {List} from akikit::containers::list;
+
+pub comptime let kOpNop: u32 = 0;
+pub comptime let kOpPushByte: u32 = 1;
+pub comptime let kOpPushByteU: u32 = 2;
+pub comptime let kOpPushShort: u32 = 3;
+pub comptime let kOpPushShortU: u32 = 4;
+pub comptime let kOpPushLong: u32 = 5;
+pub comptime let kOpAdd: u32 = 6;
+pub comptime let kOpSub: u32 = 7;
+pub comptime let kOpMul: u32 = 8;
+pub comptime let kOpDiv: u32 = 9;
+pub comptime let kOpMinimum: u32 = 10;
+pub comptime let kOpMaximum: u32 = 11;
+pub comptime let kOpNeg: u32 = 12;
+pub comptime let kOpTrunc8: u32 = 13;
+pub comptime let kOpTrunc16: u32 = 14;
+pub comptime let kOpCond: u32 = 15;
+pub comptime let kOpAnd: u32 = 16;
+pub comptime let kOpOr: u32 = 17;
+pub comptime let kOpNot: u32 = 18;
+pub comptime let kOpEqual: u32 = 19;
+pub comptime let kOpNotEq: u32 = 20;
+pub comptime let kOpLess: u32 = 21;
+pub comptime let kOpGtr: u32 = 22;
+pub comptime let kOpLessEq: u32 = 23;
+pub comptime let kOpGtrEq: u32 = 24;
+pub comptime let kOpNext: u32 = 25;
+pub comptime let kOpNextN: u32 = 26;
+pub comptime let kOpCopyNext: u32 = 27;
+pub comptime let kOpPutGlyph8bitObs: u32 = 28;
+pub comptime let kOpPutSubs8bitObs: u32 = 29;
+pub comptime let kOpPutCopy: u32 = 30;
+pub comptime let kOpInsert: u32 = 31;
+pub comptime let kOpDelete: u32 = 32;
+pub comptime let kOpAssoc: u32 = 33;
+pub comptime let kOpCntxtItem: u32 = 34;
+pub comptime let kOpAttrSet: u32 = 35;
+pub comptime let kOpAttrAdd: u32 = 36;
+pub comptime let kOpAttrSub: u32 = 37;
+pub comptime let kOpAttrSetSlot: u32 = 38;
+pub comptime let kOpIattrSetSlot: u32 = 39;
+pub comptime let kOpPushSlotAttr: u32 = 40;
+pub comptime let kOpPushGlyphAttrObs: u32 = 41;
+pub comptime let kOpPushGlyphMetric: u32 = 42;
+pub comptime let kOpPushFeat: u32 = 43;
+pub comptime let kOpPushAttToGattrObs: u32 = 44;
+pub comptime let kOpPushAttToGlyphMetric: u32 = 45;
+pub comptime let kOpPushIslotAttr: u32 = 46;
+pub comptime let kOpPushIglyphAttr: u32 = 47;
+pub comptime let kOpPopRet: u32 = 48;
+pub comptime let kOpRetZero: u32 = 49;
+pub comptime let kOpRetTrue: u32 = 50;
+pub comptime let kOpIattrSet: u32 = 51;
+pub comptime let kOpIattrAdd: u32 = 52;
+pub comptime let kOpIattrSub: u32 = 53;
+pub comptime let kOpPushProcState: u32 = 54;
+pub comptime let kOpPushVersion: u32 = 55;
+pub comptime let kOpPutSubs: u32 = 56;
+pub comptime let kOpPutSubs2: u32 = 57;
+pub comptime let kOpPutSubs3: u32 = 58;
+pub comptime let kOpPutGlyph: u32 = 59;
+pub comptime let kOpPushGlyphAttr: u32 = 60;
+pub comptime let kOpPushAttToGlyphAttr: u32 = 61;
+pub comptime let kOpBitOr: u32 = 62;
+pub comptime let kOpBitAnd: u32 = 63;
+pub comptime let kOpBitNot: u32 = 64;
+pub comptime let kOpBitSet: u32 = 65;
+pub comptime let kOpSetFeat: u32 = 66;
+pub comptime let kOpLimit: u32 = 67;     // MAX_OPCODE
+pub comptime let kOpTempCopy: u32 = 67;  // the private opcode after them
+
+comptime let kVarArgs: u32 = 0xFF;
+
+// opcode_t::param_sz
+comptime let kParamSize: [u8; 68] = [
+  0, 1, 1, 2, 2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,     // 0x00
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 3, 1, 0,     // 0x10
+  0, 0xFF, 2, 1, 1, 1, 1, 2, 2, 2, 3, 2, 2, 3, 3, 3,  // 0x20
+  0, 0, 0, 2, 2, 2, 1, 0, 5, 0, 0, 2, 3, 3, 0, 0,     // 0x30
+  0, 4, 2, 0,                                         // 0x40
+];
+
+// opcode_t::impl: bit 0 set when the action machine has it, bit 1 the
+// constraint machine.
+comptime let kImpl: [u8; 68] = [
+  3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+  3, 3, 3, 3, 3, 3, 3, 3, 3, 1, 0, 1, 1, 1, 1, 1,
+  1, 1, 2, 1, 1, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 0,
+  3, 3, 3, 1, 1, 1, 3, 3, 1, 0, 0, 1, 3, 3, 3, 3,
+  3, 3, 1, 1,
+];
+
+// gr_slatMax and the attribute ids of decoder::limits::attrid.
+pub comptime let kSlatMax: u32 = 78;
+
+// enum passtype
+pub comptime let kPassUnknown: u32 = 0;
+pub comptime let kPassLinebreak: u32 = 1;
+pub comptime let kPassSubstitute: u32 = 2;
+pub comptime let kPassPositioning: u32 = 3;
+pub comptime let kPassJustification: u32 = 4;
+
+// Machine::Code
+pub struct Code {
+  pub var instrs: List<u8> = List()  // the program, then a RET_ZERO the C++ appends
+  pub var data: List<u8> = List()
+  pub var runnable: bool = false     // operator bool: a program, loaded
+  pub var failed: bool = false       // status() != loaded
+  pub var constraint: bool = false
+  pub var modify: bool = false
+  pub var deletes: bool = false
+  pub var max_ref: u32 = 0
+
+  pub fn immutable(self&): bool => !(self.deletes || self.modify);
+}
+
+// What decoder::limits holds.
+pub struct CodeLimits : Copy {
+  pub var pre_context: u32 = 0
+  pub var rule_length: u32 = 0
+  pub var classes: u32 = 0
+  pub var glyf_attrs: u32 = 0
+  pub var features: u32 = 0
+  pub var num_user: u32 = 0
+}
+
+struct Context : Copy {
+  pub var changed: bool = false
+  pub var referenced: bool = false
+  pub var code_ref: u32 = 0  // uint8
+}
+
+struct Decoder {
+  pub var code: Code
+  pub var lim: CodeLimits
+  pub var bytecode_end: usize = 0
+  pub var pass_type: u32 = 0
+  pub var out_index: i32 = 0
+  pub var out_length: u32 = 0  // uint16
+  pub var stack_depth: i32 = 0
+  pub var in_ctxt_item: bool = false
+  pub var slotref: i32 = 0     // int16
+  pub var max_ref: u32 = 0     // byte
+  pub var contexts: List<Context> = List()
+}
+
+fn attrid(lim&: CodeLimits, attr: u32): u32 {
+  if (attr < 15 || (attr >= 16 && attr < 30)) {
+    return 1;
+  }
+  if (attr == 15) {
+    return 255;
+  }
+  if (attr == 55) {
+    return lim.num_user;
+  }
+  return 0;
+}
+
+fn Decoder::failure(var self&) {
+  self.code.failed = true;
+}
+
+// decoder::valid_upto (its arguments are uint16)
+fn Decoder::valid_upto(var self&, limit: u32, x: u32): bool {
+  let l = limit & 0xFFFF;
+  let v = x & 0xFFFF;
+  let t = l != 0 && v < l;
+  if (!t) {
+    self.failure();
+  }
+  return t;
+}
+
+// decoder::test_ref
+fn Decoder::test_ref(var self&, index: i32): bool {
+  if (self.code.constraint && !self.in_ctxt_item) {
+    if (index > 0 || -index > self.lim.pre_context as i32) {
+      self.failure();
+      return false;
+    }
+  } else {
+    let at = self.slotref + self.lim.pre_context as i32 + index;
+    if (self.lim.rule_length == 0 || at >= self.lim.rule_length as i32 || at < 0) {
+      self.failure();
+      return false;
+    }
+  }
+  return true;
+}
+
+// decoder::test_context
+fn Decoder::test_context(var self&): bool {
+  if (self.out_index >= self.out_length as i32 || self.out_index < 0 || self.slotref >= 255) {
+    self.failure();
+    return false;
+  }
+  return true;
+}
+
+fn Decoder::set_ref(var self&, index: i32) {
+  let at = index + self.slotref;
+  if (at < 0 || at >= 256) {
+    return;
+  }
+  self.contexts[at as usize].referenced = true;
+  if (at > self.max_ref as i32) {
+    self.max_ref = at as u32 & 0xFF;
+  }
+}
+
+fn Decoder::set_noref(var self&, index: i32) {
+  let at = index + self.slotref;
+  if (at < 0 || at >= 256) {
+    return;
+  }
+  if (at > self.max_ref as i32) {
+    self.max_ref = at as u32 & 0xFF;
+  }
+}
+
+fn Decoder::set_changed(var self&, index: i32) {
+  let at = index + self.slotref;
+  if (at < 0 || at >= 256) {
+    return;
+  }
+  self.contexts[at as usize].changed = true;
+  if (at > self.max_ref as i32) {
+    self.max_ref = at as u32 & 0xFF;
+  }
+}
+
+fn s8(b: u8): i32 => (b as i8) as i32;
+
+fn Decoder::impl_bit(self&): u8 => self.code.constraint ? 2 : 1;
+
+// decoder::validate_opcode; `p` is the position after the opcode.
+fn Decoder::validate_opcode(var self&, bc: &[u8], opc: u32, p: usize): bool {
+  if (opc >= kOpLimit) {
+    self.failure();
+    return false;
+  }
+  if ((kImpl[opc as usize] & self.impl_bit()) == 0) {
+    self.failure();
+    return false;
+  }
+  let sz = kParamSize[opc as usize] as u32;
+  if (sz == kVarArgs && p >= self.bytecode_end) {
+    self.failure();
+    return false;
+  }
+  let param_sz = sz == kVarArgs ? bc[p] as usize + 1 : sz as usize;
+  if (p - 1 + param_sz >= self.bytecode_end) {
+    self.failure();
+    return false;
+  }
+  return true;
+}
+
+// decoder::fetch_opcode: the opcode, or kOpLimit when the program fails.
+fn Decoder::fetch_opcode(var self&, bc: &[u8], at: usize): u32 {
+  let opc = bc[at] as u32;
+  let p = at + 1;
+  if (!self.validate_opcode(bc, opc, p)) {
+    return kOpLimit;
+  }
+  let a = fn(i: usize): u32 => bc[p + i] as u32;
+  match (opc) {
+    kOpNop => {},
+    kOpPushByte | kOpPushByteU | kOpPushShort | kOpPushShortU | kOpPushLong => {
+      self.stack_depth += 1;
+    },
+    kOpAdd | kOpSub | kOpMul | kOpDiv | kOpMinimum | kOpMaximum | kOpAnd | kOpOr | kOpEqual | kOpNotEq | kOpLess | kOpGtr | kOpLessEq | kOpGtrEq |
+    kOpBitOr | kOpBitAnd => {
+      self.stack_depth -= 1;
+      if (self.stack_depth <= 0) {
+        self.failure();
+      }
+    },
+    kOpNeg | kOpTrunc8 | kOpTrunc16 | kOpNot | kOpBitNot | kOpBitSet => {
+      if (self.stack_depth <= 0) {
+        self.failure();
+      }
+    },
+    kOpCond => {
+      self.stack_depth -= 2;
+      if (self.stack_depth <= 0) {
+        self.failure();
+      }
+    },
+    kOpNextN => {},
+    kOpNext | kOpCopyNext => {
+      self.out_index += 1;
+      if (self.out_index < -1 || self.out_index > self.out_length as i32 || self.slotref > self.lim.rule_length as i32) {
+        self.failure();
+      }
+    },
+    kOpPutGlyph8bitObs => {
+      let _ = self.valid_upto(self.lim.classes, a(0));
+      let _ = self.test_context();
+    },
+    kOpPutSubs8bitObs => {
+      let _ = self.test_ref(s8(bc[p]));
+      let _ = self.valid_upto(self.lim.classes, a(1));
+      let _ = self.valid_upto(self.lim.classes, a(2));
+      let _ = self.test_context();
+    },
+    kOpPutCopy => {
+      let _ = self.test_ref(s8(bc[p]));
+      let _ = self.test_context();
+    },
+    kOpInsert => {
+      if (self.pass_type >= kPassPositioning) {
+        self.failure();
+      }
+      self.out_length = (self.out_length + 1) & 0xFFFF;
+      if (self.out_index < 0) {
+        self.out_index += 1;
+      }
+      if (self.out_index < -1 || self.out_index >= self.out_length as i32) {
+        self.failure();
+      }
+    },
+    kOpDelete => {
+      if (self.pass_type >= kPassPositioning) {
+        self.failure();
+      }
+      if (self.out_index < self.lim.pre_context as i32) {
+        self.failure();
+      }
+      self.out_index -= 1;
+      self.out_length = (self.out_length -% 1) & 0xFFFF;
+      if (self.out_index < -1 || self.out_index > self.out_length as i32) {
+        self.failure();
+      }
+    },
+    kOpAssoc => {
+      if (a(0) == 0) {
+        self.failure();
+      }
+      var num = a(0) as usize;
+      while (num > 0) {
+        let _ = self.test_ref(s8(bc[p + num]));
+        num -= 1;
+      }
+      let _ = self.test_context();
+    },
+    kOpCntxtItem => {
+      let _ = self.valid_upto(self.lim.rule_length, (self.lim.pre_context as i32 + s8(bc[p])) as u32);
+      if (p + 2 + a(1) as usize >= self.bytecode_end) {
+        self.failure();
+      }
+      if (self.in_ctxt_item) {
+        self.failure();
+      }
+    },
+    kOpAttrSet | kOpAttrAdd | kOpAttrSub | kOpAttrSetSlot => {
+      self.stack_depth -= 1;
+      if (self.stack_depth < 0) {
+        self.failure();
+      }
+      let _ = self.valid_upto(kSlatMax, a(0));
+      if (a(0) == 55) {
+        self.failure();
+      }
+      let _ = self.test_context();
+    },
+    kOpIattrSetSlot => {
+      self.stack_depth -= 1;
+      if (self.stack_depth < 0) {
+        self.failure();
+      }
+      if (self.valid_upto(kSlatMax, a(0))) {
+        let _ = self.valid_upto(attrid(self.lim, a(0)), a(1));
+      }
+      let _ = self.test_context();
+    },
+    kOpPushSlotAttr => {
+      self.stack_depth += 1;
+      let _ = self.valid_upto(kSlatMax, a(0));
+      let _ = self.test_ref(s8(bc[p + 1]));
+      if (a(0) == 55) {
+        self.failure();
+      }
+    },
+    kOpPushGlyphAttrObs | kOpPushAttToGattrObs => {
+      self.stack_depth += 1;
+      let _ = self.valid_upto(self.lim.glyf_attrs, a(0));
+      let _ = self.test_ref(s8(bc[p + 1]));
+    },
+    kOpPushAttToGlyphMetric | kOpPushGlyphMetric => {
+      self.stack_depth += 1;
+      let _ = self.valid_upto(11, a(0));  // kgmetDescent
+      let _ = self.test_ref(s8(bc[p + 1]));
+    },
+    kOpPushFeat => {
+      self.stack_depth += 1;
+      let _ = self.valid_upto(self.lim.features, a(0));
+      let _ = self.test_ref(s8(bc[p + 1]));
+    },
+    kOpPushIslotAttr => {
+      self.stack_depth += 1;
+      if (self.valid_upto(kSlatMax, a(0))) {
+        let _ = self.test_ref(s8(bc[p + 1]));
+        let _ = self.valid_upto(attrid(self.lim, a(0)), a(2));
+      }
+    },
+    kOpPushIglyphAttr => {
+      self.stack_depth += 1;
+    },
+    kOpPopRet => {
+      self.stack_depth -= 1;
+      if (self.stack_depth < 0) {
+        self.failure();
+      }
+    },
+    kOpRetZero | kOpRetTrue => {},
+    kOpIattrSet | kOpIattrAdd | kOpIattrSub => {
+      self.stack_depth -= 1;
+      if (self.stack_depth < 0) {
+        self.failure();
+      }
+      if (self.valid_upto(kSlatMax, a(0))) {
+        let _ = self.valid_upto(attrid(self.lim, a(0)), a(1));
+      }
+      let _ = self.test_context();
+    },
+    kOpPushProcState | kOpPushVersion => {
+      self.stack_depth += 1;
+    },
+    kOpPutSubs => {
+      let _ = self.test_ref(s8(bc[p]));
+      let _ = self.valid_upto(self.lim.classes, (a(1) << 8) | a(2));
+      let _ = self.valid_upto(self.lim.classes, (a(3) << 8) | a(4));
+      let _ = self.test_context();
+    },
+    kOpPutSubs2 | kOpPutSubs3 => {},
+    kOpPutGlyph => {
+      let _ = self.valid_upto(self.lim.classes, (a(0) << 8) | a(1));
+      let _ = self.test_context();
+    },
+    kOpPushGlyphAttr | kOpPushAttToGlyphAttr => {
+      self.stack_depth += 1;
+      let _ = self.valid_upto(self.lim.glyf_attrs, (a(0) << 8) | a(1));
+      let _ = self.test_ref(s8(bc[p + 2]));
+    },
+    kOpSetFeat => {
+      let _ = self.valid_upto(self.lim.features, a(0));
+      let _ = self.test_ref(s8(bc[p + 1]));
+    },
+    _ => {
+      self.failure();
+    },
+  }
+  return self.code.failed ? kOpLimit : opc;
+}
+
+// decoder::analyse_opcode; `p` is the position of the parameters.
+fn Decoder::analyse_opcode(var self&, bc: &[u8], opc: u32, p: usize) {
+  match (opc) {
+    kOpDelete => {
+      self.code.deletes = true;
+    },
+    kOpAssoc => {
+      self.set_changed(0);
+    },
+    kOpPutGlyph8bitObs | kOpPutGlyph => {
+      self.code.modify = true;
+      self.set_changed(0);
+    },
+    kOpAttrSet | kOpAttrAdd | kOpAttrSub | kOpAttrSetSlot | kOpIattrSetSlot | kOpIattrSet | kOpIattrAdd | kOpIattrSub => {
+      self.set_noref(0);
+    },
+    kOpNext | kOpCopyNext => {
+      self.slotref += 1;
+      if (self.slotref >= 0 && self.slotref < 256) {
+        self.contexts[self.slotref as usize] = Context { code_ref: (self.code.instrs.len() as u32 + 1) & 0xFF };
+      }
+    },
+    kOpInsert => {
+      if (self.slotref >= 0) {
+        self.slotref -= 1;
+      }
+      self.code.modify = true;
+    },
+    kOpPutSubs8bitObs | kOpPutSubs | kOpPutCopy => {
+      if (opc != kOpPutCopy) {
+        self.code.modify = true;
+        self.set_changed(0);
+      }
+      let arg0 = s8(bc[p]);
+      if (arg0 != 0) {
+        self.set_changed(0);
+        self.code.modify = true;
+      }
+      self.set_ref(arg0);
+    },
+    kOpPushGlyphAttrObs | kOpPushSlotAttr | kOpPushGlyphMetric | kOpPushAttToGattrObs | kOpPushAttToGlyphMetric | kOpPushIslotAttr | kOpPushFeat |
+    kOpSetFeat => {
+      self.set_ref(s8(bc[p + 1]));
+    },
+    kOpPushAttToGlyphAttr | kOpPushGlyphAttr => {
+      self.set_ref(s8(bc[p + 2]));
+    },
+    _ => {},
+  }
+}
+
+// decoder::emit_opcode: appends the instruction and its parameters; a context
+// item decodes its body here. `p` moves past what was consumed.
+fn Decoder::emit_opcode(var self&, bc: &[u8], opc: u32, var p&: usize): bool {
+  if ((kImpl[opc as usize] & self.impl_bit()) == 0) {
+    self.failure();
+    return false;
+  }
+  let sz = kParamSize[opc as usize] as u32;
+  let param_sz = sz == kVarArgs ? bc[p] as usize + 1 : sz as usize;
+  self.code.instrs.push(opc as u8);
+  for (let i in 0..param_sz) {
+    self.code.data.push(bc[p + i]);
+  }
+  p += param_sz;
+  if (opc == kOpCntxtItem) {
+    let skip_at = self.code.data.len() - 1;
+    let offset = s8(self.code.data[skip_at - 1]);
+    self.in_ctxt_item = true;
+    self.out_index = self.lim.pre_context as i32 + offset;
+    self.slotref = offset;
+    self.out_length = self.lim.rule_length & 0xFFFF;
+    let ctxt_start = self.code.instrs.len();
+    let instr_skip = self.code.data[skip_at] as usize;
+    self.code.data.push(0);  // data_skip
+    let curr_end = self.bytecode_end;
+    if (self.load(bc, p, p + instr_skip)) {
+      p += instr_skip;
+      let n = self.code.instrs.len() - ctxt_start;
+      self.code.data[skip_at + 1] = ((instr_skip -% n) & 0xFF) as u8;
+      self.code.data[skip_at] = (n & 0xFF) as u8;
+      self.bytecode_end = curr_end;
+      self.out_length = 1;
+      self.out_index = 0;
+      self.slotref = 0;
+      self.in_ctxt_item = false;
+    } else {
+      self.out_index = 0;
+      self.slotref = 0;
+      return false;
+    }
+  }
+  return !self.code.failed;
+}
+
+// decoder::load
+fn Decoder::load(var self&, bc: &[u8], begin: usize, end: usize): bool {
+  self.bytecode_end = end;
+  var p = begin;
+  while (p < end) {
+    let opc = self.fetch_opcode(bc, p);
+    p += 1;
+    if (opc == kOpLimit) {
+      return false;
+    }
+    self.analyse_opcode(bc, opc, p);
+    if (!self.emit_opcode(bc, opc, p)) {
+      return false;
+    }
+  }
+  return !self.code.failed;
+}
+
+// Machine::Code::Code: the program in bc[begin..end].
+pub fn load_code(is_constraint: bool, bc: &[u8], begin: usize, end: usize, lim: CodeLimits, pass_type: u32): Code {
+  var d = Decoder { code: Code { constraint: is_constraint }, lim, pass_type };
+  if (begin == end) {
+    return d.code;  // an empty Code: not runnable, loaded
+  }
+  d.out_index = is_constraint ? 0 : lim.pre_context as i32;
+  d.out_length = is_constraint ? 1 : lim.rule_length & 0xFFFF;
+  for (let i in 0..256) {
+    d.contexts.push(Context {});
+  }
+  if (!d.load(bc, begin, end)) {
+    var c = d.code;
+    c.instrs.clear();
+    c.data.clear();
+    c.failed = true;
+    return c;
+  }
+  if (d.code.instrs.len() == 0) {
+    return Code { constraint: is_constraint };
+  }
+  let last = d.code.instrs[d.code.instrs.len() - 1] as u32;
+  if (last != kOpPopRet && last != kOpRetZero && last != kOpRetTrue) {
+    var c = d.code;
+    c.instrs.clear();
+    c.data.clear();
+    c.failed = true;
+    return c;
+  }
+  // decoder::apply_analysis
+  if (!is_constraint) {
+    var temps = 0usize;
+    for (let i in 0..(d.slotref > 0 ? d.slotref as usize : 0)) {
+      let c = d.contexts[i];
+      if (!c.referenced || !c.changed) {
+        continue;
+      }
+      let at = c.code_ref as usize + temps;
+      if (at <= d.code.instrs.len()) {
+        d.code.instrs.insert(at, kOpTempCopy as u8);
+      } else {
+        d.code.instrs.push(kOpTempCopy as u8);
+      }
+      temps += 1;
+      d.code.deletes = true;
+    }
+  }
+  var c = d.code;
+  c.max_ref = d.max_ref;
+  c.instrs.push(kOpRetZero as u8);
+  c.runnable = true;
+  return c;
+}

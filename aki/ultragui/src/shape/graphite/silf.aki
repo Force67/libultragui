@@ -1,0 +1,585 @@
+// graphite2's Silf table (Face::readGraphite, Silf.cpp, Pass.cpp's readers):
+// the subtables, their attribute numbers and pass bounds, the glyph classes,
+// the pseudo-glyphs, and each pass's columns, rules (constraint and action
+// programs, decoded by graphite::code), finite-state machine and rule lists,
+// with every check that rejects a face.
+//
+// Offsets are relative to the Silf subtable, as the table's own offsets are.
+// The C++ also bounds the decoded programs by a pool sized from the bytecode
+// (Pass::readRules); a valid program always fits it, so it is not modeled.
+
+module ultragui::shape::graphite::silf;
+
+import {List} from akikit::containers::list;
+import {Code, CodeLimits, kPassJustification, kPassLinebreak, kPassPositioning, kPassSubstitute, kPassUnknown, load_code} from ultragui::shape::graphite::code;
+import {GlyphCache} from ultragui::shape::graphite::glyphs;
+import {be16, be32, be8} from ultragui::shape::graphite::tables;
+
+pub comptime let kMaxRules: u32 = 128;  // FiniteStateMachine::MAX_RULES
+
+pub struct Rule {
+  pub var constraint: Code
+  pub var action: Code
+  pub var sort: u32 = 0
+  pub var pre_context: u32 = 0
+}
+
+// State: its rules are rule_map[begin..end] (end at most MAX_RULES past begin).
+pub struct State : Copy {
+  pub var begin: u32 = 0
+  pub var end: u32 = 0
+}
+
+pub struct Pass {
+  pub var cols: List<u16> = List()
+  pub var rules: List<Rule> = List()
+  pub var rule_map: List<u16> = List()  // RuleEntry: rule indices
+  pub var start_states: List<u16> = List()
+  pub var transitions: List<u16> = List()
+  pub var states: List<State> = List()
+  pub var constraint: Code = Code {}     // m_cPConstraint
+  pub var num_coll_runs: u32 = 0
+  pub var kern_colls: u32 = 0
+  pub var max_loop: u32 = 0
+  pub var num_glyphs: u32 = 0
+  pub var num_rules: u32 = 0
+  pub var num_states: u32 = 0
+  pub var num_transition: u32 = 0
+  pub var num_success: u32 = 0
+  pub var success_start: u32 = 0
+  pub var num_columns: u32 = 0
+  pub var min_pre: u32 = 0
+  pub var max_pre: u32 = 0
+  pub var col_threshold: u32 = 0
+  pub var reverse_dir: bool = false
+}
+
+pub struct Silf {
+  pub var passes: List<Pass> = List()
+  pub var pseudo_uids: List<u32> = List()
+  pub var pseudo_gids: List<u32> = List()
+  pub var class_offsets: List<u32> = List()
+  pub var class_data: List<u16> = List()
+  pub var justs: List<u32> = List()  // Justinfo: stretch, shrink, step, weight bytes, 4 per level
+  pub var num_passes: u32 = 0
+  pub var num_justs: u32 = 0
+  pub var s_pass: u32 = 0
+  pub var p_pass: u32 = 0
+  pub var j_pass: u32 = 0
+  pub var b_pass: u32 = 0
+  pub var flags: u32 = 0
+  pub var dir: u32 = 0      // uint8: the byte minus one
+  pub var a_pseudo: u32 = 0
+  pub var a_break: u32 = 0
+  pub var a_user: u32 = 0
+  pub var a_bidi: u32 = 0
+  pub var a_mirror: u32 = 0
+  pub var a_pass_bits: u32 = 0
+  pub var i_max_comp: u32 = 0
+  pub var a_collision: u32 = 0
+  pub var a_lig: u32 = 0
+  pub var n_class: u32 = 0
+  pub var n_linear: u32 = 0
+  pub var g_end_line: u32 = 0
+
+  // Silf::findPseudo
+  pub fn find_pseudo(self&, uid: u32): u32 {
+    for (let i in 0..self.pseudo_uids.len()) {
+      if (self.pseudo_uids[i] == uid) {
+        return self.pseudo_gids[i];
+      }
+    }
+    return 0;
+  }
+
+  // Silf::findClassIndex: the glyph's index in the class, 0xFFFF if absent.
+  pub fn find_class_index(self&, cid: u32, gid: u32): u32 {
+    if (cid > self.n_class) {
+      return 0xFFFF;
+    }
+    let base = self.class_offsets[cid as usize] as usize;
+    if (cid < self.n_linear) {
+      let n = (self.class_offsets[cid as usize + 1] - self.class_offsets[cid as usize]) as usize;
+      for (let i in 0..n) {
+        if (self.class_data[base + i] as u32 == gid) {
+          return i as u32 & 0xFFFF;
+        }
+      }
+      return 0xFFFF;
+    }
+    let cd& = self.class_data;
+    var lo = base + 4;
+    var hi = lo + cd[base] as usize * 2;
+    while (true) {
+      let p = lo + (((hi - lo) / 2) & ~1usize);
+      if (cd[p] as u32 > gid) {
+        hi = p;
+      } else {
+        lo = p;
+      }
+      if (!(hi - lo > 2)) {
+        break;
+      }
+    }
+    return cd[lo] as u32 == gid ? cd[lo + 1] as u32 : 0xFFFF;
+  }
+
+  // Silf::getClassGlyph
+  pub fn class_glyph(self&, cid: u32, index: u32): u32 {
+    if (cid > self.n_class) {
+      return 0;
+    }
+    let loc = self.class_offsets[cid as usize];
+    if (cid < self.n_linear) {
+      if (index < self.class_offsets[cid as usize + 1] - loc) {
+        return self.class_data[(index + loc) as usize] as u32;
+      }
+    } else {
+      var i = loc + 4;
+      while (i < self.class_offsets[cid as usize + 1]) {
+        if (self.class_data[i as usize + 1] as u32 == index) {
+          return self.class_data[i as usize] as u32;
+        }
+        i += 2;
+      }
+    }
+    return 0;
+  }
+}
+
+// Silf::readClassMap: the class data's length, or none.
+fn read_class_map(var silf&: Silf, s: &[u8], p0: usize, data_len: usize, version: u32): usize? {
+  if (data_len < 4) {
+    return none;
+  }
+  var p = p0;
+  silf.n_class = be16(s, p);
+  silf.n_linear = be16(s, p + 2);
+  p += 4;
+  let wide = version >= 0x00040000;
+  let w: usize = wide ? 4 : 2;
+  if (silf.n_linear > silf.n_class || (silf.n_class as usize + 1) * w > data_len - 4) {
+    return none;
+  }
+  // readClassOffsets<T>
+  let n = silf.n_class as usize;
+  let read_t = fn(o: usize): u32 => wide ? be32(s, o) : be16(s, o);
+  let cls_off = wide ? 4 + 4 * (silf.n_class + 1) : (4 + 2 * (silf.n_class + 1)) & 0xFFFF;
+  // (T - cls_off) / 2: uint16 operands promote to int, uint32 ones wrap.
+  let off_of = fn(v: u32): u32 => wide ? (v -% cls_off) / 2 : ((v as i32 - cls_off as i32) / 2) as u32;
+  let max_off = off_of(read_t(p + w * n));
+  if (read_t(p) != cls_off || max_off as u64 > ((data_len as u64) -% (cls_off as u64)) / 2) {
+    return none;
+  }
+  for (let i in 0..n + 1) {
+    let o = off_of(read_t(p));
+    p += w;
+    if (o > max_off) {
+      return none;
+    }
+    silf.class_offsets.push(o);
+  }
+  if ((max_off as i32) < (silf.n_linear + (silf.n_class - silf.n_linear) * 6) as i32) {
+    return none;
+  }
+  for (let i in 0..silf.n_linear as usize) {
+    if (silf.class_offsets[i] > silf.class_offsets[i + 1]) {
+      return none;
+    }
+  }
+  for (let i in 0..max_off as usize) {
+    silf.class_data.push(be16(s, p) as u16);
+    p += 2;
+  }
+  for (let c in silf.n_linear as usize..n) {
+    let o = silf.class_offsets[c];
+    if (o + 4 > max_off) {
+      return none;
+    }
+    let l0 = silf.class_data[o as usize] as u32;
+    let l1 = silf.class_data[o as usize + 1] as u32;
+    let l3 = silf.class_data[o as usize + 3] as u32;
+    if (l0 == 0 || l0 * 2 + o + 4 > max_off || l3 + l1 != l0) {
+      return none;
+    }
+    if (((silf.class_offsets[c + 1] -% o) & 1) != 0) {
+      return none;
+    }
+  }
+  return max_off as usize;
+}
+
+// Pass::readRanges
+fn read_ranges(var pass&: Pass, s: &[u8], ranges: usize, num_ranges: usize): bool {
+  for (let i in 0..pass.num_glyphs) {
+    pass.cols.push(0xFFFF);
+  }
+  var r = ranges;
+  for (let k in 0..num_ranges) {
+    let first = be16(s, r) as usize;
+    let last1 = be16(s, r + 2) as usize + 1;
+    let col = be16(s, r + 4);
+    r += 6;
+    if (first >= last1 || last1 > pass.num_glyphs as usize || col >= pass.num_columns) {
+      return false;
+    }
+    var ci = first;
+    while (ci != last1 && pass.cols[ci] == 0xFFFF) {
+      pass.cols[ci] = col as u16;
+      ci += 1;
+    }
+    if (ci != last1) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Pass::readRules
+fn read_rules(var pass&: Pass, s: &[u8], rule_map: usize, num_entries: usize, precontext: usize, sort_key: usize, o_constraint: usize,
+              rc_data: usize, o_action: usize, ac_data: usize, lim0: CodeLimits, pt: u32): bool {
+  let n_rules = pass.num_rules as usize;
+  let ac_data_end = ac_data + be16(s, o_action + 2 * n_rules) as usize;
+  let rc_data_end = rc_data + be16(s, o_constraint + 2 * n_rules) as usize;
+  var ac_end = ac_data + be16(s, o_action + 2 * n_rules) as usize;
+  var rc_end = rc_data + be16(s, o_constraint + 2 * n_rules) as usize;
+  var rules: List<Rule> = List();
+  var n = n_rules;
+  while (n > 0) {
+    let i = n - 1;
+    let pre = be8(s, precontext + i);  // a byte
+    let sort = be16(s, sort_key + 2 * i);
+    if (sort > 63 || pre >= sort || pre > pass.max_pre || pre < pass.min_pre) {
+      return false;
+    }
+    let ac_begin = ac_data + be16(s, o_action + 2 * i) as usize;
+    let rc_off = be16(s, o_constraint + 2 * i) as usize;
+    let rc_begin = rc_off != 0 ? rc_data + rc_off : rc_end;
+    if (ac_begin > ac_end || ac_begin > ac_data_end || ac_end > ac_data_end || rc_begin > rc_end || rc_begin > rc_data_end || rc_end > rc_data_end) {
+      return false;
+    }
+    var lim = lim0;
+    lim.pre_context = pre;
+    lim.rule_length = sort;
+    let action = load_code(false, s, ac_begin, ac_end, lim, pt);
+    let constraint = load_code(true, s, rc_begin, rc_end, lim, pt);
+    if (action.failed || constraint.failed || !constraint.immutable()) {
+      return false;
+    }
+    rules.push(Rule { constraint, action, sort, pre_context: pre });
+    ac_end = ac_begin;
+    rc_end = rc_begin;
+    n -= 1;
+  }
+  // They were read last to first.
+  while (rules.len() > 0) {
+    pass.rules.push(rules.pop()!);
+  }
+  for (let k in 0..num_entries) {
+    let rn = be16(s, rule_map + 2 * k);
+    if (rn >= pass.num_rules) {
+      return false;
+    }
+    pass.rule_map.push(rn as u16);
+  }
+  return true;
+}
+
+// RuleEntry::operator<: longer rules first, then by rule order.
+fn entry_less(pass&: Pass, a: u32, b: u32): bool {
+  let sa = pass.rules[a as usize].sort;
+  let sb = pass.rules[b as usize].sort;
+  return sa > sb || (sa == sb && a < b);
+}
+
+// Pass::readStates
+fn read_states(var pass&: Pass, s: &[u8], starts: usize, states: usize, o_rule_map: usize): bool {
+  for (let i in 0..(pass.max_pre - pass.min_pre + 1) as usize) {
+    let v = be16(s, starts + 2 * i);
+    if (v >= pass.num_states) {
+      return false;
+    }
+    pass.start_states.push(v as u16);
+  }
+  for (let i in 0..(pass.num_transition * pass.num_columns) as usize) {
+    let v = be16(s, states + 2 * i);
+    if (v >= pass.num_states) {
+      return false;
+    }
+    pass.transitions.push(v as u16);
+  }
+  let map_end = be16(s, o_rule_map + 2 * pass.num_success as usize);
+  var o = o_rule_map;
+  for (let st in 0..pass.num_states) {
+    if (st < pass.success_start) {
+      pass.states.push(State {});
+      continue;
+    }
+    let begin = be16(s, o);
+    let end = be16(s, o + 2);
+    o += 2;
+    if (begin >= map_end || end > map_end || begin > end) {
+      return false;
+    }
+    pass.states.push(State { begin, end: end - begin <= kMaxRules ? end : begin + kMaxRules });
+    // qsort of the state's entries (in place: states may share entries)
+    var j = begin as usize + 1;
+    while (j < end as usize) {
+      let x = pass.rule_map[j] as u32;
+      var k = j;
+      while (k > begin as usize && entry_less(pass, x, pass.rule_map[k - 1] as u32)) {
+        pass.rule_map[k] = pass.rule_map[k - 1];
+        k -= 1;
+      }
+      pass.rule_map[k] = x as u16;
+      j += 1;
+    }
+  }
+  return true;
+}
+
+// Pass::readPass: the pass in s[start..start+len], or none.
+fn read_pass(silf&: Silf, s: &[u8], start: usize, len: usize, glyphs&: GlyphCache, num_feats: u32, pt: u32): Pass? {
+  var pass = Pass {};
+  let pe = (start + len) as i64;
+  if (len < 40) {
+    return none;
+  }
+  var p = start;
+  let flags = be8(s, p);
+  p += 1;
+  if ((flags & 0x1F) != 0 && (pt < kPassPositioning || silf.a_collision == 0 || !glyphs.has_boxes || (silf.flags & 0x20) == 0)) {
+    return none;
+  }
+  pass.num_coll_runs = flags & 0x7;
+  pass.kern_colls = (flags >> 3) & 0x3;
+  pass.reverse_dir = ((flags >> 5) & 0x1) != 0;
+  pass.max_loop = be8(s, p);
+  p += 1;
+  if (pass.max_loop < 1) {
+    pass.max_loop = 1;
+  }
+  p += 2;
+  pass.num_rules = be16(s, p);
+  p += 2;
+  if (pass.num_rules == 0 && pass.num_coll_runs == 0) {
+    return none;
+  }
+  p += 2;
+  let pc_code = be32(s, p) as i64;
+  let rc_code = be32(s, p + 4) as i64;
+  let a_code = be32(s, p + 8) as i64;
+  p += 16;
+  pass.num_states = be16(s, p);
+  pass.num_transition = be16(s, p + 2);
+  pass.num_success = be16(s, p + 4);
+  pass.num_columns = be16(s, p + 6);
+  let num_ranges = be16(s, p + 8) as usize;
+  p += 16;
+  if (pass.num_transition > pass.num_states || pass.num_success > pass.num_states || pass.num_success + pass.num_transition < pass.num_states ||
+      (pass.num_rules != 0 && num_ranges == 0) || pass.num_columns > 0x7FFF) {
+    return none;
+  }
+  pass.success_start = pass.num_states - pass.num_success;
+  if (p as i64 + num_ranges as i64 * 6 - 2 > pe) {
+    return none;
+  }
+  pass.num_glyphs = (be16(s, p + num_ranges * 6 - 4) + 1) & 0xFFFF;
+  let ranges = p;
+  p += num_ranges * 6;
+  let o_rule_map = p;
+  p += (pass.num_success as usize + 1) * 2;
+  if ((o_rule_map + pass.num_success as usize * 2) as i64 > pe || p as i64 > pe) {
+    return none;
+  }
+  let num_entries = be16(s, o_rule_map + pass.num_success as usize * 2) as usize;
+  let rule_map = p;
+  p += num_entries * 2;
+  if (p as i64 + 2 > pe) {
+    return none;
+  }
+  pass.min_pre = be8(s, p);
+  pass.max_pre = be8(s, p + 1);
+  p += 2;
+  if (pass.min_pre > pass.max_pre) {
+    return none;
+  }
+  let start_states = p;
+  p += (pass.max_pre - pass.min_pre + 1) as usize * 2;
+  let sort_keys = p;
+  p += pass.num_rules as usize * 2;
+  let precontext = p;
+  p += pass.num_rules as usize;
+  if (p as i64 + 3 > pe) {
+    return none;
+  }
+  pass.col_threshold = be8(s, p);
+  p += 1;
+  if (pass.col_threshold == 0) {
+    pass.col_threshold = 10;
+  }
+  let pc_len = be16(s, p) as i64;
+  p += 2;
+  let o_constraint = p;
+  p += (pass.num_rules as usize + 1) * 2;
+  let o_actions = p;
+  p += (pass.num_rules as usize + 1) * 2;
+  let states = p;
+  // 2u*numTransition*numColumns >= (unsigned)(pass_end - p) || p >= pass_end
+  let rest = pe - p as i64;
+  if ((rest >= 0 && 2 * pass.num_transition as i64 * pass.num_columns as i64 >= rest) || p as i64 >= pe) {
+    return none;
+  }
+  p += (pass.num_transition * pass.num_columns) as usize * 2;
+  p += 1;
+  if (p as i64 != pc_code) {
+    return none;
+  }
+  p += pc_len as usize;
+  if (p as i64 != rc_code || rc_code - pc_code != pc_len) {
+    return none;
+  }
+  p += be16(s, o_constraint + pass.num_rules as usize * 2) as usize;
+  if (p as i64 != a_code) {
+    return none;
+  }
+  p += be16(s, o_actions + pass.num_rules as usize * 2) as usize;
+  if (p as i64 > pe) {
+    return none;
+  }
+  let lim = CodeLimits {
+    pre_context: be8(s, precontext), rule_length: be16(s, sort_keys), classes: silf.n_class, glyf_attrs: glyphs.num_attrs, features: num_feats,
+    num_user: silf.a_user,
+  };
+  if (pc_len != 0) {
+    pass.constraint = load_code(true, s, pc_code as usize, (pc_code + pc_len) as usize, lim, kPassUnknown);
+    if (!pass.constraint.runnable || pass.constraint.failed) {
+      return none;
+    }
+  }
+  if (pass.num_rules != 0) {
+    if (!read_ranges(pass, s, ranges, num_ranges)) {
+      return none;
+    }
+    if (!read_rules(pass, s, rule_map, num_entries, precontext, sort_keys, o_constraint, rc_code as usize, o_actions, a_code as usize, lim, pt)) {
+      return none;
+    }
+    if (!read_states(pass, s, start_states, states, o_rule_map)) {
+      return none;
+    }
+  }
+  return pass;
+}
+
+// Silf::readGraphite: the subtable s (a whole Silf subtable), or none.
+pub fn read_silf(s: &[u8], glyphs&: GlyphCache, num_feats: u32, version: u32): Silf? {
+  var silf = Silf {};
+  let l = #s;
+  if (version >= 0x00060000) {
+    return none;
+  }
+  var p = 0usize;
+  if (version >= 0x00030000) {
+    if (l < 28) {
+      return none;
+    }
+    p += 8;
+  } else if (l < 20) {
+    return none;
+  }
+  let max_glyph = be16(s, p);
+  p += 6;  // maxGlyph, extra ascent and descent
+  silf.num_passes = be8(s, p);
+  silf.s_pass = be8(s, p + 1);
+  silf.p_pass = be8(s, p + 2);
+  silf.j_pass = be8(s, p + 3);
+  silf.b_pass = be8(s, p + 4);
+  silf.flags = be8(s, p + 5);
+  p += 8;  // + max{Pre,Post}Context
+  silf.a_pseudo = be8(s, p);
+  silf.a_break = be8(s, p + 1);
+  silf.a_bidi = be8(s, p + 2);
+  silf.a_mirror = be8(s, p + 3);
+  silf.a_pass_bits = be8(s, p + 4);
+  silf.num_justs = be8(s, p + 5);
+  p += 6;
+  if (max_glyph >= glyphs.num_glyphs || p + silf.num_justs as usize * 8 >= l) {
+    return none;
+  }
+  for (let i in 0..silf.num_justs as usize) {
+    silf.justs.push(be32(s, p));
+    p += 8;
+  }
+  if (p + 2 + 8 >= l) {
+    return none;
+  }
+  silf.a_lig = be16(s, p);
+  silf.a_user = be8(s, p + 2);
+  silf.i_max_comp = be8(s, p + 3);
+  silf.dir = ((be8(s, p + 4)) -% 1) & 0xFF;
+  silf.a_collision = be8(s, p + 5);
+  p += 9;
+  p += 2 * (be8(s, p)) as usize + 1;  // critical features
+  p += 1;                                   // reserved
+  if (p >= l) {
+    return none;
+  }
+  p += 4 * (be8(s, p)) as usize + 1;  // script tags
+  if (p + 2 + 4 >= l) {
+    return none;
+  }
+  silf.g_end_line = be16(s, p);
+  p += 2;
+  var o_passes = p;
+  let passes_start = be32(s, p) as usize;
+  p += 4;
+  let num_attrs = glyphs.num_attrs as i64;
+  if (silf.a_pseudo as i64 >= num_attrs || silf.a_break as i64 >= num_attrs || silf.a_bidi as i64 >= num_attrs || silf.a_mirror as i64 >= num_attrs ||
+      (silf.a_collision != 0 && num_attrs >= 5 && silf.a_collision as i64 >= num_attrs - 5) || silf.num_passes > 128 || passes_start >= l ||
+      silf.p_pass < silf.s_pass || silf.p_pass > silf.num_passes || silf.s_pass > silf.num_passes || silf.j_pass < silf.p_pass ||
+      silf.j_pass > silf.num_passes || (silf.b_pass != 0xFF && (silf.b_pass < silf.j_pass || silf.b_pass > silf.num_passes)) || silf.a_lig > 127) {
+    return none;
+  }
+  p += 4 * silf.num_passes as usize;
+  if (p + 2 >= passes_start) {
+    return none;
+  }
+  let num_pseudo = be16(s, p) as usize;
+  p += 8;
+  if (p + num_pseudo * 6 >= passes_start) {
+    return none;
+  }
+  for (let i in 0..num_pseudo) {
+    silf.pseudo_uids.push(be32(s, p));
+    silf.pseudo_gids.push(be16(s, p + 4));
+    p += 6;
+  }
+  let room = passes_start - p;
+  let clen = read_class_map(silf, s, p, room, version) else {
+    return none;
+  };
+  if (clen > room) {
+    return none;
+  }
+  for (let i in 0..silf.num_passes) {
+    let pass_start = be32(s, o_passes) as usize;
+    let pass_end = be32(s, o_passes + 4) as usize;
+    o_passes += 4;
+    if (pass_start > pass_end || pass_start < passes_start || pass_end > l) {
+      return none;
+    }
+    var pt = kPassLinebreak;
+    if (i >= silf.j_pass) {
+      pt = kPassJustification;
+    } else if (i >= silf.p_pass) {
+      pt = kPassPositioning;
+    } else if (i >= silf.s_pass) {
+      pt = kPassSubstitute;
+    }
+    let pass = read_pass(silf, s, pass_start, pass_end - pass_start, glyphs, num_feats, pt) else {
+      return none;
+    };
+    silf.passes.push(pass);
+  }
+  return silf;
+}

@@ -13,10 +13,16 @@
 // cmap (random runs of its letters, marks, digits, punctuation, spaces,
 // joiners, variation selectors and ill-formed UTF-8).
 //
+// Fonts with a Silf table that graphite2 accepts are shaped by graphite2 in
+// HarfBuzz and by ultragui::shape::graphite here; the test checks both pick
+// the same shaper.
+//
 // Default: a curated set of fonts at 12, 16 and 24 px. SHAPE_SWEEP=1 runs
 // every font of /usr/share/fonts at 9, 12, 16, 24 and 37 px with
 // SHAPE_GENERATED (default 400) generated strings per font; SHAPE_FONTS=a:b
-// picks fonts by path; SHAPE_SEED changes the generated strings. The first
+// picks fonts by path; SHAPE_SEED changes the generated strings;
+// SHAPE_SIZES=a:b or a-b replaces the pixel sizes; SHAPE_MAXLEN (default
+// 12) is the longest generated string, in characters. The first
 // differences are printed with the font, size and string. Every font also
 // runs a 28-locale matrix over the samples and SHAPE_LANGUAGE_GENERATED
 // (default 4; sweep 12) generated strings. Available locales use setlocale
@@ -46,7 +52,7 @@ import {gc_is_mark, general_category, tag} from ultragui::shape::ucd;
 import {FtFont, open_ft_font, set_pixel_size} from support::shape_ft;
 import {kSamples} from support::shape_samples;
 
-comptime let kCurated: [str; 9] = [
+comptime let kCurated: [str; 12] = [
   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
   "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
   "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -56,6 +62,10 @@ comptime let kCurated: [str; 9] = [
   "/usr/share/fonts/truetype/tlwg/Garuda.ttf",
   "/usr/share/fonts/truetype/ttf-khmeros-core/KhmerOS.ttf",
   "/usr/share/fonts/truetype/freefont/FreeSerif.ttf",
+  // Fonts HarfBuzz shapes with graphite2 (a Silf table).
+  "/usr/share/fonts/truetype/padauk/Padauk-Regular.ttf",
+  "/usr/share/fonts/truetype/abyssinica/AbyssinicaSIL-Regular.ttf",
+  "/usr/share/fonts/truetype/annapurna/AnnapurnaSIL-Regular.ttf",
 ];
 
 comptime let kMaxReported: u64 = 30;
@@ -66,7 +76,9 @@ struct Totals {
   pub var glyphs: u64 = 0
   pub var mismatches: u64 = 0
   pub var reported: u64 = 0
-  pub var skipped_graphite: u64 = 0
+  pub var graphite: u64 = 0
+  pub var graphite_strings: u64 = 0
+  pub var graphite_glyphs: u64 = 0
   pub var locale_cases: u64 = 0
   pub var table_selections: u64 = 0
 }
@@ -178,7 +190,7 @@ fn generated_strings(var face&: ShapeFace, count: u64, seed: u64, var out&: List
   let specials = [0x20u32, 0x20, 0x200C, 0x200D, 0xFE0F, 0xFE0E, 0x34F, 0x2060, 0xA0, 0x2009, 0x30, 0x31, 0x2E, 0x2C, 0x25CC];
   for (let n in 0..count) {
     var s: List<u8> = List();
-    let len = 1 + rng.below(12);
+    let len = 1 + rng.below(env_u64("SHAPE_MAXLEN", 12));
     // Mostly one region of the letters, so runs look like words of one script.
     let base = rng.below(letters.len() as u64);
     for (let k in 0..len) {
@@ -317,6 +329,25 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
       ok = check_font_runs(path, out_dir, oracle, sizes, localized, face, ft, totals, language, false) && ok;
     }
     set_test_locale("C");
+    // A graphite2 face's own languages (its Sill table), bare and with a
+    // region: their feature settings replace the defaults.
+    if (face.uses_graphite()) {
+      var langs: List<String> = List();
+      for (let t in face.graphite[0].features.languages) {
+        var name = String();
+        for (let k in 0u32..4) {
+          let c = (t >> (24 - 8 * k)) & 0xFF;
+          if (c != 0 && c != 0x20) {
+            name.push_char(c as c32);
+          }
+        }
+        langs.push(from_str(name.as_str()));
+        langs.push(from_str(f"{name}-XY".as_str()));
+      }
+      for (let language in langs) {
+        ok = check_font_runs(path, out_dir, oracle, sizes, localized, face, ft, totals, language.as_str(), false) && ok;
+      }
+    }
   }
   return ok;
 }
@@ -416,12 +447,13 @@ fn check_font_runs(path: str, out_dir: str, oracle: str, sizes: &[u32], strings&
       }
     }
   }
-  if (is_graphite) {
-    if (#locale == 0) {
-      totals.skipped_graphite += 1;
-      println(f"{path}: HarfBuzz shapes it with graphite2; not compared");
-    }
-    return true;
+  // The shaper HarfBuzz picked (graphite2 when graphite2 accepts the face).
+  if (is_graphite != face.uses_graphite()) {
+    totals.mismatches += 1;
+    eprintln(f"SHAPER {path}: HarfBuzz uses graphite2 {is_graphite}, aki {face.uses_graphite()}");
+  }
+  if (is_graphite && #locale == 0) {
+    totals.graphite += 1;
   }
   var font_mismatches = 0u64;
   for (let px in sizes) {
@@ -448,6 +480,10 @@ fn check_font_runs(path: str, out_dir: str, oracle: str, sizes: &[u32], strings&
       let got = use_default ? shape_utf8(face, ft, xs, ys, strings[si].as_slice()) : shape_utf8(face, ft, xs, ys, strings[si].as_slice(), lang.as_str());
       totals.strings += 1;
       totals.glyphs += n as u64;
+      if (is_graphite) {
+        totals.graphite_strings += 1;
+        totals.graphite_glyphs += n as u64;
+      }
       var same = got.len() == want.len();
       if (same) {
         for (let k in 0..n) {
@@ -676,13 +712,41 @@ pub fn main(): i32 {
   }
   let sizes_default = [12u32, 16, 24];
   let sizes_sweep = [9u32, 12, 16, 24, 37];
+  // SHAPE_SIZES=a:b:... replaces the sizes; "a-b" is a range.
+  var sizes_env: List<u32> = List();
+  if (let list = get_environment_variable("SHAPE_SIZES")) {
+    let l = list.as_str();
+    var start = 0usize;
+    for (let i in 0..#l + 1) {
+      if (i == #l || l[i] == ':') {
+        let item = l[start..i];
+        var dash = #item;
+        for (let k in 0..#item) {
+          if (item[k] == '-') {
+            dash = k;
+          }
+        }
+        if (dash < #item) {
+          let lo = parse_u64(item[..dash]) ?? 0;
+          let hi = parse_u64(item[dash + 1..]) ?? 0;
+          for (let v in lo..hi + 1) {
+            sizes_env.push(v as u32);
+          }
+        } else if (#item > 0) {
+          sizes_env.push((parse_u64(item) ?? 12) as u32);
+        }
+        start = i + 1;
+      }
+    }
+  }
   let generated = env_u64("SHAPE_GENERATED", sweep ? 400 : 60);
   var totals = Totals {};
   var ok = true;
   for (let f in fonts) {
-    let sizes = sweep ? sizes_sweep[..] : sizes_default[..];
+    let sizes = sizes_env.len() > 0 ? sizes_env.as_slice() : sweep ? sizes_sweep[..] : sizes_default[..];
     ok = check_font(f.as_str(), root, out_dir.as_str(), oracle.as_str(), sizes, generated, seed, totals, "", false, true) && ok;
   }
-  println(f"{totals.fonts} fonts ({totals.skipped_graphite} shaped by graphite2, not compared), {totals.locale_cases} locale/font cases, {totals.table_selections} table selections, {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
+  println(f"{totals.fonts} fonts, {totals.locale_cases} locale/font cases, {totals.table_selections} table selections, {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
+  println(f"  of which {totals.graphite} fonts shaped by graphite2: {totals.graphite_strings} strings, {totals.graphite_glyphs} glyphs");
   return ok && totals.mismatches == 0 ? 0 : 1;
 }

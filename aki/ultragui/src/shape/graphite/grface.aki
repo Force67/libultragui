@@ -1,0 +1,74 @@
+// A graphite2 face as HarfBuzz makes it (gr_make_face_with_ops with
+// gr_face_preloadAll; gr_face.cpp's load_face, Face::readGlyphs,
+// Face::readFeatures, Face::readGraphite): none when graphite2 would reject
+// the face, and HarfBuzz then shapes it with OpenType.
+
+module ultragui::shape::graphite::grface;
+
+import {List} from akikit::containers::list;
+import {FeatureMap, load_features} from ultragui::shape::graphite::features;
+import {CachedCmap, GlyphCache, load_cmap, load_glyph_cache} from ultragui::shape::graphite::glyphs;
+import {Silf, read_silf} from ultragui::shape::graphite::silf;
+import {be16, be32, face_table, kTagSilf} from ultragui::shape::graphite::tables;
+
+pub struct GrFace {
+  pub var glyphs: GlyphCache
+  pub var cmap: CachedCmap
+  pub var features: FeatureMap
+  pub var silfs: List<Silf> = List()
+}
+
+// The face in the sfnt at `sfnt` of the font data, or none.
+pub fn load_gr_face(data: &[u8], sfnt: usize): GrFace? {
+  let silf_l = face_table(data, sfnt, kTagSilf, 0x00050000);
+  if (silf_l.len() == 0) {
+    return none;
+  }
+  let glyphs = load_glyph_cache(data, sfnt);
+  if (glyphs.num_glyphs == 0 || glyphs.upem == 0) {
+    return none;
+  }
+  let cmap = load_cmap(data, sfnt);
+  if (!cmap.present) {
+    return none;
+  }
+  let features = load_features(data, sfnt) else {
+    return none;
+  };
+  var face = GrFace { glyphs, cmap, features };
+  // Face::readGraphite
+  let silf = silf_l.as_slice();
+  if (#silf < 20) {
+    return none;
+  }
+  let version = be32(silf, 0);
+  if (version < 0x00020000) {
+    return none;
+  }
+  var p = 4usize;
+  if (version >= 0x00030000) {
+    p += 4;
+  }
+  let num_silf = be16(silf, p) as usize;
+  p += 4;
+  var have_passes = false;
+  for (let i in 0..num_silf) {
+    let offset = be32(silf, p) as usize;
+    p += 4;
+    let next = i == num_silf - 1 ? #silf : be32(silf, p) as usize;
+    if (next > #silf || offset >= next) {
+      return none;
+    }
+    let s = read_silf(silf[offset..next], face.glyphs, face.features.num_feats(), version) else {
+      return none;
+    };
+    if (s.num_passes != 0) {
+      have_passes = true;
+    }
+    face.silfs.push(s);
+  }
+  if (!have_passes) {
+    return none;
+  }
+  return face;
+}
