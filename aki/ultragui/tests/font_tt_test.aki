@@ -130,8 +130,9 @@ fn compare_glyph(d&: [u8], var r&: Rd, var face&: Face, var t&: Totals, label: s
     r.pos = r.end;
     return;
   }
-  // An autohinted face still loads a strike's bitmaps itself.
-  if (face.uses_autohinter() && (err != 0 || d[r.pos] != 1)) {
+  // An autohinted face still loads a strike's bitmaps itself; its outlines
+  // are tests/autofit_test.aki's (FONT_AUTOFIT=1 compares them here too).
+  if (face.uses_autohinter() && (err != 0 || d[r.pos] != 1) && get_environment_variable("FONT_AUTOFIT") == none) {
     t.skipped_autohint += 1;
     r.pos = r.end;
     return;

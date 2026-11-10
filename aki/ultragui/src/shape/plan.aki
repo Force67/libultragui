@@ -90,6 +90,9 @@ pub struct ShapePlan {
   pub var script: u32 = 0
   pub var language: String = String()
   pub var direction: u32 = 0
+  // One user feature, on for the whole text (0: none), as FreeType's
+  // autohinter passes one to hb_shape.
+  pub var user_feature: u32 = 0
   pub var shaper: u32 = 0
   pub var map: OtMap = OtMap()
   pub var frac_mask: u32 = 0
@@ -112,14 +115,15 @@ pub struct ShapePlan {
 }
 
 
-// The plan for script, direction and canonical language: hb_ot_shape_plan_t::init0.
-pub fn create_plan(face&: ShapeFace, script: u32, direction: u32, language: str = default_language()): ShapePlan {
+// The plan for script, direction, canonical language and one optional user
+// feature (FreeType's autohinter passes one): hb_ot_shape_plan_t::init0.
+pub fn create_plan(face&: ShapeFace, script: u32, direction: u32, language: str = default_language(), user_feature: u32 = 0): ShapePlan {
   let gsub = MapTable { t: face.gsub_t(), gg: face.gsub, variations_index: face.gsub_variations };
   let gpos = MapTable { t: face.gpos_t(), gg: face.gpos, variations_index: face.gpos_variations };
   let tags = ot_tags(script, language);
   var b = map_builder(gsub, gpos, tags.scripts[..tags.script_count], tags.languages[..tags.language_count]);
 
-  var plan = ShapePlan { script, direction, language: from_str(language) };
+  var plan = ShapePlan { script, direction, language: from_str(language), user_feature };
   plan.shaper = categorize(script, direction, b.chosen_script0);
   let script_zero_marks = zero_width_marks(plan.shaper) != kZeroNone;
   let script_fallback_position = fallback_position(plan.shaper);
@@ -162,6 +166,10 @@ pub fn create_plan(face&: ShapeFace, script: u32, direction: u32, language: str 
   } else {
     b.enable_feature(tag("vert"), kFGlobalSearch);
   }
+  if (user_feature != 0) {
+    b.is_simple = false;
+    b.add_feature(user_feature, kFGlobal, 1);
+  }
   override_features(plan.shaper, b, gsub, gpos);
 
   // hb_ot_shape_planner_t::compile
@@ -199,14 +207,16 @@ pub fn create_plan(face&: ShapeFace, script: u32, direction: u32, language: str 
   return plan;
 }
 
-// The cached plan of a face for script, direction and language (built on first use).
-pub fn plan_index(var face&: ShapeFace, script: u32, direction: u32, language: str = default_language()): usize {
+// The cached plan of a face for script, direction, language and user feature
+// (built on first use).
+pub fn plan_index(var face&: ShapeFace, script: u32, direction: u32, language: str = default_language(), user_feature: u32 = 0): usize {
   for (let i in 0..face.plans.len()) {
-    if (face.plans[i].script == script && face.plans[i].direction == direction && face.plans[i].language.as_str() == language) {
+    if (face.plans[i].script == script && face.plans[i].direction == direction && face.plans[i].language.as_str() == language &&
+        face.plans[i].user_feature == user_feature) {
       return i;
     }
   }
-  let p = create_plan(face, script, direction, language);
+  let p = create_plan(face, script, direction, language, user_feature);
   face.plans.push(p);
   return face.plans.len() - 1;
 }

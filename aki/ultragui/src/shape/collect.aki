@@ -1,0 +1,669 @@
+// What FreeType's autohinter asks HarfBuzz about a face's layout tables
+// (afshaper.c, afadjust.c), as HarfBuzz 13.2.1 answers it:
+//
+// - hb_ot_layout_collect_lookups (hb-ot-layout.cc: collect_features with the
+//   script/langsys/feature-index memo and limits, then the features' lookups
+//   and those of every FeatureVariations substitute of a collected feature);
+// - hb_ot_layout_lookup_collect_glyphs for the GSUB output set (recursing into
+//   nested lookups, HB_MAX_NESTING_LEVEL deep, each recursed lookup once) and
+//   the GPOS input set (OT/Layout/GSUB, GPOS and hb-ot-layout-gsubgpos.hh
+//   collect_glyphs);
+// - hb_ot_layout_lookup_would_substitute is syllabic.aki's `would_substitute`.
+//
+// Glyph sets are HarfBuzz sets of 16-bit values here (no layout value is
+// wider); a set HarfBuzz is not asked for is its immutable empty set, whose
+// add_range/add_sorted_array "succeed", so collection never stops early on it.
+
+module ultragui::shape::collect;
+
+import {swap} from akikit::algorithm;
+import {List, resize} from akikit::containers::list;
+import {
+  GsubGpos, feature_count, feature_lookup_count, feature_lookup_index, feature_offset, kNull, lookup_count, lookup_offset, lookup_subtable,
+  lookup_subtable_count, lookup_type, off16, off32, rd16, rd32,
+} from ultragui::shape::otl;
+
+// An hb_set_t of glyph ids or lookup indices below 65536, or (`sink`) the
+// empty set that ignores what is added.
+pub struct GlyphSet {
+  var bits: List<u64> = List()
+  pub var sink: bool = false
+
+  pub fn GlyphSet(): GlyphSet {
+    var s = GlyphSet {};
+    resize(s.bits, 1024, 0u64);
+    return s;
+  }
+  pub fn empty_sink(): GlyphSet => GlyphSet { sink: true };
+
+  pub fn add(var self&, g: u32) {
+    if (self.sink || g > 0xFFFF) {
+      return;
+    }
+    self.bits[(g >> 6) as usize] |= 1u64 << (g & 63) as u64;
+  }
+  pub fn has(self&, g: u32): bool => !self.sink && g <= 0xFFFF && (self.bits[(g >> 6) as usize] & (1u64 << (g & 63) as u64)) != 0;
+  pub fn remove(var self&, g: u32) {
+    if (!self.sink && g <= 0xFFFF) {
+      self.bits[(g >> 6) as usize] &= ~(1u64 << (g & 63) as u64);
+    }
+  }
+  // hb_bit_set_t::add_range: false for a > b.
+  pub fn add_range(var self&, a: u32, b: u32): bool {
+    if (self.sink) {
+      return true;
+    }
+    if (a > b) {
+      return false;
+    }
+    for (let g in a..b + 1) {
+      self.add(g);
+    }
+    return true;
+  }
+  pub fn is_empty(self&): bool {
+    if (self.sink) {
+      return true;
+    }
+    for (let w in self.bits) {
+      if (w != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+  // hb_set_subtract
+  pub fn subtract(var self&, o&: GlyphSet) {
+    if (self.sink || o.sink) {
+      return;
+    }
+    for (let i in 0..self.bits.len()) {
+      self.bits[i] &= ~o.bits[i];
+    }
+  }
+  // The members in ascending order (hb_set_next).
+  pub fn members(self&): List<u32> {
+    var out: List<u32> = List();
+    if (self.sink) {
+      return out;
+    }
+    for (let i in 0..self.bits.len()) {
+      var w = self.bits[i];
+      while (w != 0) {
+        let b = @trailing_zeros(w);
+        out.push((i as u32) * 64 + b as u32);
+        w &= w - 1;
+      }
+    }
+    return out;
+  }
+}
+
+// --- Coverage and ClassDef into sets --------------------------------------------------
+
+fn range_first(t: &[u8], c: usize, i: u32): u32 => rd16(t, c + 4 + i as usize * 6);
+fn range_last(t: &[u8], c: usize, i: u32): u32 => rd16(t, c + 6 + i as usize * 6);
+
+// The glyphs a Coverage iterates, in order (CoverageFormat1/2 iter_t; a
+// broken format 2 table stops the iteration where HarfBuzz stops it).
+pub fn coverage_glyphs(t: &[u8], c: usize): List<u32> {
+  var out: List<u32> = List();
+  let format = rd16(t, c);
+  if (format == 1) {
+    for (let i in 0..rd16(t, c + 2)) {
+      out.push(rd16(t, c + 4 + i as usize * 2));
+    }
+  } else if (format == 2) {
+    let n = rd16(t, c + 2);
+    if (n == 0) {
+      return out;
+    }
+    if (range_first(t, c, 0) > range_last(t, c, 0)) {
+      return out;
+    }
+    var i = 0u32;
+    var j = range_first(t, c, 0);
+    var coverage = 0u32;
+    while (i < n) {
+      out.push(j);
+      if (j >= range_last(t, c, i)) {
+        i += 1;
+        if (i < n) {
+          let old = coverage;
+          j = range_first(t, c, i);
+          coverage = rd16(t, c + 8 + i as usize * 6);
+          if (coverage != old + 1) {
+            break;
+          }
+        }
+      } else {
+        coverage += 1;
+        j += 1;
+      }
+    }
+  }
+  return out;
+}
+
+// Coverage::collect_coverage: false where HarfBuzz gives up (an unknown
+// format, a range with first > last).
+fn collect_coverage(t: &[u8], c: usize, var s&: GlyphSet): bool {
+  let format = rd16(t, c);
+  if (format == 1) {
+    if (s.sink) {
+      return true;
+    }
+    for (let i in 0..rd16(t, c + 2)) {
+      s.add(rd16(t, c + 4 + i as usize * 2));
+    }
+    return true;
+  }
+  if (format == 2) {
+    for (let i in 0..rd16(t, c + 2)) {
+      let r = c + 4 + i as usize * 6;
+      if (!s.add_range(rd16(t, r), rd16(t, r + 2))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+// ClassDef::collect_coverage (format 1 adds each run of non-zero classes
+// together with the glyph after it, as HarfBuzz does).
+fn classdef_collect_coverage(t: &[u8], c: usize, var s&: GlyphSet): bool {
+  let format = rd16(t, c);
+  if (format == 1) {
+    let start_glyph = rd16(t, c + 2);
+    let count = rd16(t, c + 4);
+    var start = 0u32;
+    for (let i in 0..count) {
+      if (rd16(t, c + 6 + i as usize * 2) != 0) {
+        continue;
+      }
+      if (start != i && !s.add_range(start_glyph + start, start_glyph + i)) {
+        return false;
+      }
+      start = i + 1;
+    }
+    if (start != count && !s.add_range(start_glyph + start, start_glyph + count)) {
+      return false;
+    }
+    return true;
+  }
+  if (format == 2) {
+    for (let i in 0..rd16(t, c + 2)) {
+      let r = c + 4 + i as usize * 6;
+      if (rd16(t, r + 4) != 0 && !s.add_range(rd16(t, r), rd16(t, r + 2))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+fn classdef_collect_class(t: &[u8], c: usize, klass: u32, var s&: GlyphSet) {
+  let format = rd16(t, c);
+  if (format == 1) {
+    let start_glyph = rd16(t, c + 2);
+    for (let i in 0..rd16(t, c + 4)) {
+      if (rd16(t, c + 6 + i as usize * 2) == klass) {
+        s.add(start_glyph + i);
+      }
+    }
+  } else if (format == 2) {
+    for (let i in 0..rd16(t, c + 2)) {
+      let r = c + 4 + i as usize * 6;
+      if (rd16(t, r + 4) == klass && !s.add_range(rd16(t, r), rd16(t, r + 2))) {
+        return;
+      }
+    }
+  }
+}
+
+// --- hb_ot_layout_collect_lookups -----------------------------------------------------
+
+struct FeatureCollector {
+  pub var features: GlyphSet = GlyphSet()
+  pub var filter: GlyphSet = GlyphSet()
+  pub var has_filter: bool = false
+  pub var visited_script: List<usize> = List()
+  pub var visited_langsys: List<usize> = List()
+  pub var script_count: u32 = 0
+  pub var langsys_count: u32 = 0
+  pub var feature_index_count: u32 = 0
+}
+
+fn seen(var list&: List<usize>, o: usize): bool {
+  for (let x in list) {
+    if (x == o) {
+      return true;
+    }
+  }
+  list.push(o);
+  return false;
+}
+
+fn langsys_collect(t: &[u8], var c&: FeatureCollector, l: usize) {
+  let required = l >= kNull ? 0xFFFFu32 : rd16(t, l + 2);
+  let count = rd16(t, l + 4);
+  // hb_collect_features_context_t::visited (LangSys)
+  if (required == 0xFFFF && count == 0) {
+    return;
+  }
+  let over = c.langsys_count > 2000;
+  c.langsys_count += 1;
+  if (over || seen(c.visited_langsys, l)) {
+    return;
+  }
+  if (!c.has_filter) {
+    if (required != 0xFFFF) {
+      c.feature_index_count += 1;
+      if (c.feature_index_count <= 1500) {
+        c.features.add(required);
+      }
+    }
+    c.feature_index_count += count;
+    if (c.feature_index_count <= 1500) {
+      for (let i in 0..count) {
+        c.features.add(rd16(t, l + 6 + i as usize * 2));
+      }
+    }
+  } else {
+    if (c.filter.is_empty()) {
+      return;
+    }
+    for (let i in 0..count) {
+      let fi = rd16(t, l + 6 + i as usize * 2);
+      if (!c.filter.has(fi)) {
+        continue;
+      }
+      c.features.add(fi);
+      c.filter.remove(fi);
+    }
+  }
+}
+
+fn script_collect(t: &[u8], var c&: FeatureCollector, s: usize) {
+  let default_langsys = s >= kNull ? 0u32 : rd16(t, s);
+  let count = s >= kNull ? 0u32 : rd16(t, s + 2);
+  if (default_langsys == 0 && count == 0) {
+    return;
+  }
+  let over = c.script_count > 500;
+  c.script_count += 1;
+  if (over || seen(c.visited_script, s)) {
+    return;
+  }
+  if (default_langsys != 0) {
+    langsys_collect(t, c, s + default_langsys as usize);
+  }
+  for (let i in 0..count) {
+    langsys_collect(t, c, off16(t, s, s + 4 + i as usize * 6 + 4));
+  }
+}
+
+fn find_script(t: &[u8], g&: GsubGpos, tag: u32): usize? {
+  let list = g.script_list;
+  let count = rd16(t, list) as i64;
+  var lo: i64 = 0;
+  var hi: i64 = count - 1;
+  while (lo <= hi) {
+    let mid = (lo + hi) / 2;
+    let v = rd32(t, list + 2 + mid as usize * 6);
+    if (tag < v) {
+      hi = mid - 1;
+    } else if (tag > v) {
+      lo = mid + 1;
+    } else {
+      return off16(t, list, list + 2 + mid as usize * 6 + 4);
+    }
+  }
+  return none;
+}
+
+// hb_ot_layout_collect_lookups(face, table, scripts, NULL, features): the
+// script tags end at the first 0; `features` none is every feature.
+pub fn collect_lookups(t: &[u8], g&: GsubGpos, scripts: &[u32], features: (&[u32])?): GlyphSet {
+  var c = FeatureCollector {};
+  if (let fs = features) {
+    c.has_filter = true;
+    for (let i in 0..feature_count(t, g)) {
+      let tag = rd32(t, g.feature_list + 2 + i as usize * 6);
+      for (let f in fs) {
+        if (f == tag) {
+          c.filter.add(i);
+          break;
+        }
+      }
+    }
+  }
+  for (let tag in scripts) {
+    if (tag == 0) {
+      break;
+    }
+    if (let s = find_script(t, g, tag)) {
+      script_collect(t, c, s);
+    }
+  }
+  var lookups = GlyphSet();
+  let feature_indices = c.features.members();
+  for (let fi in feature_indices) {
+    let f = feature_offset(t, g, fi);
+    for (let i in 0..feature_lookup_count(t, f)) {
+      lookups.add(feature_lookup_index(t, f, i));
+    }
+  }
+  // GSUBGPOS::feature_variation_collect_lookups: every record's substitutes.
+  if (g.version >= 0x00010001 && g.feature_vars < kNull) {
+    let fv = g.feature_vars;
+    for (let i in 0..rd32(t, fv + 4)) {
+      let subst = off32(t, fv, fv + 8 + i as usize * 8 + 4);
+      for (let k in 0..rd16(t, subst + 4)) {
+        let r = subst + 6 + k as usize * 6;
+        if (!c.features.has(rd16(t, r))) {
+          continue;
+        }
+        let f = off32(t, subst, r + 2);
+        for (let j in 0..feature_lookup_count(t, f)) {
+          lookups.add(feature_lookup_index(t, f, j));
+        }
+      }
+    }
+  }
+  return lookups;
+}
+
+// --- hb_ot_layout_lookup_collect_glyphs -----------------------------------------------
+
+struct GlyphCollector {
+  pub var gsub: bool = true
+  pub var input: GlyphSet = GlyphSet::empty_sink()
+  pub var output: GlyphSet = GlyphSet::empty_sink()
+  pub var recursed: GlyphSet = GlyphSet()
+  pub var nesting_left: u32 = 64
+}
+
+fn extension(t: &[u8], type_: u32, s: usize, ext_type: u32): (u32, usize) {
+  if (type_ == ext_type) {
+    if (rd16(t, s) != 1) {
+      return (0, kNull);
+    }
+    return (rd16(t, s + 2), off32(t, s, s + 4));
+  }
+  return (type_, s);
+}
+
+// The lookup records of a context rule: recurse into each nested lookup.
+fn recurse_records(t: &[u8], g&: GsubGpos, var c&: GlyphCollector, records: usize, count: u32) {
+  for (let i in 0..count) {
+    recurse(t, g, c, rd16(t, records + i as usize * 4 + 2));
+  }
+}
+
+// hb_collect_glyphs_context_t::recurse (GSUB only; GPOS has no recurse_func).
+fn recurse(t: &[u8], g&: GsubGpos, var c&: GlyphCollector, lookup_index: u32) {
+  if (c.nesting_left == 0 || !c.gsub || c.output.sink || c.recursed.has(lookup_index)) {
+    return;
+  }
+  var saved_input = GlyphSet::empty_sink();
+  swap(saved_input, c.input);
+  c.nesting_left -= 1;
+  collect_lookup(t, g, c, lookup_index);
+  c.nesting_left += 1;
+  swap(saved_input, c.input);
+  c.recursed.add(lookup_index);
+}
+
+// The value arrays of context rules go to before/input/after; only input is
+// ever a real set here, so only it is filled.
+fn collect_values(t: &[u8], var c&: GlyphCollector, kind: u32, data: usize, values: usize, count: u32) {
+  for (let i in 0..count) {
+    let v = rd16(t, values + i as usize * 2);
+    if (kind == 0) {
+      c.input.add(v);
+    } else if (kind == 1) {
+      classdef_collect_class(t, data, v, c.input);
+    } else {
+      let _ = collect_coverage(t, v == 0 ? kNull : data + v as usize, c.input);
+    }
+  }
+}
+
+fn collect_context(t: &[u8], g&: GsubGpos, var c&: GlyphCollector, s: usize, format: u32) {
+  if (format == 1 || format == 2) {
+    let _ = collect_coverage(t, off16(t, s, s + 2), c.input);
+    let kind: u32 = format == 1 ? 0 : 1;
+    let data = format == 1 ? kNull : off16(t, s, s + 4);
+    let sets_at = format == 1 ? s + 4 : s + 6;
+    for (let i in 0..rd16(t, sets_at)) {
+      let rs = off16(t, s, sets_at + 2 + i as usize * 2);
+      for (let k in 0..rd16(t, rs)) {
+        let r = off16(t, rs, rs + 2 + k as usize * 2);
+        let input_count = rd16(t, r);
+        let lookup_count_ = rd16(t, r + 2);
+        let inputs = input_count > 0 ? input_count - 1 : 0;
+        collect_values(t, c, kind, data, r + 4, inputs);
+        recurse_records(t, g, c, r + 4 + inputs as usize * 2, lookup_count_);
+      }
+    }
+  } else if (format == 3) {
+    let glyph_count = rd16(t, s + 2);
+    let lookup_count_ = rd16(t, s + 4);
+    let _ = collect_coverage(t, off16(t, s, s + 6), c.input);
+    collect_values(t, c, 2, s, s + 8, glyph_count > 0 ? glyph_count - 1 : 0);
+    recurse_records(t, g, c, s + 6 + glyph_count as usize * 2, lookup_count_);
+  }
+}
+
+fn collect_chain_context(t: &[u8], g&: GsubGpos, var c&: GlyphCollector, s: usize, format: u32) {
+  if (format == 1 || format == 2) {
+    let _ = collect_coverage(t, off16(t, s, s + 2), c.input);
+    let kind: u32 = format == 1 ? 0 : 1;
+    let data = format == 1 ? kNull : off16(t, s, s + 6);  // the input ClassDef
+    let sets_at = format == 1 ? s + 4 : s + 10;
+    for (let i in 0..rd16(t, sets_at)) {
+      let rs = off16(t, s, sets_at + 2 + i as usize * 2);
+      for (let k in 0..rd16(t, rs)) {
+        let r = off16(t, rs, rs + 2 + k as usize * 2);
+        let backtrack = rd16(t, r);
+        let ip = r + 2 + backtrack as usize * 2;
+        let input_count = rd16(t, ip);
+        let inputs = input_count > 0 ? input_count - 1 : 0;
+        let lp = ip + 2 + inputs as usize * 2;
+        let lookahead = rd16(t, lp);
+        let rp = lp + 2 + lookahead as usize * 2;
+        collect_values(t, c, kind, data, ip + 2, inputs);
+        recurse_records(t, g, c, rp + 2, rd16(t, rp));
+      }
+    }
+  } else if (format == 3) {
+    let backtrack = rd16(t, s + 2);
+    let ip = s + 4 + backtrack as usize * 2;
+    let input_count = rd16(t, ip);
+    let lp = ip + 2 + input_count as usize * 2;
+    let lookahead = rd16(t, lp);
+    let rp = lp + 2 + lookahead as usize * 2;
+    let _ = collect_coverage(t, off16(t, s, ip + 2), c.input);
+    collect_values(t, c, 2, s, ip + 4, input_count > 0 ? input_count - 1 : 0);
+    recurse_records(t, g, c, rp + 2, rd16(t, rp));
+  }
+}
+
+fn collect_gsub_subtable(t: &[u8], g&: GsubGpos, var c&: GlyphCollector, type_: u32, s: usize) {
+  let format = rd16(t, s);
+  match (type_) {
+    1 => {
+      let cov = off16(t, s, s + 2);
+      if (format == 1) {
+        if (!collect_coverage(t, cov, c.input)) {
+          return;
+        }
+        let d = rd16(t, s + 4);
+        for (let gl in coverage_glyphs(t, cov)) {
+          c.output.add((gl + d) & 0xFFFF);
+        }
+      } else if (format == 2) {
+        if (!collect_coverage(t, cov, c.input)) {
+          return;
+        }
+        let n = rd16(t, s + 4);
+        let glyphs = coverage_glyphs(t, cov);
+        for (let i in 0..glyphs.len()) {
+          if (i as u32 >= n) {
+            break;
+          }
+          c.output.add(rd16(t, s + 6 + i * 2));
+        }
+      }
+    },
+    2 | 3 => {
+      // MultipleSubst / AlternateSubst: every sequence or alternate set.
+      if (format != 1) {
+        return;
+      }
+      let cov = off16(t, s, s + 2);
+      if (!collect_coverage(t, cov, c.input)) {
+        return;
+      }
+      let n = rd16(t, s + 4);
+      let glyphs = coverage_glyphs(t, cov);
+      for (let i in 0..glyphs.len()) {
+        if (i as u32 >= n) {
+          break;
+        }
+        let seq = off16(t, s, s + 6 + i * 2);
+        for (let k in 0..rd16(t, seq)) {
+          c.output.add(rd16(t, seq + 2 + k as usize * 2));
+        }
+      }
+    },
+    4 => {
+      if (format != 1) {
+        return;
+      }
+      let cov = off16(t, s, s + 2);
+      if (!collect_coverage(t, cov, c.input)) {
+        return;
+      }
+      let n = rd16(t, s + 4);
+      let glyphs = coverage_glyphs(t, cov);
+      for (let i in 0..glyphs.len()) {
+        if (i as u32 >= n) {
+          break;
+        }
+        let set = off16(t, s, s + 6 + i * 2);
+        for (let k in 0..rd16(t, set)) {
+          let lig = off16(t, set, set + 2 + k as usize * 2);
+          let comps = rd16(t, lig + 2);
+          for (let j in 1..comps) {
+            c.input.add(rd16(t, lig + 4 + (j - 1) as usize * 2));
+          }
+          c.output.add(rd16(t, lig));
+        }
+      }
+    },
+    5 => collect_context(t, g, c, s, format),
+    6 => collect_chain_context(t, g, c, s, format),
+    8 => {
+      if (format != 1) {
+        return;
+      }
+      if (!collect_coverage(t, off16(t, s, s + 2), c.input)) {
+        return;
+      }
+      let backtrack = rd16(t, s + 4);
+      let lp = s + 6 + backtrack as usize * 2;
+      let lookahead = rd16(t, lp);
+      let sp = lp + 2 + lookahead as usize * 2;
+      for (let i in 0..rd16(t, sp)) {
+        c.output.add(rd16(t, sp + 2 + i as usize * 2));
+      }
+    },
+    _ => {},
+  }
+}
+
+fn collect_gpos_subtable(t: &[u8], g&: GsubGpos, var c&: GlyphCollector, type_: u32, s: usize) {
+  let format = rd16(t, s);
+  match (type_) {
+    1 | 3 => {
+      let _ = collect_coverage(t, off16(t, s, s + 2), c.input);
+    },
+    2 => {
+      if (!collect_coverage(t, off16(t, s, s + 2), c.input)) {
+        return;
+      }
+      if (format == 1) {
+        let vf1 = rd16(t, s + 4);
+        let vf2 = rd16(t, s + 6);
+        let len1 = @pop_count(vf1) as usize;
+        let len2 = @pop_count(vf2) as usize;
+        let record_size = 2 * (1 + len1 + len2);
+        for (let i in 0..rd16(t, s + 8)) {
+          let ps = off16(t, s, s + 10 + i as usize * 2);
+          for (let k in 0..rd16(t, ps)) {
+            c.input.add(rd16(t, ps + 2 + k as usize * record_size));
+          }
+        }
+      } else if (format == 2) {
+        let _ = classdef_collect_coverage(t, off16(t, s, s + 10), c.input);
+      }
+    },
+    4 | 5 | 6 => {
+      if (format != 1) {
+        return;
+      }
+      if (!collect_coverage(t, off16(t, s, s + 2), c.input)) {
+        return;
+      }
+      let _ = collect_coverage(t, off16(t, s, s + 4), c.input);
+    },
+    7 => collect_context(t, g, c, s, format),
+    8 => collect_chain_context(t, g, c, s, format),
+    _ => {},
+  }
+}
+
+fn collect_lookup(t: &[u8], g&: GsubGpos, var c&: GlyphCollector, lookup_index: u32) {
+  if (lookup_index >= lookup_count(t, g)) {
+    return;
+  }
+  let l = lookup_offset(t, g, lookup_index);
+  let type_ = lookup_type(t, l);
+  for (let i in 0..lookup_subtable_count(t, l)) {
+    let sub = lookup_subtable(t, l, i);
+    if (sub >= kNull) {
+      continue;
+    }
+    if (c.gsub) {
+      let (st, s) = extension(t, type_, sub, 7);
+      if (s < kNull) {
+        collect_gsub_subtable(t, g, c, st, s);
+      }
+    } else {
+      let (st, s) = extension(t, type_, sub, 9);
+      if (s < kNull) {
+        collect_gpos_subtable(t, g, c, st, s);
+      }
+    }
+  }
+}
+
+// hb_ot_layout_lookup_collect_glyphs(face, GSUB, lookup, NULL, NULL, NULL, output).
+pub fn gsub_lookup_output(t: &[u8], g&: GsubGpos, lookup_index: u32, var output&: GlyphSet) {
+  var c = GlyphCollector { gsub: true };
+  swap(c.output, output);
+  collect_lookup(t, g, c, lookup_index);
+  swap(c.output, output);
+}
+
+// hb_ot_layout_lookup_collect_glyphs(face, GPOS, lookup, NULL, input, NULL, NULL).
+pub fn gpos_lookup_input(t: &[u8], g&: GsubGpos, lookup_index: u32, var input&: GlyphSet) {
+  var c = GlyphCollector { gsub: false };
+  swap(c.input, input);
+  collect_lookup(t, g, c, lookup_index);
+  swap(c.input, input);
+}

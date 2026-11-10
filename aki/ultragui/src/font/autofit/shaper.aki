@@ -1,0 +1,148 @@
+// afshaper.c with FT_CONFIG_OPTION_USE_HARFBUZZ: how the autohinter maps its
+// blue-zone, standard and digit characters to glyphs, through the shaper in
+// ultragui::shape, and which glyphs a style's OpenType feature covers
+// (af_shaper_get_coverage_hb, with shape/collect).
+//
+// FreeType makes its own HarfBuzz font for this (ft-hb-ft.c): hb_face_create
+// on the file's bytes and hb_font_create, i.e. HarfBuzz's OpenType font
+// functions (advances from hmtx, extents from glyf), scaled to units per EM so
+// that positions come out in font units. Its nominal glyphs come from
+// HarfBuzz's cmap choice; on every face of the corpus that answers like
+// FreeType's charmap, which ShapeFace uses.
+
+module ultragui::font::autofit::shaper;
+
+import {List} from akikit::containers::list;
+import {Face} from ultragui::font::face;
+import {i16_at} from ultragui::font::sfnt;
+import {face_metrics} from ultragui::font::tt_glyph;
+import {ShapeFace} from ultragui::shape::face;
+import {GlyphExtents, ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {ShapedGlyph, shape_utf8} from ultragui::shape::shape;
+import {default_language} from ultragui::shape::language;
+
+// hb_ot_get_glyph_h_advances and hb_ot_get_glyph_extents (glyf, no
+// variations) at a scale of units per EM, precomputed per glyph.
+pub struct OtFontFuncs : ShapeFontFuncs {
+  pub var advances: List<i32> = List()
+  pub var extents: List<GlyphExtents> = List()
+
+  pub fn h_advance(var self&, glyph: u32): i32 => glyph < self.advances.len() as u32 ? self.advances[glyph as usize] : 0;
+  pub fn glyph_extents(var self&, glyph: u32): GlyphExtents? {
+    if (glyph >= self.extents.len() as u32) {
+      return none;
+    }
+    return self.extents[glyph as usize];
+  }
+}
+
+fn ot_font_funcs(face&: Face): OtFontFuncs {
+  var f = OtFontFuncs {};
+  let d = face.data.as_slice();
+  for (let gid in 0..face.num_glyphs) {
+    let (lsb, advance) = face_metrics(face, false, gid);
+    f.advances.push(advance as i32);
+    let (off, len) = face.glyph_location(gid);
+    let at = face.glyf_offset as usize + off as usize;
+    var e = GlyphExtents {};
+    if (len >= 10 && at + 10 <= #d && i16_at(d, at) != 0) {
+      let x_min = i16_at(d, at + 2) as i32;
+      let y_min = i16_at(d, at + 4) as i32;
+      let x_max = i16_at(d, at + 6) as i32;
+      let y_max = i16_at(d, at + 8) as i32;
+      // GlyphHeader::get_extents_without_var_scaled: x_bearing is the lsb.
+      e.x_bearing = face.hhea.number_of_metrics > 0 ? lsb as i32 : (x_min < x_max ? x_min : x_max);
+      e.y_bearing = y_min > y_max ? y_min : y_max;
+      e.width = (x_min > x_max ? x_min : x_max) - (x_min < x_max ? x_min : x_max);
+      e.height = (y_min < y_max ? y_min : y_max) - (y_min > y_max ? y_min : y_max);
+    }
+    f.extents.push(e);
+  }
+  return f;
+}
+
+// The face's HarfBuzz objects (globals->hb_font, its face and buffers).
+pub struct AfShaper {
+  pub var face: ShapeFace
+  pub var funcs: OtFontFuncs
+  pub var upem: i32 = 1000
+
+  pub fn create(face&: Face): AfShaper {
+    return AfShaper {
+      face: ShapeFace::from_bytes(face.data.clone(), face.face_index, face.num_glyphs), funcs: ot_font_funcs(face),
+      upem: face.units_per_em as i32,
+    };
+  }
+
+  // af_shaper_get_cluster_hb on the bytes of one cluster (a string between
+  // spaces): the shaped glyphs, or none when `feature` (0: none) changes no
+  // glyph of it.
+  pub fn get_cluster(var self&, text: &[u8], feature: u32): List<ShapedGlyph>;
+}
+
+fn AfShaper::get_cluster(var self&, text: &[u8], feature: u32): List<ShapedGlyph> {
+  let upem = self.upem;
+  var glyphs = shape_utf8(self.face, self.funcs, upem, upem, text, default_language(), feature);
+  if (feature != 0) {
+    let plain = shape_utf8(self.face, self.funcs, upem, upem, text, default_language(), 0);
+    if (plain.len() == glyphs.len()) {
+      var same = true;
+      for (let i in 0..plain.len()) {
+        if (plain[i].glyph_id != glyphs[i].glyph_id) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        glyphs.clear();
+      }
+    }
+  }
+  return glyphs;
+}
+
+// The clusters of a blue or standard string: (start, end) byte ranges between
+// spaces (af_shaper_get_cluster's scanning).
+pub fn clusters(s: &[u8]): List<(usize, usize)> {
+  var out: List<(usize, usize)> = List();
+  var p = 0usize;
+  while (p < #s && s[p] != 0) {
+    while (p < #s && s[p] == 32) {
+      p += 1;
+    }
+    let start = p;
+    while (p < #s && s[p] != 32 && s[p] != 0) {
+      p += 1;
+    }
+    if (p > start) {
+      out.push((start, p));
+    }
+  }
+  return out;
+}
+
+// GET_UTF8_CHAR: the code point starting at s[p] (FreeType's decoder) and
+// the position after it.
+pub fn utf8_char(s: &[u8], p: usize): (u32, usize) {
+  var ch = s[p] as u32;
+  var q = p + 1;
+  var len: u32 = 0;
+  if (ch >= 0x80) {
+    if (ch < 0xE0) {
+      len = 1;
+      ch &= 0x1F;
+    } else if (ch < 0xF0) {
+      len = 2;
+      ch &= 0x0F;
+    } else {
+      len = 3;
+      ch &= 0x07;
+    }
+    while (len > 0 && q < #s) {
+      ch = (ch << 6) | (s[q] as u32 & 0x3F);
+      q += 1;
+      len -= 1;
+    }
+  }
+  return (ch, q);
+}

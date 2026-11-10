@@ -1,0 +1,466 @@
+// afadjust.c's adjustment database and the Latin glyph adjustments that use
+// it (aflatin.c 2.14.3: tilde stretching and alignment, ignoring blue zones
+// for accents, af_glyph_hints_apply_vertical_separation_adjustments), on
+// the hinted points of `Hints`. A glyph's code point comes from its style's
+// reverse character map (globals.aki).
+
+module ultragui::font::autofit::adjust;
+
+import {resize} from akikit::containers::list;
+import {pix_round} from ultragui::font::fixed;
+import {Hints, kControl, kIgnore, kNoBlue, kTouchY} from ultragui::font::autofit::hints;
+import {kAdjustDb} from ultragui::font::autofit::tables;
+
+pub comptime let kAdjustUp: u32 = 0x01;
+pub comptime let kAdjustDown: u32 = 0x02;
+pub comptime let kAdjustUp2: u32 = 0x04;
+pub comptime let kAdjustDown2: u32 = 0x08;
+pub comptime let kAdjustTildeTop: u32 = 0x10;
+pub comptime let kAdjustTildeBottom: u32 = 0x20;
+pub comptime let kAdjustTildeTop2: u32 = 0x40;
+pub comptime let kAdjustTildeBottom2: u32 = 0x80;
+pub comptime let kIgnoreCapitalTop: u32 = 0x100;
+pub comptime let kIgnoreCapitalBottom: u32 = 0x200;
+pub comptime let kIgnoreSmallTop: u32 = 0x400;
+pub comptime let kIgnoreSmallBottom: u32 = 0x800;
+pub comptime let kAdjustNoHeightCheck: u32 = 0x1000;
+
+comptime let kLongMin: i64 = -9223372036854775807 - 1;
+comptime let kLongMax: i64 = 9223372036854775807;
+
+// af_adjustment_database_lookup: FreeType's binary search over its table
+// in its order (a few entries are out of order and so never found).
+pub fn adjustment_flags(codepoint: u32): u32 {
+  var low: i64 = 0;
+  var high: i64 = (kAdjustDb.len() / 2) as i64 - 1;
+  while (high >= low) {
+    let mid = (low + high) / 2;
+    let c = kAdjustDb[mid as usize * 2];
+    if (c < codepoint) {
+      low = mid + 1;
+    } else if (c > codepoint) {
+      high = mid - 1;
+    } else {
+      return kAdjustDb[mid as usize * 2 + 1];
+    }
+  }
+  return 0;
+}
+
+fn move_contour(var h&: Hints, contour: usize, movement: i64) {
+  let first = h.contours[contour];
+  var p = first;
+  while (true) {
+    h.points[p].y = h.points[p].y +% movement;
+    p = h.points[p].next;
+    if (p == first) {
+      break;
+    }
+  }
+}
+
+pub fn move_contours_up(var h&: Hints, limit: i64, delta: i64) {
+  for (let c in 0..h.contours.len()) {
+    let lo = h.contour_y_min[c];
+    let hi = h.contour_y_max[c];
+    if (lo < hi && lo > limit) {
+      move_contour(h, c, delta);
+    }
+  }
+}
+
+pub fn move_contours_down(var h&: Hints, limit: i64, delta: i64) {
+  for (let c in 0..h.contours.len()) {
+    let lo = h.contour_y_min[c];
+    let hi = h.contour_y_max[c];
+    if (lo < hi && hi < limit) {
+      move_contour(h, c, -delta);
+    }
+  }
+}
+
+// af_compute_vertical_extrema
+pub fn compute_vertical_extrema(var h&: Hints) {
+  let n = h.contours.len();
+  if (h.contour_y_min.len() < n) {
+    resize(h.contour_y_min, n, 0i64);
+    resize(h.contour_y_max, n, 0i64);
+  }
+  for (let c in 0..n) {
+    var lo = kLongMax;
+    var hi = kLongMin;
+    let first = h.contours[c];
+    if (h.points[h.points[first].next].next != first) {
+      var p = first;
+      while (true) {
+        let y = h.points[p].y;
+        if (y < lo) {
+          lo = y;
+        }
+        if (y > hi) {
+          hi = y;
+        }
+        p = h.points[p].next;
+        if (p == first) {
+          break;
+        }
+      }
+    }
+    h.contour_y_min[c] = lo;
+    h.contour_y_max[c] = hi;
+  }
+}
+
+pub fn find_highest_contour(h&: Hints): usize {
+  var best: usize = 0;
+  var best_min = kLongMax;
+  var best_max = kLongMin;
+  for (let c in 0..h.contours.len()) {
+    let lo = h.contour_y_min[c];
+    let hi = h.contour_y_max[c];
+    if (hi > best_max || (hi == best_max && lo > best_min)) {
+      best_min = lo;
+      best_max = hi;
+      best = c;
+    }
+  }
+  return best;
+}
+
+pub fn find_second_highest_contour(h&: Hints): usize {
+  if (h.contours.len() < 3) {
+    return 0;
+  }
+  let highest = find_highest_contour(h);
+  let highest_min = h.contour_y_min[highest];
+  var best: usize = 0;
+  var best_max = kLongMin;
+  for (let c in 0..h.contours.len()) {
+    if (c == highest) {
+      continue;
+    }
+    let lo = h.contour_y_min[c];
+    let hi = h.contour_y_max[c];
+    if (hi > best_max && lo < highest_min) {
+      best_max = hi;
+      best = c;
+    }
+  }
+  return best;
+}
+
+pub fn find_lowest_contour(h&: Hints): usize {
+  var best: usize = 0;
+  var best_min = kLongMax;
+  var best_max = kLongMin;
+  for (let c in 0..h.contours.len()) {
+    let lo = h.contour_y_min[c];
+    let hi = h.contour_y_max[c];
+    if (lo < best_min || (lo == best_min && hi < best_max)) {
+      best_min = lo;
+      best_max = hi;
+      best = c;
+    }
+  }
+  return best;
+}
+
+pub fn find_second_lowest_contour(h&: Hints): usize {
+  if (h.contours.len() < 3) {
+    return 0;
+  }
+  let lowest = find_lowest_contour(h);
+  let lowest_max = h.contour_y_max[lowest];
+  var best: usize = 0;
+  var best_min = kLongMax;
+  for (let c in 0..h.contours.len()) {
+    if (c == lowest) {
+      continue;
+    }
+    let lo = h.contour_y_min[c];
+    let hi = h.contour_y_max[c];
+    if (lo < best_min && hi > lowest_max) {
+      best_min = lo;
+      best = c;
+    }
+  }
+  return best;
+}
+
+// af_prevent_top_blue_alignment / af_prevent_bottom_blue_alignment
+pub fn prevent_blue_alignment(var h&: Hints, pos: i64, top: bool) {
+  for (var e& in h.axis[1].edges) {
+    if (top ? e.pos > pos : e.pos < pos) {
+      e.flags |= kNoBlue;
+    }
+  }
+}
+
+fn touch_contour(var h&: Hints, contour: usize) {
+  let first = h.contours[contour];
+  var p = first;
+  while (true) {
+    p = h.points[p].next;
+    h.points[p].flags |= kIgnore;
+    if ((h.points[p].flags & kControl) == 0) {
+      h.points[p].flags |= kTouchY;
+    }
+    if (p == first) {
+      break;
+    }
+  }
+}
+
+fn touch_contours(var h&: Hints, limit_contour: usize, top: bool) {
+  let limit = h.contour_y_min[limit_contour];
+  for (let c in 0..h.contours.len()) {
+    let lo = h.contour_y_min[c];
+    let hi = h.contour_y_max[c];
+    if (lo < hi && (top ? lo >= limit : hi <= limit)) {
+      touch_contour(h, c);
+    }
+  }
+}
+
+// af_latin_stretch_top_tilde (top) / af_latin_stretch_bottom_tilde.
+pub fn stretch_tilde(var h&: Hints, contour: usize, top: bool): i64 {
+  let first = h.contours[contour];
+  let min_y = h.contour_y_min[contour];
+  let max_y = h.contour_y_max[contour];
+  if (min_y == max_y) {
+    return 0;
+  }
+  let height = max_y -% min_y;
+  let extremum_threshold = height / 8;
+  var min_measurement = kLongMax;
+  var taken = false;
+  var p = first;
+  while (true) {
+    p = h.points[p].next;
+    let pt = h.points[p];
+    let prev = h.points[pt.prev];
+    let next = h.points[pt.next];
+    if ((pt.flags & kControl) == 0 && prev.y == pt.y && next.y == pt.y && pt.y != min_y && pt.y != max_y && (prev.flags & kControl) != 0 &&
+        (next.flags & kControl) != 0) {
+      var prev_on = pt.prev;
+      var next_on = pt.next;
+      while ((h.points[prev_on].flags & kControl) != 0) {
+        prev_on = h.points[prev_on].prev;
+      }
+      while ((h.points[next_on].flags & kControl) != 0) {
+        next_on = h.points[next_on].next;
+      }
+      var measurement: i64 = -1;
+      var ok = true;
+      if (h.points[next_on].y > pt.y && h.points[prev_on].y > pt.y) {
+        measurement = pt.y -% min_y;
+      } else if (h.points[next_on].y < pt.y && h.points[prev_on].y < pt.y) {
+        measurement = max_y -% pt.y;
+      } else {
+        ok = false;
+      }
+      if (ok && measurement >= extremum_threshold && (!taken || measurement < min_measurement)) {
+        taken = true;
+        min_measurement = measurement;
+      }
+    }
+    if (p == first) {
+      break;
+    }
+  }
+  if (!taken) {
+    min_measurement = 0;
+  }
+  touch_contours(h, contour, top);
+  let target_height = min_measurement + 64;
+  if (height >= target_height) {
+    return 0;
+  }
+  p = first;
+  let base = top ? min_y : max_y;
+  while (true) {
+    p = h.points[p].next;
+    h.points[p].y = ((h.points[p].y -% base) *% target_height) / height +% base;
+    if (p == first) {
+      break;
+    }
+  }
+  return target_height - height;
+}
+
+// af_latin_align_top_tilde (top) / af_latin_align_bottom_tilde.
+pub fn align_tilde(var h&: Hints, contour: usize, top: bool): i64 {
+  let first = h.contours[contour];
+  var min_y = h.points[first].y;
+  var max_y = min_y;
+  var p = first;
+  while (true) {
+    p = h.points[p].next;
+    let y = h.points[p].y;
+    if (y < min_y) {
+      min_y = y;
+    }
+    if (y > max_y) {
+      max_y = y;
+    }
+    if (p == first) {
+      break;
+    }
+  }
+  let height = max_y -% min_y;
+  var delta: i64 = 0;
+  if (top) {
+    delta = pix_round(min_y) -% min_y;
+    if (height < 64 * 3) {
+      delta += (pix_round(height) - height) / 2;
+    }
+  } else {
+    delta = pix_round(max_y) -% max_y;
+    if (height < 64 * 3) {
+      delta -= (pix_round(height) - height) / 2;
+    }
+  }
+  move_contour(h, contour, delta);
+  return delta;
+}
+
+// af_check_contour_horizontal_overlap
+fn horizontal_overlap(h&: Hints, contour: usize): bool {
+  var c_max = kLongMin;
+  var c_min = kLongMax;
+  var o_max = kLongMin;
+  var o_min = kLongMax;
+  for (let c in 0..h.contours.len()) {
+    let first = h.contours[c];
+    if (h.points[h.points[first].next].next == first) {
+      continue;
+    }
+    var p = first;
+    while (true) {
+      p = h.points[p].next;
+      let x = h.points[p].x;
+      if (c == contour) {
+        if (x < c_min) {
+          c_min = x;
+        }
+        if (x > c_max) {
+          c_max = x;
+        }
+      } else {
+        if (x < o_min) {
+          o_min = x;
+        }
+        if (x > o_max) {
+          o_max = x;
+        }
+      }
+      if (p == first) {
+        break;
+      }
+    }
+  }
+  return (o_min <= c_max && c_max <= o_max) || (o_min <= c_min && c_min <= o_max) || (c_max >= o_max && c_min <= o_min);
+}
+
+// af_glyph_hints_apply_vertical_separation_adjustments, for the flags of
+// the glyph's code point (0 when it has none).
+pub fn vertical_separation(var h&: Hints, adj: u32, accent_height_limit: i64) {
+  let up = (adj & kAdjustUp) != 0;
+  let up2 = (adj & kAdjustUp2) != 0;
+  let down = (adj & kAdjustDown) != 0;
+  let down2 = (adj & kAdjustDown2) != 0;
+  let n = h.contours.len();
+  if (((up || down) && n >= 2) || ((up2 || down2) && n >= 3)) {
+    compute_vertical_extrema(h);
+  }
+  if ((up && n >= 2) || (up2 && n >= 3)) {
+    let is_top_tilde = (adj & kAdjustTildeTop) != 0;
+    let is_below_top_tilde = (adj & kAdjustTildeTop2) != 0;
+    let high = up2 ? find_second_highest_contour(h) : find_highest_contour(h);
+    if (!horizontal_overlap(h, high)) {
+      return;
+    }
+    let high_min = h.contour_y_min[high];
+    let high_max = h.contour_y_max[high];
+    let high_height = high_max -% high_min;
+    if (high_height > accent_height_limit) {
+      return;
+    }
+    var min_distance: i64 = 64;
+    for (let c in 0..n) {
+      if (c == high) {
+        continue;
+      }
+      let distance = high_min -% h.contour_y_max[c];
+      if (distance < 64 && distance < min_distance && h.contour_y_min[c] < high_min) {
+        min_distance = distance;
+      }
+    }
+    let adjustment = 64 - min_distance;
+    var centering: i64 = 0;
+    if (is_top_tilde || is_below_top_tilde) {
+      let tilde = up ? high : (is_below_top_tilde ? high : find_highest_contour(h));
+      let tilde_height = h.contour_y_max[tilde] -% h.contour_y_min[tilde];
+      var pos = high_min +% adjustment;
+      if (up2 && is_top_tilde) {
+        pos += high_height;
+      }
+      if (pos % 64 == 0 && tilde_height < 3 * 64) {
+        centering = (pix_round(tilde_height) - tilde_height) / 2;
+      }
+    }
+    let calculated = (up && is_top_tilde) || (up2 && is_below_top_tilde) ? adjustment + centering : adjustment;
+    if (calculated != 0 && calculated >= -2 && (calculated <= 66 || adjustment <= 66)) {
+      let min_y_limit = high_min -% high_height / 8;
+      move_contours_up(h, min_y_limit, adjustment);
+      if (up2 && is_top_tilde) {
+        move_contours_up(h, min_y_limit +% high_height, centering);
+      }
+    }
+  }
+  if ((down && n >= 2) || (down2 && n >= 3)) {
+    let is_bottom_tilde = (adj & kAdjustTildeBottom) != 0;
+    let is_above_bottom_tilde = (adj & kAdjustTildeBottom2) != 0;
+    let low = down2 ? find_second_lowest_contour(h) : find_lowest_contour(h);
+    if (!horizontal_overlap(h, low)) {
+      return;
+    }
+    let low_min = h.contour_y_min[low];
+    let low_max = h.contour_y_max[low];
+    let low_height = low_max -% low_min;
+    if (low_height > accent_height_limit) {
+      return;
+    }
+    var min_distance: i64 = 64;
+    for (let c in 0..n) {
+      if (c == low) {
+        continue;
+      }
+      let distance = h.contour_y_min[c] -% low_max;
+      if (distance < 64 && distance < min_distance && h.contour_y_max[c] > low_max) {
+        min_distance = distance;
+      }
+    }
+    let adjustment = 64 - min_distance;
+    var centering: i64 = 0;
+    if (is_bottom_tilde || is_above_bottom_tilde) {
+      let tilde = down ? low : (is_above_bottom_tilde ? low : find_lowest_contour(h));
+      let tilde_height = h.contour_y_max[tilde] -% h.contour_y_min[tilde];
+      var pos = low_max -% adjustment;
+      if (down2 && is_bottom_tilde) {
+        pos -= low_height;
+      }
+      if (pos % 64 == 0 && tilde_height < 3 * 64) {
+        centering = (pix_round(tilde_height) - tilde_height) / 2;
+      }
+    }
+    let calculated = (down && is_bottom_tilde) || (down2 && is_above_bottom_tilde) ? adjustment + centering : adjustment;
+    if (calculated != 0 && calculated >= -2 && (calculated <= 66 || adjustment <= 66)) {
+      let max_y_limit = low_max +% low_height / 8;
+      move_contours_down(h, max_y_limit, adjustment);
+      if (down2 && is_bottom_tilde) {
+        move_contours_down(h, max_y_limit -% low_height, centering);
+      }
+    }
+  }
+}

@@ -1,0 +1,114 @@
+// FreeType's integer-keyed hash table (base/fthash.c: ft_hash_num_*), kept
+// because the autohinter's reverse character map depends on its iteration
+// order and on which of two inserts wins: open addressing from
+// `hash % size` downwards, 241 slots doubled when a third is used.
+
+module ultragui::font::autofit::fthash;
+
+import {List, resize} from akikit::containers::list;
+
+pub struct FtHash {
+  pub var size: u32 = 241
+  pub var limit: u32 = 80
+  pub var used: u32 = 0
+  var keys: List<i64> = List()
+  var values: List<u64> = List()
+  var full: List<bool> = List()
+
+  pub fn FtHash(): FtHash {
+    var h = FtHash {};
+    resize(h.keys, 241, 0i64);
+    resize(h.values, 241, 0u64);
+    resize(h.full, 241, false);
+    return h;
+  }
+
+  // ft_hash_num_lookup
+  pub fn lookup(self&, key: i64): u64? {
+    let i = self.bucket(key);
+    return self.full[i] ? self.values[i] : none;
+  }
+  // ft_hash_num_insert (overwrite) / ft_hash_num_insert_no_overwrite.
+  pub fn insert(var self&, key: i64, value: u64, overwrite: bool = true);
+  // Adds `delta` to the value of an existing key (`*value += delta`).
+  pub fn add_to(var self&, key: i64, delta: u64) {
+    let i = self.bucket(key);
+    if (self.full[i]) {
+      self.values[i] = self.values[i] +% delta;
+    }
+  }
+  // ft_hash_num_iterator: the entries in slot order.
+  pub fn entries(self&): List<(i64, u64)> {
+    var out: List<(i64, u64)> = List();
+    for (let i in 0..self.size as usize) {
+      if (self.full[i]) {
+        out.push((self.keys[i], self.values[i]));
+      }
+    }
+    return out;
+  }
+
+  fn bucket(self&, key: i64): usize;
+}
+
+// hash_num_lookup (the Mocklisp hash of the key's four low bytes).
+fn hash_of(key: i64): u64 {
+  let num = key as u64;
+  var res = num & 0xFF;
+  res = (res << 5) -% res +% ((num >> 8) & 0xFF);
+  res = (res << 5) -% res +% ((num >> 16) & 0xFF);
+  res = (res << 5) -% res +% ((num >> 24) & 0xFF);
+  return res;
+}
+
+fn FtHash::bucket(self&, key: i64): usize {
+  var i = (hash_of(key) % self.size as u64) as usize;
+  while (self.full[i]) {
+    if (self.keys[i] == key) {
+      break;
+    }
+    if (i == 0) {
+      i = self.size as usize - 1;
+    } else {
+      i -= 1;
+    }
+  }
+  return i;
+}
+
+fn FtHash::insert(var self&, key: i64, value: u64, overwrite: bool) {
+  let i = self.bucket(key);
+  if (self.full[i]) {
+    if (overwrite) {
+      self.values[i] = value;
+    }
+    return;
+  }
+  self.full[i] = true;
+  self.keys[i] = key;
+  self.values[i] = value;
+  if (self.used >= self.limit) {
+    // hash_rehash
+    let old_keys = self.keys.clone();
+    let old_values = self.values.clone();
+    let old_full = self.full.clone();
+    let old_size = self.size as usize;
+    self.size <<= 1;
+    self.limit = self.size / 3;
+    self.keys.clear();
+    self.values.clear();
+    self.full.clear();
+    resize(self.keys, self.size as usize, 0i64);
+    resize(self.values, self.size as usize, 0u64);
+    resize(self.full, self.size as usize, false);
+    for (let k in 0..old_size) {
+      if (old_full[k]) {
+        let j = self.bucket(old_keys[k]);
+        self.full[j] = true;
+        self.keys[j] = old_keys[k];
+        self.values[j] = old_values[k];
+      }
+    }
+  }
+  self.used += 1;
+}

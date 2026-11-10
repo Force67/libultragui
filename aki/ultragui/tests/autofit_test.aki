@@ -1,0 +1,373 @@
+// FreeType 2.14.3's autohinter against ultragui::font, end to end and bit for
+// bit: for faces FreeType hints with its autohinter (Face::uses_autohinter),
+// FT_Load_Glyph(face, gid, FT_LOAD_RENDER), what libultragui's text engine
+// calls, against Face::load_glyph plus font::raster.
+//
+// The oracle is the real FreeType, in this process through the test-only
+// bindings (ultragui_ft_oracle), with HarfBuzz linked and loaded before
+// FreeType starts, as in the C++ library: FreeType's autohinter finds
+// HarfBuzz there and uses it for its style coverage and blue-zone shaping.
+// Each face is opened once on both sides and loaded size after size, glyph
+// after glyph, in the same order (the autohinter keeps per-face state).
+//
+// Compared per glyph: the load error, the slot metrics, advance.x, the
+// linear advances, the hinted outline (points, tags, contours, flags; FT's
+// smooth renderer restores the outline after rendering) and the rendered
+// bitmap (size, pitch, placement, every byte), or a strike's bitmap.
+//
+// Default: Ubuntu-R, KacstBook, uming.ttc (face 0; every 29th glyph; its
+// bitmap strikes cover 11-16 px), Lohit-Bengali and Rachana-Regular, sizes
+// 6..48, 64, 96, every glyph. AUTOFIT_SWEEP=1: every autohinted face under
+// /usr/share/fonts (face 0), every glyph, at 7 9 11 12 13 14 16 18 20 24 32
+// 48 72. AUTOFIT_FORCE=1 (with the sweep or font arguments): every TrueType
+// face that is not tricky, with FT_LOAD_RENDER | FT_LOAD_FORCE_AUTOHINT
+// against Face::load_glyph_autohinted, which takes the autohinter to faces
+// and scripts the autohinted corpus lacks. AUTOFIT_SIZES="a b" and
+// AUTOFIT_STRIDE=n override; arguments name the fonts.
+
+module autofit_test;
+
+import {List} from akikit::containers::list;
+import {is_directory, list_directory} from akikit::filesystem::directory;
+import {eprintln, println} from akikit::logging;
+import {arguments} from akikit::process::command_line;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {String, from_str, with_nul} from akikit::strings::string;
+import {parse_u64} from akikit::strings::string_to_number;
+import {Face} from ultragui::font::face;
+import {GlyphFormat, LoadedGlyph, Outline} from ultragui::font::outline;
+import {Outline as RasterOutline, OutlinePoint} from ultragui::font::raster::outline;
+import {render_outline} from ultragui::font::raster::rasterizer;
+import {CLong} from ultragui_ft_oracle::c_long;
+import {
+  FtBitmap, FtFace, FtGeneric, FtGlyphMetrics, FtLibrary, FtVector, ft_done_face, ft_init_freetype, ft_load_glyph, ft_set_pixel_sizes,
+  kFtLoadRender,
+} from ultragui_ft_oracle::freetype;
+import {hb_buffer_create, hb_buffer_destroy} from ultragui_ft_oracle::harfbuzz;
+
+// FT_LOAD_FORCE_AUTOHINT
+comptime let kFtLoadForceAutohint: i32 = 32;
+
+extern("FT_New_Face") fn ft_new_face(library: FtLibrary, path: *const c_char, index: CLong, face: *var FtFace): i32;
+
+// FT_Outline (2.14: unsigned short counts).
+extern struct FtOutline {
+  pub var n_contours: u16
+  pub var n_points: u16
+  pub var points: *var FtVector
+  pub var tags: *var u8
+  pub var contours: *var u16
+  pub var flags: i32
+}
+
+// FT_GlyphSlotRec through `outline`.
+extern struct FtSlot {
+  pub var library: FtLibrary
+  pub var face: *var u8
+  pub var next: *var u8
+  pub var glyph_index: u32
+  pub var generic: FtGeneric
+  pub var metrics: FtGlyphMetrics
+  pub var linear_hori_advance: CLong
+  pub var linear_vert_advance: CLong
+  pub var advance: FtVector
+  pub var format: u32
+  pub var bitmap: FtBitmap
+  pub var bitmap_left: i32
+  pub var bitmap_top: i32
+  pub var outline: FtOutline
+}
+
+struct Totals {
+  pub var fonts: u64 = 0
+  pub var sizes: u64 = 0
+  pub var glyphs: u64 = 0
+  pub var rendered: u64 = 0
+  pub var strikes: u64 = 0
+  pub var errors: u64 = 0
+  pub var mismatches: u64 = 0
+  pub var mismatched_glyphs: u64 = 0
+  pub var reported: u64 = 0
+}
+
+fn report(var t&: Totals, what: String) {
+  t.mismatches += 1;
+  if (t.reported < 40) {
+    eprintln(what.as_str());
+  }
+  t.reported += 1;
+}
+
+fn to_raster(o&: Outline): RasterOutline {
+  var r = RasterOutline {};
+  for (let p in o.points) {
+    r.points.push(OutlinePoint { x: p.x as i32, y: p.y as i32 });
+  }
+  r.tags = o.tags.clone();
+  for (let c in o.contours) {
+    r.contours.push(c as u32);
+  }
+  r.flags = o.flags as i32;
+  return r;
+}
+
+fn ft_bytes(b&: FtBitmap): List<u8> {
+  var out: List<u8> = List();
+  let pitch = b.pitch < 0 ? -b.pitch : b.pitch;
+  let n = pitch as usize * b.rows as usize;
+  if (b.buffer != null) {
+    for (let i in 0..n) {
+      out.push(unsafe *(b.buffer + i));
+    }
+  }
+  return out;
+}
+
+fn compare_bitmap(var t&: Totals, label&: String, b&: FtBitmap, left: i32, top: i32, width: u32, rows: u32, pitch: i32, l: i32, tp: i32, pixels&: List<u8>) {
+  if (b.width != width || b.rows != rows || b.pitch != pitch || left != l || top != tp) {
+    report(t, f"{label}: bitmap freetype {b.width}x{b.rows} pitch {b.pitch} at ({left}, {top}), aki {width}x{rows} pitch {pitch} at ({l}, {tp})");
+    return;
+  }
+  let want = ft_bytes(b);
+  for (let i in 0..want.len()) {
+    if (i >= pixels.len() || want[i] != pixels[i]) {
+      report(t, f"{label}: bitmap byte {i}: freetype {want[i]}, aki {(i < pixels.len() ? pixels[i] as i32 : -1i32)}");
+      return;
+    }
+  }
+}
+
+fn compare_glyph(var t&: Totals, label&: String, slot&: FtSlot, g&: LoadedGlyph) {
+  let m = slot.metrics;
+  let names = ["width", "height", "horiBearingX", "horiBearingY", "horiAdvance", "vertBearingX", "vertBearingY", "vertAdvance", "advance.x",
+               "linearHoriAdvance", "linearVertAdvance"];
+  let want = [m.width as i64, m.height as i64, m.hori_bearing_x as i64, m.hori_bearing_y as i64, m.hori_advance as i64,
+              m.vert_bearing_x as i64, m.vert_bearing_y as i64, m.vert_advance as i64, slot.advance.x as i64,
+              slot.linear_hori_advance as i64, slot.linear_vert_advance as i64];
+  let have = [g.metrics.width, g.metrics.height, g.metrics.hori_bearing_x, g.metrics.hori_bearing_y, g.metrics.hori_advance,
+              g.metrics.vert_bearing_x, g.metrics.vert_bearing_y, g.metrics.vert_advance, g.advance_x, g.linear_hori_advance,
+              g.linear_vert_advance];
+  for (let k in 0usize..11) {
+    if (want[k] != have[k]) {
+      report(t, f"{label}: {names[k]}: freetype {want[k]}, aki {have[k]}");
+    }
+  }
+  if (g.format is GlyphFormat::Bitmap) {
+    t.strikes += 1;
+    compare_bitmap(t, label, slot.bitmap, slot.bitmap_left, slot.bitmap_top, g.bitmap.width, g.bitmap.rows, g.bitmap.pitch, g.bitmap_left,
+                   g.bitmap_top, g.bitmap.buffer);
+    return;
+  }
+  let o& = slot.outline;
+  let a& = g.outline;
+  if (o.n_points as usize != a.points.len() || o.n_contours as usize != a.contours.len()) {
+    report(t, f"{label}: freetype {o.n_points} points {o.n_contours} contours, aki {a.points.len()} points {a.contours.len()} contours");
+    return;
+  }
+  if (o.flags as u32 != a.flags) {
+    report(t, f"{label}: outline flags freetype {o.flags}, aki {a.flags}");
+  }
+  for (let i in 0..a.points.len()) {
+    let p = unsafe *(o.points + i);
+    if (p.x as i64 != a.points[i].x || p.y as i64 != a.points[i].y) {
+      report(t, f"{label}: point {i}: freetype ({p.x as i64}, {p.y as i64}), aki ({a.points[i].x}, {a.points[i].y})");
+      break;
+    }
+  }
+  for (let i in 0..a.tags.len()) {
+    let tag = unsafe *(o.tags + i);
+    if (tag != a.tags[i]) {
+      report(t, f"{label}: tag {i}: freetype {tag}, aki {a.tags[i]}");
+      break;
+    }
+  }
+  for (let i in 0..a.contours.len()) {
+    let c = unsafe *(o.contours + i);
+    if (c != a.contours[i]) {
+      report(t, f"{label}: contour {i}: freetype {c}, aki {a.contours[i]}");
+      break;
+    }
+  }
+  t.rendered += 1;
+  let r = to_raster(a);
+  if (let bmp = render_outline(r)) {
+    compare_bitmap(t, label, slot.bitmap, slot.bitmap_left, slot.bitmap_top, bmp.width, bmp.rows, bmp.pitch, bmp.left, bmp.top, bmp.pixels);
+  } else (let e) {
+    report(t, f"{label}: freetype renders, aki's rasterizer fails");
+  }
+}
+
+fn forceable(f&: Face): bool => !f.is_cff() && !f.is_tricky() && f.is_scalable();
+
+fn run_font(path: str, sizes&: List<u32>, stride: u32, force: bool, var t&: Totals): bool {
+  var face = Face::open_file(path, 0) else {
+    eprintln(f"{path}: aki cannot open it");
+    return false;
+  };
+  if (force ? !forceable(face) : !face.uses_autohinter()) {
+    eprintln(f"{path}: not an autohinted face");
+    return false;
+  }
+  let flags = force ? kFtLoadRender | kFtLoadForceAutohint : kFtLoadRender;
+  var lib: FtLibrary = null;
+  if (unsafe ft_init_freetype(&raw var lib) != 0) {
+    return false;
+  }
+  let p = with_nul(path);
+  var ft: FtFace = null;
+  if (unsafe ft_new_face(lib, @ptr(p.as_str()) as *const c_char, 0 as CLong, &raw var ft) != 0) {
+    eprintln(f"{path}: FreeType cannot open it");
+    return false;
+  }
+  t.fonts += 1;
+  let before = t.mismatches;
+  let glyphs_before = t.mismatched_glyphs;
+  for (let px in sizes) {
+    t.sizes += 1;
+    let ft_err = unsafe ft_set_pixel_sizes(ft, 0, px);
+    var aki_ok = false;
+    if (let x = face.set_pixel_size(px)) {
+      aki_ok = true;
+    }
+    if ((ft_err == 0) != aki_ok) {
+      report(t, f"{path} {px}px: FT_Set_Pixel_Sizes error {ft_err}, aki ok {(aki_ok ? 1i32 : 0i32)}");
+      continue;
+    }
+    var gid = 0u32;
+    while (gid < face.num_glyphs) {
+      t.glyphs += 1;
+      let label = f"{path} {px}px gid {gid}";
+      let err = unsafe ft_load_glyph(ft, gid, flags);
+      let res = force ? face.load_glyph_autohinted(gid) : face.load_glyph(gid);
+      let mismatches = t.mismatches;
+      if (err != 0) {
+        t.errors += 1;
+        if (let g = res) {
+          report(t, f"{label}: freetype fails (error {err}), aki loads");
+        }
+      } else if (let g = res) {
+        let slot = unsafe *((*ft).glyph as *var FtSlot);
+        compare_glyph(t, label, slot, g);
+      } else (let e) {
+        report(t, f"{label}: freetype loads, aki fails");
+      }
+      if (t.mismatches != mismatches) {
+        t.mismatched_glyphs += 1;
+      }
+      gid += stride;
+    }
+  }
+  unsafe {
+    let _ = ft_done_face(ft);
+  }
+  if (t.mismatches != before) {
+    println(f"{path}: {t.mismatches - before} mismatches in {t.mismatched_glyphs - glyphs_before} glyphs");
+  }
+  return true;
+}
+
+fn ends_with(s: str, suffix: str): bool => #s >= #suffix && s[#s - #suffix..] == suffix;
+
+// Every font file under dir (sorted) whose face 0 the autohinter would hint
+// (or, forced, can hint).
+fn collect_fonts(dir: str, force: bool, var out&: List<String>) {
+  var entries: List<String> = List();
+  if (let list = list_directory(dir)) {
+    for (let e in list) {
+      entries.push(f"{dir}/{e}");
+    }
+  }
+  for (let i in 1..entries.len()) {
+    var j = i;
+    while (j > 0 && entries[j].as_str() < entries[j - 1].as_str()) {
+      entries.swap(j, j - 1);
+      j -= 1;
+    }
+  }
+  for (let e in entries) {
+    if (is_directory(e.as_str())) {
+      collect_fonts(e.as_str(), force, out);
+    } else if (ends_with(e.as_str(), ".ttf") || ends_with(e.as_str(), ".ttc") || ends_with(e.as_str(), ".otf")) {
+      if (let f = Face::open_file(e.as_str(), 0)) {
+        if (force ? forceable(f) : f.uses_autohinter()) {
+          out.push(e.clone());
+        }
+      }
+    }
+  }
+}
+
+fn parse_list(s: str): List<u32> {
+  var out: List<u32> = List();
+  var cur: u64 = 0;
+  var have = false;
+  for (let c in s) {
+    if (c >= '0' && c <= '9') {
+      cur = cur * 10 + (c as u64 - '0' as u64);
+      have = true;
+    } else if (have) {
+      out.push(cur as u32);
+      cur = 0;
+      have = false;
+    }
+  }
+  if (have) {
+    out.push(cur as u32);
+  }
+  return out;
+}
+
+pub fn main(): i32 {
+  // HarfBuzz in the process before FreeType looks for it (RTLD_DEFAULT).
+  unsafe {
+    hb_buffer_destroy(hb_buffer_create());
+  }
+  let sweep = get_environment_variable("AUTOFIT_SWEEP") != none;
+  let force = get_environment_variable("AUTOFIT_FORCE") != none;
+  var sizes: List<u32> = List();
+  if (let s = get_environment_variable("AUTOFIT_SIZES")) {
+    sizes = parse_list(s.as_str());
+  } else if (sweep) {
+    for (let s in [7u32, 9, 11, 12, 13, 14, 16, 18, 20, 24, 32, 48, 72]) {
+      sizes.push(s);
+    }
+  } else {
+    for (let s in 6u32..49) {
+      sizes.push(s);
+    }
+    sizes.push(64);
+    sizes.push(96);
+  }
+  var stride_override: u32 = 0;
+  if (let s = get_environment_variable("AUTOFIT_STRIDE")) {
+    stride_override = (parse_u64(s.as_str()) ?? 1) as u32;
+  }
+  var fonts: List<String> = List();
+  let args = arguments();
+  if (args.len() > 0) {
+    for (let a in args) {
+      fonts.push(from_str(a));
+    }
+  } else if (sweep) {
+    collect_fonts("/usr/share/fonts", force, fonts);
+  } else {
+    for (let f in ["/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf", "/usr/share/fonts/truetype/kacst/KacstBook.ttf",
+                   "/usr/share/fonts/truetype/arphic/uming.ttc", "/usr/share/fonts/truetype/lohit-bengali/Lohit-Bengali.ttf",
+                   "/usr/share/fonts/truetype/malayalam/Rachana-Regular.ttf"]) {
+      fonts.push(from_str(f));
+    }
+  }
+  var t = Totals {};
+  var ok = true;
+  for (let f in fonts) {
+    var stride: u32 = 1;
+    if (stride_override > 0) {
+      stride = stride_override;
+    } else if (!sweep && ends_with(f.as_str(), "uming.ttc")) {
+      stride = 29;
+    }
+    ok = run_font(f.as_str(), sizes, stride, force, t) && ok;
+  }
+  println(f"{t.fonts} faces, {t.sizes} sizes, {t.glyphs} glyph loads ({t.rendered} outlines rendered, {t.strikes} strike bitmaps, {t.errors} errors on both sides); {t.mismatches} mismatches in {t.mismatched_glyphs} glyphs");
+  return ok && t.mismatches == 0 ? 0 : 1;
+}

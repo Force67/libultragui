@@ -5,7 +5,12 @@ import {Outline} from ultragui::font::outline;
 import {compute_segments, link_segments, compute_edges} from ultragui::font::autofit::features;
 import {mul_div, mul_fix, pix_round} from ultragui::font::fixed;
 import {Hints, abs, min, max, kNone, kRound, kSerif, kDone, kNeutral, kNoBlue} from ultragui::font::autofit::hints;
-import {LatinMetrics, kBlueActive, kBlueTop, kBlueSubTop, kBlueNeutral} from ultragui::font::autofit::metrics;
+import {LatinMetrics, kBlueActive, kBlueAdjustment, kBlueBottom, kBlueSmallBottom, kBlueTop, kBlueSubTop, kBlueNeutral} from ultragui::font::autofit::metrics;
+import {
+  align_tilde, compute_vertical_extrema, find_highest_contour, find_lowest_contour, find_second_highest_contour, find_second_lowest_contour,
+  kAdjustNoHeightCheck, kAdjustTildeBottom, kAdjustTildeBottom2, kAdjustTildeTop, kAdjustTildeTop2, kIgnoreCapitalBottom, kIgnoreCapitalTop,
+  kIgnoreSmallBottom, kIgnoreSmallTop, move_contours_down, move_contours_up, prevent_blue_alignment, stretch_tilde, vertical_separation,
+} from ultragui::font::autofit::adjust;
 
 pub fn blue_edges(var h&: Hints, m&: LatinMetrics) {
   let major = h.axis[1].major_dir;
@@ -213,26 +218,108 @@ pub fn hint_edges(var h&: Hints, m&: LatinMetrics, dim: usize) {
   }
 }
 
-// Fit a Latin outline once a global analyzer has supplied design metrics.
-// This stage excludes afadjust's codepoint-specific vertical separation.
-// Callers must not treat it as the complete default-load entry point.
-pub fn apply_latin(var h&: Hints, m&: LatinMetrics, var outline&: Outline, nonbase: bool = false) {
+// af_latin_hints_init + af_latin_hints_apply for the normal target: `adj` is
+// the afadjust flags of the glyph's code point (0 for none), `nonbase` the
+// glyph's AF_NONBASE flag; an italic face is not hinted horizontally.
+pub fn apply_latin(var h&: Hints, m&: LatinMetrics, var outline&: Outline, nonbase: bool = false, adj: u32 = 0) {
   h.units_per_em = m.units_per_em;
   h.x_scale = m.axis[0].scale; h.y_scale = m.axis[1].scale;
   h.x_delta = m.axis[0].delta; h.y_delta = m.axis[1].delta;
   h.reload(outline);
-  for (let dim in 0usize..2) {
-    if (dim == 0 && m.italic) { continue; }
-    compute_segments(h, dim);
-    let count = m.axis[dim].widths.len();
-    link_segments(h, dim, count == 0 ? 0 : m.axis[dim].widths[count - 1].org);
-    compute_edges(h, dim, m.axis[dim].edge_distance, dim == 1 && m.top_to_bottom);
-    if (dim == 1 && !nonbase) { blue_edges(h, m); }
+  if (!m.italic) {
+    detect_features(h, m, 0);
   }
+  var accent_height_limit: i64 = 0;
+  // Tildes: the inner ones first.
+  if ((adj & (kAdjustTildeTop | kAdjustTildeBottom | kAdjustTildeTop2 | kAdjustTildeBottom2)) != 0) {
+    compute_vertical_extrema(h);
+  }
+  if ((adj & kAdjustTildeTop2) != 0) {
+    let c = find_second_highest_contour(h);
+    var y_offset = stretch_tilde(h, c, true);
+    y_offset += align_tilde(h, c, true);
+    move_contours_up(h, h.contour_y_min[c], y_offset);
+  }
+  if ((adj & kAdjustTildeBottom2) != 0) {
+    let c = find_second_lowest_contour(h);
+    var y_offset = stretch_tilde(h, c, false);
+    y_offset -= align_tilde(h, c, false);
+    move_contours_down(h, h.contour_y_max[c], y_offset);
+  }
+  if ((adj & kAdjustTildeTop) != 0) {
+    let c = find_highest_contour(h);
+    let _ = stretch_tilde(h, c, true);
+    let _ = align_tilde(h, c, true);
+  }
+  if ((adj & kAdjustTildeBottom) != 0) {
+    let c = find_lowest_contour(h);
+    let _ = stretch_tilde(h, c, false);
+    let _ = align_tilde(h, c, false);
+  }
+  detect_features(h, m, 1);
+  let (cap_top, cap_bottom) = base_glyph_blues(m, true);
+  let (small_top, small_bottom) = base_glyph_blues(m, false);
+  let blues& = m.axis[1].blues;
+  if (adj != 0) {
+    if ((adj & kAdjustNoHeightCheck) == 0) {
+      if (small_top != kNone && small_bottom != kNone) {
+        accent_height_limit = 2 * (blues[small_top].shoot.cur - blues[small_bottom].shoot.cur) / 3;
+      } else if (cap_top != kNone && cap_bottom != kNone) {
+        accent_height_limit = (blues[cap_top].shoot.cur - blues[cap_bottom].shoot.cur) / 2;
+      } else {
+        accent_height_limit = mul_fix(m.units_per_em * 4 / 10, m.y_scale);
+      }
+    }
+  }
+  if (cap_top != kNone && cap_bottom != kNone) {
+    if ((adj & kIgnoreCapitalTop) != 0) { ignore_blues(h, m, cap_top, cap_bottom, true); }
+    if ((adj & kIgnoreCapitalBottom) != 0) { ignore_blues(h, m, cap_top, cap_bottom, false); }
+  }
+  if (small_top != kNone && small_bottom != kNone) {
+    if ((adj & kIgnoreSmallTop) != 0) { ignore_blues(h, m, small_top, small_bottom, true); }
+    if ((adj & kIgnoreSmallBottom) != 0) { ignore_blues(h, m, small_top, small_bottom, false); }
+  }
+  if (!nonbase) { blue_edges(h, m); }
   for (let dim in 0usize..2) {
     if (dim == 0 && m.italic) { continue; }
     hint_edges(h, m, dim);
     h.align_edges(dim); h.align_strong(dim); h.align_weak(dim);
+    if (dim == 1) { vertical_separation(h, adj, accent_height_limit); }
   }
   h.save(outline);
+}
+
+// af_latin_hints_detect_features
+fn detect_features(var h&: Hints, m&: LatinMetrics, dim: usize) {
+  compute_segments(h, dim);
+  let count = m.axis[dim].widths.len();
+  link_segments(h, dim, count == 0 ? 0 : m.axis[dim].widths[count - 1].org);
+  compute_edges(h, dim, m.axis[dim].edge_distance, dim == 1 && m.top_to_bottom);
+}
+
+// af_latin_get_base_glyph_blues: (top, bottom) blue indices (kNone: none).
+fn base_glyph_blues(m&: LatinMetrics, capital: bool): (usize, usize) {
+  let top_flag = (capital ? kBlueTop : kBlueAdjustment) | kBlueActive;
+  let bottom_flag = (capital ? kBlueBottom : kBlueSmallBottom) | kBlueActive;
+  var top = kNone;
+  var bottom = kNone;
+  for (let i in 0..m.axis[1].blues.len()) {
+    if ((m.axis[1].blues[i].flags & top_flag) == top_flag) { top = i; break; }
+  }
+  for (let i in 0..m.axis[1].blues.len()) {
+    if ((m.axis[1].blues[i].flags & bottom_flag) == bottom_flag) { bottom = i; break; }
+  }
+  return (top, bottom);
+}
+
+// af_latin_ignore_top / af_latin_ignore_bottom
+fn ignore_blues(var h&: Hints, m&: LatinMetrics, top: usize, bottom: usize, upper: bool) {
+  let t = m.axis[1].blues[top].shoot.cur;
+  let b = m.axis[1].blues[bottom].shoot.cur;
+  let base_glyph_height = t - b;
+  if (upper) {
+    prevent_blue_alignment(h, t + base_glyph_height / 7 + 16, true);
+  } else {
+    prevent_blue_alignment(h, b - base_glyph_height / 7 - 16, false);
+  }
 }

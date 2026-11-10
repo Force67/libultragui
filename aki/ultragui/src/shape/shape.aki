@@ -437,7 +437,9 @@ fn guess_script(buf&: Buffer): u32 {
 }
 
 // Shapes UTF-8 bytes (ill-formed sequences become U+FFFD, as HarfBuzz reads them).
-pub fn shape_utf8<F: ShapeFontFuncs>(var face&: ShapeFace, var funcs&: F, x_scale: i32, y_scale: i32, text: &[u8], language: str = default_language()): List<ShapedGlyph> {
+// `user_feature` (0: none) is one feature tag on for the whole text.
+pub fn shape_utf8<F: ShapeFontFuncs>(var face&: ShapeFace, var funcs&: F, x_scale: i32, y_scale: i32, text: &[u8], language: str = default_language(),
+                                     user_feature: u32 = 0): List<ShapedGlyph> {
   var out: List<ShapedGlyph> = List();
   var buf = Buffer();
   var p = 0usize;
@@ -457,7 +459,7 @@ pub fn shape_utf8<F: ShapeFontFuncs>(var face&: ShapeFace, var funcs&: F, x_scal
   buf.direction = direction;
   buf.enter();
 
-  let pi = plan_index(face, buf.script, buf.direction, language);
+  let pi = plan_index(face, buf.script, buf.direction, language, user_feature);
   let scale = Scale::of(x_scale, y_scale, face.upem);
   let plan& = face.plans[pi];
   shape_buffer(plan, face, funcs, scale, buf);
