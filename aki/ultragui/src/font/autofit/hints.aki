@@ -1,0 +1,364 @@
+// Outline analysis shared by the automatic writing-system hinters.
+// Positions are font units until an explicit fixed-point scaling operation.
+// Indices keep contour/segment references valid when a List reallocates.
+module ultragui::font::autofit::hints;
+
+import {List} from akikit::containers::list;
+import {div_fix, msb, mul_fix} from ultragui::font::fixed;
+import {Outline, Vec26} from ultragui::font::outline;
+
+pub comptime let kNone: usize = 0xFFFF_FFFF;
+pub comptime let kDirNone: i32 = 4;
+pub comptime let kUp: i32 = 2;
+pub comptime let kRight: i32 = 1;
+pub comptime let kControl: u32 = 3;
+pub comptime let kTouchX: u32 = 4;
+pub comptime let kTouchY: u32 = 8;
+pub comptime let kWeak: u32 = 16;
+pub comptime let kNear: u32 = 32;
+pub comptime let kIgnore: u32 = 64;
+pub comptime let kRound: u32 = 1;
+pub comptime let kSerif: u32 = 2;
+pub comptime let kDone: u32 = 4;
+pub comptime let kNeutral: u32 = 8;
+pub comptime let kNoBlue: u32 = 16;
+
+pub fn abs(x: i64): i64 => x < 0 ? -x : x;
+pub fn min(a: i64, b: i64): i64 => a < b ? a : b;
+pub fn max(a: i64, b: i64): i64 => a > b ? a : b;
+pub fn short(x: i64): i64 => x as i16 as i64;
+
+pub struct Point : Copy {
+  pub var flags: u32 = 0
+  pub var in_dir: i32 = kDirNone
+  pub var out_dir: i32 = kDirNone
+  pub var fx: i64 = 0
+  pub var fy: i64 = 0
+  pub var ox: i64 = 0
+  pub var oy: i64 = 0
+  pub var x: i64 = 0
+  pub var y: i64 = 0
+  pub var u: i64 = 0
+  pub var v: i64 = 0
+  pub var next: usize = 0
+  pub var prev: usize = 0
+}
+
+pub struct Segment : Copy {
+  pub var flags: u32 = 0
+  pub var dir: i32 = 0
+  pub var pos: i64 = 0
+  pub var delta: i64 = 0
+  pub var min_coord: i64 = 0
+  pub var max_coord: i64 = 0
+  pub var height: i64 = 0
+  pub var edge: usize = kNone
+  pub var edge_next: usize = kNone
+  pub var link: usize = kNone
+  pub var serif: usize = kNone
+  pub var score: i64 = 32000
+  pub var len: i64 = 0
+  pub var first: usize = 0
+  pub var last: usize = 0
+}
+
+pub struct Edge : Copy {
+  pub var fpos: i64 = 0
+  pub var opos: i64 = 0
+  pub var pos: i64 = 0
+  pub var flags: u32 = 0
+  pub var dir: i32 = 0
+  pub var scale: i64 = 0
+  pub var blue: usize = kNone
+  pub var blue_shoot: bool = false
+  pub var link: usize = kNone
+  pub var serif: usize = kNone
+  pub var score: i64 = 0
+  pub var first: usize = kNone
+  pub var last: usize = kNone
+}
+
+pub struct Axis {
+  pub var segments: List<Segment> = List()
+  pub var edges: List<Edge> = List()
+  pub var major_dir: i32 = 0
+}
+
+pub struct Hints {
+  pub var points: List<Point> = List()
+  pub var contours: List<usize> = List()
+  pub var axis: [Axis; 2] = [Axis {}, Axis {}]
+  pub var x_scale: i64 = 0x10000
+  pub var y_scale: i64 = 0x10000
+  pub var x_delta: i64 = 0
+  pub var y_delta: i64 = 0
+  pub var units_per_em: i64 = 2048
+
+  pub fn reload(var self&, outline&: Outline);
+  pub fn save(self&, var outline&: Outline);
+  pub fn align_edges(var self&, dim: usize);
+  pub fn align_strong(var self&, dim: usize);
+  pub fn align_weak(var self&, dim: usize);
+}
+
+// Direction codes have opposite signs on opposite sides of a stem.
+pub fn direction(dx: i64, dy: i64): i32 {
+  if (abs(dy) >= abs(dx)) {
+    return abs(dy) <= 14 * abs(dx) ? kDirNone : (dy >= 0 ? kUp : -kUp);
+  }
+  return abs(dx) <= 14 * abs(dy) ? kDirNone : (dx >= 0 ? kRight : -kRight);
+}
+
+// The same shifted polygon-area test as FT_Outline_Get_Orientation.
+pub fn is_postscript(o&: Outline): bool {
+  if (o.points.len() == 0) { return false; }
+  let (xmin, ymin, xmax, ymax) = o.cbox();
+  if (xmin == xmax || ymin == ymax || xmin < -0x1000000 || ymin < -0x1000000 ||
+      xmax > 0x1000000 || ymax > 0x1000000) { return false; }
+  let xs = max(msb((abs(xmax) | abs(xmin)) as u32) as i64 - 14, 0);
+  let ys = max(msb((ymax - ymin) as u32) as i64 - 14, 0);
+  var area: i64 = 0;
+  var first: usize = 0;
+  for (let endpoint in o.contours) {
+    let last = endpoint as usize;
+    var prev = o.points[last];
+    for (let i in first..last + 1) {
+      let cur = o.points[i];
+      area = area +% (((cur.y >> ys) - (prev.y >> ys)) *% ((cur.x >> xs) + (prev.x >> xs)));
+      prev = cur;
+    }
+    first = last + 1;
+  }
+  return area > 0;
+}
+
+fn approximate_length(x: i64, y: i64): i64 {
+  let ax = abs(x); let ay = abs(y);
+  return ax > ay ? ax + ((3 * ay) >> 3) : ay + ((3 * ax) >> 3);
+}
+fn flat(ix: i64, iy: i64, ox: i64, oy: i64): bool {
+  let hyp = approximate_length(ix + ox, iy + oy);
+  return approximate_length(ix, iy) + approximate_length(ox, oy) - hyp < (hyp >> 4);
+}
+
+fn Hints::reload(var self&, outline&: Outline) {
+  self.points.clear();
+  self.contours.clear();
+  for (var a& in self.axis) { a.segments.clear(); a.edges.clear(); }
+  let reverse = is_postscript(outline);
+  self.axis[0].major_dir = reverse ? -kUp : kUp;
+  self.axis[1].major_dir = reverse ? kRight : -kRight;
+  for (let i in 0..outline.points.len()) {
+    let p = outline.points[i];
+    let tag = outline.tags[i] & 3;
+    let x = mul_fix(p.x, self.x_scale) + self.x_delta;
+    let y = mul_fix(p.y, self.y_scale) + self.y_delta;
+    self.points.push(Point { fx: short(p.x), fy: short(p.y), ox: x, oy: y, x, y,
+      flags: tag == 0 ? 1 : (tag == 2 ? 2 : 0) });
+  }
+  let near = 20 * self.units_per_em / 2048;
+  var start: usize = 0;
+  for (let endpoint in outline.contours) {
+    let end = endpoint as usize;
+    self.contours.push(start);
+    for (let i in start..end + 1) {
+      let prev = i == start ? end : i - 1;
+      let next = i == end ? start : i + 1;
+      self.points[i].prev = prev;
+      self.points[i].next = next;
+      if ((i != end || start == end) && abs(self.points[i].fx - self.points[next].fx) + abs(self.points[i].fy - self.points[next].fy) < near) {
+        self.points[i].flags |= kNear;
+      }
+    }
+    start = end + 1;
+  }
+  for (let contour in self.contours) {
+    var first = contour;
+    var point = first;
+    var prev = self.points[first].prev;
+    while (prev != first) {
+      if (abs(self.points[point].fx - self.points[prev].fx) + abs(self.points[point].fy - self.points[prev].fy) >= 2 * near - 1) { break; }
+      point = prev;
+      prev = self.points[prev].prev;
+    }
+    first = point;
+    var curr = first;
+    self.points[curr].u = first as i64 - curr as i64;
+    self.points[first].v = -self.points[curr].u;
+    var ox: i64 = 0;
+    var oy: i64 = 0;
+    var next = first;
+    while (true) {
+      point = next;
+      next = self.points[point].next;
+      ox += self.points[next].fx - self.points[point].fx;
+      oy += self.points[next].fy - self.points[point].fy;
+      if (abs(ox) + abs(oy) < near) {
+        self.points[next].flags |= kWeak;
+      } else {
+        self.points[curr].u = next as i64 - curr as i64;
+        self.points[next].v = -self.points[curr].u;
+        let dir = direction(ox, oy);
+        self.points[curr].out_dir = dir;
+        curr = self.points[curr].next;
+        while (curr != next) {
+          self.points[curr].in_dir = dir;
+          self.points[curr].out_dir = dir;
+          curr = self.points[curr].next;
+        }
+        self.points[next].in_dir = dir;
+        self.points[curr].u = first as i64 - curr as i64;
+        self.points[first].v = -self.points[curr].u;
+        ox = 0; oy = 0;
+      }
+      if (next == first) { break; }
+    }
+  }
+  for (let i in 0..self.points.len()) {
+    let p = self.points[i];
+    if ((p.flags & kWeak) != 0 || p.in_dir != kDirNone || p.out_dir != kDirNone) { continue; }
+    let n = (i as i64 + p.u) as usize;
+    let v = (i as i64 + p.v) as usize;
+    if (((p.fx - self.points[v].fx) ^ (self.points[n].fx - p.fx)) >= 0 &&
+        ((p.fy - self.points[v].fy) ^ (self.points[n].fy - p.fy)) >= 0) {
+      self.points[i].flags |= kWeak;
+      self.points[v].u = n as i64 - v as i64;
+      self.points[n].v = -self.points[v].u;
+    }
+  }
+  for (let i in 0..self.points.len()) {
+    let p = self.points[i];
+    if ((p.flags & kWeak) != 0) { continue; }
+    var weak = (p.flags & kControl) != 0;
+    if (!weak && p.out_dir == p.in_dir) {
+      if (p.out_dir != kDirNone) { weak = true; }
+      else {
+        let n = (i as i64 + p.u) as usize;
+        let v = (i as i64 + p.v) as usize;
+        if (flat(p.fx - self.points[v].fx, p.fy - self.points[v].fy,
+                 self.points[n].fx - p.fx, self.points[n].fy - p.fy)) {
+          self.points[v].u = n as i64 - v as i64;
+          self.points[n].v = -self.points[v].u;
+          weak = true;
+        }
+      }
+    } else if (!weak && p.in_dir == -p.out_dir) { weak = true; }
+    if (weak) { self.points[i].flags |= kWeak; }
+  }
+}
+
+fn Hints::save(self&, var outline&: Outline) {
+  for (let i in 0..self.points.len()) {
+    let p = self.points[i];
+    outline.points[i] = Vec26 { x: p.x, y: p.y };
+    outline.tags[i] = (p.flags & 1) != 0 ? 0 : ((p.flags & 2) != 0 ? 2 : 1);
+  }
+}
+
+fn Hints::align_edges(var self&, dim: usize) {
+  for (let seg in self.axis[dim].segments) {
+    if (seg.edge == kNone) { continue; }
+    let pos = self.axis[dim].edges[seg.edge].pos;
+    var point = seg.first;
+    while (true) {
+      if (dim == 0) { self.points[point].x = pos; self.points[point].flags |= kTouchX; }
+      else { self.points[point].y = pos; self.points[point].flags |= kTouchY; }
+      if (point == seg.last) { break; }
+      point = self.points[point].next;
+    }
+  }
+}
+
+fn Hints::align_strong(var self&, dim: usize) {
+  let count = self.axis[dim].edges.len();
+  if (count == 0) { return; }
+  let touch = dim == 0 ? kTouchX : kTouchY;
+  for (let i in 0..self.points.len()) {
+    let p = self.points[i];
+    if ((p.flags & (touch | kWeak)) != 0) { continue; }
+    let fu = dim == 0 ? p.fx : p.fy;
+    let ou = dim == 0 ? p.ox : p.oy;
+    let first = self.axis[dim].edges[0];
+    let last = self.axis[dim].edges[count - 1];
+    var u: i64 = 0;
+    if (fu <= first.fpos) { u = first.pos - first.opos + ou; }
+    else if (fu >= last.fpos) { u = last.pos - last.opos + ou; }
+    else {
+      var lo: usize = 0;
+      var hi = count;
+      var found = kNone;
+      if (count <= 8) {
+        while (self.axis[dim].edges[lo].fpos < fu) { lo += 1; }
+        if (self.axis[dim].edges[lo].fpos == fu) { found = lo; }
+      } else {
+        while (lo < hi) {
+          let mid = (lo + hi) >> 1;
+          let f = self.axis[dim].edges[mid].fpos;
+          if (fu < f) { hi = mid; }
+          else if (fu > f) { lo = mid + 1; }
+          else { found = mid; break; }
+        }
+      }
+      if (found != kNone) { u = self.axis[dim].edges[found].pos; }
+      else {
+        let before = self.axis[dim].edges[lo - 1];
+        let after = self.axis[dim].edges[lo];
+        var scale = before.scale;
+        if (scale == 0) {
+          scale = div_fix(after.pos - before.pos, after.fpos - before.fpos);
+          self.axis[dim].edges[lo - 1].scale = scale;
+        }
+        u = before.pos + mul_fix(fu - before.fpos, scale);
+      }
+    }
+    if (dim == 0) { self.points[i].x = u; } else { self.points[i].y = u; }
+    self.points[i].flags |= touch;
+  }
+}
+
+// IUP uses scaled original coordinates, while strong interpolation uses
+// font units. Rounding a division at a different stage changes the result.
+fn interpolate(var points&: List<Point>, start: usize, end: usize, a: usize, b: usize) {
+  var r1 = points[a];
+  var r2 = points[b];
+  if (r1.v > r2.v) { let tmp = r1; r1 = r2; r2 = tmp; }
+  let d1 = r1.u - r1.v;
+  let d2 = r2.u - r2.v;
+  let constant = r1.u == r2.u || r1.v == r2.v;
+  let scale = constant ? 0 : div_fix(r2.u - r1.u, r2.v - r1.v);
+  for (let i in start..end) {
+    let v = points[i].v;
+    points[i].u = v <= r1.v ? v + d1 : (v >= r2.v ? v + d2 : (constant ? r1.u : r1.u + mul_fix(v - r1.v, scale)));
+  }
+}
+
+fn Hints::align_weak(var self&, dim: usize) {
+  let touch = dim == 0 ? kTouchX : kTouchY;
+  for (var p& in self.points) {
+    p.u = dim == 0 ? p.x : p.y;
+    p.v = dim == 0 ? p.ox : p.oy;
+  }
+  for (let start in self.contours) {
+    let end = self.points[start].prev + 1;
+    var first = start;
+    while (first < end && (self.points[first].flags & touch) == 0) { first += 1; }
+    if (first == end) { continue; }
+    var last = first;
+    for (let i in first + 1..end) {
+      if ((self.points[i].flags & touch) != 0) {
+        interpolate(self.points, last + 1, i, last, i);
+        last = i;
+      }
+    }
+    if (first == last) {
+      let delta = self.points[first].u - self.points[first].v;
+      if (delta != 0) {
+        for (let i in start..end) { if (i != first) { self.points[i].u = self.points[i].v + delta; } }
+      }
+    } else {
+      interpolate(self.points, last + 1, end, last, first);
+      interpolate(self.points, start, first, last, first);
+    }
+  }
+  for (var p& in self.points) { if (dim == 0) { p.x = p.u; } else { p.y = p.u; } }
+}

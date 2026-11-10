@@ -182,18 +182,18 @@ pub struct MapBuilder {
 }
 
 // hb_ot_map_builder_t's constructor: script and language selection.
-pub fn map_builder(gsub&: MapTable, gpos&: MapTable, script_tags&: [u32]): MapBuilder {
+pub fn map_builder(gsub&: MapTable, gpos&: MapTable, script_tags&: [u32], language_tags&: [u32] = []): MapBuilder {
   var b = MapBuilder {};
   let (si0, cs0, f0) = select_script(gsub.t, gsub.gg, script_tags);
   b.script_index0 = si0;
   b.chosen_script0 = cs0;
   b.found_script0 = f0;
-  b.language_index0 = select_language(gsub.t, gsub.gg, si0);
+  b.language_index0 = select_language(gsub.t, gsub.gg, si0, language_tags);
   let (si1, cs1, f1) = select_script(gpos.t, gpos.gg, script_tags);
   b.script_index1 = si1;
   b.chosen_script1 = cs1;
   b.found_script1 = f1;
-  b.language_index1 = select_language(gpos.t, gpos.gg, si1);
+  b.language_index1 = select_language(gpos.t, gpos.gg, si1, language_tags);
   return b;
 }
 
