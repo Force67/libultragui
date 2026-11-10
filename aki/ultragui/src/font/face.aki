@@ -204,6 +204,10 @@ pub struct Face {
   // or by the autohinter (font/autofit) on faces that `uses_autohinter`.
   // Fails with CffNotLoaded on CFF faces (font/cff).
   pub fn load_glyph(var self&, gid: u32): LoadedGlyph ! FontError;
+  // FT_Load_Glyph(face, gid, FT_LOAD_FORCE_AUTOHINT) on a TrueType face
+  // that is not tricky: a strike's bitmap, else the autohinter's outline
+  // (what load_glyph does for faces that `uses_autohinter`).
+  pub fn load_glyph_autohinted(var self&, gid: u32): LoadedGlyph ! FontError;
   // FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING), what
   // hb_ft loads for glyph extents and contour points.
   pub fn load_glyph_unhinted(var self&, gid: u32): LoadedGlyph ! FontError;
@@ -1300,16 +1304,23 @@ fn Face::load_glyph(var self&, gid: u32): LoadedGlyph ! FontError {
     return fail FontError::CffNotLoaded;
   }
   if (self.uses_autohinter()) {
-    // FT_Load_Glyph tries the strike's bitmap (FT_LOAD_SBITS_ONLY) before
-    // the autohinter.
-    if (self.has_fixed_sizes() && self.size.strike_index != 0xFFFF_FFFF) {
-      if (let b = load_sbit_glyph(self, gid)) {
-        return b;
-      }
-    }
-    return load_autohinted(self, gid);
+    return self.load_glyph_autohinted(gid);
   }
   return load_tt(self, gid, true);
+}
+
+fn Face::load_glyph_autohinted(var self&, gid: u32): LoadedGlyph ! FontError {
+  if (self.is_cff() || self.is_tricky() || !self.is_scalable()) {
+    return fail FontError::UnimplementedFeature;
+  }
+  // FT_Load_Glyph tries the strike's bitmap (FT_LOAD_SBITS_ONLY) before the
+  // autohinter.
+  if (self.has_fixed_sizes() && self.size.strike_index != 0xFFFF_FFFF) {
+    if (let b = load_sbit_glyph(self, gid)) {
+      return b;
+    }
+  }
+  return load_autohinted(self, gid);
 }
 
 fn Face::load_glyph_unhinted(var self&, gid: u32): LoadedGlyph ! FontError {

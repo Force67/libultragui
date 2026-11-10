@@ -8,7 +8,7 @@
 // - the glyph's style metrics are scaled (Latin: x-height alignment of the
 //   vertical scale), the glyph is loaded unscaled (FT_LOAD_NO_SCALE |
 //   FT_LOAD_IGNORE_TRANSFORM | FT_LOAD_LINEAR_DESIGN) and fitted by its
-//   writing system (dummy: scaled only; Latin; CJK);
+//   writing system (dummy: scaled only; Latin; CJK and Indic);
 // - the normal target's phantom points: Latin moves them with the outermost
 //   vertical edges (with the "too close" corrections), CJK (no advance
 //   hinting) and the others round them;
@@ -31,7 +31,7 @@ import {apply_cjk} from ultragui::font::autofit::cjk;
 import {FaceGlobals, StyleMetrics} from ultragui::font::autofit::globals;
 import {Hints} from ultragui::font::autofit::hints;
 import {apply_latin} from ultragui::font::autofit::latin;
-import {kWritingSystemCjk, kWritingSystemLatin} from ultragui::font::autofit::tables;
+import {kWritingSystemCjk, kWritingSystemIndic, kWritingSystemLatin} from ultragui::font::autofit::tables;
 
 // FT_STYLE_FLAG_ITALIC as sfnt_load_face sets it for an outline face.
 fn is_italic(face&: Face): bool {
@@ -55,7 +55,7 @@ fn scale_metrics(var m&: StyleMetrics, var h&: Hints, face&: Face, x_scale: i64,
     h.y_scale = m.latin.axis[1].scale;
     h.x_delta = m.latin.axis[0].delta;
     h.y_delta = m.latin.axis[1].delta;
-  } else if (m.writing_system == kWritingSystemCjk) {
+  } else if (m.writing_system == kWritingSystemCjk || m.writing_system == kWritingSystemIndic) {
     m.cjk.scale(x_scale, y_scale, 0, 0);
     m.x_scale = x_scale;
     m.y_scale = y_scale;
@@ -78,7 +78,8 @@ fn scale_metrics(var m&: StyleMetrics, var h&: Hints, face&: Face, x_scale: i64,
 }
 
 // The autohinted part of FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT) (the
-// caller has already tried the strike's bitmap).
+// caller has already tried the strike's bitmap). On a face that does not
+// `uses_autohinter`, this is FT_LOAD_FORCE_AUTOHINT's outline path.
 pub fn load_autohinted(var face&: Face, gid: u32): LoadedGlyph ! FontError {
   if (face.autofit == none) {
     face.autofit = FaceGlobals::create(face);
@@ -120,7 +121,7 @@ pub fn load_autohinted(var face&: Face, gid: u32): LoadedGlyph ! FontError {
       }
       apply_latin(h, m.latin, g.outline, globals.is_nonbase(gid), adj);
       hinted_edges = true;
-    } else if (m.writing_system == kWritingSystemCjk) {
+    } else if (m.writing_system == kWritingSystemCjk || m.writing_system == kWritingSystemIndic) {
       apply_cjk(h, m.cjk, g.outline);
     } else {
       // af_dummy_hints_apply: reload and save (scaled, tags normalized).

@@ -1,4 +1,5 @@
-// The CJK writing system (FreeType 2.14.3 afcjk.c): style metrics (standard
+// The CJK writing system (FreeType 2.14.3 afcjk.c, and afindic.c's Indic
+// system, which is CJK without blue zones): style metrics (standard
 // widths, horizontal and vertical blue zones, digit widths), their scaling,
 // and the normal-target glyph fitting: CJK segment rounding, linking and
 // serifs, edges, blue edges, stem fitting (af_hint_normal_stem), the
@@ -47,8 +48,10 @@ pub struct CjkMetrics {
   pub var axis: [CjkAxis; 2] = [CjkAxis {}, CjkAxis {}]
   pub var digits_same_width: bool = false
 
-  // af_cjk_metrics_init (`unicode`: FT_Select_Charmap(UNICODE) succeeds).
-  pub fn init(var face&: Face, var shaper&: AfShaper, style: u32, unicode: bool): CjkMetrics;
+  // af_cjk_metrics_init (`unicode`: FT_Select_Charmap(UNICODE) succeeds);
+  // without `blues`, af_indic_metrics_init (the Indic writing system is CJK
+  // without blue zones).
+  pub fn init(var face&: Face, var shaper&: AfShaper, style: u32, unicode: bool, blues: bool = true): CjkMetrics;
   // af_cjk_metrics_scale
   pub fn scale(var self&, x_scale: i64, y_scale: i64, x_delta: i64, y_delta: i64);
 }
@@ -188,7 +191,7 @@ fn check_digits(var m&: CjkMetrics, var shaper&: AfShaper, style: u32) {
   m.digits_same_width = same_width;
 }
 
-fn CjkMetrics::init(var face&: Face, var shaper&: AfShaper, style: u32, unicode: bool): CjkMetrics {
+fn CjkMetrics::init(var face&: Face, var shaper&: AfShaper, style: u32, unicode: bool, blues: bool): CjkMetrics {
   var m = CjkMetrics { units_per_em: face.units_per_em as i64 };
   if (!unicode) {
     return m;
@@ -213,7 +216,9 @@ fn CjkMetrics::init(var face&: Face, var shaper&: AfShaper, style: u32, unicode:
     m.axis[dim].edge_distance = lm.axis[dim].edge_distance;
     m.axis[dim].extra_light = false;
   }
-  init_blues(m, face, shaper, style);
+  if (blues) {
+    init_blues(m, face, shaper, style);
+  }
   check_digits(m, shaper, style);
   return m;
 }

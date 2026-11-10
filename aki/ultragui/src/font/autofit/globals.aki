@@ -591,11 +591,9 @@ fn FaceGlobals::get_metrics(var self&, var face&: Face, gid: u32): u32 ! FontErr
         style = self.glyph_styles[gid as usize] as u32 & kStyleUnassigned;
         continue;
       }
-    } else if (ws == kWritingSystemCjk) {
-      m.cjk = CjkMetrics::init(face, self.shaper, style, self.unicode);
+    } else if (ws == kWritingSystemCjk || ws == kWritingSystemIndic) {
+      m.cjk = CjkMetrics::init(face, self.shaper, style, self.unicode, ws == kWritingSystemCjk);
       m.digits_same_width = m.cjk.digits_same_width;
-    } else if (ws == kWritingSystemIndic) {
-      return fail FontError::UnimplementedFeature;
     }
     self.metrics[style as usize] = m;
     return style;
