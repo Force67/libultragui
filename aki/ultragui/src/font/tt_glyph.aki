@@ -792,11 +792,14 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
   if (gid >= face.num_glyphs) {
     return fail FontError::InvalidArgument;
   }
-  var hinted = hint;
-  if (!hint && face.is_tricky()) {
+  // No size yet (or a bitmap-only face at a size it has no strike for):
+  // FT_Load_Glyph loads unscaled (FT_LOAD_NO_SCALE), unhinted, no bitmaps.
+  let no_scale = face.size.metrics.x_ppem == 0 || face.size.metrics.y_ppem == 0;
+  var hinted = hint && !no_scale;
+  if (!hint && !no_scale && face.is_tricky()) {
     hinted = true;
   }
-  if (face.size.strike_index != 0xFFFF_FFFF) {
+  if (face.size.strike_index != 0xFFFF_FFFF && !(no_scale && face.is_scalable())) {
     if (let b = load_sbit_glyph(face, gid)) {
       return b;
     } else (let e) {
@@ -805,13 +808,13 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
       }
     }
   }
-  if (face.size.ppem == 0) {
+  if (!no_scale && face.size.ppem == 0) {
     return fail FontError::InvalidSizeHandle;
   }
   let sm = hinted ? face.size.hinted : face.size.metrics;
   var ld = Loader {};
-  ld.x_scale = sm.x_scale;
-  ld.y_scale = sm.y_scale;
+  ld.x_scale = no_scale ? 0x10000 : sm.x_scale;
+  ld.y_scale = no_scale ? 0x10000 : sm.y_scale;
   var widthp: usize? = none;
   if (hinted) {
     let still = try face.prepare_hinting();
@@ -837,7 +840,7 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
     g.outline.contours.push(ld.contours[i]);
   }
   g.outline.flags = ld.outline_flags & ~kOutlineSinglePass;
-  if (sm.y_ppem < 24) {
+  if (!no_scale && sm.y_ppem < 24) {
     g.outline.flags = g.outline.flags | kOutlineHighPrecision;
   }
   if (ld.pp1.x != 0) {
@@ -877,12 +880,14 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
   if (!outline_ok(g.outline)) {
     return fail FontError::InvalidOutline;
   }
-  if (hint) {
+  if (hint && !no_scale) {
     grid_fit_metrics(g.metrics);
   }
   g.advance_x = g.metrics.hori_advance;
-  g.linear_hori_advance = mul_div(g.linear_hori_advance, face.size.metrics.x_scale, 64);
-  g.linear_vert_advance = mul_div(g.linear_vert_advance, face.size.metrics.y_scale, 64);
+  if (face.is_scalable()) {
+    g.linear_hori_advance = mul_div(g.linear_hori_advance, face.size.metrics.x_scale, 64);
+    g.linear_vert_advance = mul_div(g.linear_vert_advance, face.size.metrics.y_scale, 64);
+  }
   return g;
 }
 

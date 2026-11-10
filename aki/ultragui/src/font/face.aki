@@ -1029,12 +1029,15 @@ fn Face::set_pixel_size(var self&, px0: u32): () ! FontError {
     px = 0xFFFF;
   }
   let w = (px as i64) << 6;
-  // tt_size_request / cff_size_request: an exact strike first.
+  // tt_size_request / cff_size_request: an exact strike first. Without one,
+  // a bitmap-only face keeps the error (with zeroed metrics, scale 1.0).
+  var no_strike = false;
   if (self.has_fixed_sizes()) {
     if (let strike = self.strikes.match_size(w, w)) {
       return self.select_strike(strike);
     }
     self.size.strike_index = 0xFFFF_FFFF;
+    no_strike = true;
   }
   // FT_Request_Metrics (nominal).
   var m = self.size.metrics;
@@ -1057,6 +1060,8 @@ fn Face::set_pixel_size(var self&, px0: u32): () ! FontError {
     try self.tt_size_reset();
     // tt_size_request: the point size MPS reports (72 dpi).
     self.size.point_size = mul_div(self.size.ppem, 64 * 72, 72);
+  } else if (no_strike) {
+    return fail FontError::InvalidPixelSize;
   }
 }
 
