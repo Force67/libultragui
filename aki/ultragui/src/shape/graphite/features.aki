@@ -1,0 +1,231 @@
+// graphite2's features (FeatureMap.cpp, FeatureVal.h, gr_face.cpp's
+// gr_face_featureval_for_lang): the Feat table's features packed into 32-bit
+// words, their default values, and the Sill table's per-language settings.
+//
+// Differences in shape: a feature value vector is a List<u32> plus whether it
+// belongs to the face's map (FeatureVal::m_pMap; a face without a Feat table
+// has default features that belong to no map, and reading them gives 0).
+
+module ultragui::shape::graphite::features;
+
+import {List} from akikit::containers::list;
+import {be16, be32, face_table, kTagFeat, kTagSill} from ultragui::shape::graphite::tables;
+
+pub struct Features {
+  pub var words: List<u32> = List()
+  pub var mapped: bool = false
+
+  pub fn copy(self&): Features {
+    var f = Features { mapped: self.mapped };
+    for (let w in self.words) {
+      f.words.push(w);
+    }
+    return f;
+  }
+}
+
+// FeatureRef
+pub struct FeatureRef : Copy {
+  pub var id: u32 = 0
+  pub var mask: u32 = 0
+  pub var max: u32 = 0
+  pub var bits: u32 = 0
+  pub var index: u32 = 0
+
+  // FeatureRef::applyValToFeature
+  pub fn apply(self&, val: u32, var dest&: Features): bool {
+    if (val > self.max) {
+      return false;
+    }
+    dest.mapped = true;
+    while (dest.words.len() <= self.index as usize) {
+      dest.words.push(0);
+    }
+    dest.words[self.index as usize] = (dest.words[self.index as usize] & ~self.mask) | (val << self.bits);
+    return true;
+  }
+
+  // FeatureRef::getFeatureVal
+  pub fn value(self&, feats&: Features): u32 {
+    if (self.index as usize < feats.words.len() && feats.mapped) {
+      return (feats.words[self.index as usize] & self.mask) >> self.bits;
+    }
+    return 0;
+  }
+}
+
+// mask_over_val: all bits up to the highest set one.
+fn mask_over(v0: u32): u32 {
+  var v = v0;
+  v |= v >> 1;
+  v |= v >> 2;
+  v |= v >> 4;
+  v |= v >> 8;
+  v |= v >> 16;
+  return v;
+}
+
+pub struct FeatureMap {
+  pub var feats: List<FeatureRef> = List()
+  pub var named: List<u32> = List()  // m_pNamedFeats: indices into feats, sorted by id
+  pub var defaults: Features = Features {}
+  pub var languages: List<u32> = List()      // Sill
+  pub var lang_feats: List<Features> = List()
+
+  pub fn num_feats(self&): u32 => self.feats.len() as u32;
+
+  // FeatureMap::findFeatureRef
+  pub fn find(self&, id: u32): FeatureRef? {
+    for (let i in self.named) {
+      if (self.feats[i as usize].id == id) {
+        return self.feats[i as usize];
+      }
+    }
+    return none;
+  }
+
+  // SillMap::cloneFeatures
+  pub fn for_lang(self&, lang: u32): Features {
+    if (lang != 0) {
+      for (let i in 0..self.languages.len()) {
+        if (self.languages[i] == lang) {
+          return self.lang_feats[i].copy();
+        }
+      }
+    }
+    return self.defaults.copy();
+  }
+}
+
+// FeatureMap::readFeats + SillMap::readSill: none when the face fails.
+pub fn load_features(data: &[u8], sfnt: usize): FeatureMap? {
+  var m = FeatureMap {};
+  let feat_l = face_table(data, sfnt, kTagFeat);
+  let feat = feat_l.as_slice();
+  if (#feat != 0) {
+    if (#feat < 12) {
+      return none;
+    }
+    let version = be32(feat, 0);
+    let num = be16(feat, 4) as usize;
+    if (num != 0) {
+      if (version < 0x00010000 || 12 + num * 16 > #feat) {
+        return none;
+      }
+      var defs: List<u32> = List();
+      var bits = 0u32;
+      var p = 12usize;
+      for (let i in 0..num) {
+        var label = 0u32;
+        if (version < 0x00020000) {
+          label = be16(feat, p);
+          p += 2;
+        } else {
+          label = be32(feat, p);
+          p += 4;
+        }
+        let num_settings = be16(feat, p) as usize;
+        p += 2;
+        if (version >= 0x00020000) {
+          p += 2;
+        }
+        let settings = be32(feat, p) as usize;
+        p += 4;
+        p += 4;  // flags, uiName
+        if (settings > #feat || settings + num_settings * 4 > #feat) {
+          return none;
+        }
+        var max_val = 0u32;
+        var def = 0u32;
+        if (num_settings != 0) {
+          // readFeatureSettings: the largest value as uint16
+          for (let k in 0..num_settings) {
+            let v = be16(feat, settings + k * 4);
+            if (v > max_val) {
+              max_val = v;
+            }
+          }
+          def = be16(feat, settings);
+        } else {
+          max_val = 0xFFFFFFFF;
+        }
+        // FeatureRef::FeatureRef
+        var mask = mask_over(max_val);
+        let need = @pop_count(mask) as u32;
+        let index = ((bits + need) / 32) & 0xFF;
+        if (index > bits / 32) {
+          bits = index * 32;
+        }
+        let shift = bits % 32;
+        bits = (bits + need) & 0xFFFF;
+        mask = mask << shift;
+        m.feats.push(FeatureRef { id: label, mask, max: max_val, bits: shift, index });
+        defs.push(def);
+      }
+      m.defaults = Features { mapped: true };
+      for (let k in 0..bits / 32 + 1) {
+        m.defaults.words.push(0);
+      }
+      for (let i in 0..num) {
+        let f = m.feats[i];
+        let _ = f.apply(defs[i], m.defaults);
+        m.named.push(i as u32);
+      }
+      // qsort by id (equal ids: the first stays first, as findFeatureRef reads
+      // the first match of a sorted array; qsort may order ties either way,
+      // which no font with distinct ids can see).
+      var j = 1usize;
+      while (j < m.named.len()) {
+        let x = m.named[j];
+        var k = j;
+        while (k > 0 && m.feats[m.named[k - 1] as usize].id > m.feats[x as usize].id) {
+          m.named[k] = m.named[k - 1];
+          k -= 1;
+        }
+        m.named[k] = x;
+        j += 1;
+      }
+    }
+  }
+  let sill_l = face_table(data, sfnt, kTagSill);
+  let sill = sill_l.as_slice();
+  if (#sill == 0) {
+    return m;
+  }
+  if (#sill < 12 || be32(sill, 0) != 0x00010000) {
+    return none;
+  }
+  let num_langs = be16(sill, 4) as usize;
+  if (m.feats.len() == 0) {
+    return m;
+  }
+  if (#sill < num_langs * 8 + 12) {
+    return none;
+  }
+  var p = 12usize;
+  for (let i in 0..num_langs) {
+    let lang = be32(sill, p);
+    let num_settings = be16(sill, p + 4) as usize;
+    let offset = be16(sill, p + 6) as usize;
+    p += 8;
+    if (offset + 8 * num_settings > #sill && num_settings > 0) {
+      return none;
+    }
+    var f = m.defaults.copy();
+    var q = offset;
+    for (let k in 0..num_settings) {
+      let name = be32(sill, q);
+      let val = be16(sill, q + 4);
+      q += 8;
+      if (let r = m.find(name)) {
+        let _ = r.apply(val, f);
+      }
+    }
+    if (let r = m.find(1)) {
+      let _ = r.apply(lang, f);
+    }
+    m.languages.push(lang);
+    m.lang_feats.push(f);
+  }
+  return m;
+}

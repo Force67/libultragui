@@ -1,0 +1,389 @@
+// graphite2's glyph cache and character map (GlyphCache.cpp, GlyphFace.cpp,
+// Sparse.cpp, CmapCache.cpp), as gr_make_face_with_ops loads them with
+// gr_face_preloadAll (HarfBuzz's options): every glyph's advance (hmtx),
+// bounding box (glyf) and attributes (Gloc/Glat) read when the face is made,
+// a face whose glyph tables fail any check rejected, and the cmap cached in
+// 256-entry blocks from the format 12 then format 4 subtable.
+//
+// Differences in shape: a glyph's attributes are its nonzero (key, value)
+// pairs in key order (graphite2's sparse array holds the same map); the
+// octaboxes of Glat 3, which only collision avoidance reads, are not kept.
+
+module ultragui::shape::graphite::glyphs;
+
+import {List} from akikit::containers::list;
+import {
+  be16, be32, check_cmap12, check_cmap4, cmap12_lookup, cmap12_next, cmap4_lookup, cmap4_next, face_table, find_cmap_subtable, glyf_box,
+  hor_advance, kTagCmap, kTagGlat, kTagGloc, kTagGlyf, kTagHead, kTagHhea, kTagHmtx, kTagLoca, kTagMaxp, loca_lookup,
+} from ultragui::shape::graphite::tables;
+
+// enum metrics (GlyphFace.h)
+pub comptime let kMetLsb: u32 = 0;
+pub comptime let kMetRsb: u32 = 1;
+pub comptime let kMetBbTop: u32 = 2;
+pub comptime let kMetBbBottom: u32 = 3;
+pub comptime let kMetBbLeft: u32 = 4;
+pub comptime let kMetBbRight: u32 = 5;
+pub comptime let kMetBbHeight: u32 = 6;
+pub comptime let kMetBbWidth: u32 = 7;
+pub comptime let kMetAdvWidth: u32 = 8;
+pub comptime let kMetAdvHeight: u32 = 9;
+pub comptime let kMetAscent: u32 = 10;
+pub comptime let kMetDescent: u32 = 11;
+
+// GlyphFace: design-unit metrics and where its attributes are.
+pub struct GlyphFace : Copy {
+  pub var advance: f32 = 0.0   // m_advance.x; m_advance.y is always 0
+  pub var bl_x: f32 = 0.0      // m_bbox
+  pub var bl_y: f32 = 0.0
+  pub var tr_x: f32 = 0.0
+  pub var tr_y: f32 = 0.0
+  pub var attr_start: u32 = 0
+  pub var attr_count: u32 = 0
+
+  // GlyphFace::getMetric
+  pub fn metric(self&, m: u32): i32 => match (m) {
+    kMetLsb => @saturating_cast(i32, self.bl_x),
+    kMetRsb => @saturating_cast(i32, self.advance - self.tr_x),
+    kMetBbTop => @saturating_cast(i32, self.tr_y),
+    kMetBbBottom => @saturating_cast(i32, self.bl_y),
+    kMetBbLeft => @saturating_cast(i32, self.bl_x),
+    kMetBbRight => @saturating_cast(i32, self.tr_x),
+    kMetBbHeight => @saturating_cast(i32, self.tr_y - self.bl_y),
+    kMetBbWidth => @saturating_cast(i32, self.tr_x - self.bl_x),
+    kMetAdvWidth => @saturating_cast(i32, self.advance),
+    _ => 0,
+  };
+}
+
+pub struct GlyphCache {
+  pub var glyphs: List<GlyphFace> = List()
+  pub var keys: List<u16> = List()
+  pub var values: List<u16> = List()
+  pub var num_glyphs: u32 = 0
+  pub var num_attrs: u32 = 0
+  pub var upem: u32 = 0
+  pub var has_boxes: bool = false
+
+  // GlyphCache::glyph: an id out of range gives glyph 0.
+  pub fn glyph(self&, gid: u32): &GlyphFace => self.glyphs[gid < self.num_glyphs ? gid as usize : 0];
+
+  // sparse::operator[] of glyph `gid`'s attributes (0 when unset).
+  pub fn attr_of(self&, g&: GlyphFace, key: u32): u32 {
+    var lo = g.attr_start as usize;
+    var hi = lo + g.attr_count as usize;
+    while (lo < hi) {
+      let mid = (lo + hi) / 2;
+      let k = self.keys[mid] as u32;
+      if (k == key) {
+        return self.values[mid] as u32;
+      }
+      if (k < key) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return 0;
+  }
+
+  // Segment::glyphAttr: glyphSafe(gid)->attrs()[attr] as int16, 0 for an id
+  // out of range.
+  pub fn glyph_attr(self&, gid: u32, attr: u32): i32 {
+    if (gid >= self.num_glyphs) {
+      return 0;
+    }
+    return (self.attr_of(self.glyphs[gid as usize], attr) as u16 as i16) as i32;
+  }
+}
+
+// The tables of GlyphCache::Loader.
+struct Loader {
+  pub var head: List<u8> = List()
+  pub var hhea: List<u8> = List()
+  pub var hmtx: List<u8> = List()
+  pub var glyf: List<u8> = List()
+  pub var loca: List<u8> = List()
+  pub var glat: List<u8> = List()
+  pub var gloc: List<u8> = List()
+  pub var ok: bool = false
+  pub var long_fmt: bool = false
+  pub var has_boxes: bool = false
+  pub var num_glyphs_graphics: u32 = 0
+  pub var num_glyphs_attributes: u32 = 0
+  pub var num_attrs: u32 = 0
+}
+
+// GlyphCache::Loader::Loader
+fn make_loader(data: &[u8], sfnt: usize): Loader {
+  var l = Loader {};
+  l.head = face_table(data, sfnt, kTagHead);
+  l.hhea = face_table(data, sfnt, kTagHhea);
+  l.hmtx = face_table(data, sfnt, kTagHmtx);
+  l.glyf = face_table(data, sfnt, kTagGlyf);
+  l.loca = face_table(data, sfnt, kTagLoca);
+  let has_glyf = l.glyf.len() != 0;
+  if (!(l.head.len() != 0 && l.hhea.len() != 0 && l.hmtx.len() != 0 && has_glyf == (l.loca.len() != 0))) {
+    return l;
+  }
+  let maxp = face_table(data, sfnt, kTagMaxp);
+  if (maxp.len() == 0) {
+    return l;
+  }
+  l.num_glyphs_graphics = be16(maxp.as_slice(), 4);
+  if (has_glyf && loca_lookup((l.num_glyphs_graphics -% 1) & 0xFFFF, l.loca.as_slice(), l.head.as_slice()) == -2) {
+    return l;
+  }
+  l.glat = face_table(data, sfnt, kTagGlat, 0x00030000);
+  l.gloc = face_table(data, sfnt, kTagGloc);
+  if (l.glat.len() == 0 || l.gloc.len() == 0 || l.gloc.len() < 8) {
+    return l;
+  }
+  let gloc = l.gloc.as_slice();
+  let version = be32(gloc, 0);
+  let flags = be16(gloc, 4);
+  l.num_attrs = be16(gloc, 6);
+  l.long_fmt = (flags & 1) != 0;
+  // (size - 8 - attribids) / entry size - 1, in size_t (a negative count wraps
+  // to a huge one, which the checks below reject as well).
+  let ids = (flags & 2) != 0 ? 2 * l.num_attrs as i64 : 0;
+  let avail = #gloc as i64 - 8 - ids;
+  let tmp: i64 = avail < 0 ? -1 : avail / (l.long_fmt ? 4 : 2) - 1;
+  if (version >= 0x00020000 || tmp < 0 || tmp > 65535 || l.num_attrs == 0 || l.num_attrs > 0x3000 || l.num_glyphs_graphics as i64 > tmp ||
+      l.glat.len() < 4) {
+    return l;
+  }
+  l.num_glyphs_attributes = tmp as u32;
+  let gv = be32(l.glat.as_slice(), 0);
+  if (gv >= 0x00040000 || (gv >= 0x00030000 && l.glat.len() < 8)) {
+    return l;
+  }
+  if (gv >= 0x00030000) {
+    l.has_boxes = true;  // "delete this once the compiler is fixed"
+  }
+  l.ok = true;
+  return l;
+}
+
+// One Glat entry run (_glat_iterator): the attributes from `glocs` to `gloce`
+// with W-byte keys and counts, appended as graphite2's sparse array reads
+// them; false when the keys of the nonzero values do not increase.
+fn read_attrs(glat: &[u8], glocs: usize, gloce: usize, w: usize, var keys&: List<u16>, var values&: List<u16>): bool {
+  let peek_w = fn(o: usize): u32 => w == 1 ? (o < #glat ? glat[o] as u32 : 0) : be16(glat, o);
+  var e = glocs;
+  var v = e + 2 * w;
+  var n = 0u32;
+  var last: i64 = -1;
+  // operator==: _v >= end._e - 1
+  while (!(v as i64 >= gloce as i64 - 1)) {
+    let key = (peek_w(e) +% n) & 0xFFFF;
+    let value = be16(glat, v);
+    if (value != 0) {
+      if (key as i64 <= last) {
+        return false;
+      }
+      last = key as i64;
+      keys.push(key as u16);
+      values.push(value as u16);
+    }
+    // operator++
+    n += 1;
+    v += 2;
+    if (n == peek_w(e + w)) {
+      n = 0;
+      e = v;
+      v += 2 * w;
+    }
+  }
+  return true;
+}
+
+// GlyphCache::Loader::read_glyph: false when the glyph is rejected.
+fn read_glyph(l&: Loader, gid: u32, var cache&: GlyphCache): bool {
+  var g = GlyphFace {};
+  if (gid < l.num_glyphs_graphics) {
+    if (l.glyf.len() != 0) {
+      let loc = loca_lookup(gid, l.loca.as_slice(), l.head.as_slice());
+      if (let (x0, y0, x1, y1) = glyf_box(l.glyf.as_slice(), loc)) {
+        if (x0 > x1 || y0 > y1) {
+          return false;
+        }
+        g.bl_x = x0 as f32;
+        g.bl_y = y0 as f32;
+        g.tr_x = x1 as f32;
+        g.tr_y = y1 as f32;
+      }
+    }
+    if (let adv = hor_advance(gid, l.hmtx.as_slice(), l.hhea.as_slice())) {
+      g.advance = adv as f32;
+    }
+  }
+  g.attr_start = cache.keys.len() as u32;
+  if (gid < l.num_glyphs_attributes) {
+    let gloc = l.gloc.as_slice();
+    let glat = l.glat.as_slice();
+    var glocs = 0usize;
+    var gloce = 0usize;
+    if (l.long_fmt) {
+      if (8 + gid as usize * 4 > #gloc) {
+        return false;
+      }
+      glocs = be32(gloc, 8 + gid as usize * 4) as usize;
+      gloce = be32(gloc, 12 + gid as usize * 4) as usize;
+    } else {
+      if (8 + gid as usize * 2 > #gloc) {
+        return false;
+      }
+      glocs = be16(gloc, 8 + gid as usize * 2) as usize;
+      gloce = be16(gloc, 10 + gid as usize * 2) as usize;
+    }
+    if (glocs >= #glat - 1 || gloce > #glat) {
+      return false;
+    }
+    let gv = be32(glat, 0);
+    if (gv >= 0x00030000) {
+      if (glocs >= gloce) {
+        return false;
+      }
+      let bmap = be16(glat, glocs);
+      let num = @pop_count(bmap) as usize;
+      glocs += 6 + 8 * num;
+      if (glocs > gloce) {
+        return false;
+      }
+    }
+    let span = gloce as i64 - glocs as i64;
+    let w: usize = gv < 0x00020000 ? 1 : 2;
+    if (w == 1) {
+      if (span < 4 || span > l.num_attrs as i64 * 4) {
+        return false;
+      }
+    } else {
+      if (span < 6 || span > l.num_attrs as i64 * 6 || glocs as i64 > #glat as i64 - 4) {
+        return false;
+      }
+    }
+    if (!read_attrs(glat, glocs, gloce, w, cache.keys, cache.values)) {
+      return false;
+    }
+    // capacity() > _num_attrs
+    if (cache.keys.len() as u32 - g.attr_start > l.num_attrs) {
+      return false;
+    }
+  }
+  g.attr_count = cache.keys.len() as u32 - g.attr_start;
+  cache.glyphs.push(g);
+  return true;
+}
+
+// GlyphCache::GlyphCache with gr_face_preloadGlyphs: an empty cache
+// (num_glyphs 0) when the tables are unusable or any glyph is rejected.
+pub fn load_glyph_cache(data: &[u8], sfnt: usize): GlyphCache {
+  var cache = GlyphCache {};
+  let l = make_loader(data, sfnt);
+  if (!l.ok) {
+    return cache;
+  }
+  let n = l.num_glyphs_graphics > l.num_glyphs_attributes ? l.num_glyphs_graphics : l.num_glyphs_attributes;
+  if (n == 0) {
+    return cache;
+  }
+  for (let gid in 0..n) {
+    if (!read_glyph(l, gid, cache)) {
+      return GlyphCache {};
+    }
+  }
+  cache.num_glyphs = n;
+  cache.num_attrs = l.num_attrs;
+  cache.upem = be16(l.head.as_slice(), 18);
+  cache.has_boxes = l.has_boxes;
+  return cache;
+}
+
+// CachedCmap: 256-glyph blocks, 0x100 of them for a BMP-only font, 0x1100
+// with a format 12 subtable.
+pub struct CachedCmap {
+  pub var bmp_only: bool = true
+  pub var present: bool = false  // operator bool: the block array exists
+  pub var blocks: List<u32> = List()  // block -> 1 + its index in `data`, 0 when absent
+  pub var data: List<u16> = List()
+
+  // CachedCmap::operator[]
+  pub fn lookup(self&, usv: u32): u32 {
+    if ((self.bmp_only && usv > 0xFFFF) || usv > 0x10FFFF) {
+      return 0;
+    }
+    let b = self.blocks[((usv >> 8) & 0xFFFF) as usize];
+    return b == 0 ? 0 : self.data[(b as usize - 1) * 256 + (usv & 0xFF) as usize] as u32;
+  }
+
+  fn set(var self&, cp: u32, gid: u32) {
+    let block = (cp >> 8) as usize;
+    if (self.blocks[block] == 0) {
+      self.blocks[block] = (self.data.len() / 256 + 1) as u32;
+      for (let i in 0..256) {
+        self.data.push(0);
+      }
+    }
+    self.data[(self.blocks[block] as usize - 1) * 256 + (cp & 0xFF) as usize] = gid as u16;
+  }
+}
+
+pub fn load_cmap(data: &[u8], sfnt: usize): CachedCmap {
+  var c = CachedCmap {};
+  let cmap_l = face_table(data, sfnt, kTagCmap);
+  if (cmap_l.len() == 0) {
+    return c;
+  }
+  let cmap = cmap_l.as_slice();
+  // bmp_subtable / smp_subtable
+  var bmp: usize? = none;
+  for (let (p, e) in [(3u32, 1u32), (0, 3), (0, 2), (0, 1), (0, 0)]) {
+    let st = find_cmap_subtable(cmap, p, e);
+    if (check_cmap4(cmap, st)) {
+      bmp = st;
+      break;
+    }
+  }
+  var smp: usize? = none;
+  for (let (p, e) in [(3u32, 10u32), (0, 4)]) {
+    let st = find_cmap_subtable(cmap, p, e);
+    if (check_cmap12(cmap, st)) {
+      smp = st;
+      break;
+    }
+  }
+  c.bmp_only = smp == none;
+  c.present = true;
+  for (let i in 0..(c.bmp_only ? 0x100 : 0x1100)) {
+    c.blocks.push(0);
+  }
+  // cache_subtable: walk the subtable's code points below the limit.
+  if (let t = smp) {
+    var key = 0i32;
+    var cp = cmap12_next(cmap, t, 0, key);
+    var prev = 0u32;
+    while (cp < 0x10FFFF) {
+      c.set(cp, cmap12_lookup(cmap, t, cp, key));
+      if (cp <= prev) {
+        cp = prev + 1;
+      }
+      prev = cp;
+      cp = cmap12_next(cmap, t, cp, key);
+    }
+  }
+  if (let t = bmp) {
+    var key = 0i32;
+    var cp = cmap4_next(cmap, t, 0, key);
+    var prev = 0u32;
+    while (cp < 0xFFFF) {
+      c.set(cp, cmap4_lookup(cmap, t, cp, key));
+      if (cp <= prev) {
+        cp = prev + 1;
+      }
+      prev = cp;
+      cp = cmap4_next(cmap, t, cp, key);
+    }
+  }
+  return c;
+}
