@@ -17,6 +17,13 @@
 // FONT_SWEEP_FROM=n skips the first n fonts. Arguments name fonts to run at
 // the default sizes instead. FONT_SIZES="a b c" overrides the sizes.
 //
+// Damaged fonts: FONT_CORRUPT=n (default 64, 0 to skip; not in the sweep
+// unless set) runs n copies of DejaVuSans/LiberationSans with a few bytes of
+// the table directory or of a table's start changed, or truncated, at 12 px
+// over their first 200 glyphs (FONT_CORRUPT_FIRST=k starts at variant k,
+// FONT_CORRUPT_KEEP=1 keeps the last font and records): whether FT_Open_Face accepts them, and every
+// record as above (glyph load errors included).
+//
 // Faces FreeType would hint with its autohinter (no fpgm, prep of at most 7
 // bytes) and CFF faces only compare face, size and unhinted records; their
 // hinted glyphs are counted as skipped.
@@ -25,11 +32,12 @@ module font_tt_test;
 
 import {List} from akikit::containers::list;
 import {create_directories, is_directory, list_directory} from akikit::filesystem::directory;
-import {delete_file, file_info, read_bytes, real_path} from akikit::filesystem::file_util;
+import {delete_file, file_info, read_bytes, real_path, write_bytes} from akikit::filesystem::file_util;
 import {eprintln, println} from akikit::logging;
 import {Command, exit_code} from akikit::process::child;
 import {arguments} from akikit::process::command_line;
 import {get_environment_variable} from akikit::process::environment_variables;
+import {getpid} from akikit::os::sys;
 import {String, from_str} from akikit::strings::string;
 import {parse_u64} from akikit::strings::string_to_number;
 import {Face, kFaceFlagsComputed} from ultragui::font::face;
@@ -37,7 +45,7 @@ import {GlyphFormat, LoadedGlyph} from ultragui::font::outline;
 import {FontError} from ultragui::font::sfnt;
 import {ft_advance, hb_contour_point, hb_extents, hb_h_advance} from ultragui::font::unhinted;
 
-comptime let kMaxReported: u64 = 30;
+comptime let kMaxReported: u64 = 12;
 
 static let kDefaultFonts: [str; 4] = [
   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -91,11 +99,14 @@ struct Totals {
   pub var unhinted: u64 = 0
   pub var mismatches: u64 = 0
   pub var mismatched_glyphs: u64 = 0
+  // Reported in the current font (each font reports its first few).
+  pub var font_reported: u64 = 0
 }
 
 fn report(var t&: Totals, label: str, what: String) {
   t.mismatches += 1;
-  if (t.mismatches <= kMaxReported) {
+  t.font_reported += 1;
+  if (t.font_reported <= kMaxReported) {
     eprintln(f"{label}: {what}");
   }
 }
@@ -295,10 +306,10 @@ fn error_name(e: FontError): str => match (e) {
 };
 
 // Replays one oracle file on a face opened from `path`.
-fn replay(d&: [u8], path: str, var t&: Totals): bool {
+fn replay(d&: [u8], path: str, name: str, var t&: Totals): bool {
   var r = Rd {};
   var face: Face? = none;
-  var label = from_str(path);
+  var label = from_str(name);
   t.fonts += 1;
   while (r.pos + 4 <= #d) {
     let n = rd_u32(d, r) as usize;
@@ -318,7 +329,7 @@ fn replay(d&: [u8], path: str, var t&: Totals): bool {
       let opened = Face::open(data, 0);
       if (err != 0) {
         if (let f = opened) {
-          report(t, path, f"freetype cannot open the face (error {err}), aki can");
+          report(t, name, f"freetype cannot open the face (error {err}), aki can");
         }
         t.faces_failed += 1;
         return true;
@@ -327,30 +338,30 @@ fn replay(d&: [u8], path: str, var t&: Totals): bool {
       if (let x = opened) {
         opened_face = x;
       } else (let e) {
-        report(t, path, f"freetype opens the face, aki fails ({error_name(e)})");
+        report(t, name, f"freetype opens the face, aki fails ({error_name(e)})");
         t.faces_failed += 1;
         return true;
       }
       var f = opened_face!;
-      let _ = check_i64(t, path, "num_glyphs", rd_u32(d, r) as i64, f.num_glyphs as i64);
+      let _ = check_i64(t, name, "num_glyphs", rd_u32(d, r) as i64, f.num_glyphs as i64);
       let flags = rd_u32(d, r);
       // GLYPH_NAMES of a CFF face depends on its top dict (font/cff).
       let mask = f.is_cff() ? kFaceFlagsComputed & ~0x200u32 : kFaceFlagsComputed;
-      let _ = check_i64(t, path, "face_flags", (flags & mask) as i64, (f.face_flags & mask) as i64);
-      let _ = check_i64(t, path, "units_per_EM", rd_u32(d, r) as i64, f.units_per_em as i64);
-      let _ = check_i64(t, path, "ascender", rd_i32(d, r) as i64, f.ascender as i64);
-      let _ = check_i64(t, path, "descender", rd_i32(d, r) as i64, f.descender as i64);
-      let _ = check_i64(t, path, "height", rd_i32(d, r) as i64, f.height as i64);
-      let _ = check_i64(t, path, "max_advance_width", rd_i32(d, r) as i64, f.max_advance_width as i64);
-      let _ = check_i64(t, path, "max_advance_height", rd_i32(d, r) as i64, f.max_advance_height as i64);
-      let _ = check_i64(t, path, "num_faces", rd_u32(d, r) as i64, f.num_faces() as i64);
-      let _ = check_i64(t, path, "num_fixed_sizes", rd_u32(d, r) as i64, f.strikes.num_strikes() as i64);
+      let _ = check_i64(t, name, "face_flags", (flags & mask) as i64, (f.face_flags & mask) as i64);
+      let _ = check_i64(t, name, "units_per_EM", rd_u32(d, r) as i64, f.units_per_em as i64);
+      let _ = check_i64(t, name, "ascender", rd_i32(d, r) as i64, f.ascender as i64);
+      let _ = check_i64(t, name, "descender", rd_i32(d, r) as i64, f.descender as i64);
+      let _ = check_i64(t, name, "height", rd_i32(d, r) as i64, f.height as i64);
+      let _ = check_i64(t, name, "max_advance_width", rd_i32(d, r) as i64, f.max_advance_width as i64);
+      let _ = check_i64(t, name, "max_advance_height", rd_i32(d, r) as i64, f.max_advance_height as i64);
+      let _ = check_i64(t, name, "num_faces", rd_u32(d, r) as i64, f.num_faces() as i64);
+      let _ = check_i64(t, name, "num_fixed_sizes", rd_u32(d, r) as i64, f.strikes.num_strikes() as i64);
       face = f;
     } else if (kind == 83) {
       // 'S'
       let px = rd_u32(d, r);
       let err = rd_i32(d, r);
-      label = f"{path} px {px}";
+      label = f"{name} px {px}";
       t.sizes += 1;
       if (var f& = face) {
         var aki_ok = false;
@@ -501,6 +512,101 @@ fn collect_fonts(dir: str, var out&: List<String>) {
   }
 }
 
+// --- Damaged fonts -------------------------------------------------------------------
+
+// xorshift64*.
+fn next_rand(var s&: u64): u64 {
+  s = s ^ (s >> 12);
+  s = s ^ (s << 25);
+  s = s ^ (s >> 27);
+  return s *% 0x2545_F491_4F6C_DD1D;
+}
+
+fn le32(d&: [u8], o: usize): u32 =>
+  ((d[o] as u32) << 24) | ((d[o + 1] as u32) << 16) | ((d[o + 2] as u32) << 8) | (d[o + 3] as u32);
+
+// One damaged copy of `base`, variant k.
+fn damaged(base&: [u8], k: u64): List<u8> {
+  var data: List<u8> = List();
+  for (let b in base) {
+    data.push(b);
+  }
+  var s: u64 = 0x9E37_79B9_7F4A_7C15 ^ ((k + 1) *% 0xBF58_476D_1CE4_E5B9);
+  let n = data.len() as u64;
+  if (next_rand(s) % 8 == 0) {
+    data.truncate((next_rand(s) % n) as usize);
+    return data;
+  }
+  let num_tables = (((base[4] as u64) << 8) | base[5] as u64);
+  let edits = 1 + next_rand(s) % 4;
+  for (let e in 0..edits) {
+    var pos: u64 = 0;
+    if (next_rand(s) % 3 == 0) {
+      pos = next_rand(s) % (12 + 16 * num_tables);
+    } else {
+      let i = next_rand(s) % num_tables;
+      let rec = (12 + 16 * i) as usize;
+      let off = le32(base, rec + 8) as u64;
+      let len = le32(base, rec + 12) as u64;
+      let span = len < 512 ? len : 512;
+      if (span == 0) {
+        continue;
+      }
+      pos = off + next_rand(s) % span;
+    }
+    if (pos < n) {
+      data[pos as usize] = next_rand(s) as u8;
+    }
+  }
+  return data;
+}
+
+fn damaged_runs(exe: str, out_dir: str, first: u64, count: u64, var t&: Totals): bool {
+  let bases = [kDefaultFonts[0], kDefaultFonts[2]];
+  var ok = true;
+  let path = f"{out_dir}/damaged-{getpid()}.ttf";
+  let record = f"{out_dir}/damaged-{getpid()}.bin";
+  let before = t.mismatches;
+  t.font_reported = 0;
+  for (let k in first..first + count) {
+    let raw = read_bytes(bases[(k % 2) as usize]) else {
+      return false;
+    };
+    let base = raw.as_slice() as &[u8];
+    let data = damaged(base, k);
+    if (let w = write_bytes(path.as_str(), data.as_slice() as &[byte])) {
+    } else (let e) {
+      eprintln(f"cannot write {path}");
+      return false;
+    }
+    var cmd = Command(exe);
+    cmd.add_env("FT_ORACLE_MAX_GLYPHS", "200");
+    cmd.arg(path.as_str());
+    cmd.arg("0");
+    cmd.arg(record.as_str());
+    cmd.arg("12");
+    if (!run(cmd, "the FreeType oracle")) {
+      ok = false;
+      continue;
+    }
+    let bytes = read_bytes(record.as_str()) else {
+      return false;
+    };
+    let label = f"damaged #{k} of {bases[(k % 2) as usize]}";
+    ok = replay(bytes.as_slice() as &[u8], path.as_str(), label.as_str(), t) && ok;
+  }
+  println(f"{count} damaged fonts: {t.mismatches - before} mismatches");
+  if (get_environment_variable("FONT_CORRUPT_KEEP") is none) {
+    if (let e = delete_file(path.as_str())) {
+    } else (let err) {
+    }
+    if (let e = delete_file(record.as_str())) {
+    } else (let err) {
+    }
+  }
+  return ok;
+}
+
 fn env_u64(name: str, fallback: u64): u64 {
   if (let v = get_environment_variable(name)) {
     return parse_u64(v.as_str()) ?? fallback;
@@ -513,7 +619,7 @@ pub fn main(): i32 {
     eprintln("cannot resolve the package dir");
     return 1;
   };
-  let out_dir = f"{pkg}/build/ft_oracle";
+  let out_dir = get_environment_variable("FT_ORACLE_DIR") ?? f"{pkg}/build/ft_oracle";
   create_directories(out_dir.as_str());
   let exe = build_oracle(pkg.as_str(), out_dir.as_str()) else {
     return 1;
@@ -570,7 +676,8 @@ pub fn main(): i32 {
       continue;
     }
     let font& = fonts[i];
-    let record = f"{out_dir}/records.bin";
+    // Per process: a sweep and the default run may share the build dir.
+    let record = f"{out_dir}/records-{getpid()}.bin";
     var cmd = Command(exe.as_str());
     cmd.arg(font.as_str());
     cmd.arg("0");
@@ -588,13 +695,18 @@ pub fn main(): i32 {
     };
     let before = totals.mismatches;
     let glyphs_before = totals.mismatched_glyphs;
-    ok = replay(bytes.as_slice() as &[u8], font.as_str(), totals) && ok;
+    totals.font_reported = 0;
+    ok = replay(bytes.as_slice() as &[u8], font.as_str(), font.as_str(), totals) && ok;
     if (sweep || totals.mismatches != before) {
       println(f"{font}: {totals.mismatches - before} mismatches in {totals.mismatched_glyphs - glyphs_before} glyphs");
     }
     if (let e = delete_file(record.as_str())) {
     } else (let err) {
     }
+  }
+  let damaged_count = env_u64("FONT_CORRUPT", sweep || args.len() > 0 ? 0 : 64);
+  if (damaged_count > 0) {
+    ok = damaged_runs(exe.as_str(), out_dir.as_str(), env_u64("FONT_CORRUPT_FIRST", 0), damaged_count, totals) && ok;
   }
   println(f"{totals.fonts} fonts ({totals.faces_failed} not opened), {totals.sizes} sizes, {totals.glyphs} hinted glyph loads ({totals.bitmaps} bitmaps; skipped: {totals.skipped_autohint} autohinter, {totals.skipped_cff} CFF), {totals.unhinted} unhinted queries; {totals.mismatches} mismatches in {totals.mismatched_glyphs} glyphs");
   return ok && totals.mismatches == 0 ? 0 : 1;

@@ -17,6 +17,8 @@
  *        (hb_ft loads with FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING), plus
  *        FT_Get_Advance(face, gid, FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING).
  *
+ * FT_ORACLE_MAX_GLYPHS=n limits each pass to the first n glyphs.
+ *
  * Every record is a little-endian u32 length and that many bytes; integers
  * are little-endian, 64-bit values for FreeType's FT_Pos/FT_Fixed.
  *
@@ -102,6 +104,9 @@ int main(int argc, char **argv) {
 
   /* As the C++ text engine creates it: hb_ft over the same face. */
   hb_font_t *hb = hb_ft_font_create_referenced(face);
+  FT_Long num_glyphs = face->num_glyphs;
+  const char *max_glyphs = getenv("FT_ORACLE_MAX_GLYPHS");
+  if (max_glyphs && atol(max_glyphs) < num_glyphs) num_glyphs = atol(max_glyphs);
 
   for (int a = 4; a < argc; a++) {
     unsigned px = (unsigned)atoi(argv[a]);
@@ -121,7 +126,7 @@ int main(int argc, char **argv) {
     i64(sm->max_advance);
     flush(out);
 
-    for (FT_Long g = 0; g < face->num_glyphs; g++) {
+    for (FT_Long g = 0; g < num_glyphs; g++) {
       err = FT_Load_Glyph(face, (FT_UInt)g, FT_LOAD_DEFAULT);
       FT_GlyphSlot s = face->glyph;
       u8('G');
@@ -159,7 +164,7 @@ int main(int argc, char **argv) {
       flush(out);
     }
 
-    for (FT_Long g = 0; g < face->num_glyphs; g++) {
+    for (FT_Long g = 0; g < num_glyphs; g++) {
       FT_Fixed adv = 0;
       FT_Error aerr = FT_Get_Advance(face, (FT_UInt)g, FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING, &adv);
       hb_position_t hadv = hb_font_get_glyph_h_advance(hb, (hb_codepoint_t)g);

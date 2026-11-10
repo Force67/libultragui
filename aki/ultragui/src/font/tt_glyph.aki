@@ -518,7 +518,7 @@ fn process_component(var lw&: Loader, sg: SubGlyph, start_point: u32, num_base_p
   if (have_scale) {
     for (let i in first..last) {
       let q = lw.points[i];
-      lw.points[i] = v(mul_fix(q.x, sg.xx) + mul_fix(q.y, sg.xy), mul_fix(q.x, sg.yx) + mul_fix(q.y, sg.yy));
+      lw.points[i] = v(mul_fix(q.x, sg.xx) +% mul_fix(q.y, sg.xy), mul_fix(q.x, sg.yx) +% mul_fix(q.y, sg.yy));
     }
   }
   var x: i64 = 0;
@@ -556,7 +556,7 @@ fn process_component(var lw&: Loader, sg: SubGlyph, start_point: u32, num_base_p
   }
   if (x != 0 || y != 0) {
     for (let i in first..last) {
-      lw.points[i] = v(lw.points[i].x + x, lw.points[i].y + y);
+      lw.points[i] = v(lw.points[i].x +% x, lw.points[i].y +% y);
     }
   }
 }

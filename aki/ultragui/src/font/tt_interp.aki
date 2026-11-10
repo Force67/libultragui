@@ -1675,7 +1675,7 @@ fn Interp::ins_mdrp(var self&) {
     if (org_dist >= 0) {
       org_dist = self.gs.single_width_value;
     } else {
-      org_dist = 0 - self.gs.single_width_value;
+      org_dist = 0 -% self.gs.single_width_value;
     }
   }
   let compensation = self.gs.compensation[(self.opcode & 3) as usize];
@@ -1729,7 +1729,7 @@ fn Interp::ins_mirp(var self&) {
     if (cvt_dist >= 0) {
       cvt_dist = self.gs.single_width_value;
     } else {
-      cvt_dist = 0 - self.gs.single_width_value;
+      cvt_dist = 0 -% self.gs.single_width_value;
     }
   }
   let z0 = self.zp0;

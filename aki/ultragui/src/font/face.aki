@@ -19,6 +19,7 @@
 module ultragui::font::face;
 
 import {List} from akikit::containers::list;
+import {read_bytes} from akikit::filesystem::file_util;
 import {GraphicsState, Interp, kRangeCvt, kRangeFont, kRangeGlyph} from ultragui::font::tt_interp;
 import {div_fix, mul_div, mul_fix, pix_ceil, pix_floor, pix_round} from ultragui::font::fixed;
 import {
@@ -166,6 +167,9 @@ pub struct Face {
   // FT_Open_Face(face index) on the bytes of a TrueType, OpenType or
   // collection file.
   pub fn open(data: List<u8>, index: u32): Face ! FontError;
+  // FT_Open_Face on a file path (FT_OPEN_PATHNAME); a missing or unreadable
+  // file is FreeType's cannot-open-resource (UnknownFileFormat here).
+  pub fn open_file(path: str, index: u32): Face ! FontError;
 
   pub fn is_tricky(self&): bool => (self.face_flags & kFaceFlagTricky) != 0;
   pub fn is_scalable(self&): bool => (self.face_flags & kFaceFlagScalable) != 0;
@@ -239,9 +243,30 @@ fn Face::open(data: List<u8>, index: u32): Face ! FontError {
       }
     }
   }
+  // FT_Open_Face's last checks.
+  if (face.is_scalable()) {
+    if (face.height < 0) {
+      face.height = (0 - face.height as i32) as i16;
+    }
+    if ((face.face_flags & kFaceFlagVertical) == 0) {
+      face.max_advance_height = face.height;
+    }
+  }
   // An OTTO face keeps sfnt_load_face's flags; cff_face_init adds
   // GLYPH_NAMES when the CFF is not CID-keyed (the CFF loader knows).
   return face;
+}
+
+fn Face::open_file(path: str, index: u32): Face ! FontError {
+  let bytes = read_bytes(path) else {
+    return fail FontError::UnknownFileFormat;
+  };
+  var data: List<u8> = List();
+  data.reserve(bytes.len());
+  for (let b in bytes) {
+    data.push(b as u8);
+  }
+  return Face::open(data, index);
 }
 
 // sfnt_load_face.
@@ -283,7 +308,8 @@ fn Face::load_sfnt(var self&): () ! FontError {
     if (fits(d, o as u64, 6)) {
       self.maxp.version = u32_at(d, o);
       self.maxp.num_glyphs = u16_at(d, o + 4);
-      if (self.maxp.version >= 0x10000 && fits(d, (o + 6) as u64, 26)) {
+      if ((self.maxp.version as i32) >= 0x10000 && fits(d, (o + 6) as u64, 26)) {
+        // (FT_FRAME_LONG: a signed version)
         self.maxp.max_twilight_points = u16_at(d, o + 16);
         self.maxp.max_storage = u16_at(d, o + 18);
         self.maxp.max_function_defs = u16_at(d, o + 20);
