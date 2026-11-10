@@ -227,7 +227,7 @@ pub fn main(): i32 {
     if (size_override != 0) {
       sizes.push(size_override as u32);
     } else if (sweep == "all") {
-      for (let size in [7u32,9,11,12,13,14,16,18,20,24,32,48,72]) {
+      for (let size in [7u32, 9, 11, 12, 13, 14, 16, 18, 20, 24, 32, 48, 72]) {
         sizes.push(size);
       }
     } else if (sweep == "curated") {
@@ -237,7 +237,7 @@ pub fn main(): i32 {
       sizes.push(64);
       sizes.push(96);
     } else {
-      for (let size in [7u32,12,18,32,48]) {
+      for (let size in [7u32, 12, 18, 32, 48]) {
         sizes.push(size);
       }
     }

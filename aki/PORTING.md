@@ -577,7 +577,7 @@ bitmaps, overflow rejection, and malformed outlines (326 expected errors).
 ```
 nix develop -c bash -c 'cd aki/ultragui && akiko test tests/raster_test.aki'
 nix develop -c bash -c 'cd aki/ultragui && RASTER_SWEEP=curated akiko test tests/raster_test.aki'
-nix develop -c bash -c 'cd aki/ultragui && RASTER_SWEEP=all akiko test tests/raster_test.aki'
+nix develop -c bash -c 'cd aki/ultragui && RASTER_SWEEP=all akiko test tests/raster_test.aki -O2'
 nix develop -c bash -c 'cd aki/ultragui && akiko test tests/raster_test.aki -- build/raster_oracle/failing.bin'
 ```
 
@@ -589,8 +589,15 @@ bytes, zero mismatches and zero load/non-outline skips. This machine has no
 NotoSans-Regular; the oracle explicitly falls back to NotoSansMono-Regular.
 `all` visits every scalable font file under `/usr/share/fonts`, face index 0,
 every glyph at 7,9,11,12,13,14,16,18,20,24,32,48,72 px with default hinting.
-`RASTER_FONT`, `RASTER_SIZE`, and `RASTER_STRIDE` narrow either mode for
-reproduction. Broad-sweep results are recorded after verification.
+The broad sweep passed on 373 scalable font files, 13 sizes, default hinting:
+10511803 font outlines plus 4065 synthetic (10515868 total), 5350884041
+bitmap bytes, zero mismatches and zero load errors. There were 101813
+embedded-bitmap glyphs instead of outlines: 100853 from arphic/uming.ttc
+and 960 from kacst/mry_KacstQurn.ttf. These are counted as skips, not
+outline comparisons. `RASTER_FONT`,
+`RASTER_SIZE`, and `RASTER_STRIDE` narrow either mode for reproduction.
+Linux and Windows `akiko check` pass, as does the full core `akiko test`
+suite (25 programs, zero failures).
 
 Scope and integration: this implements normal/light smooth gray outline
 rendering only. Font loading, hinting, shaping, embedded bitmap selection,
