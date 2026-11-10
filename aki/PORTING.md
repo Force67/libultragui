@@ -27,6 +27,8 @@ aki/
     tests/data/svg/      the SVG corpus (@embed'ed by tests/support/svg_corpus.aki)
     tools/yoga_fuzz.cc   the layout engine's oracle: random trees through third_party/yoga, traced;
                          tests/yoga_fuzz_test.aki builds it, runs it and replays the traces bit for bit
+    tools/ft_oracle.c    the font engine's oracle: FreeType's and hb_ft's results for a face as binary
+                         records; tests/font_tt_test.aki builds it (clang, pkg-config) and compares field by field
   ultragui_audio/        miniaudio AudioBackend (csrc/ugui_ma.c shim)
   ultragui_lottie/       rlottie from third_party via c_sources; tools/gen_reference.cc + gen_tables.py
   ultragui_video/        pl_mpeg via [build.implement]; tools/{gen_reference,recording_rhi}.cc + gen_tables.py
@@ -192,6 +194,7 @@ in the table, and none is unported.
 | ui_context.{h,cc}: OverlayEntry, overlays_, ShowOverlay, HideOverlay | ultragui::widgets::overlays (`Overlays`) | ported; UIContext holds one, see below |
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} | ported (test_layout_retained.cc ported) |
 | (yoga, third_party/yoga) | ultragui::layout::{flex_style,flex_tree} | replaced: an aki flexbox engine with yoga's results bit for bit for every style layout.cc can write (tests/yoga_fuzz_test.aki; "The layout engine" below) |
+| (FreeType: sfnt, TrueType driver, embedded bitmaps, ftcalc; hb_ft's unhinted queries) | ultragui::font::{fixed,sfnt,outline,face,tt_interp,tt_glyph,sbit,unhinted} | replacing (not wired into text_engine yet): faces, sizes and bytecode-hinted TrueType glyphs bit for bit vs FreeType 2.14.3 (tests/font_tt_test.aki; "The font engine" below); font/raster and font/cff are other modules |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -771,6 +774,105 @@ being too rare to show or hidden by the pixel-grid rounding: the +0.0 border
 adds, a zero-out resetting line indices, and fusing the STEP 7 aspect-ratio
 add (which clang's assembly confirms is not fused). The golden draw-data
 comparison (tools/golden) stays 21/21 `same` on the engine.
+
+### The font engine — `ultragui::font` (faces, TrueType glyphs)
+
+The aki core is to drop FreeType and HarfBuzz for its own font engine and
+shaper with pixel-identical output. This part opens faces, sizes them and
+loads TrueType glyphs the way FreeType 2.14.3 does for libultragui's calls;
+`font/raster` (smooth rasterizer) and `font/cff` (CFF outlines) are written
+beside it, and an integration step swaps them into text_engine.
+
+```aki
+var face = try Face::open(bytes, 0);             // FT_Open_Face(face index 0); bytes: List<u8>
+try face.set_pixel_size(px);                     // FT_Set_Pixel_Sizes(face, 0, px)
+let m = face.size_metrics();                     // face->size->metrics (x/y ppem, scales, ascender, descender, height, max_advance)
+let g = try face.load_glyph(gid);                // FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT)
+// g.format: Outline (g.outline: points 26.6, tags, contours, flags) for the rasterizer,
+// or Bitmap (g.bitmap + bitmap_left/top, as FreeType hands it over); g.metrics, g.advance_x
+let adv = hb_h_advance(face, gid);               // hb_ft's glyph h advance (font::unhinted)
+let ext = hb_extents(face, gid);                 // hb_ft's glyph extents
+let pt = hb_contour_point(face, gid, i);         // hb_ft's contour point
+let fx = ft_advance(face, gid);                  // FT_Get_Advance(FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING)
+let u = try face.load_glyph_unhinted(gid);       // FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING
+```
+
+**Modules.** `fixed` (FT_MulFix/MulDiv/DivFix, the CORDIC FT_Vector_Length,
+FT_Vector_NormLen, TT_MulFix14/DotFix14, 26.6 rounding), `sfnt` (directory,
+collections, table lookup, FontError), `outline` (Vec26, Outline, Bitmap,
+GlyphMetrics, LoadedGlyph), `face` (sfnt_load_face's tables and design
+metrics, tt_face_init's loca/cvt/fpgm/prep/hdmx, the tricky-font checks,
+FT_Request_Size and tt_size_reset, running fpgm and prep), `tt_interp` (the
+bytecode interpreter), `tt_glyph` (glyf/loca simple and composite glyphs,
+phantom points, scaling, TT_Hint_Glyph, compute_glyph_metrics, FT_Load_Glyph's
+tail), `sbit` (EBLC/EBDT strikes and bitmaps), `unhinted` (hb_ft's numbers).
+
+**Which hinter runs.** FT_Load_Glyph with FT_LOAD_DEFAULT (ftobjs.c): a
+TrueType face with any `fpgm` or a `prep` longer than 7 bytes, or a tricky
+face, is hinted by the TrueType driver's bytecode interpreter (v40, minimal
+subpixel hinting with backward compatibility); a TrueType face without
+`fpgm` and with `prep` <= 7 bytes goes to FreeType's **autohinter**
+(`Face::uses_autohinter`); a CFF face to the CFF driver's own (Adobe) hinter.
+In /usr/share/fonts 78 TrueType faces take the autohinter (all Ubuntu, the
+KACST fonts, Malayalam, Lohit Assamese/Bengali, Padauk, Pagul, Samyak,
+fonts-{beng,deva,gujr}-extra, Gargi, Abyssinica, arphic ukai/uming, ...).
+The autohinter is **not implemented**: `load_glyph` fails with
+`UnimplementedFeature` on those faces (strike bitmaps still load). It is
+FreeType's `autofit` module, about 21k lines of C (aflatin 5.1k, afcjk 2.4k,
+afhints 1.8k, afadjust 1.6k, afranges, afblue tables, afglobal, afloader,
+afshaper), and in this build it also runs HarfBuzz: blue-zone characters are
+shaped with hb_shape and glyph coverage per style comes from GSUB closures,
+so matching it means the shaper's GSUB code as well.
+
+**Kept FreeType behaviors** (all observable in the output):
+
+- state across loads, as FreeType's FT_Size keeps it: the font program runs
+  at the first hinted load (at that size), the CVT program again after every
+  size change; the twilight zone keeps what glyph programs leave in it; a
+  failing fpgm or prep makes every hinted load at that size fail;
+- glyph programs write private copies of the CVT and storage area (one per
+  load); `exec->GS` after the last run decides the dropout flags of the next
+  outline, even when that glyph has no instructions;
+- the scan-mode bits FreeType ORs into `tags[0]` of a hinted simple glyph
+  (and into an off-outline slot for composites), and the interpreter's touch
+  bits in the tags;
+- v40 backward compatibility: no x moves, no y moves after both IUPs,
+  SHPIX/DELTAP only on touched points, phantom points not taken from a
+  hinting run, hdmx advances only in native ClearType mode;
+- composite offsets scaled by FT_Hypot (CORDIC) under SCALED_COMPONENT_OFFSET,
+  ROUND_XY_TO_GRID only in y under backward compatibility, point matching on
+  hinted points, USE_MY_METRICS, the overlap flags;
+- GRID_FIT_METRICS: rounded size metrics (ascender ceil, descender floor) and
+  grid-fitted glyph metrics on hinted loads;
+- non-pedantic errors: out-of-range references are ignored or read 0, stack
+  underflow reads zeros, an error ends the program with the points as they
+  are; the 1,000,000-instruction and loopcall/negative-jump limits.
+
+**Verification.** `tests/font_tt_test.aki` builds `tools/ft_oracle.c` (FreeType
+and HarfBuzz from the dev shell), which records for one face, size after
+size, face->size->metrics, FT_Load_Glyph(FT_LOAD_DEFAULT) of every glyph
+(points, tags, contours, outline flags or bitmap bytes, slot metrics,
+advance.x, linear advances) and hb_ft's unhinted answers for every glyph
+(h advance, extents, contour point 0, and FT_Get_Advance). The test replays
+the same calls in the same order and compares every field. Default:
+DejaVuSans, DejaVuSans-Bold, LiberationSans-Regular, NotoSansMono-Regular
+(the corpus has no NotoSans-Regular), sizes 6..48, 64, 96, all glyphs:
+848,520 hinted loads and 848,520 unhinted queries, 0 mismatches (about 50 s).
+`FONT_SWEEP=1` runs every font file under /usr/share/fonts (face 0) at 7 9 11
+12 13 14 16 18 20 24 32 48 72; `FONT_SIZES`, `FONT_SWEEP_FROM` and font
+arguments narrow it. Sweep results: SWEEP_RESULTS. Changing one reproduced
+behavior (rounding by one unit) gives 1,238 mismatches at two sizes of
+DejaVuSans.
+
+**Known gaps.** The autohinter (above). CFF faces: directory, design metrics
+and size metrics only (their glyphs are font/cff's; `load_glyph` fails with
+`CffNotLoaded`; GLYPH_NAMES needs the CFF top dict). Embedded bitmaps in PNG
+(CBDT 17-19: NotoColorEmoji at its only strike, 109 ppem), sbix and 'bhed'
+fonts. Variable fonts are read at their default instance with no blend (hb_ft
+calls FT_Get_MM_Var, which gives FreeType a blend: GETINFO bit 10 and
+GETVARIATION would then answer; only the autohinted Ubuntu faces are variable
+here). FreeType's `.notdef` name check of tt_check_single_notdef reads only
+index 0. WOFF/WOFF2 and Type 1 wrappers are not opened.
 
 ### Paint and the widget tree
 

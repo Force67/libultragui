@@ -22,13 +22,13 @@ import {List} from akikit::containers::list;
 import {GraphicsState, Interp, kRangeCvt, kRangeFont, kRangeGlyph} from ultragui::font::tt_interp;
 import {div_fix, mul_div, mul_fix, pix_ceil, pix_floor, pix_round} from ultragui::font::fixed;
 import {
-  Directory, FontError, fits, i16_at, kTagCbdt, kTagCblc, kTagCff, kTagCff2, kTagColr, kTagCpal, kTagCvt, kTagEblc,
+  Directory, FontError, fits, i16_at, kTagCbdt, kTagCblc, kTagCff, kTagCff2, kTagCvt, kTagEblc,
   kTagFpgm, kTagFvar, kTagGlyf, kTagHdmx, kTagHead, kTagHhea, kTagHmtx, kTagLoca, kTagMaxp, kTagName, kTagOs2, kTagOtto,
-  kTagPost, kTagPrep, kTagSbix, kTagSvg, kTagTrue, kTagVhea, kTagVmtx, kTagBloc, open_directory, u16_at, u32_at,
+  kTagPost, kTagPrep, kTagSbix, kTagTrue, kTagVhea, kTagVmtx, kTagBloc, open_directory, u16_at, u32_at,
 } from ultragui::font::sfnt;
 import {StrikeTable, load_strikes} from ultragui::font::sbit;
 import {LoadedGlyph, Vec26} from ultragui::font::outline;
-import {load_tt} from ultragui::font::tt_glyph;
+import {load_sbit_glyph, load_tt} from ultragui::font::tt_glyph;
 
 // FT_FACE_FLAG_*.
 pub comptime let kFaceFlagScalable: u32 = 0x1;
@@ -238,10 +238,9 @@ fn Face::open(data: List<u8>, index: u32): Face ! FontError {
         face.face_flags = face.face_flags & ~kFaceFlagScalable;
       }
     }
-  } else {
-    // cff_face_init: scalable, horizontal, hinter (+ sfnt); never tricky.
-    face.face_flags = face.face_flags | kFaceFlagScalable | kFaceFlagHorizontal | kFaceFlagHinter;
   }
+  // An OTTO face keeps sfnt_load_face's flags; cff_face_init adds
+  // GLYPH_NAMES when the CFF is not CID-keyed (the CFF loader knows).
   return face;
 }
 
@@ -1263,6 +1262,13 @@ fn Face::load_glyph(var self&, gid: u32): LoadedGlyph ! FontError {
     return fail FontError::CffNotLoaded;
   }
   if (self.uses_autohinter()) {
+    // FT_Load_Glyph tries the strike's bitmap (FT_LOAD_SBITS_ONLY) before
+    // the autohinter.
+    if (self.has_fixed_sizes() && self.size.strike_index != 0xFFFF_FFFF) {
+      if (let b = load_sbit_glyph(self, gid)) {
+        return b;
+      }
+    }
     return fail FontError::UnimplementedFeature;
   }
   return load_tt(self, gid, true);

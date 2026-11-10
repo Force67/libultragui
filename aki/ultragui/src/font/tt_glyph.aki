@@ -16,7 +16,7 @@ module ultragui::font::tt_glyph;
 
 import {List} from akikit::containers::list;
 import {swap} from akikit::algorithm;
-import {Face, kFaceFlagScalable} from ultragui::font::face;
+import {Face, kFaceFlagSbix} from ultragui::font::face;
 import {div_fix, mul_div, mul_fix, pix_ceil, pix_floor, pix_round, vector_length} from ultragui::font::fixed;
 import {
   GlyphFormat, GlyphMetrics, LoadedGlyph, Outline, Vec26, kOutlineHighPrecision, kOutlineIgnoreDropouts,
@@ -24,6 +24,7 @@ import {
 } from ultragui::font::outline;
 import {FontError, fits, i16_at, i8_at, u16_at} from ultragui::font::sfnt;
 import {Zone, kRangeGlyph} from ultragui::font::tt_interp;
+import {load_sbit_image} from ultragui::font::sbit;
 
 // Simple glyph flags.
 comptime let kOnCurvePoint: u8 = 0x01;
@@ -594,7 +595,7 @@ fn process_composite(var face&: Face, var ld&: Loader, start_point: u32, start_c
 }
 
 // load_truetype_glyph.
-fn load_tt_glyph(var face&: Face, var ld&: Loader, gid: u32, recurse_count: u32): () ! FontError {
+fn load_tt_glyph(var face&: Face, var ld&: Loader, gid: u32, recurse_count: u32, header_only: bool): () ! FontError {
   if (recurse_count > 100) {
     return fail FontError::InvalidComposite;
   }
@@ -632,6 +633,9 @@ fn load_tt_glyph(var face&: Face, var ld&: Loader, gid: u32, recurse_count: u32)
     ld.bbox_y_max = 0;
   }
   get_metrics(face, ld, gid);
+  if (header_only) {
+    return;
+  }
   set_pp(ld);
   if (len == 0 || ld.n_contours == 0) {
     ld.scale_pp();
@@ -676,7 +680,7 @@ fn load_tt_glyph(var face&: Face, var ld&: Loader, gid: u32, recurse_count: u32)
     let linear_hadvance = ld.linear;
     let linear_vadvance = ld.vadvance;
     let num_base_points = ld.base_points;
-    try load_tt_glyph(face, ld, sg.index, recurse_count + 1);
+    try load_tt_glyph(face, ld, sg.index, recurse_count + 1, false);
     if ((sg.flags & kUseMyMetrics) == 0) {
       ld.pp1 = pp[0];
       ld.pp2 = pp[1];
@@ -792,7 +796,15 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
   if (!hint && face.is_tricky()) {
     hinted = true;
   }
-  // (Embedded bitmaps come first when the size is a strike: font::sbit.)
+  if (face.size.strike_index != 0xFFFF_FFFF) {
+    if (let b = load_sbit_glyph(face, gid)) {
+      return b;
+    } else (let e) {
+      if (!face.is_scalable()) {
+        return fail e;
+      }
+    }
+  }
   if (face.size.ppem == 0) {
     return fail FontError::InvalidSizeHandle;
   }
@@ -812,7 +824,7 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
       widthp = face.size.widthp;
     }
   }
-  try load_tt_glyph(face, ld, gid, 0);
+  try load_tt_glyph(face, ld, gid, 0, false);
   var g = LoadedGlyph {};
   g.format = GlyphFormat::Outline;
   let np = ld.base_points as usize;
@@ -871,5 +883,50 @@ pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
   g.advance_x = g.metrics.hori_advance;
   g.linear_hori_advance = mul_div(g.linear_hori_advance, face.size.metrics.x_scale, 64);
   g.linear_vert_advance = mul_div(g.linear_vert_advance, face.size.metrics.y_scale, 64);
+  return g;
+}
+
+// TT_Load_Glyph's embedded bitmap branch (load_sbit_image) and the tail of
+// FT_Load_Glyph for a bitmap: the strike's bitmap with its metrics, the
+// linear advances from the glyph's header and hmtx/vmtx when the face is
+// scalable.
+pub fn load_sbit_glyph(var face&: Face, gid: u32): LoadedGlyph ! FontError {
+  if (gid >= face.num_glyphs) {
+    return fail FontError::InvalidArgument;
+  }
+  let (bitmap, m) = try load_sbit_image(face.data.as_slice(), face.strikes, face.size.strike_index, gid, false);
+  var g = LoadedGlyph {};
+  g.format = GlyphFormat::Bitmap;
+  g.metrics.width = m.width as i64 * 64;
+  g.metrics.height = m.height as i64 * 64;
+  g.metrics.hori_bearing_x = m.hori_bearing_x as i64 * 64;
+  g.metrics.hori_bearing_y = m.hori_bearing_y as i64 * 64;
+  g.metrics.hori_advance = m.hori_advance as i64 * 64;
+  g.metrics.vert_bearing_x = m.vert_bearing_x as i64 * 64;
+  g.metrics.vert_bearing_y = m.vert_bearing_y as i64 * 64;
+  g.metrics.vert_advance = m.vert_advance as i64 * 64;
+  g.bitmap_left = m.hori_bearing_x as i32;
+  g.bitmap_top = m.hori_bearing_y as i32;
+  g.bitmap = bitmap;
+  let scalable = face.is_scalable();
+  if (scalable || (face.face_flags & kFaceFlagSbix) != 0) {
+    let xs = face.size.metrics.x_scale;
+    let ys = face.size.metrics.y_scale;
+    var ld = Loader {};
+    let _ = load_tt_glyph(face, ld, gid, 0, true);
+    g.linear_hori_advance = ld.linear;
+    g.linear_vert_advance = ld.vadvance as i64;
+    if (g.metrics.hori_advance == 0 && g.linear_hori_advance != 0) {
+      g.metrics.hori_advance = mul_fix(g.linear_hori_advance, xs);
+    }
+    if (g.metrics.vert_advance == 0 && g.linear_vert_advance != 0) {
+      g.metrics.vert_advance = mul_fix(g.linear_vert_advance, ys);
+    }
+  }
+  g.advance_x = g.metrics.hori_advance;
+  if (scalable) {
+    g.linear_hori_advance = mul_div(g.linear_hori_advance, face.size.metrics.x_scale, 64);
+    g.linear_vert_advance = mul_div(g.linear_vert_advance, face.size.metrics.y_scale, 64);
+  }
   return g;
 }

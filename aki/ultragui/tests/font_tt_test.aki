@@ -26,9 +26,8 @@ module font_tt_test;
 import {List} from akikit::containers::list;
 import {create_directories, is_directory, list_directory} from akikit::filesystem::directory;
 import {delete_file, file_info, read_bytes, real_path} from akikit::filesystem::file_util;
-import {parent} from akikit::filesystem::path;
 import {eprintln, println} from akikit::logging;
-import {Child, Command, exit_code} from akikit::process::child;
+import {Command, exit_code} from akikit::process::child;
 import {arguments} from akikit::process::command_line;
 import {get_environment_variable} from akikit::process::environment_variables;
 import {String, from_str} from akikit::strings::string;
@@ -120,7 +119,8 @@ fn compare_glyph(d&: [u8], var r&: Rd, var face&: Face, var t&: Totals, label: s
     r.pos = r.end;
     return;
   }
-  if (face.uses_autohinter()) {
+  // An autohinted face still loads a strike's bitmaps itself.
+  if (face.uses_autohinter() && (err != 0 || d[r.pos] != 1)) {
     t.skipped_autohint += 1;
     r.pos = r.end;
     return;
@@ -334,7 +334,9 @@ fn replay(d&: [u8], path: str, var t&: Totals): bool {
       var f = opened_face!;
       let _ = check_i64(t, path, "num_glyphs", rd_u32(d, r) as i64, f.num_glyphs as i64);
       let flags = rd_u32(d, r);
-      let _ = check_i64(t, path, "face_flags", (flags & kFaceFlagsComputed) as i64, (f.face_flags & kFaceFlagsComputed) as i64);
+      // GLYPH_NAMES of a CFF face depends on its top dict (font/cff).
+      let mask = f.is_cff() ? kFaceFlagsComputed & ~0x200u32 : kFaceFlagsComputed;
+      let _ = check_i64(t, path, "face_flags", (flags & mask) as i64, (f.face_flags & mask) as i64);
       let _ = check_i64(t, path, "units_per_EM", rd_u32(d, r) as i64, f.units_per_em as i64);
       let _ = check_i64(t, path, "ascender", rd_i32(d, r) as i64, f.ascender as i64);
       let _ = check_i64(t, path, "descender", rd_i32(d, r) as i64, f.descender as i64);
