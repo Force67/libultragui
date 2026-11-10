@@ -21,7 +21,7 @@ import {Outline, Vec26} from ultragui::font::outline;
 import {Hints} from ultragui::font::autofit::hints;
 import {compute_segments, link_segments, compute_edges} from ultragui::font::autofit::features;
 import {LatinMetrics, Width, Blue, kBlueBottom, kBlueTop, kBlueAdjustment, kBlueNeutral, kBlueSubTop} from ultragui::font::autofit::metrics;
-import {blue_edges, hint_edges} from ultragui::font::autofit::latin;
+import {apply_latin, blue_edges, hint_edges} from ultragui::font::autofit::latin;
 import {div_fix, pix_round} from ultragui::font::fixed;
 
 struct Reader {
@@ -69,7 +69,7 @@ fn metrics(upem: i64, gid: u32, xs: i64, ys: i64, px: u32): LatinMetrics {
   var m = LatinMetrics { units_per_em: upem, increase_x_height: gid % 3 == 0 ? 16u32 : 0u32 };
   for (var a& in m.axis) {
     a.widths.push(Width { org: upem / 12 }); a.widths.push(Width { org: upem / 8 });
-    a.standard_width = upem / 12;
+    a.standard_width = upem / 12; a.edge_distance = upem / 100;
   }
   for (let i in 0usize..5) {
     let reference = i == 0 ? 0 : (i == 1 ? upem * 7 / 10 : (i == 2 ? upem / 2 : (i == 3 ? upem / 4 : upem / 2 - 1)));
@@ -122,14 +122,14 @@ fn replay(path: str, record: str, var t&: Totals): bool {
     // The oracle records the adjusted scales, but initialize our metrics
     // from the same FT_Set_Pixel_Sizes design scale to test that adjustment.
     let original = div_fix(px as i64 * 64, h.units_per_em);
-    let m = metrics(h.units_per_em, gid, original, original, px);
+    var m = metrics(h.units_per_em, gid, original, original, px);
     if (!compare_metrics(r, m, path, gid, px, t)) { return false; }
     if (h.x_scale != m.x_scale || h.y_scale != m.y_scale) { return false; }
     if (px != current_size) {
       if (let sized = face.set_pixel_size(px)) {} else (let error) { return false; }
       current_size = px;
     }
-    let loaded = load_tt_design(face, gid) else { eprintln(f"{path} {px}px gid={gid}: design load failed"); return false; };
+    var loaded = load_tt_design(face, gid) else { eprintln(f"{path} {px}px gid={gid}: design load failed"); return false; };
     let g = loaded.metrics;
     let values = [g.width, g.height, g.hori_bearing_x, g.hori_bearing_y, g.hori_advance, g.vert_bearing_x, g.vert_bearing_y, g.vert_advance, loaded.advance_x, loaded.linear_hori_advance, loaded.linear_vert_advance];
     compare(r, values[..], path, gid, px, "design load metrics", 0, t);
@@ -191,6 +191,15 @@ fn replay(path: str, record: str, var t&: Totals): bool {
     for (let i in 0..np) {
       let x = r.num(); let y = r.num(); let tag = r.word() as u8;
       if (o.points[i].x != x || o.points[i].y != y || o.tags[i] != tag) { t.mismatches += 1; }
+    }
+    m.italic = gid % 11 == 0; m.top_to_bottom = gid % 13 == 0;
+    apply_latin(h, m, loaded.outline, gid % 7 == 0);
+    for (let i in 0..np) {
+      let x = r.num(); let y = r.num(); let tag = r.word() as u8;
+      if (loaded.outline.points[i].x != x || loaded.outline.points[i].y != y || loaded.outline.tags[i] != tag) {
+        t.mismatches += 1;
+        eprintln(f"{path} {px}px gid={gid} fitted point {i}: ({loaded.outline.points[i].x},{loaded.outline.points[i].y},{loaded.outline.tags[i]}) vs ({x},{y},{tag})");
+      }
     }
     t.records += 1; t.points += np as u64;
   }

@@ -904,7 +904,8 @@ subpixel hinting with backward compatibility); a TrueType face without
 In /usr/share/fonts 78 TrueType faces take the autohinter (all Ubuntu, the
 KACST fonts, Malayalam, Lohit Assamese/Bengali, Padauk, Pagul, Samyak,
 fonts-{beng,deva,gujr}-extra, Gargi, Abyssinica, arphic ukai/uming, ...).
-The autohinter is **not implemented**: `load_glyph` fails with
+The default-load autohinter is **not implemented** (verified Latin building
+blocks are described under "Automatic hinting" below): `load_glyph` fails with
 `UnimplementedFeature` on those faces (strike bitmaps still load). It is
 FreeType's `autofit` module, about 21k lines of C (aflatin 5.1k, afcjk 2.4k,
 afhints 1.8k, afadjust 1.6k, afranges, afblue tables, afglobal, afloader,
@@ -998,13 +999,21 @@ HarfBuzz. Its default compares five fonts, 13 sizes and every 97th glyph:
 4,212 glyph/size records, 934,856 points, 148,226 segments, 86,155 edges,
 zero field mismatches. It checks design-unit glyph loading, topology,
 every segment and edge field, standard-width quantization, metric scaling,
-blue assignment, normal-target edge fitting and interpolation against
-deliberately perturbed edge positions. The scale/fit checks use **synthetic
+blue assignment, normal-target edge fitting, the combined Latin fitting pass
+against `af_latin_hints_apply` (including non-base, italic and top-to-bottom
+policies), and interpolation against deliberately perturbed edge positions. The scale/fit checks use **synthetic
 style metrics**, not the real per-face global analysis. Uninitialized scratch
 fields on weak points at reload are excluded; all coordinates, flags and final
 tags are checked. `AUTOFIT_STAGES_SWEEP=1` selects all autohinted faces and
 all glyphs; `AUTOFIT_STAGES_SIZE` and `AUTOFIT_STAGES_STRIDE` narrow that
 workload. Traces are memory-mapped to bound resident allocations.
+
+The all-face sampled sweep (every 97th glyph, all 13 sizes) passes on **78
+faces**, **16,848 glyph/size records**, **2,211,092 points**, **329,953
+segments** and **222,448 edges**, with **0 field mismatches**. This includes
+design-unit Aki loading, standard-width initialization and the combined Latin
+pass against the actual FreeType entry point, with synthetic style metrics
+and an empty reverse charmap (thus no afadjust codepoint-specific work).
 
 This is stage verification, **not** default-load or raster equivalence.
 **Remaining:** global style/script coverage and its lifetime; shaping and

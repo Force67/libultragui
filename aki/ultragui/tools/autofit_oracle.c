@@ -15,7 +15,7 @@
 
 /* Feature analysis only consults this flag; actual face coverage and blue
  * metrics are deliberately not represented by this stage oracle. */
-static const AF_ScriptClassRec script = { .top_to_bottom_hinting = 0 };
+static AF_ScriptClassRec script = { .top_to_bottom_hinting = 0 };
 const AF_ScriptClass af_script_classes[] = { &script };
 static const AF_StyleClassRec style = { .script = 0 };
 #include "aflatin.c"
@@ -91,6 +91,7 @@ static void standard_widths(FT_Face face, FT_Outline *outline) {
   af_glyph_hints_done(&h);
 }
 static int record(FT_Face face, unsigned gid, unsigned px) {
+  script.top_to_bottom_hinting=0;
   if(FT_Set_Pixel_Sizes(face,0,px) || FT_Load_Glyph(face,gid,FT_LOAD_NO_SCALE|FT_LOAD_LINEAR_DESIGN)) return 1;
   FT_Outline *o=&face->glyph->outline;
   AF_GlyphHintsRec h;
@@ -174,6 +175,24 @@ static int record(FT_Face face, unsigned gid, unsigned px) {
   }
   af_glyph_hints_save(&h,o);
   for(int i=0;i<o->n_points;i++) { num(o->points[i].x); num(o->points[i].y); word((unsigned char)o->tags[i]); }
+  if(getenv("AUTOFIT_STAGE_WIDTHS")) {
+    if(FT_Load_Glyph(face,gid,FT_LOAD_NO_SCALE|FT_LOAD_LINEAR_DESIGN)) return 1;
+    o=&face->glyph->outline;
+    FT_HashRec reverse;
+    if(ft_hash_num_init(&reverse,face->memory)) return 1;
+    metrics.root.reverse_charmap=&reverse;
+    globals.glyph_styles=calloc((size_t)face->num_glyphs,sizeof(FT_UShort));
+    if(!globals.glyph_styles) return 1;
+    if((gid%7)==0) globals.glyph_styles[gid]=AF_NONBASE;
+    af_latin_hints_init(&h,(AF_StyleMetrics)&metrics);
+    /* Vary style policy independently of the real face's native flags. */
+    h.scaler_flags=(gid%11)==0?AF_SCALER_FLAG_NO_HORIZONTAL:0;
+    script.top_to_bottom_hinting=(gid%13)==0;
+    if(af_latin_hints_apply(gid,&h,o,(AF_StyleMetrics)&metrics)) return 1;
+    for(int i=0;i<o->n_points;i++) { num(o->points[i].x); num(o->points[i].y); word((unsigned char)o->tags[i]); }
+    free(globals.glyph_styles);
+    ft_hash_num_free(&reverse,face->memory);
+  }
   af_glyph_hints_done(&h);
   return 0;
 }

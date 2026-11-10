@@ -16,5 +16,6 @@ clang -std=c11 -O2 -ffunction-sections -fdata-sections -DFT2_BUILD_LIBRARY \
   -I"$src/include" -I"$src/src/autofit" $(pkg-config --cflags harfbuzz freetype2) \
   "$pkg/tools/autofit_oracle.c" "$src/src/autofit/afhints.c" \
   "$src/src/base/ftcalc.c" "$src/src/base/ftutil.c" \
+  "$src/src/base/fthash.c" "$src/src/autofit/afadjust.c" \
   -Wl,--gc-sections $(pkg-config --libs freetype2 harfbuzz) -o "$oracle_tmp"
 mv "$oracle_tmp" "$build/autofit_oracle"
