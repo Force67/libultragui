@@ -1,0 +1,502 @@
+// Positioning without GPOS: the legacy `kern` table HarfBuzz applies itself
+// (hb-ot-kern-table.hh with hb-kern.hh's kern machine), the fallback mark
+// positioning and space widths of hb-ot-shape-fallback.cc.
+//
+// The kern table is read in its OpenType form (version 0) with format 0
+// subtables, the only ones in the corpus; format 1 (state machine), 2 and 3
+// subtables and Apple's version-1 table are skipped. hb_ft's own fallback
+// kerning (FT_Get_Kerning when the font has no kern table HarfBuzz uses)
+// always gives 0 and is not run.
+
+module ultragui::shape::fallback;
+
+import {Buffer, GlyphInfo} from ultragui::shape::buffer;
+import {GlyphExtents, ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {ShapeFace} from ultragui::shape::face;
+import {ApplyCtx, Scale, is_default_ignorable, is_hidden, is_ligated, iter_next, lig_comp, lig_id, lig_num_comps, new_ctx, set_lookup_mask, set_lookup_props} from ultragui::shape::layout;
+import {rd16, rds16} from ultragui::shape::otl;
+import {ShapePlan} from ultragui::shape::plan;
+import {
+  dir_is_backward, dir_is_forward, dir_is_horizontal, gc_is_mark, kDirInvalid, kDirLtr, kDirRtl, kGcNonSpacingMark, kGcSpaceSeparator,
+  kSpace4Em18, kSpaceEm, kSpaceEm16, kSpaceEm2, kSpaceEm3, kSpaceEm4, kSpaceEm5, kSpaceEm6, kSpaceFigure, kSpaceNarrow,
+  kSpacePunctuation, script_horizontal_direction,
+} from ultragui::shape::ucd;
+
+// --- kern ------------------------------------------------------------------------------------
+
+// kern::has_data: the 32-bit version (OpenType: version 0 and the table count).
+pub fn kern_has_data(t: &[u8]): bool => #t >= 4 && ((rd16(t, 0) << 16) | rd16(t, 2)) != 0;
+
+fn kern_subtable_count(t: &[u8]): u32 => rd16(t, 0) == 0 ? rd16(t, 2) : 0;
+
+pub fn kern_has_state_machine(t: &[u8]): bool {
+  var p = 4usize;
+  for (let i in 0..kern_subtable_count(t)) {
+    if (t.len() < p + 6) {
+      break;
+    }
+    if ((rd16(t, p + 4) >> 8) == 1) {
+      return true;
+    }
+    p += rd16(t, p + 2) as usize;
+  }
+  return false;
+}
+
+pub fn kern_has_cross_stream(t: &[u8]): bool {
+  var p = 4usize;
+  for (let i in 0..kern_subtable_count(t)) {
+    if (t.len() < p + 6) {
+      break;
+    }
+    if ((rd16(t, p + 4) & 0x04) != 0) {
+      return true;
+    }
+    p += rd16(t, p + 2) as usize;
+  }
+  return false;
+}
+
+// KerxSubTableFormat0::get_kerning: the pair's value (0 when absent).
+fn format0_kerning(t: &[u8], s: usize, left: u32, right: u32): i32 {
+  let n = rd16(t, s + 6) as i64;
+  var lo: i64 = 0;
+  var hi: i64 = n - 1;
+  let key = (left << 16) | right;
+  while (lo <= hi) {
+    let mid = (lo + hi) / 2;
+    let r = s + 14 + mid as usize * 6;
+    let k = (rd16(t, r) << 16) | rd16(t, r + 2);
+    if (key < k) {
+      hi = mid - 1;
+    } else if (key > k) {
+      lo = mid + 1;
+    } else {
+      return rds16(t, r + 4);
+    }
+  }
+  return 0;
+}
+
+// hb_kern_machine_t::kern over one format 0 subtable.
+fn kern_machine(var c&: ApplyCtx, var buf&: Buffer, t: &[u8], s: usize, kern_mask: u32, cross_stream: bool) {
+  let horizontal = dir_is_horizontal(buf.direction);
+  let count = buf.len();
+  var idx = 0usize;
+  while (idx < count) {
+    if ((buf.info[idx].mask & kern_mask) == 0) {
+      idx += 1;
+      continue;
+    }
+    var it = c.iter_input;
+    it.idx = idx;
+    if (!iter_next(c, it, buf)) {
+      c.iter_input = it;
+      idx += 1;
+      continue;
+    }
+    c.iter_input = it;
+    let i = idx;
+    let j = it.idx;
+    var kern = format0_kerning(t, s, buf.info[i].codepoint, buf.info[j].codepoint);
+    if (kern != 0) {
+      if (horizontal) {
+        kern = c.scale.em_x(kern);
+        if (cross_stream) {
+          buf.pos[j].y_offset = kern;
+          buf.scratch_flags |= 0x4;
+        } else {
+          let kern1 = kern >> 1;
+          let kern2 = kern - kern1;
+          buf.pos[i].x_advance += kern1;
+          buf.pos[j].x_advance += kern2;
+          buf.pos[j].x_offset += kern2;
+        }
+      } else {
+        kern = c.scale.em_y(kern);
+        if (cross_stream) {
+          buf.pos[j].x_offset = kern;
+          buf.scratch_flags |= 0x4;
+        } else {
+          let kern1 = kern >> 1;
+          let kern2 = kern - kern1;
+          buf.pos[i].y_advance += kern1;
+          buf.pos[j].y_advance += kern2;
+          buf.pos[j].y_offset += kern2;
+        }
+      }
+    }
+    idx = j;
+  }
+}
+
+// hb_ot_layout_kern: KerxTable::apply over the OpenType kern table.
+pub fn apply_kern(plan&: ShapePlan, face&: ShapeFace, scale: Scale, var buf&: Buffer) {
+  let t = face.kern_t();
+  if (rd16(t, 0) != 0) {
+    return;
+  }
+  var reversed = false;
+  var seen_cross_stream = false;
+  var p = 4usize;
+  for (let i in 0..kern_subtable_count(t)) {
+    if (t.len() < p + 6) {
+      break;
+    }
+    let s = p;
+    let length = rd16(t, s + 2) as usize;
+    let format = rd16(t, s + 4) >> 8;
+    let coverage = rd16(t, s + 4) & 0xFF;
+    p += length;
+    if (dir_is_horizontal(buf.direction) != ((coverage & 0x01) != 0)) {
+      continue;
+    }
+    if (format != 0) {
+      continue;
+    }
+    if (!seen_cross_stream && (coverage & 0x04) != 0) {
+      seen_cross_stream = true;
+      for (var q& in buf.pos) {
+        q.attach_type = 2;
+        q.attach_chain = dir_is_forward(buf.direction) ? -1 : 1;
+      }
+    }
+    let reverse = dir_is_backward(buf.direction);
+    if (reverse != reversed) {
+      buf.reverse();
+      reversed = reverse;
+    }
+    if (!plan.requested_kerning) {
+      continue;
+    }
+    var c = new_ctx(face.gpos_t(), face.gdef_t(), face.gdef, face.gpos, 1, scale, buf);
+    set_lookup_mask(c, plan.kern_mask);
+    set_lookup_props(c, buf, 0x8);  // IgnoreMarks
+    kern_machine(c, buf, t, s, plan.kern_mask, (coverage & 0x04) != 0);
+  }
+  if (reversed) {
+    buf.reverse();
+  }
+}
+
+// --- Fallback mark positioning ------------------------------------------------------------
+
+// hb_unicode_combining_class_t values used here.
+comptime let kCccAttachedBelowLeft: u32 = 200;
+comptime let kCccAttachedBelow: u32 = 202;
+comptime let kCccAttachedAbove: u32 = 214;
+comptime let kCccAttachedAboveRight: u32 = 216;
+comptime let kCccBelowLeft: u32 = 218;
+comptime let kCccBelow: u32 = 220;
+comptime let kCccBelowRight: u32 = 222;
+comptime let kCccLeft: u32 = 224;
+comptime let kCccRight: u32 = 226;
+comptime let kCccAboveLeft: u32 = 228;
+comptime let kCccAbove: u32 = 230;
+comptime let kCccAboveRight: u32 = 232;
+comptime let kCccDoubleBelow: u32 = 233;
+comptime let kCccDoubleAbove: u32 = 234;
+
+// recategorize_combining_class
+fn recategorize_combining_class(u: u32, klass_: u32): u32 {
+  var klass = klass_;
+  if (klass >= 200) {
+    return klass;
+  }
+  if ((u & ~0xFFu32) == 0x0E00) {
+    if (klass == 0) {
+      match (u) {
+        0x0E31 | 0x0E34 | 0x0E35 | 0x0E36 | 0x0E37 | 0x0E47 | 0x0E4C | 0x0E4D | 0x0E4E => { klass = kCccAboveRight; },
+        0x0EB1 | 0x0EB4 | 0x0EB5 | 0x0EB6 | 0x0EB7 | 0x0EBB | 0x0ECC | 0x0ECD => { klass = kCccAbove; },
+        0x0EBC => { klass = kCccBelow; },
+        _ => {},
+      }
+    } else if (u == 0x0E3A) {
+      klass = kCccBelowRight;
+    }
+  }
+  return match (klass) {
+    10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 20 | 22 => kCccBelow,
+    23 => kCccAttachedAbove,
+    24 => kCccAboveRight,
+    25 | 19 => kCccAboveLeft,
+    26 => kCccAbove,
+    21 => klass,
+    27 | 28 | 30 | 31 | 33 | 34 | 35 | 36 => kCccAbove,
+    29 | 32 => kCccBelow,
+    103 => kCccBelowRight,
+    107 => kCccAboveRight,
+    118 => kCccBelow,
+    122 => kCccAbove,
+    129 => kCccBelow,
+    130 => kCccAbove,
+    132 => kCccBelow,
+    _ => klass,
+  };
+}
+
+fn is_unicode_mark(g&: GlyphInfo): bool => gc_is_mark(g.unicode_props & 0x1F);
+fn mcc(g&: GlyphInfo): u32 => is_unicode_mark(g) ? g.unicode_props >> 8 : 0;
+
+// _hb_ot_shape_fallback_mark_position_recategorize_marks
+pub fn recategorize_marks(var buf&: Buffer) {
+  for (var g& in buf.info) {
+    if ((g.unicode_props & 0x1F) == kGcNonSpacingMark) {
+      let klass = recategorize_combining_class(g.codepoint, g.unicode_props >> 8);
+      g.unicode_props = (klass << 8) | (g.unicode_props & 0xFF);
+    }
+  }
+}
+
+fn zero_mark_advances(var buf&: Buffer, start: usize, end: usize, adjust: bool) {
+  for (let i in start..end) {
+    if ((buf.info[i].unicode_props & 0x1F) == kGcNonSpacingMark) {
+      if (adjust) {
+        buf.pos[i].x_offset -= buf.pos[i].x_advance;
+        buf.pos[i].y_offset -= buf.pos[i].y_advance;
+      }
+      buf.pos[i].x_advance = 0;
+      buf.pos[i].y_advance = 0;
+    }
+  }
+}
+
+// position_mark
+fn position_mark<F: ShapeFontFuncs>(var funcs&: F, y_scale: i32, var buf&: Buffer, var base&: GlyphExtents, i: usize, combining_class: u32) {
+  let mark = funcs.glyph_extents(buf.info[i].codepoint) else {
+    return;
+  };
+  let y_gap = y_scale / 16;
+  buf.pos[i].x_offset = 0;
+  buf.pos[i].y_offset = 0;
+  var x = 0i32;
+  let dir = buf.direction;
+  var handled = false;
+  if (combining_class == kCccDoubleBelow || combining_class == kCccDoubleAbove) {
+    if (dir == kDirLtr) {
+      x += base.x_bearing + base.width - mark.width / 2 - mark.x_bearing;
+      handled = true;
+    } else if (dir == kDirRtl) {
+      x += base.x_bearing - mark.width / 2 - mark.x_bearing;
+      handled = true;
+    }
+  }
+  if (!handled) {
+    match (combining_class) {
+      kCccAttachedBelowLeft | kCccBelowLeft | kCccAboveLeft => {
+        x += base.x_bearing - mark.x_bearing;
+      },
+      kCccAttachedAboveRight | kCccBelowRight | kCccAboveRight => {
+        x += base.x_bearing + base.width - mark.width - mark.x_bearing;
+      },
+      _ => {
+        x += base.x_bearing + (base.width - mark.width) / 2 - mark.x_bearing;
+      },
+    }
+  }
+  buf.pos[i].x_offset += x;
+
+  var y = 0i32;
+  match (combining_class) {
+    kCccDoubleBelow | kCccBelowLeft | kCccBelow | kCccBelowRight | kCccAttachedBelowLeft | kCccAttachedBelow => {
+      if (combining_class != kCccAttachedBelowLeft && combining_class != kCccAttachedBelow) {
+        base.height -= y_gap;
+      }
+      y = base.y_bearing + base.height - mark.y_bearing;
+      if ((y_gap > 0) == (y > 0)) {
+        base.height -= y;
+        y = 0;
+      }
+      base.height += mark.height;
+      buf.pos[i].y_offset = y;
+    },
+    kCccDoubleAbove | kCccAboveLeft | kCccAbove | kCccAboveRight | kCccAttachedAbove | kCccAttachedAboveRight => {
+      if (combining_class != kCccAttachedAbove && combining_class != kCccAttachedAboveRight) {
+        base.y_bearing += y_gap;
+        base.height -= y_gap;
+      }
+      y = base.y_bearing - (mark.y_bearing + mark.height);
+      if ((y_gap > 0) != (y > 0)) {
+        let correction = -y / 2;
+        base.y_bearing += correction;
+        base.height -= correction;
+        y += correction;
+      }
+      base.y_bearing -= mark.height;
+      base.height += mark.height;
+      buf.pos[i].y_offset = y;
+    },
+    _ => {},
+  }
+}
+
+// position_around_base
+fn position_around_base<F: ShapeFontFuncs>(plan&: ShapePlan, var funcs&: F, y_scale: i32, var buf&: Buffer, base: usize, end: usize, adjust: bool) {
+  var horiz_dir = kDirInvalid;
+  var base_extents = funcs.glyph_extents(buf.info[base].codepoint) else {
+    zero_mark_advances(buf, base + 1, end, adjust);
+    return;
+  };
+  base_extents.y_bearing += buf.pos[base].y_offset;
+  base_extents.x_bearing = 0;
+  base_extents.width = funcs.h_advance(buf.info[base].codepoint);
+
+  let lid = lig_id(buf.info[base]);
+  let num_lig_components = lig_num_comps(buf.info[base]) as i32;
+  var x_offset = 0i32;
+  var y_offset = 0i32;
+  if (dir_is_forward(buf.direction)) {
+    x_offset -= buf.pos[base].x_advance;
+    y_offset -= buf.pos[base].y_advance;
+  }
+  var component_extents = base_extents;
+  var last_lig_component = -1i32;
+  var last_combining_class = 255u32;
+  var cluster_extents = base_extents;
+  for (let i in base + 1..end) {
+    if (mcc(buf.info[i]) != 0) {
+      if (num_lig_components > 1) {
+        let this_lig_id = lig_id(buf.info[i]);
+        var this_lig_component = lig_comp(buf.info[i]) as i32 - 1;
+        if (lid == 0 || lid != this_lig_id || this_lig_component >= num_lig_components) {
+          this_lig_component = num_lig_components - 1;
+        }
+        if (last_lig_component != this_lig_component) {
+          last_lig_component = this_lig_component;
+          last_combining_class = 255;
+          component_extents = base_extents;
+          if (horiz_dir == kDirInvalid) {
+            if (dir_is_horizontal(plan.direction)) {
+              horiz_dir = plan.direction;
+            } else {
+              horiz_dir = script_horizontal_direction(plan.script);
+            }
+          }
+          if (horiz_dir == kDirLtr) {
+            component_extents.x_bearing += (this_lig_component * component_extents.width) / num_lig_components;
+          } else {
+            component_extents.x_bearing += ((num_lig_components - 1 - this_lig_component) * component_extents.width) / num_lig_components;
+          }
+          component_extents.width /= num_lig_components;
+        }
+      }
+      let this_combining_class = mcc(buf.info[i]);
+      if (last_combining_class != this_combining_class) {
+        last_combining_class = this_combining_class;
+        cluster_extents = component_extents;
+      }
+      position_mark(funcs, y_scale, buf, cluster_extents, i, this_combining_class);
+      buf.pos[i].x_advance = 0;
+      buf.pos[i].y_advance = 0;
+      buf.pos[i].x_offset += x_offset;
+      buf.pos[i].y_offset += y_offset;
+    } else {
+      if (dir_is_forward(buf.direction)) {
+        x_offset -= buf.pos[i].x_advance;
+        y_offset -= buf.pos[i].y_advance;
+      } else {
+        x_offset += buf.pos[i].x_advance;
+        y_offset += buf.pos[i].y_advance;
+      }
+    }
+  }
+}
+
+fn position_cluster<F: ShapeFontFuncs>(plan&: ShapePlan, var funcs&: F, y_scale: i32, var buf&: Buffer, start: usize, end: usize, adjust: bool) {
+  if (end - start < 2) {
+    return;
+  }
+  var i = start;
+  while (i < end) {
+    if (!is_unicode_mark(buf.info[i])) {
+      var j = i + 1;
+      while (j < end) {
+        if (is_hidden(buf.info[j]) || is_default_ignorable(buf.info[j])) {
+          j += 1;
+          continue;
+        }
+        if (!is_unicode_mark(buf.info[j])) {
+          break;
+        }
+        j += 1;
+      }
+      position_around_base(plan, funcs, y_scale, buf, i, j, adjust);
+      i = j - 1;
+    }
+    i += 1;
+  }
+}
+
+// _hb_ot_shape_fallback_mark_position
+pub fn fallback_mark_position<F: ShapeFontFuncs>(plan&: ShapePlan, var funcs&: F, y_scale: i32, var buf&: Buffer, adjust: bool) {
+  var start = 0usize;
+  let count = buf.len();
+  for (let i in 1..count) {
+    let g = buf.info[i];
+    if (!is_unicode_mark(g) && !is_hidden(g) && !is_default_ignorable(g)) {
+      position_cluster(plan, funcs, y_scale, buf, start, i, adjust);
+      start = i;
+    }
+  }
+  position_cluster(plan, funcs, y_scale, buf, start, count, adjust);
+}
+
+// --- Fallback spaces --------------------------------------------------------------------------
+
+// _hb_ot_shape_fallback_spaces
+pub fn fallback_spaces<F: ShapeFontFuncs>(face&: ShapeFace, var funcs&: F, x_scale: i32, y_scale: i32, var buf&: Buffer) {
+  let horizontal = dir_is_horizontal(buf.direction);
+  for (let i in 0..buf.len()) {
+    let g = buf.info[i];
+    if ((g.unicode_props & 0x1F) != kGcSpaceSeparator || is_ligated(g)) {
+      continue;
+    }
+    let space_type = g.unicode_props >> 8;
+    match (space_type) {
+      kSpaceEm | kSpaceEm2 | kSpaceEm3 | kSpaceEm4 | kSpaceEm5 | kSpaceEm6 | kSpaceEm16 => {
+        let st = space_type as i32;
+        if (horizontal) {
+          buf.pos[i].x_advance = (x_scale + st / 2) / st;
+        } else {
+          buf.pos[i].y_advance = -((y_scale + st / 2) / st);
+        }
+      },
+      kSpace4Em18 => {
+        if (horizontal) {
+          buf.pos[i].x_advance = (x_scale as i64 * 4 / 18) as i32;
+        } else {
+          buf.pos[i].y_advance = (-(y_scale as i64) * 4 / 18) as i32;
+        }
+      },
+      kSpaceFigure => {
+        for (let u in 0x30u32..0x3A) {
+          if (let glyph = face.nominal_glyph(u)) {
+            if (horizontal) {
+              buf.pos[i].x_advance = funcs.h_advance(glyph);
+            }
+            break;
+          }
+        }
+      },
+      kSpacePunctuation => {
+        var glyph = face.nominal_glyph(0x2E);
+        if (glyph == none) {
+          glyph = face.nominal_glyph(0x2C);
+        }
+        if (let gl = glyph) {
+          if (horizontal) {
+            buf.pos[i].x_advance = funcs.h_advance(gl);
+          }
+        }
+      },
+      kSpaceNarrow => {
+        if (horizontal) {
+          buf.pos[i].x_advance /= 2;
+        } else {
+          buf.pos[i].y_advance /= 2;
+        }
+      },
+      _ => {},
+    }
+  }
+}

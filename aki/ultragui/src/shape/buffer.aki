@@ -71,9 +71,10 @@ pub struct Buffer {
   pub var random_state: u32 = 1
   pub var max_len: i64 = 0
   pub var max_ops: i64 = 0
-  // HB_BUFFER_FLAG_BOT / EOT: add_utf8 of the whole text sets both.
-  pub var bot: bool = true
-  pub var eot: bool = true
+  // HB_BUFFER_FLAG_BOT / EOT: the C++ library leaves the buffer flags at
+  // their default (none set).
+  pub var bot: bool = false
+  pub var eot: bool = false
   pub var not_found_variation_selector_set: bool = false
 
   pub fn Buffer(): Buffer => Buffer {};

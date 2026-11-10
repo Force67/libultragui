@@ -1,0 +1,102 @@
+// The shaper's font functions for the tests, from the real FreeType (FFI,
+// test-only): what hb_ft hands HarfBuzz (hb-ft.cc), so tests/shape_test.aki
+// compares the shaping logic alone. The font engine provides the same
+// numbers at integration.
+
+module support::shape_ft;
+
+import {GlyphExtents, ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {CLong} from ultragui::sys::c_long;
+import {
+  FtFace, FtLibrary, ft_done_face, ft_init_freetype, ft_load_glyph, ft_set_pixel_sizes,
+} from ultragui::sys::freetype;
+import {with_nul} from akikit::strings::string;
+
+extern("FT_New_Face") fn ft_new_face(library: FtLibrary, path: *const c_char, index: CLong, face: *var FtFace): i32;
+extern("FT_Get_Advance") fn ft_get_advance(face: FtFace, gindex: u32, load_flags: i32, advance: *var CLong): i32;
+
+// FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING: hb_ft's load flags.
+comptime let kLoadFlags: i32 = 2;
+
+pub struct FtFont : ShapeFontFuncs {
+  pub unowned var library: FtLibrary = null
+  pub unowned var face: FtFace = null
+  pub var x_scale: i32 = 0
+  pub var y_scale: i32 = 0
+  pub var num_glyphs: u32 = 0
+
+  pub fn h_advance(var self&, glyph: u32): i32;
+  pub fn glyph_extents(var self&, glyph: u32): GlyphExtents?;
+  fn ~FtFont();
+}
+
+// FT_New_Face on the path, face 0.
+pub fn open_ft_font(path: str): FtFont? {
+  var f = FtFont {};
+  var lib: FtLibrary = null;
+  if (unsafe ft_init_freetype(&raw var lib) != 0) {
+    return none;
+  }
+  f.library = lib;
+  let p = with_nul(path);
+  var face: FtFace = null;
+  if (unsafe ft_new_face(lib, @ptr(p.as_str()) as *const c_char, 0 as CLong, &raw var face) != 0) {
+    return none;
+  }
+  f.face = face;
+  f.num_glyphs = unsafe (*face).num_glyphs as u32;
+  return f;
+}
+
+// FT_Set_Pixel_Sizes (face, 0, px) and hb_ft_font_changed's scale.
+pub fn set_pixel_size(var f&: FtFont, px: u32) {
+  unsafe {
+    let _ = ft_set_pixel_sizes(f.face, 0, px);
+    let m = (*(*f.face).size).metrics;
+    let upem = (*f.face).units_per_em as u64;
+    f.x_scale = ((m.x_scale as u64 * upem + 0x8000) >> 16) as i32;
+    f.y_scale = ((m.y_scale as u64 * upem + 0x8000) >> 16) as i32;
+  }
+}
+
+// hb_ft_get_glyph_h_advances: (int) (abs (v) * 1.f + (1 << 9)) >> 10, in float.
+fn FtFont::h_advance(var self&, glyph: u32): i32 {
+  var v: CLong = 0 as CLong;
+  unsafe {
+    let _ = ft_get_advance(self.face, glyph, kLoadFlags, &raw var v);
+  }
+  var a = v as i64;
+  if (a < 0) {
+    a = -a;
+  }
+  let f = a as f32 * 1.0f32 + 512.0f32;
+  return (f as i32) >> 10;
+}
+
+// hb_ft_get_glyph_extents
+fn FtFont::glyph_extents(var self&, glyph: u32): GlyphExtents? {
+  if (unsafe ft_load_glyph(self.face, glyph, kLoadFlags) != 0) {
+    return none;
+  }
+  let m = unsafe (*(*self.face).glyph).metrics;
+  let x1 = m.hori_bearing_x as f32;
+  let y1 = m.hori_bearing_y as f32;
+  let w = m.width as f32;
+  let h = m.height as f32;
+  let x2 = x1 + w;
+  let y2 = y1 + -h;
+  let xb = roundf(x1);
+  let yb = roundf(y1);
+  return GlyphExtents { x_bearing: xb, y_bearing: yb, width: roundf(x2) - xb, height: roundf(y2) - yb };
+}
+
+// HarfBuzz's roundf (hb-algs.hh): floorf (x + .5f), in float.
+fn roundf(x: f32): i32 => @floor(x + 0.5f32) as i32;
+
+fn FtFont::~FtFont() {
+  unsafe {
+    if (self.face != null) {
+      let _ = ft_done_face(self.face);
+    }
+  }
+}

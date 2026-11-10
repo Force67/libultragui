@@ -161,6 +161,17 @@ pub static let kScriptOtTags: [u32; 528] = [
   2053205602, 0, 0, 2053729896, 0, 0,
   2054781305, 0, 0, 2054847098, 0, 0,
 ];
+// hb_ot_shaper_categorize for a GSUB script tag of the script's own: 0 default,
+// 1 Arabic, 2 Thai, 3 Hangul, 4 Hebrew, 5 Indic, 6 Khmer, 7 Myanmar, 8 USE,
+// 9 Myanmar Zawgyi.
+pub static let kScriptShapers: [u8; 176] = [
+  0, 8, 0, 8, 1, 0, 0, 0, 8, 0, 0, 8, 5, 8, 8, 0, 8, 0, 8, 8, 8, 0, 0, 8, 0, 8, 0, 8, 0, 0, 5, 8,
+  8, 0, 8, 8, 0, 8, 0, 8, 0, 0, 8, 8, 0, 8, 0, 5, 8, 5, 3, 0, 8, 0, 4, 0, 0, 8, 8, 0, 0, 8, 8, 0,
+  8, 8, 6, 8, 8, 5, 8, 8, 8, 2, 0, 8, 8, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 0, 0, 0, 5, 8, 8, 0, 8,
+  8, 7, 8, 8, 0, 0, 8, 8, 0, 0, 0, 8, 0, 5, 0, 0, 8, 0, 0, 0, 8, 0, 8, 0, 8, 0, 8, 8, 0, 0, 0, 8,
+  0, 0, 8, 8, 8, 8, 8, 8, 8, 0, 8, 8, 8, 8, 1, 8, 8, 8, 0, 5, 0, 8, 8, 5, 8, 8, 0, 2, 8, 8, 8, 8,
+  8, 8, 8, 0, 0, 8, 0, 8, 0, 0, 8, 0, 8, 0, 0, 0,
+];
 
 // _hb_modified_combining_class
 pub static let kModifiedCombiningClass: [u8; 256] = [

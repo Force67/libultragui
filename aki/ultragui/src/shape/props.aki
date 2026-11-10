@@ -1,0 +1,73 @@
+// The per-character properties HarfBuzz packs into unicode_props
+// (hb-ot-layout.hh: _hb_glyph_info_set_unicode_props): the general category,
+// default ignorable, hidden, continuation, ZWJ/ZWNJ/variation selector bits,
+// and the modified combining class of marks in the top byte.
+
+module ultragui::shape::props;
+
+import {Buffer, GlyphInfo, kScratchHasCgj, kScratchHasContinuations, kScratchHasDefaultIgnorables} from ultragui::shape::buffer;
+import {gc_is_mark, general_category, is_default_ignorable, modified_combining_class} from ultragui::shape::ucd;
+
+// hb_unicode_props_flags_t
+pub comptime let kUpropsGenCat: u32 = 0x001F;
+pub comptime let kUpropsIgnorable: u32 = 0x0020;
+pub comptime let kUpropsHidden: u32 = 0x0040;
+pub comptime let kUpropsContinuation: u32 = 0x0080;
+pub comptime let kUpropsZwj: u32 = 0x0100;
+pub comptime let kUpropsZwnj: u32 = 0x0200;
+pub comptime let kUpropsVs: u32 = 0x0400;
+
+pub fn set_unicode_props(var g&: GlyphInfo, var buf&: Buffer) {
+  let u = g.codepoint;
+  let gen_cat = general_category(u);
+  var props = gen_cat;
+  if (u >= 0x80) {
+    if (is_default_ignorable(u)) {
+      buf.scratch_flags |= kScratchHasDefaultIgnorables;
+      props |= kUpropsIgnorable;
+      if (u == 0x200C) {
+        props |= kUpropsZwnj;
+      } else if (u == 0x200D) {
+        props |= kUpropsZwj;
+      } else if ((u >= 0x180B && u <= 0x180D) || u == 0x180F) {
+        props |= kUpropsHidden;
+      } else if (u >= 0xE0020 && u <= 0xE007F) {
+        props |= kUpropsHidden;
+      } else if (u == 0x034F) {
+        buf.scratch_flags |= kScratchHasCgj;
+        props |= kUpropsHidden;
+      }
+    }
+    if (gc_is_mark(gen_cat)) {
+      buf.scratch_flags |= kScratchHasContinuations;
+      props |= kUpropsContinuation;
+      props |= modified_combining_class(u) << 8;
+    }
+  }
+  g.unicode_props = props;
+}
+
+pub fn set_continuation(var g&: GlyphInfo, var buf&: Buffer) {
+  buf.scratch_flags |= kScratchHasContinuations;
+  g.unicode_props |= kUpropsContinuation;
+}
+
+pub fn gc_of(g&: GlyphInfo): u32 => g.unicode_props & kUpropsGenCat;
+
+// _hb_glyph_info_set_general_category: clears the top byte.
+pub fn set_gc(var g&: GlyphInfo, gc: u32) {
+  g.unicode_props = gc | (g.unicode_props & (0xFF & ~kUpropsGenCat));
+}
+
+pub fn is_unicode_mark(g&: GlyphInfo): bool => gc_is_mark(g.unicode_props & kUpropsGenCat);
+
+// _hb_glyph_info_get_modified_combining_class
+pub fn info_cc(g&: GlyphInfo): u32 => is_unicode_mark(g) ? g.unicode_props >> 8 : 0;
+
+// _hb_glyph_info_set_modified_combining_class
+pub fn set_info_cc(var g&: GlyphInfo, klass: u32) {
+  if (!is_unicode_mark(g)) {
+    return;
+  }
+  g.unicode_props = (klass << 8) | (g.unicode_props & 0xFF);
+}

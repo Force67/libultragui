@@ -1,0 +1,211 @@
+// A shape plan: HarfBuzz's hb_ot_shape_plan_t and its planner
+// (hb-ot-shape.cc: hb_ot_shape_planner_t, hb_ot_shape_collect_features,
+// compile), the shaper choice (hb_ot_shaper_categorize) and each shaper's
+// fixed properties (hb_ot_shaper_t's normalization preference, mark zeroing,
+// fallback positioning, GPOS tag). Shapers add features and pauses through
+// ultragui::shape::shapers.
+//
+// Plans are cached per face by (script, direction); the C++ library shapes
+// with no user features and the language of the C locale, so those are not
+// part of the key.
+
+module ultragui::shape::plan;
+
+import {ShapeFace} from ultragui::shape::face;
+import {kern_has_cross_stream, kern_has_data, kern_has_state_machine} from ultragui::shape::fallback;
+import {
+  MapTable, OtMap, compile, kFGlobal, kFGlobalHasFallback, kFGlobalManualJoiners, kFGlobalSearch, kFRandom, kMapMaxValue,
+  map_builder,
+} from ultragui::shape::map;
+import {gdef_has_glyph_classes, has_data} from ultragui::shape::otl;
+import {ShaperData, collect_features, override_features, plan_data} from ultragui::shape::shapers;
+import {dir_is_horizontal, kDirLtr, kDirRtl, ot_script_tags, tag} from ultragui::shape::ucd;
+import {kScriptShapers, kScriptTags} from ultragui::shape::ucd_tables;
+
+// The shapers (hb_ot_shaper_t instances).
+pub comptime let kShaperDefault: u32 = 0;
+pub comptime let kShaperArabic: u32 = 1;
+pub comptime let kShaperThai: u32 = 2;
+pub comptime let kShaperHangul: u32 = 3;
+pub comptime let kShaperHebrew: u32 = 4;
+pub comptime let kShaperIndic: u32 = 5;
+pub comptime let kShaperKhmer: u32 = 6;
+pub comptime let kShaperMyanmar: u32 = 7;
+pub comptime let kShaperUse: u32 = 8;
+pub comptime let kShaperMyanmarZawgyi: u32 = 9;
+pub comptime let kShaperDumber: u32 = 10;
+
+// hb_ot_shape_normalization_mode_t
+pub comptime let kNormNone: u32 = 0;
+pub comptime let kNormDecomposed: u32 = 1;
+pub comptime let kNormComposedDiacritics: u32 = 2;
+pub comptime let kNormComposedDiacriticsNoShortCircuit: u32 = 3;
+pub comptime let kNormAuto: u32 = 4;
+
+// hb_ot_shape_zero_width_marks_type_t
+pub comptime let kZeroNone: u32 = 0;
+pub comptime let kZeroByGdefEarly: u32 = 1;
+pub comptime let kZeroByGdefLate: u32 = 2;
+
+pub fn normalization_preference(shaper: u32): u32 => match (shaper) {
+  kShaperHangul | kShaperMyanmarZawgyi => kNormNone,
+  kShaperIndic | kShaperKhmer | kShaperMyanmar | kShaperUse => kNormComposedDiacriticsNoShortCircuit,
+  _ => kNormAuto,
+};
+
+pub fn zero_width_marks(shaper: u32): u32 => match (shaper) {
+  kShaperDefault | kShaperArabic | kShaperHebrew | kShaperThai => kZeroByGdefLate,
+  kShaperMyanmar | kShaperUse => kZeroByGdefEarly,
+  _ => kZeroNone,
+};
+
+pub fn fallback_position(shaper: u32): bool => match (shaper) {
+  kShaperDefault | kShaperArabic | kShaperHangul | kShaperHebrew => true,
+  _ => false,
+};
+
+pub fn gpos_tag(shaper: u32): u32 => shaper == kShaperHebrew ? tag("hebr") : 0;
+
+// hb_ot_shaper_categorize
+pub fn categorize(script: u32, direction: u32, gsub_script: u32): u32 {
+  var kind = kShaperDefault;
+  for (let i in 0..#kScriptTags) {
+    if (kScriptTags[i] == script) {
+      kind = kScriptShapers[i] as u32;
+      break;
+    }
+  }
+  let dflt = tag("DFLT");
+  let latn = tag("latn");
+  return match (kind) {
+    kShaperArabic => (gsub_script != dflt || script == tag("Arab")) && dir_is_horizontal(direction) ? kShaperArabic : kShaperDefault,
+    kShaperIndic => gsub_script == dflt || gsub_script == latn ? kShaperDefault : ((gsub_script & 0xFF) == 0x33 ? kShaperUse : kShaperIndic),
+    kShaperMyanmar => gsub_script == dflt || gsub_script == latn || gsub_script == tag("mymr") ? kShaperDefault : kShaperMyanmar,
+    kShaperUse => gsub_script == dflt || gsub_script == latn ? kShaperDefault : kShaperUse,
+    _ => kind,
+  };
+}
+
+pub struct ShapePlan {
+  pub var script: u32 = 0
+  pub var direction: u32 = 0
+  pub var shaper: u32 = 0
+  pub var map: OtMap = OtMap()
+  pub var frac_mask: u32 = 0
+  pub var numr_mask: u32 = 0
+  pub var dnom_mask: u32 = 0
+  pub var has_frac: bool = false
+  pub var rtlm_mask: u32 = 0
+  pub var has_vert: bool = false
+  pub var kern_mask: u32 = 0
+  pub var requested_kerning: bool = false
+  pub var has_gpos_mark: bool = false
+  pub var fallback_glyph_classes: bool = false
+  pub var apply_gpos: bool = false
+  pub var apply_kern: bool = false
+  pub var apply_fallback_kern: bool = false
+  pub var zero_marks: bool = false
+  pub var adjust_mark_positioning_when_zeroing: bool = false
+  pub var fallback_mark_positioning: bool = false
+  pub var data: ShaperData = ShaperData {}
+}
+
+
+// The plan for a script and direction: hb_ot_shape_plan_t::init0.
+pub fn create_plan(face&: ShapeFace, script: u32, direction: u32): ShapePlan {
+  let gsub = MapTable { t: face.gsub_t(), gg: face.gsub, variations_index: face.gsub_variations };
+  let gpos = MapTable { t: face.gpos_t(), gg: face.gpos, variations_index: face.gpos_variations };
+  let (tags, n) = ot_script_tags(script);
+  var b = map_builder(gsub, gpos, tags[..n]);
+
+  var plan = ShapePlan { script, direction };
+  plan.shaper = categorize(script, direction, b.chosen_script0);
+  let script_zero_marks = zero_width_marks(plan.shaper) != kZeroNone;
+  let script_fallback_position = fallback_position(plan.shaper);
+
+  // hb_ot_shape_collect_features
+  b.is_simple = true;
+  b.enable_feature(tag("rvrn"));
+  b.add_gsub_pause(0);
+  if (direction == kDirLtr) {
+    b.enable_feature(tag("ltra"));
+    b.enable_feature(tag("ltrm"));
+  } else if (direction == kDirRtl) {
+    b.enable_feature(tag("rtla"));
+    b.add_feature(tag("rtlm"));
+  }
+  b.add_feature(tag("frac"));
+  b.add_feature(tag("numr"));
+  b.add_feature(tag("dnom"));
+  b.enable_feature(tag("rand"), kFRandom, kMapMaxValue);
+  b.enable_feature(tag("Harf"));
+  b.enable_feature(tag("HARF"));
+  if (collect_features(plan.shaper, b, gsub, gpos, script)) {
+    b.is_simple = false;
+  }
+  b.enable_feature(tag("Buzz"));
+  b.enable_feature(tag("BUZZ"));
+  for (let f in ["abvm", "blwm", "ccmp", "locl"]) {
+    b.add_feature(tag(f), kFGlobal);
+  }
+  b.add_feature(tag("mark"), kFGlobalManualJoiners);
+  b.add_feature(tag("mkmk"), kFGlobalManualJoiners);
+  b.add_feature(tag("rlig"), kFGlobal);
+  if (dir_is_horizontal(direction)) {
+    for (let f in ["calt", "clig", "curs", "dist"]) {
+      b.add_feature(tag(f), kFGlobal);
+    }
+    b.add_feature(tag("kern"), kFGlobalHasFallback);
+    b.add_feature(tag("liga"), kFGlobal);
+    b.add_feature(tag("rclt"), kFGlobal);
+  } else {
+    b.enable_feature(tag("vert"), kFGlobalSearch);
+  }
+  override_features(plan.shaper, b, gsub, gpos);
+
+  // hb_ot_shape_planner_t::compile
+  plan.map = compile(b, gsub, gpos);
+  plan.frac_mask = plan.map.get_1_mask(tag("frac"));
+  plan.numr_mask = plan.map.get_1_mask(tag("numr"));
+  plan.dnom_mask = plan.map.get_1_mask(tag("dnom"));
+  plan.has_frac = plan.frac_mask != 0 || (plan.numr_mask != 0 && plan.dnom_mask != 0);
+  plan.rtlm_mask = plan.map.get_1_mask(tag("rtlm"));
+  plan.has_vert = plan.map.get_1_mask(tag("vert")) != 0;
+  let kern_tag = dir_is_horizontal(direction) ? tag("kern") : tag("vkrn");
+  plan.kern_mask = plan.map.get_mask(kern_tag);
+  plan.requested_kerning = plan.kern_mask != 0;
+  let has_gpos_kern = plan.map.feature_index(1, kern_tag) != 0xFFFF;
+  let gt = gpos_tag(plan.shaper);
+  let disable_gpos = gt != 0 && gt != plan.map.chosen_script1;
+  plan.fallback_glyph_classes = !gdef_has_glyph_classes(face.gdef);
+  let has_gpos = !disable_gpos && has_data(face.gpos);
+  if (has_gpos) {
+    plan.apply_gpos = true;
+  }
+  let kt = face.kern_t();
+  if (!has_gpos_kern || !plan.apply_gpos) {
+    if (kern_has_data(kt)) {
+      plan.apply_kern = script_fallback_position;
+    }
+  }
+  plan.apply_fallback_kern = script_fallback_position && !(plan.apply_gpos || plan.apply_kern);
+  plan.zero_marks = script_zero_marks && (!plan.apply_kern || !kern_has_state_machine(kt));
+  plan.has_gpos_mark = plan.map.get_1_mask(tag("mark")) != 0;
+  plan.adjust_mark_positioning_when_zeroing = !plan.apply_gpos && (!plan.apply_kern || !kern_has_cross_stream(kt));
+  plan.fallback_mark_positioning = plan.adjust_mark_positioning_when_zeroing && script_fallback_position;
+
+  plan.data = plan_data(plan.shaper, plan.map, face, script);
+  return plan;
+}
+
+// The cached plan of a face for a script and direction (built on first use).
+pub fn plan_index(var face&: ShapeFace, script: u32, direction: u32): usize {
+  for (let i in 0..face.plans.len()) {
+    if (face.plans[i].script == script && face.plans[i].direction == direction) {
+      return i;
+    }
+  }
+  let p = create_plan(face, script, direction);
+  face.plans.push(p);
+  return face.plans.len() - 1;
+}

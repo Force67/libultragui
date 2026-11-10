@@ -1,0 +1,447 @@
+// The feature map of a shape plan: HarfBuzz's hb_ot_map_builder_t and
+// hb_ot_map_t (hb-ot-map.hh, hb-ot-map.cc). The builder collects features in
+// stages separated by pauses; compile sorts and merges them, allocates mask
+// bits (bit 31 is the global bit, features start at bit 4), and collects each
+// stage's lookups sorted and merged by index.
+//
+// A pause is a number the shaper gives meaning to (ultragui::shape::plan's
+// kPause* constants); 0 is no pause function.
+
+module ultragui::shape::map;
+
+import {List} from akikit::containers::list;
+import {
+  GsubGpos, feature_lookup_count, feature_lookup_index, feature_tag, feature_variation_offset, find_feature_any, kNotFound,
+  langsys_feature_count, langsys_feature_index, langsys_offset, langsys_required_feature, lookup_count, script_offset,
+  select_language, select_script,
+} from ultragui::shape::otl;
+
+// hb_ot_map_feature_flags_t
+pub comptime let kFNone: u32 = 0x0000;
+pub comptime let kFGlobal: u32 = 0x0001;
+pub comptime let kFHasFallback: u32 = 0x0002;
+pub comptime let kFManualZwnj: u32 = 0x0004;
+pub comptime let kFManualZwj: u32 = 0x0008;
+pub comptime let kFManualJoiners: u32 = 0x000C;
+pub comptime let kFGlobalManualJoiners: u32 = 0x000D;
+pub comptime let kFGlobalHasFallback: u32 = 0x0003;
+pub comptime let kFGlobalSearch: u32 = 0x0010;
+pub comptime let kFRandom: u32 = 0x0020;
+pub comptime let kFPerSyllable: u32 = 0x0040;
+
+pub comptime let kMapMaxBits: u32 = 8;
+pub comptime let kMapMaxValue: u32 = 255;
+
+pub struct FeatureInfo : Copy {
+  pub var tag: u32
+  pub var seq: u32
+  pub var max_value: u32
+  pub var flags: u32
+  pub var default_value: u32
+  pub var stage0: u32
+  pub var stage1: u32
+}
+
+pub struct FeatureMap : Copy {
+  pub var tag: u32 = 0
+  pub var index0: u32 = kNotFound
+  pub var index1: u32 = kNotFound
+  pub var stage0: u32 = 0
+  pub var stage1: u32 = 0
+  pub var shift: u32 = 0
+  pub var mask: u32 = 0
+  pub var one_mask: u32 = 0
+  pub var needs_fallback: bool = false
+  pub var auto_zwnj: bool = true
+  pub var auto_zwj: bool = true
+  pub var random: bool = false
+  pub var per_syllable: bool = false
+}
+
+pub struct LookupMap : Copy {
+  pub var index: u32 = 0
+  pub var auto_zwnj: bool = true
+  pub var auto_zwj: bool = true
+  pub var random: bool = false
+  pub var per_syllable: bool = false
+  pub var mask: u32 = 0
+  pub var feature_tag: u32 = 0
+}
+
+pub struct StageMap : Copy {
+  pub var last_lookup: usize = 0
+  pub var pause: u32 = 0
+}
+
+pub struct StageInfo : Copy {
+  pub var index: u32
+  pub var pause: u32
+}
+
+pub struct OtMap {
+  pub var global_mask: u32 = 0
+  pub var chosen_script0: u32 = 0
+  pub var chosen_script1: u32 = 0
+  pub var found_script0: bool = false
+  pub var found_script1: bool = false
+  pub var features: List<FeatureMap> = List()   // sorted by tag
+  pub var lookups0: List<LookupMap> = List()    // GSUB
+  pub var lookups1: List<LookupMap> = List()    // GPOS
+  pub var stages0: List<StageMap> = List()
+  pub var stages1: List<StageMap> = List()
+
+  pub fn OtMap(): OtMap => OtMap {};
+
+  // features.bsearch (tag)
+  pub fn find(self&, tag: u32): FeatureMap? {
+    var lo: i64 = 0;
+    var hi: i64 = self.features.len() as i64 - 1;
+    while (lo <= hi) {
+      let mid = (lo + hi) / 2;
+      let t = self.features[mid as usize].tag;
+      if (tag < t) {
+        hi = mid - 1;
+      } else if (tag > t) {
+        lo = mid + 1;
+      } else {
+        return self.features[mid as usize];
+      }
+    }
+    return none;
+  }
+
+  pub fn get_mask(self&, tag: u32): u32 => (self.find(tag) ?? FeatureMap {}).mask;
+  pub fn get_shift(self&, tag: u32): u32 => (self.find(tag) ?? FeatureMap {}).shift;
+  pub fn get_1_mask(self&, tag: u32): u32 => (self.find(tag) ?? FeatureMap {}).one_mask;
+  pub fn needs_fallback(self&, tag: u32): bool => (self.find(tag) ?? FeatureMap {}).needs_fallback;
+  pub fn feature_index(self&, table: u32, tag: u32): u32 {
+    if (let f = self.find(tag)) {
+      return table == 0 ? f.index0 : f.index1;
+    }
+    return kNotFound;
+  }
+  pub fn feature_stage(self&, table: u32, tag: u32): u32 {
+    if (let f = self.find(tag)) {
+      return table == 0 ? f.stage0 : f.stage1;
+    }
+    return 0xFFFFFFFF;
+  }
+}
+
+// One table (GSUB or GPOS) as the builder sees it.
+pub struct MapTable<'a> {
+  pub let t: &'a [u8]
+  pub let gg: GsubGpos
+  pub let variations_index: u32
+}
+
+pub struct MapBuilder {
+  pub var script_index0: u32 = kNotFound
+  pub var script_index1: u32 = kNotFound
+  pub var language_index0: u32 = kNotFound
+  pub var language_index1: u32 = kNotFound
+  pub var chosen_script0: u32 = 0
+  pub var chosen_script1: u32 = 0
+  pub var found_script0: bool = false
+  pub var found_script1: bool = false
+  pub var is_simple: bool = true
+  pub var current_stage0: u32 = 0
+  pub var current_stage1: u32 = 0
+  pub var feature_infos: List<FeatureInfo> = List()
+  pub var stages0: List<StageInfo> = List()
+  pub var stages1: List<StageInfo> = List()
+
+  pub fn add_feature(var self&, tag: u32, flags: u32 = kFNone, value: u32 = 1) {
+    if (tag == 0) {
+      return;
+    }
+    let seq = self.feature_infos.len() as u32 + 1;
+    self.feature_infos.push(FeatureInfo {
+      tag, seq, max_value: value, flags, default_value: (flags & kFGlobal) != 0 ? value : 0, stage0: self.current_stage0,
+      stage1: self.current_stage1,
+    });
+  }
+
+  pub fn enable_feature(var self&, tag: u32, flags: u32 = kFNone, value: u32 = 1) {
+    self.add_feature(tag, kFGlobal | flags, value);
+  }
+
+  pub fn disable_feature(var self&, tag: u32) {
+    self.add_feature(tag, kFGlobal, 0);
+  }
+
+  pub fn add_gsub_pause(var self&, pause: u32) {
+    self.stages0.push(StageInfo { index: self.current_stage0, pause });
+    self.current_stage0 += 1;
+  }
+
+  pub fn add_gpos_pause(var self&, pause: u32) {
+    self.stages1.push(StageInfo { index: self.current_stage1, pause });
+    self.current_stage1 += 1;
+  }
+}
+
+// hb_ot_map_builder_t's constructor: script and language selection.
+pub fn map_builder(gsub&: MapTable, gpos&: MapTable, script_tags&: [u32]): MapBuilder {
+  var b = MapBuilder {};
+  let (si0, cs0, f0) = select_script(gsub.t, gsub.gg, script_tags);
+  b.script_index0 = si0;
+  b.chosen_script0 = cs0;
+  b.found_script0 = f0;
+  b.language_index0 = select_language(gsub.t, gsub.gg, si0);
+  let (si1, cs1, f1) = select_script(gpos.t, gpos.gg, script_tags);
+  b.script_index1 = si1;
+  b.chosen_script1 = cs1;
+  b.found_script1 = f1;
+  b.language_index1 = select_language(gpos.t, gpos.gg, si1);
+  return b;
+}
+
+// hb_ot_layout_language_find_feature on one table.
+fn language_find_feature(mt&: MapTable, script_index: u32, language_index: u32, tag: u32): bool {
+  let l = langsys_offset(mt.t, script_offset(mt.t, mt.gg, script_index), language_index);
+  let n = langsys_feature_count(mt.t, l);
+  for (let i in 0..n) {
+    if (feature_tag(mt.t, mt.gg, langsys_feature_index(mt.t, l, i)) == tag) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// hb_ot_map_builder_t::has_feature
+pub fn has_feature(b&: MapBuilder, gsub&: MapTable, gpos&: MapTable, tag: u32): bool =>
+  language_find_feature(gsub, b.script_index0, b.language_index0, tag) || language_find_feature(gpos, b.script_index1, b.language_index1, tag);
+
+// hb_ot_layout_collect_features_map: the first feature of each tag in the
+// language system (a later duplicate does not win).
+fn feature_index_in(mt&: MapTable, script_index: u32, language_index: u32, tag: u32): u32 {
+  let l = langsys_offset(mt.t, script_offset(mt.t, mt.gg, script_index), language_index);
+  let n = langsys_feature_count(mt.t, l);
+  for (let i in 0..n) {
+    let fi = langsys_feature_index(mt.t, l, i);
+    if (feature_tag(mt.t, mt.gg, fi) == tag) {
+      return fi;
+    }
+  }
+  return kNotFound;
+}
+
+fn feature_info_less(a&: FeatureInfo, b&: FeatureInfo): bool => a.tag < b.tag || (a.tag == b.tag && a.seq < b.seq);
+
+// A stable insertion sort (the keys are unique, so any sort agrees).
+fn sort_feature_infos(var v&: List<FeatureInfo>) {
+  for (let i in 1..v.len()) {
+    let x = v[i];
+    var j = i;
+    while (j > 0 && feature_info_less(x, v[j - 1])) {
+      v[j] = v[j - 1];
+      j -= 1;
+    }
+    v[j] = x;
+  }
+}
+
+fn sort_feature_maps(var v&: List<FeatureMap>) {
+  for (let i in 1..v.len()) {
+    let x = v[i];
+    var j = i;
+    while (j > 0 && x.tag < v[j - 1].tag) {
+      v[j] = v[j - 1];
+      j -= 1;
+    }
+    v[j] = x;
+  }
+}
+
+fn sort_lookups(var v&: List<LookupMap>, start: usize) {
+  for (let i in start + 1..v.len()) {
+    let x = v[i];
+    var j = i;
+    while (j > start && x.index < v[j - 1].index) {
+      v[j] = v[j - 1];
+      j -= 1;
+    }
+    v[j] = x;
+  }
+}
+
+// hb_ot_map_builder_t::add_lookups
+fn add_lookups(var out&: List<LookupMap>, mt&: MapTable, feature_index: u32, mask: u32, auto_zwnj: bool, auto_zwj: bool, random: bool,
+               per_syllable: bool, feature_tag_: u32) {
+  if (feature_index == kNotFound) {
+    return;
+  }
+  let table_lookup_count = lookup_count(mt.t, mt.gg);
+  let f = feature_variation_offset(mt.t, mt.gg, feature_index, mt.variations_index);
+  let n = feature_lookup_count(mt.t, f);
+  for (let i in 0..n) {
+    let li = feature_lookup_index(mt.t, f, i);
+    if (li >= table_lookup_count) {
+      continue;
+    }
+    out.push(LookupMap { index: li, auto_zwnj, auto_zwj, random, per_syllable, mask, feature_tag: feature_tag_ });
+  }
+}
+
+fn bit_storage(v: u32): u32 => v == 0 ? 0 : 32 - @leading_zeros(v);
+
+// hb_ot_map_builder_t::compile
+pub fn compile(var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable): OtMap {
+  var m = OtMap();
+  let global_bit_shift = 31u32;
+  let global_bit_mask = 1u32 << global_bit_shift;
+  m.global_mask = global_bit_mask;
+  m.chosen_script0 = b.chosen_script0;
+  m.chosen_script1 = b.chosen_script1;
+  m.found_script0 = b.found_script0;
+  m.found_script1 = b.found_script1;
+
+  let l0 = langsys_offset(gsub.t, script_offset(gsub.t, gsub.gg, b.script_index0), b.language_index0);
+  let l1 = langsys_offset(gpos.t, script_offset(gpos.t, gpos.gg, b.script_index1), b.language_index1);
+  let required_index0 = langsys_required_feature(gsub.t, l0);
+  let required_index1 = langsys_required_feature(gpos.t, l1);
+  let required_tag0 = feature_tag(gsub.t, gsub.gg, required_index0);
+  let required_tag1 = feature_tag(gpos.t, gpos.gg, required_index1);
+  var required_stage0 = 0u32;
+  var required_stage1 = 0u32;
+
+  // Sort features and merge duplicates
+  if (b.feature_infos.len() > 0) {
+    if (!b.is_simple) {
+      sort_feature_infos(b.feature_infos);
+    }
+    var j = 0usize;
+    let count = b.feature_infos.len();
+    for (let i in 1..count) {
+      let fi = b.feature_infos[i];
+      if (fi.tag != b.feature_infos[j].tag) {
+        j += 1;
+        b.feature_infos[j] = fi;
+      } else {
+        var fj = b.feature_infos[j];
+        if ((fi.flags & kFGlobal) != 0) {
+          fj.flags |= kFGlobal;
+          fj.max_value = fi.max_value;
+          fj.default_value = fi.default_value;
+        } else {
+          if ((fj.flags & kFGlobal) != 0) {
+            fj.flags ^= kFGlobal;
+          }
+          fj.max_value = fj.max_value > fi.max_value ? fj.max_value : fi.max_value;
+        }
+        fj.flags |= fi.flags & kFHasFallback;
+        fj.stage0 = fj.stage0 < fi.stage0 ? fj.stage0 : fi.stage0;
+        fj.stage1 = fj.stage1 < fi.stage1 ? fj.stage1 : fi.stage1;
+        b.feature_infos[j] = fj;
+      }
+    }
+    b.feature_infos.truncate(j + 1);
+  }
+
+  // Allocate bits now
+  var next_bit = 4u32;
+  for (let i in 0..b.feature_infos.len()) {
+    let info = b.feature_infos[i];
+    var bits_needed = 0u32;
+    if ((info.flags & kFGlobal) != 0 && info.max_value == 1) {
+      bits_needed = 0;
+    } else {
+      let s = bit_storage(info.max_value);
+      bits_needed = s < kMapMaxBits ? s : kMapMaxBits;
+    }
+    if (info.max_value == 0 || next_bit + bits_needed >= global_bit_shift) {
+      continue;
+    }
+    var found = false;
+    if (required_tag0 == info.tag) {
+      required_stage0 = info.stage0;
+    }
+    if (required_tag1 == info.tag) {
+      required_stage1 = info.stage1;
+    }
+    var fi0 = feature_index_in(gsub, b.script_index0, b.language_index0, info.tag);
+    var fi1 = feature_index_in(gpos, b.script_index1, b.language_index1, info.tag);
+    found = fi0 != kNotFound || fi1 != kNotFound;
+    if (!found && (info.flags & kFGlobalSearch) != 0) {
+      fi0 = find_feature_any(gsub.t, gsub.gg, info.tag);
+      fi1 = find_feature_any(gpos.t, gpos.gg, info.tag);
+      found = fi0 != kNotFound || fi1 != kNotFound;
+    }
+    if (!found && (info.flags & kFHasFallback) == 0) {
+      continue;
+    }
+    var fm = FeatureMap {
+      tag: info.tag, index0: fi0, index1: fi1, stage0: info.stage0, stage1: info.stage1, auto_zwnj: (info.flags & kFManualZwnj) == 0,
+      auto_zwj: (info.flags & kFManualZwj) == 0, random: (info.flags & kFRandom) != 0, per_syllable: (info.flags & kFPerSyllable) != 0,
+    };
+    if ((info.flags & kFGlobal) != 0 && info.max_value == 1) {
+      fm.shift = global_bit_shift;
+      fm.mask = global_bit_mask;
+    } else {
+      fm.shift = next_bit;
+      fm.mask = ((1u64 << (next_bit + bits_needed) as u64) - (1u64 << next_bit as u64)) as u32;
+      next_bit += bits_needed;
+      m.global_mask |= ((info.default_value as u64 << fm.shift as u64) as u32) & fm.mask;
+    }
+    fm.one_mask = (1u32 << fm.shift) & fm.mask;
+    fm.needs_fallback = !found;
+    m.features.push(fm);
+  }
+  if (b.is_simple) {
+    sort_feature_maps(m.features);
+  }
+
+  b.add_gsub_pause(0);
+  b.add_gpos_pause(0);
+
+  var lookups0: List<LookupMap> = List();
+  var stages0: List<StageMap> = List();
+  compile_table(m.features, lookups0, stages0, gsub, 0, b.current_stage0, b.stages0, required_index0, required_stage0, global_bit_mask);
+  var lookups1: List<LookupMap> = List();
+  var stages1: List<StageMap> = List();
+  compile_table(m.features, lookups1, stages1, gpos, 1, b.current_stage1, b.stages1, required_index1, required_stage1, global_bit_mask);
+  m.lookups0 = lookups0;
+  m.stages0 = stages0;
+  m.lookups1 = lookups1;
+  m.stages1 = stages1;
+  return m;
+}
+
+fn compile_table(features&: List<FeatureMap>, var lookups&: List<LookupMap>, var stages&: List<StageMap>, mt&: MapTable, table: u32,
+                 stage_count: u32, stage_infos&: List<StageInfo>, required_index: u32, required_stage: u32, global_bit_mask: u32) {
+  var stage_index = 0usize;
+  var last_num_lookups = 0usize;
+  for (let stage in 0..stage_count) {
+    if (required_index != kNotFound && required_stage == stage) {
+      add_lookups(lookups, mt, required_index, global_bit_mask, true, true, false, false, 0x20202020);
+    }
+    for (let f in features) {
+      if ((table == 0 ? f.stage0 : f.stage1) == stage) {
+        add_lookups(lookups, mt, table == 0 ? f.index0 : f.index1, f.mask, f.auto_zwnj, f.auto_zwj, f.random, f.per_syllable, f.tag);
+      }
+    }
+    // Sort lookups and merge duplicates
+    if (last_num_lookups + 1 < lookups.len()) {
+      sort_lookups(lookups, last_num_lookups);
+      var j = last_num_lookups;
+      for (let i in j + 1..lookups.len()) {
+        let li = lookups[i];
+        if (li.index != lookups[j].index) {
+          j += 1;
+          lookups[j] = li;
+        } else {
+          lookups[j].mask |= li.mask;
+          lookups[j].auto_zwnj = lookups[j].auto_zwnj && li.auto_zwnj;
+          lookups[j].auto_zwj = lookups[j].auto_zwj && li.auto_zwj;
+        }
+      }
+      lookups.truncate(j + 1);
+    }
+    last_num_lookups = lookups.len();
+    if (stage_index < stage_infos.len() && stage_infos[stage_index].index == stage) {
+      stages.push(StageMap { last_lookup: last_num_lookups, pause: stage_infos[stage_index].pause });
+      stage_index += 1;
+    }
+  }
+}

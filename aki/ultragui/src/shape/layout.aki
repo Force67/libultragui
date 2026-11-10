@@ -67,18 +67,8 @@ fn allocate_lig_id(var buf&: Buffer): u32 {
   return id;
 }
 
-// roundf: half away from zero.
-pub fn roundf(x: f32): i32 {
-  let t = x < 0.0 ? -@floor(-x) : @floor(x);
-  let d = x - t;
-  if (d >= 0.5) {
-    return (t + 1.0) as i32;
-  }
-  if (d <= -0.5) {
-    return (t - 1.0) as i32;
-  }
-  return t as i32;
-}
+// HarfBuzz's roundf (hb-algs.hh redefines it): floorf (x + .5f), in float.
+pub fn roundf(x: f32): i32 => @floor(x + 0.5f32) as i32;
 
 // --- The font's scale (hb_font_t's em_scale / em_fscale) ------------------------------------
 

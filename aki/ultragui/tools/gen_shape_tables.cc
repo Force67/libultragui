@@ -20,8 +20,9 @@
 //                 u8 0, u32 mirroring, u32 script tag, u32 decomposition a,
 //                 u32 decomposition b (both 0 when there is none)
 //   compose.txt   "a b ab" for every pair the canonical composition joins
-//   scripts.txt   per script: "tag direction n script-tags... m language-tags..."
-//                 (OpenType tags for language "c", the C locale's)
+//   scripts.txt   per script: "tag direction n script-tags... m language-tags... shaper"
+//                 (OpenType tags for language "c", the C locale's; the shaper
+//                 hb_ot_shaper_categorize picks for a GSUB script of the script's own)
 //   mcc.txt       the 256 modified combining classes
 //   arabic.txt    the fallback shaping table and its ligature tables
 //   pua.txt       "u simp trad" for the symbol-font Arabic PUA maps (nonzero only)
@@ -98,7 +99,16 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < sn; i++) fprintf(sc, " %u", stags[i]);
     fprintf(sc, " %u", ln);
     for (unsigned i = 0; i < ln; i++) fprintf(sc, " %u", ltags[i]);
-    fprintf(sc, "\n");
+    /* The shaper hb_ot_shaper_categorize picks when the font's GSUB has a
+     * script tag of its own (neither DFLT, latn, mymr nor a '3' tag). */
+    const hb_ot_shaper_t *sh = hb_ot_shaper_categorize((hb_script_t) s, HB_DIRECTION_LTR, HB_TAG('z','z','z','z'));
+    const hb_ot_shaper_t *list[] = {&_hb_ot_shaper_default, &_hb_ot_shaper_arabic, &_hb_ot_shaper_thai,
+				    &_hb_ot_shaper_hangul, &_hb_ot_shaper_hebrew, &_hb_ot_shaper_indic,
+				    &_hb_ot_shaper_khmer, &_hb_ot_shaper_myanmar, &_hb_ot_shaper_use,
+				    &_hb_ot_shaper_myanmar_zawgyi};
+    unsigned id = 99;
+    for (unsigned k = 0; k < 10; k++) if (list[k] == sh) id = k;
+    fprintf(sc, " %u\n", id);
   }
   fclose(sc);
 

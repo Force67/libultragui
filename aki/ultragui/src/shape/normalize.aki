@@ -1,0 +1,335 @@
+// HarfBuzz's normalization (hb-ot-shape-normalize.cc): decompose what the
+// font lacks (shortest or full, per the shaper's mode), reorder marks by
+// their modified combining class, recompose what the font has, mapping every
+// character to its glyph through the font's cmap on the way (the glyph goes
+// to GlyphInfo::glyph_index, HarfBuzz's normalizer_glyph_index).
+
+module ultragui::shape::normalize;
+
+import {Buffer, GlyphInfo, kScratchHasCgj, kScratchHasSpaceFallback, kScratchHasVariationSelectorFallback} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {
+  ShapePlan, kNormAuto, kNormComposedDiacritics, kNormComposedDiacriticsNoShortCircuit, kNormDecomposed, kNormNone,
+  normalization_preference,
+} from ultragui::shape::plan;
+import {compose as shaper_compose, decompose as shaper_decompose, reorder_marks} from ultragui::shape::shapers;
+import {compose, decompose, gc_is_mark, is_variation_selector, kGcSpaceSeparator, kNotSpace, space_fallback_type} from ultragui::shape::ucd;
+import {set_unicode_props} from ultragui::shape::props;
+
+comptime let kMaxCombiningMarks: usize = 32;
+
+fn is_unicode_mark(g&: GlyphInfo): bool => gc_is_mark(g.unicode_props & 0x1F);
+fn mcc(g&: GlyphInfo): u32 => is_unicode_mark(g) ? g.unicode_props >> 8 : 0;
+
+fn nominal(face&: ShapeFace, u: u32): u32? => face.nominal_glyph(u);
+
+// The shaper's decompose, else Unicode's.
+fn do_decompose(plan&: ShapePlan, face&: ShapeFace, ab: u32): (u32, u32)? {
+  if (let r = shaper_decompose(plan, face, ab)) {
+    return r;
+  }
+  return decompose(ab);
+}
+
+fn do_compose(plan&: ShapePlan, a: u32, b: u32): u32? {
+  if (let r = shaper_compose(plan, a, b)) {
+    return r;
+  }
+  return compose(a, b);
+}
+
+// output_char
+fn output_char(var buf&: Buffer, unichar: u32, glyph: u32) {
+  let i = buf.idx;
+  buf.info[i].glyph_index = glyph;
+  buf.output_glyph(unichar);
+  let n = buf.out_info.len();
+  var g = buf.out_info[n - 1];
+  set_unicode_props(g, buf);
+  buf.out_info[n - 1] = g;
+}
+
+fn next_char(var buf&: Buffer, glyph: u32) {
+  let i = buf.idx;
+  buf.info[i].glyph_index = glyph;
+  buf.next_glyph();
+}
+
+// decompose: the number of characters output (0: none).
+fn decompose_rec(plan&: ShapePlan, face&: ShapeFace, var buf&: Buffer, shortest: bool, ab: u32): u32 {
+  let (a, b) = do_decompose(plan, face, ab) else {
+    return 0;
+  };
+  var b_glyph = 0u32;
+  if (b != 0) {
+    let bg = nominal(face, b) else {
+      return 0;
+    };
+    b_glyph = bg;
+  }
+  let a_glyph = nominal(face, a);
+  let has_a = a_glyph != none;
+  if (shortest && has_a) {
+    output_char(buf, a, a_glyph ?? 0);
+    if (b != 0) {
+      output_char(buf, b, b_glyph);
+      return 2;
+    }
+    return 1;
+  }
+  let ret = decompose_rec(plan, face, buf, shortest, a);
+  if (ret != 0) {
+    if (b != 0) {
+      output_char(buf, b, b_glyph);
+      return ret + 1;
+    }
+    return ret;
+  }
+  if (has_a) {
+    output_char(buf, a, a_glyph ?? 0);
+    if (b != 0) {
+      output_char(buf, b, b_glyph);
+      return 2;
+    }
+    return 1;
+  }
+  return 0;
+}
+
+// decompose_current_character
+fn decompose_current_character(plan&: ShapePlan, face&: ShapeFace, var buf&: Buffer, shortest: bool) {
+  let u = buf.info[buf.idx].codepoint;
+  var glyph = 0u32;
+  if (shortest) {
+    if (let g = nominal(face, u)) {
+      next_char(buf, g);
+      return;
+    }
+  }
+  if (decompose_rec(plan, face, buf, shortest, u) != 0) {
+    buf.skip_glyph();
+    return;
+  }
+  if (!shortest) {
+    if (let g = nominal(face, u)) {
+      next_char(buf, g);
+      return;
+    }
+  }
+  if ((buf.info[buf.idx].unicode_props & 0x1F) == kGcSpaceSeparator) {
+    let space_type = space_fallback_type(u);
+    if (space_type != kNotSpace) {
+      if (let space_glyph = nominal(face, 0x20)) {
+        let i = buf.idx;
+        buf.info[i].unicode_props = (space_type << 8) | (buf.info[i].unicode_props & 0xFF);
+        next_char(buf, space_glyph);
+        buf.scratch_flags |= kScratchHasSpaceFallback;
+        return;
+      }
+    }
+  }
+  if (u == 0x2011) {
+    if (let other = nominal(face, 0x2010)) {
+      next_char(buf, other);
+      return;
+    }
+  }
+  next_char(buf, glyph);
+}
+
+fn set_glyph(face&: ShapeFace, var buf&: Buffer, i: usize) {
+  let u = buf.info[i].codepoint;
+  buf.info[i].glyph_index = nominal(face, u) ?? 0;
+}
+
+// handle_variation_selector_cluster
+fn handle_variation_selector_cluster(face&: ShapeFace, var buf&: Buffer, end: usize) {
+  while (buf.idx + 1 < end && buf.successful) {
+    let cur = buf.info[buf.idx].codepoint;
+    let nxt = buf.info[buf.idx + 1].codepoint;
+    if (is_variation_selector(nxt)) {
+      if (let g = face.variation_glyph(cur, nxt)) {
+        let i = buf.idx;
+        buf.info[i].glyph_index = g;
+        buf.replace_glyphs(2, [cur]);
+      } else {
+        set_glyph(face, buf, buf.idx);
+        buf.next_glyph();
+        buf.scratch_flags |= kScratchHasVariationSelectorFallback;
+        // _hb_glyph_info_set_variation_selector (cur, true)
+        let i = buf.idx;
+        buf.info[i].unicode_props = 1 | (buf.info[i].unicode_props & (0xFF & ~0x1Fu32));
+        buf.info[i].unicode_props |= 0x400;
+        set_glyph(face, buf, buf.idx);
+        buf.next_glyph();
+      }
+      while (buf.idx < end && buf.successful && is_variation_selector(buf.info[buf.idx].codepoint)) {
+        set_glyph(face, buf, buf.idx);
+        buf.next_glyph();
+      }
+    } else {
+      set_glyph(face, buf, buf.idx);
+      buf.next_glyph();
+    }
+  }
+  if (buf.idx < end) {
+    set_glyph(face, buf, buf.idx);
+    buf.next_glyph();
+  }
+}
+
+fn decompose_multi_char_cluster(plan&: ShapePlan, face&: ShapeFace, var buf&: Buffer, end: usize, short_circuit: bool) {
+  for (let i in buf.idx..end) {
+    if (!buf.successful) {
+      break;
+    }
+    if (is_variation_selector(buf.info[i].codepoint)) {
+      handle_variation_selector_cluster(face, buf, end);
+      return;
+    }
+  }
+  while (buf.idx < end && buf.successful) {
+    decompose_current_character(plan, face, buf, short_circuit);
+  }
+}
+
+fn cc_less(a&: GlyphInfo, b&: GlyphInfo): bool => mcc(a) < mcc(b);
+
+// _hb_ot_shape_normalize
+pub fn normalize(plan&: ShapePlan, face&: ShapeFace, var buf&: Buffer) {
+  if (buf.len() == 0) {
+    return;
+  }
+  var mode = normalization_preference(plan.shaper);
+  if (mode == kNormAuto) {
+    mode = kNormComposedDiacritics;
+  }
+  let always_short_circuit = mode == kNormNone;
+  let might_short_circuit = always_short_circuit || (mode != kNormDecomposed && mode != kNormComposedDiacriticsNoShortCircuit);
+
+  // First round, decompose
+  var all_simple = true;
+  buf.clear_output();
+  let count = buf.len();
+  buf.idx = 0;
+  while (true) {
+    var end = buf.idx + 1;
+    while (end < count) {
+      if (is_unicode_mark(buf.info[end])) {
+        break;
+      }
+      end += 1;
+    }
+    if (end < count) {
+      end -= 1;  // Leave one base for the marks to cluster with.
+    }
+    // From idx to end are simple clusters.
+    if (might_short_circuit) {
+      // get_nominal_glyphs: map until the first character the font lacks.
+      var done = 0usize;
+      while (buf.idx + done < end) {
+        let i = buf.idx + done;
+        if (let g = nominal(face, buf.info[i].codepoint)) {
+          buf.info[i].glyph_index = g;
+          done += 1;
+        } else {
+          buf.info[i].glyph_index = 0;
+          break;
+        }
+      }
+      buf.next_glyphs(done);
+    }
+    while (buf.idx < end && buf.successful) {
+      decompose_current_character(plan, face, buf, might_short_circuit);
+    }
+    if (buf.idx == count || !buf.successful) {
+      break;
+    }
+    all_simple = false;
+    // Find all the marks now.
+    end = buf.idx + 1;
+    while (end < count) {
+      if (!is_unicode_mark(buf.info[end])) {
+        break;
+      }
+      end += 1;
+    }
+    // idx to end is one non-simple cluster.
+    decompose_multi_char_cluster(plan, face, buf, end, always_short_circuit);
+    if (!(buf.idx < count && buf.successful)) {
+      break;
+    }
+  }
+  buf.sync();
+
+  // Second round, reorder (inplace)
+  if (!all_simple) {
+    let n = buf.len();
+    var i = 0usize;
+    while (i < n) {
+      if (mcc(buf.info[i]) == 0) {
+        i += 1;
+        continue;
+      }
+      var end = i + 1;
+      while (end < n) {
+        if (mcc(buf.info[end]) == 0) {
+          break;
+        }
+        end += 1;
+      }
+      if (end - i > kMaxCombiningMarks) {
+        i = end + 1;
+        continue;
+      }
+      buf.sort(i, end, cc_less);
+      reorder_marks(plan, buf, i, end);
+      i = end + 1;
+    }
+  }
+  if ((buf.scratch_flags & kScratchHasCgj) != 0) {
+    let n = buf.len();
+    var i = 1usize;
+    while (i + 1 < n) {
+      if (buf.info[i].codepoint == 0x034F && (mcc(buf.info[i + 1]) == 0 || mcc(buf.info[i - 1]) <= mcc(buf.info[i + 1]))) {
+        buf.info[i].unicode_props &= ~0x40u32;
+      }
+      i += 1;
+    }
+  }
+
+  // Third round, recompose
+  if (!all_simple && buf.successful && (mode == kNormComposedDiacritics || mode == kNormComposedDiacriticsNoShortCircuit)) {
+    buf.clear_output();
+    let n = buf.len();
+    var starter = 0usize;
+    buf.next_glyph();
+    while (buf.idx < n) {
+      let cur = buf.info[buf.idx];
+      if (is_unicode_mark(cur)) {
+        let out_len = buf.out_info.len();
+        if (starter == out_len - 1 || mcc(buf.prev()) < mcc(cur)) {
+          if (let composed = do_compose(plan, buf.out_info[starter].codepoint, cur.codepoint)) {
+            if (let glyph = nominal(face, composed)) {
+              buf.next_glyph();
+              let ol = buf.out_info.len();
+              buf.merge_out_clusters(starter, ol);
+              buf.out_info.truncate(ol - 1);
+              var s = buf.out_info[starter];
+              s.codepoint = composed;
+              s.glyph_index = glyph;
+              set_unicode_props(s, buf);
+              buf.out_info[starter] = s;
+              continue;
+            }
+          }
+        }
+      }
+      buf.next_glyph();
+      if (mcc(buf.prev()) == 0) {
+        starter = buf.out_info.len() - 1;
+      }
+    }
+    buf.sync();
+  }
+}

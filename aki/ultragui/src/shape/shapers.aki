@@ -1,0 +1,58 @@
+// The script shapers' hooks (hb_ot_shaper_t's function pointers) as
+// functions that dispatch on the shaper: collect_features,
+// override_features, data_create, preprocess_text, decompose, compose,
+// setup_masks, reorder_marks, postprocess_glyphs, and the pause functions the
+// shapers put between GSUB stages.
+
+module ultragui::shape::shapers;
+
+import {Buffer} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {MapBuilder, MapTable, OtMap} from ultragui::shape::map;
+import {ShapePlan} from ultragui::shape::plan;
+
+// Pause functions (hb_ot_map_t::pause_func_t).
+pub comptime let kPauseNone: u32 = 0;
+pub comptime let kPauseClearSubstitutionFlags: u32 = 1;  // _hb_clear_substitution_flags
+
+// What a shaper keeps in its plan (data_create).
+pub struct ShaperData {
+}
+
+// collect_features: whether the shaper has one (it makes the map not simple).
+pub fn collect_features(shaper: u32, var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable, script: u32): bool {
+  return false;
+}
+
+pub fn override_features(shaper: u32, var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable) {
+}
+
+pub fn plan_data(shaper: u32, map&: OtMap, face&: ShapeFace, script: u32): ShaperData => ShaperData {};
+
+pub fn preprocess_text(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
+}
+
+// decompose: none when the shaper has no hook (the Unicode decomposition applies).
+pub fn decompose(plan&: ShapePlan, face&: ShapeFace, ab: u32): ((u32, u32)?)? => none;
+
+pub fn compose(plan&: ShapePlan, a: u32, b: u32): (u32?)? => none;
+
+pub fn setup_masks(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
+}
+
+pub fn reorder_marks(plan&: ShapePlan, var buf&: Buffer, start: usize, end: usize) {
+}
+
+pub fn postprocess_glyphs(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
+}
+
+// A pause function; true when it may have added glyphs.
+pub fn run_pause(pause: u32, plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace): bool {
+  if (pause == kPauseClearSubstitutionFlags) {
+    for (var g& in buf.info) {
+      g.glyph_props &= ~0x10u32;
+    }
+    return false;
+  }
+  return false;
+}

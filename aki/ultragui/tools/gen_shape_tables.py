@@ -32,7 +32,9 @@ def main():
         stags = f[3:3 + sn]
         ln = f[3 + sn]
         assert ln == 0, "language 'c' maps to no OpenType language tag"
-        scripts.append((tag, direction, stags))
+        shaper = f[4 + sn]
+        assert shaper < 10
+        scripts.append((tag, direction, stags, shaper))
     script_index = {s[0]: i for i, s in enumerate(scripts)}
     assert len(scripts) < 256
 
@@ -167,6 +169,10 @@ def main():
         t = list(s[2]) + [0] * (3 - len(s[2]))
         ot += t
     w.append(arr("kScriptOtTags", "u32", ot, 6))
+    w.append("// hb_ot_shaper_categorize for a GSUB script tag of the script's own: 0 default,\n"
+             "// 1 Arabic, 2 Thai, 3 Hangul, 4 Hebrew, 5 Indic, 6 Khmer, 7 Myanmar, 8 USE,\n"
+             "// 9 Myanmar Zawgyi.\n")
+    w.append(arr("kScriptShapers", "u8", [s[3] for s in scripts], 32))
     w.append("\n// _hb_modified_combining_class\n")
     w.append(arr("kModifiedCombiningClass", "u8", mcc, 16))
     w.append(f"\n// The Arabic fallback shaping table: isolated, final, initial, medial\n"
