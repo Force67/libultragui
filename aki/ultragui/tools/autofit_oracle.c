@@ -203,7 +203,8 @@ int main(int argc,char **argv) {
   int major,minor,patch; FT_Library_Version(lib,&major,&minor,&patch);
   if(major!=2||minor!=14||patch!=3) return 5;
   hb_font_t *hb=hb_ft_font_create_referenced(face);
-  if(!hb || !hb_version_atleast(13,2,1)) return 5;
+  unsigned hbmajor,hbminor,hbpatch; hb_version(&hbmajor,&hbminor,&hbpatch);
+  if(!hb || hbmajor!=13 || hbminor!=2 || hbpatch!=1) return 5;
   out=fopen(argv[2],"wb"); if(!out) return 4;
   word(0x41464832); word(major); word(minor); word(patch); word(face->num_glyphs);
   unsigned stride=(unsigned)atoi(argv[3]); if(!stride) stride=1;

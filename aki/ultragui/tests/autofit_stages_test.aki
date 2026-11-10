@@ -2,6 +2,7 @@
 // This does NOT claim end-to-end autohinter equivalence. The stage oracle
 // supplies unscaled outlines, then records every point/segment/edge field
 // and all three interpolation passes independently of face/global metrics.
+// Default: five fonts, every 97th glyph, sizes 6..48,64,96.
 // AUTOFIT_STAGES_SWEEP=1: every autohinted face, all glyphs, 13 sizes.
 // AUTOFIT_STAGES_STRIDE and AUTOFIT_STAGES_SIZE narrow the workload.
 module autofit_stages_test;
@@ -213,7 +214,7 @@ fn collect(dir: str, var fonts&: List<String>) {
     if (entry == "." || entry == "..") { continue; }
     let path = f"{dir}/{entry}";
     if (is_directory(path.as_str())) { collect(path.as_str(), fonts); }
-    else if (true) {
+    else {
       if (let f = Face::open_file(path.as_str(), 0)) { if (f.uses_autohinter() && !f.is_cff()) { fonts.push(path); } }
     }
   }
@@ -243,9 +244,12 @@ pub fn main(): i32 {
     cmd.add_env("AUTOFIT_STAGE_WIDTHS", "1");
     cmd.arg(path.as_str()); cmd.arg(record.as_str()); cmd.arg(stride.as_str());
     if (let size = get_environment_variable("AUTOFIT_STAGES_SIZE")) { cmd.arg(size.as_str()); }
-    else {
+    else if (sweep) {
       let sizes = ["7", "9", "11", "12", "13", "14", "16", "18", "20", "24", "32", "48", "72"];
       for (let size in sizes) { cmd.arg(size); }
+    } else {
+      for (let size in 6u32..49) { cmd.arg(f"{size}".as_str()); }
+      cmd.arg("64"); cmd.arg("96");
     }
     if (!run(cmd) || !replay(path.as_str(), record.as_str(), t)) { return 1; }
   }

@@ -995,8 +995,8 @@ behavior is unchanged.
 
 `tests/autofit_stages_test.aki` builds `tools/autofit_oracle.c` using actual
 FreeType 2.14.3 internal source routines, linked with both FreeType and
-HarfBuzz. Its default compares five fonts, 13 sizes and every 97th glyph:
-4,212 glyph/size records, 934,856 points, 148,226 segments, 86,155 edges,
+HarfBuzz. Its default compares five fonts, 45 sizes (6..48,64,96) and every 97th glyph:
+14,580 glyph/size records, 3,236,040 points, 513,090 segments, 308,644 edges,
 zero field mismatches. It checks design-unit glyph loading, topology,
 every segment and edge field, standard-width quantization, metric scaling,
 blue assignment, normal-target edge fitting, the combined Latin fitting pass
@@ -1014,6 +1014,15 @@ segments** and **222,448 edges**, with **0 field mismatches**. This includes
 design-unit Aki loading, standard-width initialization and the combined Latin
 pass against the actual FreeType entry point, with synthetic style metrics
 and an empty reverse charmap (thus no afadjust codepoint-specific work).
+
+The exhaustive sweep of topology, segments/edges, synthetic-metric scaling
+and edge fitting, and perturbed interpolation passes on **78 faces**, **13
+sizes**, **121,889 glyph indices** (**1,584,557 glyph/size records**),
+**213,070,208 points**, **31,627,089 segments**, and **20,936,307 edges**,
+with **0 field mismatches**. The additional design-load, standard-width and
+combined-pass checks above were verified with stride 97 across all 78 faces;
+they were added after the exhaustive sweep started. Shaped strings and
+end-to-end default-load/render comparisons: **0**.
 
 This is stage verification, **not** default-load or raster equivalence.
 **Remaining:** global style/script coverage and its lifetime; shaping and
