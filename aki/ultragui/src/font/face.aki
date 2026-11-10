@@ -30,6 +30,8 @@ import {
 import {StrikeTable, load_strikes} from ultragui::font::sbit;
 import {LoadedGlyph, Vec26} from ultragui::font::outline;
 import {Loader, load_sbit_glyph, load_tt} from ultragui::font::tt_glyph;
+import {FaceGlobals} from ultragui::font::autofit::globals;
+import {load_autohinted} from ultragui::font::autofit::loader;
 
 // FT_FACE_FLAG_*.
 pub comptime let kFaceFlagScalable: u32 = 0x1;
@@ -165,6 +167,9 @@ pub struct Face {
   pub var size: Size = Size {}
   // The glyph loader's buffers, kept between loads.
   pub var scratch: Loader = Loader {}
+  // The autohinter's state (face->autohint.data), made by the first
+  // autohinted load.
+  pub var autofit: FaceGlobals? = none
 
   // FT_Open_Face(face index) on the bytes of a TrueType, OpenType or
   // collection file.
@@ -195,9 +200,9 @@ pub struct Face {
   pub fn uses_autohinter(self&): bool;
 
   // FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT): the hinted outline (or an
-  // embedded bitmap at a strike size) and the slot metrics. Fails with
-  // UnimplementedFeature on faces FreeType's autohinter would hint
-  // (`uses_autohinter`) and with CffNotLoaded on CFF faces (font/cff).
+  // embedded bitmap at a strike size) and the slot metrics: by the bytecode,
+  // or by the autohinter (font/autofit) on faces that `uses_autohinter`.
+  // Fails with CffNotLoaded on CFF faces (font/cff).
   pub fn load_glyph(var self&, gid: u32): LoadedGlyph ! FontError;
   // FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING), what
   // hb_ft loads for glyph extents and contour points.
@@ -1302,7 +1307,7 @@ fn Face::load_glyph(var self&, gid: u32): LoadedGlyph ! FontError {
         return b;
       }
     }
-    return fail FontError::UnimplementedFeature;
+    return load_autohinted(self, gid);
   }
   return load_tt(self, gid, true);
 }

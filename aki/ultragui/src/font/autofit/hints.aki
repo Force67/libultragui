@@ -93,6 +93,9 @@ pub struct Hints {
   pub var x_delta: i64 = 0
   pub var y_delta: i64 = 0
   pub var units_per_em: i64 = 2048
+  // contour_y_minima / contour_y_maxima (afadjust), filled on demand.
+  pub var contour_y_min: List<i64> = List()
+  pub var contour_y_max: List<i64> = List()
 
   pub fn reload(var self&, outline&: Outline);
   pub fn save(self&, var outline&: Outline);

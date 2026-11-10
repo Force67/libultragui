@@ -1,0 +1,195 @@
+// FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT) through FreeType 2.14.3's
+// autohinter (afloader.c af_loader_load_glyph, afmodule.c, and the tail of
+// ftobjs.c FT_Load_Glyph) for a TrueType face that `uses_autohinter`:
+//
+// - the face's autohinter globals are made on its first autohinted load and
+//   kept with the face (face->autohint.data); the size's scales are read at
+//   each load (autohint_metrics is reset by every size request);
+// - the glyph's style metrics are scaled (Latin: x-height alignment of the
+//   vertical scale), the glyph is loaded unscaled (FT_LOAD_NO_SCALE |
+//   FT_LOAD_IGNORE_TRANSFORM | FT_LOAD_LINEAR_DESIGN) and fitted by its
+//   writing system (dummy: scaled only; Latin; CJK);
+// - the normal target's phantom points: Latin moves them with the outermost
+//   vertical edges (with the "too close" corrections), CJK (no advance
+//   hinting) and the others round them;
+// - the slot metrics from the hinted outline's control box, the advance
+//   from the phantom points (or the scaled advance for fixed-width faces
+//   and same-width digits), and the linear advances.
+//
+// Stem darkening is not applied: FreeType only darkens for the light target.
+
+module ultragui::font::autofit::loader;
+
+import {swap} from akikit::algorithm;
+import {Face, kFaceFlagFixedWidth} from ultragui::font::face;
+import {mul_div, mul_fix, pix_ceil, pix_floor, pix_round} from ultragui::font::fixed;
+import {GlyphFormat, LoadedGlyph} from ultragui::font::outline;
+import {FontError} from ultragui::font::sfnt;
+import {load_tt_design} from ultragui::font::tt_glyph;
+import {adjustment_flags} from ultragui::font::autofit::adjust;
+import {apply_cjk} from ultragui::font::autofit::cjk;
+import {FaceGlobals, StyleMetrics} from ultragui::font::autofit::globals;
+import {Hints} from ultragui::font::autofit::hints;
+import {apply_latin} from ultragui::font::autofit::latin;
+import {kWritingSystemCjk, kWritingSystemLatin} from ultragui::font::autofit::tables;
+
+// FT_STYLE_FLAG_ITALIC as sfnt_load_face sets it for an outline face.
+fn is_italic(face&: Face): bool {
+  if (face.os2.version != 0xFFFF) {
+    return (face.os2.fs_selection & 512) != 0 || (face.os2.fs_selection & 1) != 0;
+  }
+  return (face.head.mac_style & 2) != 0;
+}
+
+// af_latin_metrics_scale / af_cjk_metrics_scale / the dummy system's copy
+// of the scaler; sets the hints' scales as each style_hints_init does.
+fn scale_metrics(var m&: StyleMetrics, var h&: Hints, face&: Face, x_scale: i64, y_scale: i64) {
+  if (m.writing_system == kWritingSystemLatin) {
+    m.latin.italic = is_italic(face);
+    m.latin.scale(x_scale, y_scale, face.size.metrics.x_ppem as u32);
+    m.x_scale = m.latin.x_scale;
+    m.y_scale = m.latin.y_scale;
+    m.x_delta = m.latin.x_delta;
+    m.y_delta = m.latin.y_delta;
+    h.x_scale = m.latin.axis[0].scale;
+    h.y_scale = m.latin.axis[1].scale;
+    h.x_delta = m.latin.axis[0].delta;
+    h.y_delta = m.latin.axis[1].delta;
+  } else if (m.writing_system == kWritingSystemCjk) {
+    m.cjk.scale(x_scale, y_scale, 0, 0);
+    m.x_scale = x_scale;
+    m.y_scale = y_scale;
+    m.x_delta = 0;
+    m.y_delta = 0;
+    h.x_scale = m.cjk.axis[0].scale;
+    h.y_scale = m.cjk.axis[1].scale;
+    h.x_delta = m.cjk.axis[0].delta;
+    h.y_delta = m.cjk.axis[1].delta;
+  } else {
+    m.x_scale = x_scale;
+    m.y_scale = y_scale;
+    m.x_delta = 0;
+    m.y_delta = 0;
+    h.x_scale = x_scale;
+    h.y_scale = y_scale;
+    h.x_delta = 0;
+    h.y_delta = 0;
+  }
+}
+
+// The autohinted part of FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT) (the
+// caller has already tried the strike's bitmap).
+pub fn load_autohinted(var face&: Face, gid: u32): LoadedGlyph ! FontError {
+  if (face.autofit == none) {
+    face.autofit = FaceGlobals::create(face);
+  }
+  let x_scale = face.size.metrics.x_scale;
+  let y_scale = face.size.metrics.y_scale;
+  var taken: FaceGlobals? = none;
+  swap(taken, face.autofit);
+  var globals = taken!;
+  let style_or = globals.get_metrics(face, gid);
+  let style = style_or else (let e) {
+    face.autofit = globals;
+    return fail e;
+  };
+  var slot: StyleMetrics? = none;
+  swap(slot, globals.metrics[style as usize]);
+  var m = slot!;
+  var h = Hints {};
+  scale_metrics(m, h, face, x_scale, y_scale);
+  let loaded = load_tt_design(face, gid);
+  var g = loaded else (let e) {
+    globals.metrics[style as usize] = m;
+    face.autofit = globals;
+    return fail e;
+  };
+  let design = g.metrics;
+  let design_linear_h = g.linear_hori_advance;
+  let design_linear_v = g.linear_vert_advance;
+  var pp1x = h.x_delta;
+  var pp2x = mul_fix(design.hori_advance, h.x_scale) + h.x_delta;
+  if (g.outline.points.len() > 0) {
+    var hinted_edges = false;
+    if (m.writing_system == kWritingSystemLatin) {
+      var adj: u32 = 0;
+      if (let rc& = m.reverse_charmap) {
+        if (let cp = rc.lookup(gid as i64)) {
+          adj = adjustment_flags(cp as u32);
+        }
+      }
+      apply_latin(h, m.latin, g.outline, globals.is_nonbase(gid), adj);
+      hinted_edges = true;
+    } else if (m.writing_system == kWritingSystemCjk) {
+      apply_cjk(h, m.cjk, g.outline);
+    } else {
+      // af_dummy_hints_apply: reload and save (scaled, tags normalized).
+      h.reload(g.outline);
+      h.save(g.outline);
+    }
+    let edges& = h.axis[0].edges;
+    if (hinted_edges && edges.len() > 1) {
+      let edge1 = edges[0];
+      let edge2 = edges[edges.len() - 1];
+      let old_rsb = pp2x - edge2.opos;
+      let old_lsb = edge1.opos;
+      let new_lsb = edge1.pos;
+      var pp1x_uh = new_lsb - old_lsb;
+      var pp2x_uh = edge2.pos + old_rsb;
+      if (old_lsb < 24) {
+        pp1x_uh -= 8;
+      }
+      if (old_rsb < 24) {
+        pp2x_uh += 8;
+      }
+      pp1x = pix_round(pp1x_uh);
+      pp2x = pix_round(pp2x_uh);
+      if (pp1x >= new_lsb && old_lsb > 0) {
+        pp1x -= 64;
+      }
+      if (pp2x <= edge2.pos && old_rsb > 0) {
+        pp2x += 64;
+      }
+    } else {
+      pp1x = pix_round(pp1x);
+      pp2x = pix_round(pp2x);
+    }
+  }
+  // Hint_Metrics
+  let vx = mul_fix(design.vert_bearing_x - design.hori_bearing_x, m.x_scale);
+  let vy = mul_fix(design.vert_bearing_y - design.hori_bearing_y, m.y_scale);
+  if (pp1x != 0) {
+    for (var p& in g.outline.points) {
+      p.x = p.x -% pp1x;
+    }
+  }
+  let (x0, y0, x1, y1) = g.outline.cbox();
+  let x_min = pix_floor(x0);
+  let y_min = pix_floor(y0);
+  let x_max = pix_ceil(x1);
+  let y_max = pix_ceil(y1);
+  var metrics = design;
+  metrics.width = x_max -% x_min;
+  metrics.height = y_max -% y_min;
+  metrics.hori_bearing_x = x_min;
+  metrics.hori_bearing_y = y_max;
+  metrics.vert_bearing_x = pix_floor(x_min +% vx);
+  metrics.vert_bearing_y = pix_floor(y_max +% vy);
+  if ((face.face_flags & kFaceFlagFixedWidth) != 0 || (globals.is_digit(gid) && m.digits_same_width)) {
+    metrics.hori_advance = mul_fix(design.hori_advance, m.x_scale);
+  } else if (metrics.hori_advance != 0) {
+    metrics.hori_advance = pp2x - pp1x;
+  }
+  metrics.vert_advance = mul_fix(design.vert_advance, m.y_scale);
+  metrics.hori_advance = pix_round(metrics.hori_advance);
+  metrics.vert_advance = pix_round(metrics.vert_advance);
+  g.format = GlyphFormat::Outline;
+  g.metrics = metrics;
+  // FT_Load_Glyph's tail.
+  g.advance_x = metrics.hori_advance;
+  g.linear_hori_advance = mul_div(design_linear_h, face.size.metrics.x_scale, 64);
+  g.linear_vert_advance = mul_div(design_linear_v, face.size.metrics.y_scale, 64);
+  globals.metrics[style as usize] = m;
+  face.autofit = globals;
+  return g;
+}
