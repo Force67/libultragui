@@ -20,7 +20,9 @@
 // Default: a curated set of fonts at 12, 16 and 24 px. SHAPE_SWEEP=1 runs
 // every font of /usr/share/fonts at 9, 12, 16, 24 and 37 px with
 // SHAPE_GENERATED (default 400) generated strings per font; SHAPE_FONTS=a:b
-// picks fonts by path; SHAPE_SEED changes the generated strings. The first
+// picks fonts by path; SHAPE_SEED changes the generated strings;
+// SHAPE_SIZES=a:b or a-b replaces the pixel sizes; SHAPE_MAXLEN (default
+// 12) is the longest generated string, in characters. The first
 // differences are printed with the font, size and string.
 
 module shape_test;
@@ -152,7 +154,7 @@ struct Rng {
 
 // Strings from the font's coverage: letters, marks, digits, punctuation,
 // spaces, joiners, variation selectors, and a few ill-formed bytes.
-fn generated_strings(var face&: ShapeFace, count: u64, seed: u64, var out&: List<List<u8>>) {
+fn generated_strings(var face&: ShapeFace, count: u64, seed: u64, max_len: u64, var out&: List<List<u8>>) {
   var letters: List<u32> = List();
   var marks: List<u32> = List();
   var others: List<u32> = List();
@@ -179,7 +181,7 @@ fn generated_strings(var face&: ShapeFace, count: u64, seed: u64, var out&: List
   let specials = [0x20u32, 0x20, 0x200C, 0x200D, 0xFE0F, 0xFE0E, 0x34F, 0x2060, 0xA0, 0x2009, 0x30, 0x31, 0x2E, 0x2C, 0x25CC];
   for (let n in 0..count) {
     var s: List<u8> = List();
-    let len = 1 + rng.below(12);
+    let len = 1 + rng.below(max_len);
     // Mostly one region of the letters, so runs look like words of one script.
     let base = rng.below(letters.len() as u64);
     for (let k in 0..len) {
@@ -285,7 +287,7 @@ fn glyphs_text(g&: List<ShapedGlyph>): String {
   return out;
 }
 
-fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], generated: u64, seed: u64, var totals&: Totals): bool {
+fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], generated: u64, seed: u64, max_len: u64, var totals&: Totals): bool {
   var strings: List<List<u8>> = List();
   example_strings(root, strings);
   for (let s in kSamples) {
@@ -309,7 +311,7 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
   };
   var face = ShapeFace::from_bytes(bytes, 0, ft.num_glyphs);
   if (generated > 0) {
-    generated_strings(face, generated, seed, strings);
+    generated_strings(face, generated, seed, max_len, strings);
   }
   var hex = String();
   for (let s in strings) {
@@ -473,12 +475,40 @@ pub fn main(): i32 {
   }
   let sizes_default = [12u32, 16, 24];
   let sizes_sweep = [9u32, 12, 16, 24, 37];
+  // SHAPE_SIZES=a:b:... replaces the sizes; "a-b" is a range.
+  var sizes_env: List<u32> = List();
+  if (let list = get_environment_variable("SHAPE_SIZES")) {
+    let l = list.as_str();
+    var start = 0usize;
+    for (let i in 0..#l + 1) {
+      if (i == #l || l[i] == ':') {
+        let item = l[start..i];
+        var dash = #item;
+        for (let k in 0..#item) {
+          if (item[k] == '-') {
+            dash = k;
+          }
+        }
+        if (dash < #item) {
+          let lo = parse_u64(item[..dash]) ?? 0;
+          let hi = parse_u64(item[dash + 1..]) ?? 0;
+          for (let v in lo..hi + 1) {
+            sizes_env.push(v as u32);
+          }
+        } else if (#item > 0) {
+          sizes_env.push((parse_u64(item) ?? 12) as u32);
+        }
+        start = i + 1;
+      }
+    }
+  }
   let generated = env_u64("SHAPE_GENERATED", sweep ? 400 : 60);
+  let max_len = env_u64("SHAPE_MAXLEN", 12);
   var totals = Totals {};
   var ok = true;
   for (let f in fonts) {
-    let sizes = sweep ? sizes_sweep[..] : sizes_default[..];
-    ok = check_font(f.as_str(), root, out_dir.as_str(), oracle.as_str(), sizes, generated, seed, totals) && ok;
+    let sizes = sizes_env.len() > 0 ? sizes_env.as_slice() : sweep ? sizes_sweep[..] : sizes_default[..];
+    ok = check_font(f.as_str(), root, out_dir.as_str(), oracle.as_str(), sizes, generated, seed, max_len, totals) && ok;
   }
   println(f"{totals.fonts} fonts, {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
   println(f"  of which {totals.graphite} fonts shaped by graphite2: {totals.graphite_strings} strings, {totals.graphite_glyphs} glyphs");
