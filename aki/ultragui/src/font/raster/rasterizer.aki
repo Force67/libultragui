@@ -1,0 +1,188 @@
+// Pure Aki, 8-bit gray glyph rendering compatible with FreeType 2.14.3's
+// default smooth renderer. Curve sampling lives in curves; this module
+// integrates signed edge areas on a 256-unit pixel grid and sweeps rows.
+// Scratch storage is bounded to 32 rows, independently of bitmap height.
+module ultragui::font::raster::rasterizer;
+
+import {List, filled} from akikit::containers::list;
+import {Segment, flatten} from ultragui::font::raster::curves;
+import {GrayBitmap, Outline, RasterError, kEvenOddFill, kOverlap} from ultragui::font::raster::outline;
+
+struct Cell : Copy {
+  pub var cover: i32 = 0
+  pub var area: i32 = 0
+}
+
+struct Band {
+  pub var width: i64
+  pub var bottom: i64
+  pub var top: i64
+  pub var cells: List<Cell>
+
+  fn add(var self&, x: i64, y: i64, height: i64, twice_x: i64) {
+    if (x >= 0 && x < self.width && y >= self.bottom && y < self.top) {
+      let i = ((y - self.bottom) * self.width + x) as usize;
+      self.cells[i].cover = self.cells[i].cover +% height as i32;
+      self.cells[i].area = self.cells[i].area +% (height * twice_x) as i32;
+    }
+  }
+
+  fn integrate(var self&, segment: Segment) {
+    let a = segment.a;
+    let b = segment.b;
+    var x = a.x >> 8;
+    var y = a.y >> 8;
+    let last_x = b.x >> 8;
+    let last_y = b.y >> 8;
+    if ((y >= self.top && last_y >= self.top) || (y < self.bottom && last_y < self.bottom)) {
+      return;
+    }
+    var fx = a.x & 255;
+    var fy = a.y & 255;
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    if (dx == 0) {
+      while (y != last_y) {
+        let edge = dy > 0 ? 256i64 : 0i64;
+        self.add(x, y, edge - fy, 2 * fx);
+        fy = 256 - edge;
+        y += dy > 0 ? 1i64 : -1i64;
+      }
+    } else if (dy != 0 && (x != last_x || y != last_y)) {
+      // Signed reciprocals, multiplied modulo 2^64. Using ordinary integer
+      // division here changes exact-boundary crossings by one grid unit.
+      let rx = x != last_x ? 4294967295i64 / dx : 0i64;
+      let ry = y != last_y ? 4294967295i64 / dy : 0i64;
+      var determinant = dx * fy - dy * fx;
+      while (x != last_x || y != last_y) {
+        var next_fx: i64 = 0;
+        var next_fy: i64 = 0;
+        var step_x: i64 = 0;
+        var step_y: i64 = 0;
+        if (determinant - dx * 256 > 0 && determinant <= 0) {
+          next_fx = 0;
+          next_fy = quotient(-determinant, -rx);
+          determinant -= dy * 256;
+          step_x = -1;
+        } else if (determinant - dx * 256 + dy * 256 > 0 && determinant - dx * 256 <= 0) {
+          determinant -= dx * 256;
+          next_fx = quotient(-determinant, ry);
+          next_fy = 256;
+          step_y = 1;
+        } else if (determinant + dy * 256 >= 0 && determinant - dx * 256 + dy * 256 <= 0) {
+          determinant += dy * 256;
+          next_fx = 256;
+          next_fy = quotient(determinant, rx);
+          step_x = 1;
+        } else {
+          next_fx = quotient(determinant, -ry);
+          next_fy = 0;
+          determinant += dx * 256;
+          step_y = -1;
+        }
+        self.add(x, y, next_fy - fy, fx + next_fx);
+        fx = step_x == 0 ? next_fx : 256 - next_fx;
+        fy = step_y == 0 ? next_fy : 256 - next_fy;
+        x += step_x;
+        y += step_y;
+      }
+    }
+    self.add(x, y, (b.y & 255) - fy, fx + (b.x & 255));
+  }
+}
+
+fn quotient(n: i64, reciprocal: i64): i64 => ((n as u64 *% reciprocal as u64) >> 32) as i64;
+
+fn coverage(area: i32, even_odd: bool): u8 {
+  var value = area >> 9;
+  if (even_odd ? (value & 256) != 0 : value < 0) {
+    value = ~value;
+  }
+  if (!even_odd && value > 255) {
+    value = 255;
+  }
+  return value as u8;
+}
+
+// No face/ppem is needed: the outline is already scaled and hinted. This
+// applies the renderer's coordinate and bitmap limits; loaders may apply
+// the additional face-specific limit (10 * ppem) before calling it.
+pub fn render_outline(outline&: Outline): GrayBitmap ! RasterError {
+  var result = GrayBitmap {};
+  var xmin: i64 = 0;
+  var xmax: i64 = 0;
+  var ymin: i64 = 0;
+  var ymax: i64 = 0;
+  if (!outline.points.is_empty()) {
+    xmin = outline.points[0].x as i64;
+    xmax = xmin;
+    ymin = outline.points[0].y as i64;
+    ymax = ymin;
+    for (let p in outline.points) {
+      xmin = p.x as i64 < xmin ? p.x as i64 : xmin;
+      xmax = p.x as i64 > xmax ? p.x as i64 : xmax;
+      ymin = p.y as i64 < ymin ? p.y as i64 : ymin;
+      ymax = p.y as i64 > ymax ? p.y as i64 : ymax;
+    }
+  }
+  let left = xmin >> 6;
+  let bottom = ymin >> 6;
+  let right = (xmax + 63) >> 6;
+  let top = (ymax + 63) >> 6;
+  let width = right - left;
+  let rows = top - bottom;
+  if (width >= 65536 || rows >= 65536 || left < -16777216 || right >= 16777216 ||
+      bottom < -16777216 || top >= 16777216) {
+    return fail RasterError::RasterOverflow;
+  }
+  result.width = width as u32;
+  result.rows = rows as u32;
+  result.pitch = width as i32;
+  result.left = left as i32;
+  result.top = top as i32;
+  if (width == 0 || rows == 0) {
+    return result;
+  }
+  let scale = (outline.flags & kOverlap) != 0 ? 4i64 : 1i64;
+  if (scale == 4 && width * scale > 32767) {
+    return fail RasterError::RasterOverflow;
+  }
+  let segments = try flatten(outline, left * 64, bottom * 64, scale);
+  result.pixels = filled((width * rows) as usize, 0u8);
+  let raster_width = width * scale;
+  let raster_rows = rows * scale;
+  let band_rows = raster_rows < 32 ? raster_rows : 32i64;
+  var band = Band { width: raster_width, bottom: 0, top: 0,
+                    cells: filled((raster_width * band_rows) as usize, Cell {}) };
+  let even_odd = (outline.flags & kEvenOddFill) != 0;
+  var y: i64 = 0;
+  while (y < raster_rows) {
+    band.bottom = y;
+    band.top = y + band_rows < raster_rows ? y + band_rows : raster_rows;
+    for (var cell& in band.cells) {
+      cell = Cell {};
+    }
+    for (let segment in segments) {
+      band.integrate(segment);
+    }
+    for (let row in band.bottom..band.top) {
+      var cover: i32 = 0;
+      let input_row = ((row - band.bottom) * raster_width) as usize;
+      let output_row = ((rows - 1 - row / scale) * width) as usize;
+      for (let col in 0i64..raster_width) {
+        let cell = band.cells[input_row + col as usize];
+        cover = cover +% (cell.cover *% 512);
+        let gray = coverage(cover -% cell.area, even_odd);
+        let index = output_row + (col / scale) as usize;
+        if (scale == 1) {
+          result.pixels[index] = gray;
+        } else {
+          let sum = result.pixels[index] as u32 + (gray as u32 + 8) / 16;
+          result.pixels[index] = (sum - (sum >> 8)) as u8;
+        }
+      }
+    }
+    y = band.top;
+  }
+  return result;
+}
