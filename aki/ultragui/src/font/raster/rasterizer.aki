@@ -1,7 +1,7 @@
 // Pure Aki, 8-bit gray glyph rendering compatible with FreeType 2.14.3's
 // default smooth renderer. Curve sampling lives in curves; this module
 // integrates signed edge areas on a 256-unit pixel grid and sweeps rows.
-// Scratch storage is bounded to 32 rows, independently of bitmap height.
+// Scratch storage is bounded to 262144 cells, independently of bitmap height.
 module ultragui::font::raster::rasterizer;
 
 import {List, filled} from akikit::containers::list;
@@ -151,7 +151,8 @@ pub fn render_outline(outline&: Outline): GrayBitmap ! RasterError {
   result.pixels = filled((width * rows) as usize, 0u8);
   let raster_width = width * scale;
   let raster_rows = rows * scale;
-  let band_rows = raster_rows < 32 ? raster_rows : 32i64;
+  let capacity_rows = 262144i64 / raster_width;
+  let band_rows = raster_rows < capacity_rows ? raster_rows : capacity_rows;
   var band = Band { width: raster_width, bottom: 0, top: 0,
                     cells: filled((raster_width * band_rows) as usize, Cell {}) };
   let even_odd = (outline.flags & kEvenOddFill) != 0;

@@ -1,0 +1,278 @@
+// Bitwise differential test against FreeType 2.14.3, including bitmap
+// dimensions, placement, every pixel, errors, quadratic and cubic outlines.
+// Default: 5 fonts, 5 sizes, deterministic glyph subset, both hinting modes.
+// RASTER_SWEEP=curated: those fonts, every glyph, sizes 6..48,64,96, both modes.
+// RASTER_SWEEP=all: every scalable font under /usr/share/fonts (face 0), every
+// glyph, sizes 7,9,11,12,13,14,16,18,20,24,32,48,72, hinted.
+// RASTER_FONT optionally selects one font; RASTER_SIZE selects one size;
+// RASTER_STRIDE overrides the subset stride. All modes include synthetics.
+// Arguments replay binary files without building or running the oracle.
+// A failing oracle trace is retained; every mismatching glyph is reported.
+module raster_test;
+
+import {List} from akikit::containers::list;
+import {create_directories} from akikit::filesystem::directory;
+import {delete_file, file_info, read_bytes, read_file} from akikit::filesystem::file_util;
+import {eprintln, println} from akikit::logging;
+import {Command, exit_code} from akikit::process::child;
+import {arguments} from akikit::process::command_line;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {String, from_str} from akikit::strings::string;
+import {parse_u64} from akikit::strings::string_to_number;
+import {GrayBitmap, Outline, OutlinePoint, RasterError} from ultragui::font::raster::outline;
+import {render_outline} from ultragui::font::raster::rasterizer;
+
+struct Reader {
+  pub let data: bytes
+  pub var pos: usize = 0
+
+  pub fn word(var self&): u32 {
+    var value: u32 = 0;
+    for (let shift in 0u32..4) {
+      value |= (self.data[self.pos] as u32) << (shift * 8);
+      self.pos += 1;
+    }
+    return value;
+  }
+  pub fn int(var self&): i32 => self.word() as i32;
+}
+
+struct Totals {
+  pub var glyphs: u64 = 0
+  pub var pixels: u64 = 0
+  pub var mismatches: u64 = 0
+  pub var errors: u64 = 0
+  pub var skipped: u64 = 0
+  pub var synthetic: u64 = 0
+}
+
+fn compare(got&: GrayBitmap, want&: GrayBitmap): bool =>
+  got.width == want.width && got.rows == want.rows && got.pitch == want.pitch &&
+  got.left == want.left && got.top == want.top && got.pixels == want.pixels;
+
+fn replay(path: str, var totals&: Totals): bool {
+  let file = read_bytes(path) else {
+    eprintln(f"cannot read {path}");
+    return false;
+  };
+  var r = Reader { data: file.as_slice() };
+  if (r.word() != 0x52545331) {
+    eprintln(f"{path}: invalid oracle header");
+    return false;
+  }
+  let major = r.word();
+  let minor = r.word();
+  let patch = r.word();
+  if (major != 2 || minor != 14 || patch != 3) {
+    eprintln(f"need FreeType 2.14.3, oracle is {major}.{minor}.{patch}");
+    return false;
+  }
+  let before = totals.mismatches;
+  var records: u32 = 0;
+  while (r.word() != 0) {
+    records += 1;
+    let gid = r.word();
+    var outline = Outline { flags: r.int() };
+    let points = r.word();
+    let contours = r.word();
+    for (let i in 0u32..points) {
+      outline.points.push(OutlinePoint { x: r.int(), y: r.int() });
+      outline.tags.push(r.word() as u8);
+    }
+    for (let i in 0u32..contours) {
+      outline.contours.push(r.word());
+    }
+    let error = r.word();
+    var want = GrayBitmap { width: r.word(), rows: r.word(), pitch: r.int(), left: r.int(), top: r.int() };
+    let size = r.word() as usize;
+    for (let i in 0..size) {
+      want.pixels.push(r.data[r.pos + i] as u8);
+    }
+    r.pos += size;
+    totals.glyphs += 1;
+    totals.pixels += size as u64;
+    var same = false;
+    if (let got = render_outline(outline)) {
+      same = error == 0 && compare(got, want);
+      if (!same) {
+        eprintln(f"{path}: glyph {gid}, flags {outline.flags}, FT error {error}: got {got.width}x{got.rows}/{got.pitch}@({got.left},{got.top}), want {want.width}x{want.rows}/{want.pitch}@({want.left},{want.top})");
+        if (got.pixels.len() == want.pixels.len()) {
+          var differing: u64 = 0;
+          for (let i in 0..got.pixels.len()) {
+            if (got.pixels[i] != want.pixels[i]) {
+              if (differing < 3) {
+                eprintln(f"  pixel {i}: got {got.pixels[i]}, want {want.pixels[i]}");
+              }
+              differing += 1;
+            }
+          }
+          eprintln(f"  {differing} differing pixels");
+        }
+      }
+    } else (let e) {
+      let code = e == RasterError::InvalidOutline ? 0x14u32 : 0x62u32;
+      same = code == error;
+      if (!same) {
+        eprintln(f"{path}: glyph {gid}, Aki error {code}, FreeType error {error}");
+      }
+    }
+    if (error != 0) {
+      totals.errors += 1;
+    }
+    if (!same) {
+      totals.mismatches += 1;
+    }
+  }
+  let expected = r.word();
+  totals.skipped += r.word() as u64;
+  if (records != expected || r.pos != #r.data) {
+    eprintln(f"{path}: incomplete oracle trace");
+    return false;
+  }
+  return before == totals.mismatches;
+}
+
+fn modified(path: str): i64 {
+  if (let info = file_info(path)) {
+    return info.modified_ns;
+  }
+  return -1;
+}
+fn run(var cmd&: Command): bool {
+  if (let status = cmd.status()) {
+    return exit_code(status) == 0;
+  } else (let e) {
+    return false;
+  }
+}
+fn remove_trace(path: str) {
+  if (let ok = delete_file(path)) {
+  } else (let e) {
+    eprintln(f"cannot delete {path}");
+  }
+}
+fn env_integer(name: str, fallback: u64): u64 {
+  if (let v = get_environment_variable(name)) {
+    return parse_u64(v.as_str()) ?? fallback;
+  }
+  return fallback;
+}
+
+pub fn main(): i32 {
+  var totals = Totals {};
+  let args = arguments();
+  var ok = true;
+  if (!args.is_empty()) {
+    for (let arg in args) {
+      ok = replay(arg, totals) && ok;
+    }
+  } else {
+    let out = f"{@package_dir()}/build/raster_oracle";
+    create_directories(out.as_str());
+    let source = f"{@package_dir()}/tools/raster_oracle.cc";
+    let exe = f"{out}/raster_oracle";
+    if (modified(exe.as_str()) <= modified(source.as_str())) {
+      var build = Command("sh");
+      build.arg("-c");
+      build.arg("exec clang++ -std=c++20 -O2 \"$1\" -o \"$2\" $(pkg-config --cflags --libs freetype2)");
+      build.arg("raster-oracle");
+      build.arg(source.as_str());
+      build.arg(exe.as_str());
+      if (!run(build)) {
+        eprintln("cannot build FreeType oracle");
+        return 1;
+      }
+    }
+    let synthetic = f"{out}/synthetic.bin";
+    var synth = Command(exe.as_str());
+    synth.arg("synthetic");
+    synth.stdout_to(synthetic.as_str());
+    if (!run(synth)) {
+      eprintln("synthetic oracle failed");
+      return 1;
+    }
+    if (replay(synthetic.as_str(), totals)) {
+      remove_trace(synthetic.as_str());
+    } else {
+      eprintln(f"kept {synthetic}");
+      ok = false;
+    }
+    totals.synthetic = totals.glyphs;
+    let sweep = get_environment_variable("RASTER_SWEEP") ?? from_str("fast");
+    let font_list = f"{out}/fonts.txt";
+    var list = Command(exe.as_str());
+    list.arg("list");
+    if (sweep == "all") {
+      list.arg("all");
+    }
+    list.stdout_to(font_list.as_str());
+    if (!run(list)) {
+      return 1;
+    }
+    var fonts: List<String> = List();
+    if (let font = get_environment_variable("RASTER_FONT")) {
+      fonts.push(font);
+    } else {
+      let text = read_file(font_list.as_str()) else { return 1; };
+      var start: usize = 0;
+      for (let i in 0..text.len()) {
+        if (text.as_str()[i] == '\n') {
+          fonts.push(from_str(text.as_str()[start..i]));
+          start = i + 1;
+        }
+      }
+    }
+    var sizes: List<u32> = List();
+    let size_override = env_integer("RASTER_SIZE", 0);
+    if (size_override != 0) {
+      sizes.push(size_override as u32);
+    } else if (sweep == "all") {
+      for (let size in [7u32,9,11,12,13,14,16,18,20,24,32,48,72]) {
+        sizes.push(size);
+      }
+    } else if (sweep == "curated") {
+      for (let size in 6u32..=48) {
+        sizes.push(size);
+      }
+      sizes.push(64);
+      sizes.push(96);
+    } else {
+      for (let size in [7u32,12,18,32,48]) {
+        sizes.push(size);
+      }
+    }
+    let stride = env_integer("RASTER_STRIDE", sweep == "fast" ? 31u64 : 1u64);
+    let modes = sweep == "all" ? 1u32 : 2u32;
+    var font_index: u32 = 0;
+    for (let font in fonts) {
+      let before = totals.glyphs;
+      for (let size in sizes) {
+        for (let hint in 0u32..modes) {
+          let hint_flag = sweep == "all" ? 1u32 : hint;
+          let trace = f"{out}/font{font_index}-px{size}-hint{hint_flag}.bin";
+          var cmd = Command(exe.as_str());
+          cmd.arg(font.as_str());
+          cmd.arg(f"{size}");
+          cmd.arg(f"{hint_flag}");
+          cmd.arg(f"{stride}");
+          cmd.stdout_to(trace.as_str());
+          if (!run(cmd)) {
+            eprintln(f"oracle failed: {font}, {size}px, hinted {hint_flag}");
+            return 1;
+          }
+          if (replay(trace.as_str(), totals)) {
+            remove_trace(trace.as_str());
+          } else {
+            eprintln(f"kept {trace} ({font})");
+            ok = false;
+          }
+        }
+      }
+      font_index += 1;
+      println(f"font {font_index}/{fonts.len()} {font}: {totals.glyphs - before} glyphs, cumulative mismatches {totals.mismatches}");
+    }
+    println(f"{fonts.len()} fonts, {sizes.len()} sizes, {modes} hinting modes, stride {stride}");
+  }
+  println(f"{totals.glyphs} outlines ({totals.synthetic} synthetic), {totals.pixels} bitmap bytes compared, {totals.errors} matching-error cases, {totals.skipped} non-outline/load skips, {totals.mismatches} mismatching glyphs");
+  return ok && totals.mismatches == 0 ? 0 : 1;
+}
