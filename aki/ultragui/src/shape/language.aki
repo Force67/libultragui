@@ -1,0 +1,185 @@
+// HarfBuzz 13.2.1 buffer languages: hb_language_from_string,
+// hb_language_get_default and hb_ot_tags_from_script_and_language. Languages
+// are canonical strings, with an immutable process-wide default initialized
+// at first use, after the host toolkit has had a chance to set LC_CTYPE.
+module ultragui::shape::language;
+
+import {min} from akikit::math::value_bounds;
+import {String} from akikit::strings::string;
+import {find, starts_with} from akikit::strings::string_search;
+import {OnceLock} from akikit::threading::once_lock;
+import {kLanguageRules, kLanguages} from ultragui::shape::language_tables;
+import {ot_script_tags} from ultragui::shape::ucd;
+import {ctype_locale} from ultragui::sys::locale;
+
+static let kDefault: OnceLock<String> = OnceLock::<String>();
+
+fn lower(c: u8): u8 => c >= 65 && c <= 90 ? c + 32 : c;
+fn upper(c: u8): u8 => c >= 97 && c <= 122 ? c - 32 : c;
+fn alpha(c: u8): bool => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+fn alnum(c: u8): bool => alpha(c) || (c >= 48 && c <= 57);
+fn at(s: str, i: usize): u8 => i < #s ? s[i] as u8 : 0;
+
+// A nonnegative explicit length has hb_language_from_string's 63-byte cap.
+// Locale names are NUL terminated (length -1): '.', '@', non-ASCII and every
+// byte outside [A-Za-z0-9_-] terminate; '_' becomes '-', ASCII becomes lower.
+pub fn from_string(s: str, length: i32 = -1): String {
+  var out = String();
+  let n = length < 0 ? #s : min(#s, min(length as usize, 63usize));
+  for (let i in 0..n) {
+    let c = at(s, i);
+    if (alnum(c) || c == 45 || c == 95) {
+      out.push_c8((c == 95 ? 45u8 : lower(c)) as c8);
+    } else {
+      break;
+    }
+  }
+  return out;
+}
+
+fn read_default(): String {
+  let locale = ctype_locale();
+  return from_string(locale.as_str());
+}
+
+pub fn default_language(): str => kDefault.get_or_init(read_default).as_str();
+
+pub struct OtTags : Copy {
+  pub var scripts: [u32; 3] = [0, 0, 0]
+  pub var script_count: usize = 0
+  pub var languages: [u32; 3] = [0, 0, 0]
+  pub var language_count: usize = 0
+}
+
+fn packed(s: str): u32 {
+  var tag = 0u32;
+  for (let i in 0usize..4) {
+    tag = (tag << 8) | (i < #s ? at(s, i) as u32 : 32u32);
+  }
+  return tag;
+}
+
+fn hex(c: u8): u32 => c >= 48 && c <= 57 ? c as u32 - 48 : (c >= 97 && c <= 102 ? c as u32 - 87 : 16);
+
+fn private_tag(s: str, prefix: str, script: bool): u32? {
+  let pos = find(s, prefix) else { return none; };
+  var p = pos + #prefix;
+  var tag = 0u32;
+  if (at(s, p) == 45) {
+    p += 1;
+    for (let i in 0usize..8) {
+      let h = hex(at(s, p + i));
+      if (h > 15) { return none; }
+      tag = (tag << 4) | h;
+    }
+  } else {
+    var n = 0usize;
+    while (n < 4 && alnum(at(s, p + n))) {
+      let c = at(s, p + n);
+      tag = (tag << 8) | (script ? lower(c) : upper(c)) as u32;
+      n += 1;
+    }
+    if (n == 0) { return none; }
+    while (n < 4) { tag = (tag << 8) | 32; n += 1; }
+  }
+  if ((tag & 0xDFDFDFDF) == 0x44464C54) { tag ^= 0x20202020; }
+  return tag;
+}
+
+// strstr can inspect past limit; only the start of a match is bounded, as in
+// HarfBuzz's subtag_matches (extensions must not change its boundary rules).
+fn subtag_matches(s: str, start: usize, limit: usize, subtag: str): bool {
+  if (start > limit || limit - start < #subtag) { return false; }
+  var p = start;
+  while (p + #subtag <= #s) {
+    if (s[p..p + #subtag] == subtag && p < limit && !alnum(at(s, p + #subtag))) { return true; }
+    p += 1;
+  }
+  return false;
+}
+
+fn language_tags(s: str, limit: usize): ([u32; 3], usize) {
+  for (let rule in kLanguageRules) {
+    var matches = false;
+    if (rule.mode == 3) {
+      if (limit >= 7) {
+        if (let p = find(s, "-")) {
+          matches = p < limit && limit - p >= 5 && subtag_matches(s, p, limit, rule.subtag);
+        }
+      }
+    } else if (rule.mode == 0) {
+      matches = s == rule.prefix;
+    } else if (rule.mode == 1) {
+      matches = limit >= #rule.prefix && starts_with(s, rule.prefix) && (at(s, #rule.prefix) == 0 || at(s, #rule.prefix) == 45);
+    } else {
+      matches = starts_with(s, rule.prefix) && subtag_matches(s, 0, limit, rule.subtag);
+    }
+    if (matches) { return (rule.tags, rule.count); }
+  }
+  var start = 0usize;
+  let first_dash = find(s, "-");
+  if (let dash = first_dash) {
+    if (limit >= 6) {
+      let rest = s[dash + 1..];
+      let ext_len = find(rest, "-") ?? #rest;
+      if (ext_len == 3 && alpha(at(rest, 0))) { start = dash + 1; }
+    }
+  }
+  let rest = s[start..];
+  // strchr searches through extensions too; without a dash first_len uses limit.
+  let n = find(rest, "-") ?? (limit >= start ? limit - start : 0usize);
+  let key = packed(rest[..min(n, #rest)]);
+  if (n == 2 || n == 3) {
+    var lo = 0usize;
+    var hi = #kLanguages / 5;
+    while (lo < hi) {
+      let mid = lo + (hi - lo) / 2;
+      let t = kLanguages[mid * 5];
+      if (t < key) { lo = mid + 1; } else { hi = mid; }
+    }
+    if (lo < #kLanguages / 5 && kLanguages[lo * 5] == key) {
+      return ([kLanguages[lo * 5 + 2], kLanguages[lo * 5 + 3], kLanguages[lo * 5 + 4]], kLanguages[lo * 5 + 1] as usize);
+    }
+    if (n == 3) { return ([key & ~0x20202000u32, 0, 0], 1); }
+  }
+  // The final ISO-639-3 fallback uses the original first dash, even if the
+  // extlang changed start (only malformed BCP47 can reach this path).
+  var final_len = #rest as i64;
+  if (let dash = first_dash) { final_len = dash as i64 - start as i64; }
+  if (final_len == 3) { return ([packed(rest[..3]) & ~0x20202000u32, 0, 0], 1); }
+  return ([0, 0, 0], 0);
+}
+
+// language must already be canonical (from_string/default_language).
+pub fn ot_tags(script: u32, language: str): OtTags {
+  let (scripts, script_count) = ot_script_tags(script);
+  var out = OtTags { scripts, script_count };
+  if (#language == 0) { return out; }
+  var limit = #language;
+  var private_start = #language;
+  if (starts_with(language, "x-")) {
+    private_start = 0;
+    limit = 0;
+  } else {
+    var limited = false;
+    var i = 1usize;
+    while (i + 1 < #language) {
+      if (at(language, i - 1) == 45 && at(language, i + 1) == 45) {
+        if (!limited) { limit = i - 1; limited = true; }
+        if (at(language, i) == 120) { private_start = i; break; }
+      }
+      i += 1;
+    }
+  }
+  let private_use = language[private_start..];
+  if (let script_tag = private_tag(private_use, "-hbsc", true)) {
+    out.scripts = [script_tag, 0, 0]; out.script_count = 1;
+  }
+  if (let language_tag = private_tag(private_use, "-hbot", false)) {
+    out.languages = [language_tag, 0, 0]; out.language_count = 1;
+  } else {
+    let (tags, count) = language_tags(language, limit);
+    out.languages = tags; out.language_count = count;
+  }
+  return out;
+}
