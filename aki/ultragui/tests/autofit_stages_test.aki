@@ -8,20 +8,24 @@ module autofit_stages_test;
 
 import {List} from akikit::containers::list;
 import {create_directories, is_directory, list_directory} from akikit::filesystem::directory;
-import {delete_file, read_bytes, real_path} from akikit::filesystem::file_util;
+import {delete_file, real_path} from akikit::filesystem::file_util;
 import {eprintln, println} from akikit::logging;
 import {getpid} from akikit::os::sys;
 import {Command, exit_code} from akikit::process::child;
 import {get_environment_variable} from akikit::process::environment_variables;
+import {map_file} from akikit::filesystem::memory_mapped_file;
 import {String, from_str} from akikit::strings::string;
+import {load_tt_design} from ultragui::font::tt_glyph;
 import {Face} from ultragui::font::face;
 import {Outline, Vec26} from ultragui::font::outline;
 import {Hints} from ultragui::font::autofit::hints;
 import {compute_segments, link_segments, compute_edges} from ultragui::font::autofit::features;
-import {pix_round} from ultragui::font::fixed;
+import {LatinMetrics, Width, Blue, kBlueBottom, kBlueTop, kBlueAdjustment, kBlueNeutral, kBlueSubTop} from ultragui::font::autofit::metrics;
+import {blue_edges, hint_edges} from ultragui::font::autofit::latin;
+import {div_fix, pix_round} from ultragui::font::fixed;
 
 struct Reader {
-  pub var data: List<byte>
+  pub var data: bytes
   pub var pos: usize = 0
   pub fn word(var self&): u32 {
     var v: u32 = 0;
@@ -50,7 +54,7 @@ fn compare(var r&: Reader, values: &[i64], path: str, gid: u32, px: u32, stage: 
     let want = r.num();
     if (values[i] != want) {
       t.mismatches += 1;
-      if (t.mismatches <= 30) { eprintln(f"{path} {px}px gid={gid} {stage}[{index}].{i}: got {values[i]}, want {want}"); }
+      { eprintln(f"{path} {px}px gid={gid} {stage}[{index}].{i}: got {values[i]}, want {want}"); }
     }
   }
 }
@@ -61,11 +65,50 @@ fn points(var r&: Reader, h&: Hints, path: str, gid: u32, px: u32, stage: str, v
     compare(r, values[..], path, gid, px, stage, i, t);
   }
 }
+fn metrics(upem: i64, gid: u32, xs: i64, ys: i64, px: u32): LatinMetrics {
+  var m = LatinMetrics { units_per_em: upem, increase_x_height: gid % 3 == 0 ? 16u32 : 0u32 };
+  for (var a& in m.axis) {
+    a.widths.push(Width { org: upem / 12 }); a.widths.push(Width { org: upem / 8 });
+    a.standard_width = upem / 12;
+  }
+  for (let i in 0usize..5) {
+    let reference = i == 0 ? 0 : (i == 1 ? upem * 7 / 10 : (i == 2 ? upem / 2 : (i == 3 ? upem / 4 : upem / 2 - 1)));
+    let shoot = reference + (i == 0 ? -upem / 100 : upem / 100);
+    let flags = i == 0 ? kBlueBottom : (i == 1 ? kBlueTop : (i == 2 ? kBlueTop | kBlueAdjustment : (i == 3 ? kBlueNeutral : kBlueSubTop)));
+    m.axis[1].blues.push(Blue { reference: Width { org: reference }, shoot: Width { org: shoot }, flags, ascender: upem * 9 / 10, descender: -upem / 4 });
+  }
+  m.scale(xs, ys, px);
+  return m;
+}
+fn compare_metrics(var r&: Reader, m&: LatinMetrics, path: str, gid: u32, px: u32, var t&: Totals): bool {
+  let scales = [m.x_scale, m.y_scale];
+  compare(r, scales[..], path, gid, px, "scales", 0, t);
+  for (let dim in 0usize..2) {
+    let a& = m.axis[dim];
+    let axis = [a.scale, a.delta, a.org_scale, a.org_delta, a.extra_light ? 1i64 : 0i64];
+    compare(r, axis[..], path, gid, px, "axis metrics", dim, t);
+    if (r.word() as usize != a.widths.len()) { return false; }
+    for (let i in 0..a.widths.len()) {
+      let w = a.widths[i]; let vals = [w.org, w.cur, w.fit];
+      compare(r, vals[..], path, gid, px, "widths", i, t);
+    }
+    if (r.word() as usize != a.blues.len()) { return false; }
+    for (let i in 0..a.blues.len()) {
+      let b = a.blues[i];
+      let vals = [b.reference.org, b.reference.cur, b.reference.fit, b.shoot.org, b.shoot.cur, b.shoot.fit, b.ascender, b.descender, b.flags as i64];
+      compare(r, vals[..], path, gid, px, "blues", i, t);
+    }
+  }
+  return true;
+}
 fn replay(path: str, record: str, var t&: Totals): bool {
-  var r = Reader { data: read_bytes(record) ?? List() };
-  if (r.data.len() < 20 || r.word() != 0x41464831 || r.word() != 2 || r.word() != 14 || r.word() != 3) { eprintln("invalid stage oracle header"); return false; }
+  let mapped = unsafe map_file(record) else { return false; };
+  var r = Reader { data: mapped.as_bytes() };
+  if ((#r.data) < 20 || r.word() != 0x41464832 || r.word() != 2 || r.word() != 14 || r.word() != 3) { eprintln("invalid stage oracle header"); return false; }
   let glyph_count = r.word();
   var h = Hints {};
+  var face = Face::open_file(path, 0) else { return false; };
+  var current_size: u32 = 0;
   while (r.word() != 0) {
     let gid = r.word();
     let px = r.word();
@@ -76,12 +119,43 @@ fn replay(path: str, record: str, var t&: Totals): bool {
     var o = Outline { flags: r.word() };
     for (let i in 0..np) { let x = r.num(); let y = r.num(); o.points.push(Vec26 { x, y }); o.tags.push(r.word() as u8); }
     for (let i in 0..nc) { o.contours.push(r.word() as u16); }
+    // The oracle records the adjusted scales, but initialize our metrics
+    // from the same FT_Set_Pixel_Sizes design scale to test that adjustment.
+    let original = div_fix(px as i64 * 64, h.units_per_em);
+    let m = metrics(h.units_per_em, gid, original, original, px);
+    if (!compare_metrics(r, m, path, gid, px, t)) { return false; }
+    if (h.x_scale != m.x_scale || h.y_scale != m.y_scale) { return false; }
+    if (px != current_size) {
+      if (let sized = face.set_pixel_size(px)) {} else (let error) { return false; }
+      current_size = px;
+    }
+    let loaded = load_tt_design(face, gid) else { eprintln(f"{path} {px}px gid={gid}: design load failed"); return false; };
+    let g = loaded.metrics;
+    let values = [g.width, g.height, g.hori_bearing_x, g.hori_bearing_y, g.hori_advance, g.vert_bearing_x, g.vert_bearing_y, g.vert_advance, loaded.advance_x, loaded.linear_hori_advance, loaded.linear_vert_advance];
+    compare(r, values[..], path, gid, px, "design load metrics", 0, t);
+    if (loaded.outline.flags != o.flags || loaded.outline.points != o.points || loaded.outline.tags != o.tags || loaded.outline.contours != o.contours) {
+      t.mismatches += 1;
+      eprintln(f"{path} {px}px gid={gid}: design outline differs");
+    }
+    var design = LatinMetrics { units_per_em: h.units_per_em };
+    design.init_widths(o);
+    for (let dim in 0usize..2) {
+      let count = r.word() as usize;
+      if (count != design.axis[dim].widths.len()) { eprintln(f"{path} {px}px gid={gid} dim={dim}: width count {design.axis[dim].widths.len()}/{count}"); return false; }
+      let vals = [design.axis[dim].standard_width, design.axis[dim].edge_distance];
+      compare(r, vals[..], path, gid, px, "standard widths", dim, t);
+      for (let i in 0..design.axis[dim].widths.len()) {
+        let vals = [design.axis[dim].widths[i].org];
+        compare(r, vals[..], path, gid, px, "quantized widths", i, t);
+      }
+    }
     h.reload(o);
     points(r, h, path, gid, px, "reload", t);
     for (let dim in 0usize..2) {
       compute_segments(h, dim);
       link_segments(h, dim, (gid & 1) != 0 ? h.units_per_em / 12 : 0);
       compute_edges(h, dim, h.units_per_em / 100, false);
+      if (dim == 1) { blue_edges(h, m); }
       let ns = r.word() as usize;
       let ne = r.word() as usize;
       let major = r.num();
@@ -99,6 +173,15 @@ fn replay(path: str, record: str, var t&: Totals): bool {
         let e = h.axis[dim].edges[i];
         let values = [e.fpos, e.opos, e.pos, e.flags as i64, e.dir as i64, e.scale, e.link as i64, e.serif as i64, e.first as i64, e.last as i64];
         compare(r, values[..], path, gid, px, "edges", i, t);
+      }
+      hint_edges(h, m, dim);
+      for (let i in 0..ne) {
+        let e = h.axis[dim].edges[i];
+        let vals = [e.pos, e.flags as i64, e.blue as i64, e.blue_shoot ? 1i64 : 0i64];
+        compare(r, vals[..], path, gid, px, "fitted edges", i, t);
+      }
+      for (let i in 0..ne) {
+        let e = h.axis[dim].edges[i];
         h.axis[dim].edges[i].pos = pix_round(e.opos) + ((i * 17 + gid as usize * 7) % 41) as i64 - 20;
       }
       h.align_edges(dim); h.align_strong(dim); h.align_weak(dim);
@@ -113,7 +196,7 @@ fn replay(path: str, record: str, var t&: Totals): bool {
   }
   t.fonts += 1;
   println(f"stages: {path}: glyphs={glyph_count}; cumulative {t.records} records, {t.mismatches} field mismatches");
-  return r.pos == r.data.len();
+  return r.pos == (#r.data);
 }
 fn collect(dir: str, var fonts&: List<String>) {
   let entries = list_directory(dir) else { return; };
@@ -148,6 +231,7 @@ pub fn main(): i32 {
   var t = Totals {};
   for (let path in fonts) {
     var cmd = Command(f"{build}/autofit_oracle".as_str());
+    cmd.add_env("AUTOFIT_STAGE_WIDTHS", "1");
     cmd.arg(path.as_str()); cmd.arg(record.as_str()); cmd.arg(stride.as_str());
     if (let size = get_environment_variable("AUTOFIT_STAGES_SIZE")) { cmd.arg(size.as_str()); }
     else {

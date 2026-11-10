@@ -10,8 +10,11 @@ if [[ ! -d "$build/freetype-2.14.3" ]]; then
   tar -xf "$source_archive" -C "$build"
 fi
 src="$build/freetype-2.14.3"
+oracle_tmp="$build/autofit_oracle.$$"
+trap 'rm -f "$oracle_tmp"' EXIT
 clang -std=c11 -O2 -ffunction-sections -fdata-sections -DFT2_BUILD_LIBRARY \
   -I"$src/include" -I"$src/src/autofit" $(pkg-config --cflags harfbuzz freetype2) \
   "$pkg/tools/autofit_oracle.c" "$src/src/autofit/afhints.c" \
-  "$src/src/autofit/aflatin.c" "$src/src/base/ftcalc.c" "$src/src/base/ftutil.c" \
-  -Wl,--gc-sections $(pkg-config --libs freetype2 harfbuzz) -o "$build/autofit_oracle"
+  "$src/src/base/ftcalc.c" "$src/src/base/ftutil.c" \
+  -Wl,--gc-sections $(pkg-config --libs freetype2 harfbuzz) -o "$oracle_tmp"
+mv "$oracle_tmp" "$build/autofit_oracle"

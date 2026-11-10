@@ -199,7 +199,7 @@ in the table, and none is unported.
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} | ported (test_layout_retained.cc ported) |
 | (yoga, third_party/yoga) | ultragui::layout::{flex_style,flex_tree} | replaced: an aki flexbox engine with yoga's results bit for bit for every style layout.cc can write (tests/yoga_fuzz_test.aki; "The layout engine" below) |
 | (FreeType: sfnt, TrueType driver, embedded bitmaps, ftcalc; hb_ft's unhinted queries) | ultragui::font::{fixed,sfnt,outline,face,tt_interp,tt_glyph,sbit,unhinted} | replacing (not wired into text_engine yet): faces, sizes and bytecode-hinted TrueType glyphs bit for bit vs FreeType 2.14.3 (tests/font_tt_test.aki; "The font engine" below); font/raster and font/cff are other modules |
-| (FreeType: autofit outline analysis) | ultragui::font::autofit::{hints,features} | shared point interpolation, Latin segments/edges and standard-width quantization; internal-stage oracle; see "Automatic hinting" |
+| (FreeType: autofit outline analysis) | ultragui::font::autofit::{hints,features,metrics,latin} | shared point interpolation, Latin metrics and normal-target edge fitting; internal-stage oracle; see "Automatic hinting" |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -967,24 +967,60 @@ index 0. WOFF/WOFF2 and Type 1 wrappers are not opened.
 `hints` owns font-unit and scaled points and implements contour topology,
 orientation, edge alignment, strong interpolation and weak IUP interpolation.
 `features` extracts Latin segments, matches stems/serifs, groups sorted edges
-and quantizes standard widths. References are indices into owned lists.
-Arithmetic retains FreeType 2.14.3's fixed-point rounding and short truncation.
+and quantizes standard widths. `metrics` analyzes a selected standard glyph's
+widths and scales design metrics and blue zones, including x-height adjustment,
+extra-light detection and sub-top zone suppression. `latin` assigns blue edges
+and fits stems and serifs for the normal target, including three-stem symmetry.
+References are indices into owned lists. Arithmetic retains FreeType 2.14.3's
+fixed-point rounding and short truncation. Source attribution is in
+`src/font/autofit/NOTICE` and `FTL.TXT`.
+
+The usable stages (these do **not** form a complete default-load entry point):
+
+```aki
+let standard = try load_tt_design(face, standard_gid); // font::tt_glyph
+metrics.init_widths(standard.outline);                  // LatinMetrics
+// The global analyzer must supply style-specific blue zones first.
+metrics.scale(size.x_scale, size.y_scale, size.x_ppem as u32);
+var glyph = try load_tt_design(face, gid);
+apply_latin(hints, metrics, glyph.outline, nonbase);     // font::autofit::latin
+// The loader must still adjust phantom points, metrics and advances.
+```
+
+`load_tt_design` bypasses strikes, scales and bytecode without changing the
+face's size; it returns recursed unscaled outlines and design-unit linear
+advances (`NO_SCALE | IGNORE_TRANSFORM | LINEAR_DESIGN`). Existing `load_tt`
+behavior is unchanged.
 
 `tests/autofit_stages_test.aki` builds `tools/autofit_oracle.c` using actual
 FreeType 2.14.3 internal source routines, linked with both FreeType and
 HarfBuzz. Its default compares five fonts, 13 sizes and every 97th glyph:
-4,212 glyph/size records, 934,856 points, 148,226 segments, 85,885 edges,
-zero field mismatches. It compares original outlines, topology, every segment
-and edge field and interpolation against deliberately perturbed edge positions.
-Uninitialized scratch fields on weak points at reload are excluded; all
-coordinates, flags and final tags are checked. `AUTOFIT_STAGES_SWEEP=1`
-selects all autohinted faces and all glyphs; `AUTOFIT_STAGES_SIZE` and
-`AUTOFIT_STAGES_STRIDE` narrow that workload.
+4,212 glyph/size records, 934,856 points, 148,226 segments, 86,155 edges,
+zero field mismatches. It checks design-unit glyph loading, topology,
+every segment and edge field, standard-width quantization, metric scaling,
+blue assignment, normal-target edge fitting and interpolation against
+deliberately perturbed edge positions. The scale/fit checks use **synthetic
+style metrics**, not the real per-face global analysis. Uninitialized scratch
+fields on weak points at reload are excluded; all coordinates, flags and final
+tags are checked. `AUTOFIT_STAGES_SWEEP=1` selects all autohinted faces and
+all glyphs; `AUTOFIT_STAGES_SIZE` and `AUTOFIT_STAGES_STRIDE` narrow that
+workload. Traces are memory-mapped to bound resident allocations.
 
 This is stage verification, **not** default-load or raster equivalence.
-Global coverage, shaping of blue strings, metrics initialization, writing-system
-edge fitting and loader integration are still required. `Face::load_glyph`
-continues to return `UnimplementedFeature` for autohinted outlines.
+**Remaining:** global style/script coverage and its lifetime; shaping and
+analyzing blue strings; CJK/Indic/dummy writing systems; afadjust's vertical
+separation; loader phantom-point, metric and advance adjustments; wiring into
+`Face::load_glyph`; end-to-end outlined and rendered differential sweeps.
+`Face::load_glyph` continues to return `UnimplementedFeature` for autohinted
+outlines. These stages must not be wired in as if they implement the full
+normal-target autohinter.
+
+Source checks: `afshaper.c` in 2.14.3 uses
+`hb_ot_layout_lookup_collect_glyphs` for GSUB outputs and GPOS inputs, and
+`hb_ot_layout_collect_lookups` plus `hb_ot_layout_lookup_would_substitute` for
+style selection; it does not call substitute closure. Autofit stem darkening
+is disabled by default and only considered for light rendering, so normal
+rendering never emboldens the outlines.
 
 ### Paint and the widget tree
 

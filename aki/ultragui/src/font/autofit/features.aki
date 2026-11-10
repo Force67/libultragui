@@ -256,7 +256,9 @@ pub fn compute_edges(var h&: Hints, dim: usize, distance: i64, descending: bool)
 // table index when averaging a cluster after the first one.
 pub fn quantize_widths(var widths&: List<i64>, threshold: i64) {
   let count = widths.len();
-  if (count <= 1) { return; }
+  // FreeType leaves a single zero-initialized slot for an empty input.
+  if (count == 0) { widths.push(0); return; }
+  if (count == 1) { return; }
   for (let i in 1..count) {
     var j = i;
     while (j > 0 && widths[j] < widths[j - 1]) { widths.swap(j, j - 1); j -= 1; }
