@@ -79,6 +79,31 @@ static int languages(const char *path)
   return 0;
 }
 
+/* Verify the selected LangSys even where its feature set happens to give
+ * identical glyphs. Includes invalid and unregistered scripts for fallback. */
+static void selections(hb_face_t *face, hb_language_t language)
+{
+  static const hb_script_t scripts[] = {
+    HB_SCRIPT_INVALID, HB_SCRIPT_LATIN, HB_SCRIPT_HAN, HB_SCRIPT_ARABIC,
+    HB_SCRIPT_DEVANAGARI, HB_SCRIPT_MONGOLIAN, HB_TAG('Q','a','a','a'), HB_SCRIPT_MYANMAR
+  };
+  printf("M %zu", sizeof scripts / sizeof scripts[0]);
+  for (unsigned i = 0; i < sizeof scripts / sizeof scripts[0]; i++) {
+    unsigned sn = 3, ln = 3;
+    hb_tag_t st[3], lt[3];
+    hb_ot_tags_from_script_and_language(scripts[i], language, &sn, st, &ln, lt);
+    printf(" %u", scripts[i]);
+    for (unsigned table = 0; table < 2; table++) {
+      hb_tag_t tt = table ? HB_OT_TAG_GPOS : HB_OT_TAG_GSUB, chosen;
+      unsigned si, li;
+      int found = hb_ot_layout_table_select_script(face, tt, sn, st, &si, &chosen);
+      hb_ot_layout_script_select_language(face, tt, si, ln, lt, &li);
+      printf(" %u %u %d %u", si, chosen, found, li);
+    }
+  }
+  printf("\n");
+}
+
 int main(int argc, char **argv)
 {
   if (argc == 3 && !strcmp(argv[1], "--languages")) return languages(argv[2]);
@@ -145,6 +170,7 @@ int main(int argc, char **argv)
       printf("F %ld %s %d %d %d\n", (long) face->num_glyphs, hb_shape_plan_get_shaper(plan),
              hb_ot_layout_has_substitution(hface), hb_ot_layout_has_positioning(hface),
              hb_ot_layout_has_glyph_classes(hface));
+      selections(hface, language);
       hb_shape_plan_destroy(plan);
       hb_buffer_destroy(buf);
       printed_shaper = 1;

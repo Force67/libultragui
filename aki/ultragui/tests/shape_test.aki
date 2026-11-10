@@ -40,7 +40,7 @@ import {ShapeFace} from ultragui::shape::face;
 import {default_language, from_bytes, from_string, ot_tags} from ultragui::shape::language;
 import {kLanguageRules} from ultragui::shape::language_tables;
 import {plan_index} from ultragui::shape::plan;
-import {kNull} from ultragui::shape::otl;
+import {kNull, select_language, select_script} from ultragui::shape::otl;
 import {ShapedGlyph, shape_utf8} from ultragui::shape::shape;
 import {gc_is_mark, general_category, tag} from ultragui::shape::ucd;
 import {FtFont, open_ft_font, set_pixel_size} from support::shape_ft;
@@ -68,6 +68,7 @@ struct Totals {
   pub var reported: u64 = 0
   pub var skipped_graphite: u64 = 0
   pub var locale_cases: u64 = 0
+  pub var table_selections: u64 = 0
 }
 
 // --- Strings ----------------------------------------------------------------------------------
@@ -394,6 +395,27 @@ fn check_font_runs(path: str, out_dir: str, oracle: str, sizes: &[u32], strings&
     totals.mismatches += 1;
     eprintln(f"TABLES {path}: HarfBuzz keeps GSUB {hb_gsub} GPOS {hb_gpos} GDEF classes {hb_gdef}, aki {face.gsub.version != 0} {face.gpos.version != 0} {face.gdef.glyph_class_def < kNull}");
   }
+  let m_tag = r.token();
+  let scripts = r.int() as usize;
+  for (let i in 0..scripts) {
+    let script = r.int() as u32;
+    let tags = ot_tags(script, lang.as_str());
+    for (let table in 0u32..2) {
+      let si = r.int() as u32;
+      let chosen = r.int() as u32;
+      let found = r.int() != 0;
+      let li = r.int() as u32;
+      let data = table == 0 ? face.gsub_t() : face.gpos_t();
+      let gg = table == 0 ? face.gsub : face.gpos;
+      let (actual_si, actual_chosen, actual_found) = select_script(data, gg, tags.scripts[..tags.script_count]);
+      let actual_li = select_language(data, gg, actual_si, tags.languages[..tags.language_count]);
+      totals.table_selections += 1;
+      if (si != actual_si || chosen != actual_chosen || found != actual_found || li != actual_li) {
+        totals.mismatches += 1;
+        eprintln(f"LANGSYS {path} {locale} script {script} table {table}: want {si}/{chosen}/{found}/{li}, got {actual_si}/{actual_chosen}/{actual_found}/{actual_li}");
+      }
+    }
+  }
   if (is_graphite) {
     if (#locale == 0) {
       totals.skipped_graphite += 1;
@@ -661,6 +683,6 @@ pub fn main(): i32 {
     let sizes = sweep ? sizes_sweep[..] : sizes_default[..];
     ok = check_font(f.as_str(), root, out_dir.as_str(), oracle.as_str(), sizes, generated, seed, totals, "", false, true) && ok;
   }
-  println(f"{totals.fonts} fonts ({totals.skipped_graphite} shaped by graphite2, not compared), {totals.locale_cases} locale/font cases, {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
+  println(f"{totals.fonts} fonts ({totals.skipped_graphite} shaped by graphite2, not compared), {totals.locale_cases} locale/font cases, {totals.table_selections} table selections, {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
   return ok && totals.mismatches == 0 ? 0 : 1;
 }
