@@ -1,0 +1,157 @@
+// CFF1/CFF2 font programs: Top DICT, CharStrings, subroutines, charsets,
+// CID font dictionaries and FDSelect. The container passes table bytes.
+module ultragui::font::cff::table;
+
+import {List, to_list, filled} from akikit::containers::list;
+import {CffError, Span, Reader, Index, PrivateDict, dict, private_dict, uint_at} from ultragui::font::cff::data;
+import {kExpertCharset, kExpertSubsetCharset} from ultragui::font::cff::standard;
+
+pub struct Program {
+  pub var data: List<u8> = List()
+  pub var cff2: bool = false
+  pub var charstrings: Index = Index {}
+  pub var global_subrs: Index = Index {}
+  pub var privates: List<PrivateDict> = List()
+  pub var fd_select: List<usize> = List()
+  pub var charset: List<u16> = List()
+  pub var max_stack: usize = 48
+  pub var blend_weights: List<List<i32>> = List()
+  pub fn parse(data&: [u8]): Program ! CffError;
+}
+
+fn get_private(data&: [u8], span: Span, cff2: bool, weights&: [List<i32>], subfont: bool = false): PrivateDict ! CffError {
+  let entries = try dict(data, span);
+  for (let e in entries) {
+    if (subfont && e.op == 0x107) { return fail CffError::Unsupported; }
+    if (e.op == 18 && e.args.len() >= 2) {
+      let n = e.args[0] >> 16; let p = e.args[1] >> 16;
+      if (n < 0 || p < 0) { return fail CffError::InvalidTable; }
+      return try private_dict(data, Span { start: p as usize, size: n as usize }, cff2, cff2 ? weights : none);
+    }
+  }
+  return PrivateDict {};
+}
+
+fn Program::parse(data&: [u8]): Program ! CffError {
+  if (#data < 4 || (data[0] != 1 && data[0] != 2)) { return fail CffError::InvalidFileFormat; }
+  var out = Program { data: to_list(data), cff2: data[0] == 2 };
+  let header = data[2] as usize;
+  if (header > #data || header < (out.cff2 ? 5usize : 4usize)) { return fail CffError::InvalidTable; }
+  var top = Span {};
+  if (out.cff2) {
+    top = Span { start: header, size: try uint_at(data, 3, 2) as usize };
+    out.global_subrs = try Index::parse(data, top.limit(), true); out.max_stack = 513;
+  } else {
+    let names = try Index::parse(data, header, false);
+    let tops = try Index::parse(data, names.next, false);
+    if (tops.entries.len() == 0) { return fail CffError::InvalidTable; }
+    top = tops.entries[0];
+    let strings = try Index::parse(data, tops.next, false);
+    out.global_subrs = try Index::parse(data, strings.next, false);
+  }
+  let entries = try dict(data, top);
+  var chars = 0usize; var fdarray = 0usize; var fdselect = 0usize; var charset = 0usize; var vstore = 0usize;
+  for (let e in entries) {
+    if (e.args.len() == 0) { continue; }
+    if (e.op == 0x107 && e.args[0] <= 0) { return fail CffError::Unsupported; }
+    let v = e.args[0] >> 16;
+    if (v < 0) { continue; }
+    if (e.op == 17) { chars = v as usize; }
+    else if (e.op == 15) { charset = v as usize; }
+    else if (e.op == 0x124) { fdarray = v as usize; }
+    else if (e.op == 0x125) { fdselect = v as usize; }
+    else if (e.op == 24) { vstore = v as usize; }
+    else if (e.op == 25 && out.cff2) { out.max_stack = v > 513 ? 513usize : v as usize; }
+    else if (e.op == 0x107 && e.args.len() >= 6) {
+      // Nonstandard transforms require concatenating per-FD matrices.
+      // Never silently return an outline in the wrong coordinate system.
+      if (e.args[1] != 0 || e.args[2] != 0 || e.args[4] != 0 || e.args[5] != 0 || e.args[0] != e.args[3]) {
+        return fail CffError::Unsupported;
+      }
+    }
+  }
+  if (vstore != 0) {
+    // CFF2 has a uint16 length before the OpenType ItemVariationStore.
+    let base = vstore + 2;
+    if (try uint_at(data, base, 2) != 1) { return fail CffError::InvalidTable; }
+    let regions = base + try uint_at(data, base + 2, 4) as usize;
+    let axes = try uint_at(data, regions, 2) as usize;
+    let region_count = try uint_at(data, regions + 2, 2) as usize;
+    var weights = filled(region_count, 65536i32);
+    for (let region in 0..region_count) {
+      for (let axis in 0..axes) {
+        let p = regions + 4 + (region * axes + axis) * 6;
+        let start = try uint_at(data, p, 2) as i16 as i32;
+        let peak = try uint_at(data, p + 2, 2) as i16 as i32;
+        let end_ = try uint_at(data, p + 4, 2) as i16 as i32;
+        // At the default normalized coordinate zero: invalid and
+        // cross-zero axes do not participate; a nonzero peak gives zero.
+        if (start <= peak && peak <= end_ && !(start < 0 && end_ > 0) && peak != 0) { weights[region] = 0; }
+      }
+    }
+    let n = try uint_at(data, base + 6, 2) as usize;
+    if (n > #data / 4) { return fail CffError::InvalidTable; }
+    for (let i in 0..n) {
+      let p = base + try uint_at(data, base + 8 + i * 4, 4) as usize;
+      let nr = try uint_at(data, p + 4, 2) as usize;
+      if (nr > region_count) { return fail CffError::InvalidTable; }
+      var row = List::<i32>();
+      for (let j in 0..nr) {
+        let region = try uint_at(data, p + 6 + j * 2, 2) as usize;
+        if (region >= region_count) { return fail CffError::InvalidTable; }
+        row.push(weights[region]);
+      }
+      out.blend_weights.push(row);
+    }
+  }
+  if (chars == 0) { return fail CffError::InvalidTable; }
+  out.charstrings = try Index::parse(data, chars, out.cff2);
+  let count = out.charstrings.entries.len();
+  out.fd_select = filled(count, 0usize);
+  if (fdarray != 0) {
+    let fds = try Index::parse(data, fdarray, out.cff2);
+    if (fds.entries.len() == 0 || fds.entries.len() > 256) { return fail CffError::InvalidTable; }
+    for (let fd in fds.entries) { out.privates.push(try get_private(data, fd, out.cff2, out.blend_weights.as_slice(), true)); }
+    if (fdselect != 0 || !out.cff2) {
+    var r = Reader { data, pos: fdselect }; let format = try r.byte();
+    if (format == 0) {
+      for (let gid in 0..count) { out.fd_select[gid] = try r.byte() as usize; }
+    } else if (format == 3) {
+      let n = try r.uint(2) as usize;
+      if (n == 0 || n > count) { return fail CffError::InvalidTable; }
+      var first = try r.uint(2) as usize;
+      if (first != 0) { return fail CffError::InvalidTable; }
+      for (let _ in 0..n) {
+        let fd = try r.uint(1) as usize;
+        let last = try r.uint(2) as usize;
+        if (last < first || last > count) { return fail CffError::InvalidTable; }
+        for (let gid in first..last) { out.fd_select[gid] = fd; }
+        first = last;
+      }
+      if (first != count) { return fail CffError::InvalidTable; }
+    } else { return fail CffError::InvalidFileFormat; }
+    }
+    for (let fd in out.fd_select) { if (fd >= out.privates.len()) { return fail CffError::InvalidTable; } }
+  } else { out.privates.push(try get_private(data, top, out.cff2, out.blend_weights.as_slice())); }
+  if (!out.cff2) {
+    out.charset = filled(count, 0u16);
+    if (charset <= 2) {
+      for (let gid in 1..count) {
+        if (charset == 0) { if (gid > 228) { return fail CffError::InvalidTable; } out.charset[gid] = gid as u16; }
+        else if (charset == 1 && gid < #kExpertCharset) { out.charset[gid] = kExpertCharset[gid]; }
+        else if (charset == 2 && gid < #kExpertSubsetCharset) { out.charset[gid] = kExpertSubsetCharset[gid]; }
+        else { return fail CffError::InvalidTable; }
+      }
+    } else {
+      var r = Reader { data, pos: charset }; let format = try r.byte(); var gid = 1usize;
+      if (format > 2) { return fail CffError::InvalidTable; }
+      while (gid < count) {
+        let first = try r.uint(2);
+        let n = format == 0 ? 0u32 : try r.uint(format == 1 ? 1usize : 2usize);
+        if (n as usize >= count - gid || first + n > 65535) { return fail CffError::InvalidTable; }
+        for (let j in 0..=n) { out.charset[gid] = (first + j) as u16; gid += 1; }
+      }
+    }
+  }
+  return out;
+}

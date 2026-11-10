@@ -172,6 +172,9 @@ in the table, and none is unported.
 | platform/platform_glfw.cc | ultragui_glfw::platform_glfw (`GlfwPlatform`; + sys::glfw) | ported (pkg:ultragui_glfw) |
 | text/text_engine.{h,cc} | ultragui::text::text_engine (+ sys::freetype, sys::harfbuzz) | ported |
 | (FreeType smooth outline rendering) | ultragui::font::raster::{outline,curves,rasterizer} | pure Aki; byte-identical to FreeType 2.14.3 (see "Glyph rasterizer") |
+| (CFF driver boundary) | ultragui::font::cff::cff | pure Aki glyph/size API; see CFF outlines below; integration pending |
+| (CFF INDEX, DICT, charset and CID tables) | ultragui::font::cff::{data,table,standard} | pure Aki; CFF1 and default-instance CFF2 |
+| (Type 2 execution and normal-target CFF hinting) | ultragui::font::cff::{charstring,fixed,hints,outline} | pure Aki; bitwise differential verification below; matrix limits explicit |
 | audio/audio_backend.h | ultragui::audio::audio_backend | ported (seam) |
 | audio/miniaudio_impl.cc, backends/ugui_impl_miniaudio.* | ultragui_audio::ugui_impl_miniaudio (+ sys::miniaudio, csrc/ugui_ma.c) | ported (pkg:ultragui_audio; `AudioEngine`) |
 | scripting/script_runtime.h, script_runtime_none.cc | ultragui::scripting::script_runtime | ported (capability + NoScript) |
@@ -1319,6 +1322,111 @@ nix develop -c bash -c 'cd aki/tools/golden/aki_golden && akiko build'
 nix develop -c aki/tools/golden/run.sh /tmp/ugui-golden/ugui_golden aki/tools/golden/aki_golden/build/aki_golden \
     aki/tools/golden/scenarios/*.txt aki/tools/golden/extra/*.txt          # all 21: same
 ```
+
+### CFF outlines — `ultragui::font::cff`
+
+This independent module replaces the CFF glyph-loading part of FreeType; the
+existing TextEngine and native bindings remain for the later integration.
+It owns its table data and returns parallel point/tag arrays and contour end
+indices. Coordinates and advances are signed 26.6; linear horizontal advance
+is 16.16. Tags are FreeType's on-curve (1) and cubic (2), and outline flags are
+`REVERSE_FILL`, plus `HIGH_PRECISION` below 24 ppem.
+
+The sfnt owner imports `CffFont`, `CffFaceInfo`, `CffSizeMetrics`, and
+`CffGlyph` from `font::cff::cff`, `CffError` from `font::cff::data`, and
+`CffPoint` from `font::cff::outline`. Its calls are:
+
+```aki
+var font = try CffFont::parse(cff_table, face_info, hmtx_table);
+try font.set_pixel_size(px);
+let size = font.size_metrics();
+let glyph = try font.load_glyph(gid, true);   // false: FT_LOAD_NO_HINTING
+```
+
+`CffFaceInfo` supplies `units_per_em`, `ascender`, `descender`, `height`,
+`max_advance`, and `horizontal_metrics` (hhea's numberOfHMetrics). These
+are the face-wide values **after** sfnt/OS/2 metric selection. `hmtx_table`
+is the raw hmtx slice; its advance widths are copied and its trailing
+shared advance is handled. With horizontal_metrics zero, an empty slice
+uses the charstring width. The API does not hold borrowed font memory.
+`set_pixel_size(0)` selects 1 ppem, matching FT_Set_Pixel_Sizes. `load_glyph`
+takes a mutable font because the Type 2 random operator has per-FD state.
+The sfnt container handles other face services, variation coordinates,
+embedded bitmaps, and vertical layout; VORG has no effect on this horizontal
+outline/advance API.
+
+The parser handles CFF1 charsets (predefined and custom), local/global
+subroutine biases, CID FDArray and FDSelect formats 0/3, and CFF2's optional
+FDSelect, 32-bit INDEX counts, vsindex/blend, and Private DICT blends at the
+default instance. Like FreeType 2.14.3, it rejects FDSelect format 4. The Type
+2 machine preserves integer-versus-fixed stack types, transient storage,
+permissive reserved operators, flex operators, implicit end/return, seac
+components through StandardEncoding, and cf2's 16-level subroutine limit.
+Charstring reads past their end return zero, as the reference's buffers do;
+structural table reads remain bounds checked. A 20-million-instruction
+limit bounds malformed programs.
+
+Normal-target hinting leaves X fractional and maps Y through stem edges,
+blue/family zones, ghost hints, counter masks, and retained stem placements.
+Contour assembly delays a segment while a new hint mask is installed and
+closes through the first contour map. Unhinted points reproduce cf2's
+font-unit quantization before FreeType's second scaling step. All observable
+scaling and rounding use integer/fixed-point arithmetic. FreeType 2.14.3's
+CFF driver defaults `no-stem-darkening` to true, so darkening is not applied.
+
+Verification is `tests/cff_differential_test.aki`, which builds
+`tools/cff_oracle.c` against the dev shell's **FreeType 2.14.3** (it checks
+the version), privately reads the sfnt directory, and compares every size
+metric, outline point, tag, contour end, flag, horizontal glyph metric,
+advance and linear advance. It streams the binary oracle trace, deletes it
+after comparison, and writes every mismatch with field/point values to
+`build/cff_oracle/<font-index>-<mode>.tsv`. Only the oracle uses FreeType;
+the implementation has no FFI, unsafe blocks, subprocesses, or native-code
+dependencies. Fixture generation uses fontTools, but the small committed
+fixtures do not require it to run the tests.
+
+```sh
+# Default: five installed representative faces (including CID Noto CJK),
+# all glyphs at 7,12,24,48; plus operator, CID, CFF2 and malformed fixtures.
+akiko test tests/cff_differential_test.aki
+# Full requested size set, including all 65,535 glyphs of Noto Sans CJK:
+CFF_SIZES=default akiko test tests/cff_differential_test.aki
+# All installed OTTO fonts, all glyphs, at the 13 requested sweep sizes:
+CFF_SWEEP=1 akiko test tests/cff_differential_test.aki
+# Reproducible random-operator comparison (explicit reference seed):
+CFF_RANDOM_SEED=0 CFF_SIZES=full akiko test tests/cff_differential_test.aki -- tests/data/cff/seeded-random.otf
+```
+
+The default uses four sizes to keep the full CJK face practical in the normal
+suite; the 45-size exhaustive CJK run takes several minutes. Arguments select
+font paths, `CFF_SIZES=<integer>` selects one size, and `CFF_UNHINTED=1` skips
+hinted loads. Verified on 2026-11-10:
+
+| Differential run | Fonts | Font/size pairs | Glyph loads (both modes) | Points | Mismatches |
+|---|---:|---:|---:|---:|---:|
+| Full installed OTTO sweep, 13 sizes | 47 | 611 | 1,099,566 | 58,070,714 | 0 |
+| Curated installed fonts, 6..48,64,96 (CJK included) | 5 | 225 | 6,252,570 | 576,480,862 | 0 |
+| Synthetic operators, malformed programs, seeded random, CID and CFF2, 45 sizes | 9 | 405 | 51,030 | 77,760 | 0 |
+
+`akiko check` passes for Linux and `x86_64-w64-windows-gnu`; the complete
+`aki/ultragui` suite passes all 26 tests.
+
+The synthetic run includes 512 seeded malformed charstrings and **40,590**
+loads whose expected FreeType error also matches, larger CFF2 operand stacks,
+multiple FDs/vsindex values, and a zero-peak variation region. No installed
+CFF2 face was present; CFF2 evidence is synthetic. Strings compared: zero
+(this module does not shape). `cff_api_test.aki` also checks empty tables,
+FDSelect format 4 rejection, unset/invalid size and out-of-range glyph IDs.
+
+Known limits (return `CffError::Unsupported`, rather than approximating):
+nonuniform, translated, skewed or rotated Top DICT FontMatrix, and any
+explicit per-FD FontMatrix. Type 2 `random` also needs `set_random_seed(seed)`:
+FreeType seeds its driver from process addresses by default, so separate
+processes cannot reproduce that default bit-for-bit. A zero supplied seed
+selects each Private DICT's initialRandomSeed; the seeded oracle verifies
+this path. Nondefault variation instances, nondefault CFF hinting engines,
+and explicitly enabled stem darkening are outside this API's scope. Pixel
+sizes above the tested 6..96 range are not differential coverage claims.
 
 ## Fidelity
 

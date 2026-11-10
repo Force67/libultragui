@@ -1,0 +1,115 @@
+// Outline assembly and delayed segment mapping. Hint masks take effect one
+// segment after they are read; the closing line uses the first contour map.
+module ultragui::font::cff::outline;
+
+import {List, to_list} from akikit::containers::list;
+import {CffError} from ultragui::font::cff::data;
+import {Hints, Edge, map_y} from ultragui::font::cff::hints;
+import {mul_fix} from ultragui::font::cff::fixed;
+
+pub struct CffPoint : Copy, Equal {
+  pub var x: i32 = 0
+  pub var y: i32 = 0
+}
+
+pub struct CffOutline {
+  pub var points: List<CffPoint> = List()
+  pub var tags: List<u8> = List()
+  pub var contours: List<u16> = List()
+}
+
+pub struct Path {
+  pub var outline: CffOutline = CffOutline {}
+  pub var hints: Hints
+  var first_map: List<Edge> = List()
+  var start: CffPoint = CffPoint {}
+  var current: CffPoint = CffPoint {}
+  var device: CffPoint = CffPoint {}
+  var queued: [CffPoint; 3] = [CffPoint {}; 3]
+  var kind: u8 = 0
+  var open: bool = false
+  var contour_first: usize = 0
+  pub fn Path(hints: Hints): Path => Path { hints };
+  pub fn move_to(var self&, p: CffPoint): () ! CffError;
+  pub fn line_to(var self&, p: CffPoint): () ! CffError;
+  pub fn curve_to(var self&, a: CffPoint, b: CffPoint, c: CffPoint): () ! CffError;
+  pub fn close(var self&): () ! CffError;
+}
+
+fn Path::mapped(self&, p: CffPoint, first: bool): CffPoint {
+  let y = self.hints.enabled ? map_y(first ? self.first_map.as_slice() : self.hints.current.as_slice(), self.hints.scale, p.y) : mul_fix(p.y, self.hints.scale);
+  return CffPoint { x: mul_fix(p.x, self.hints.scale), y };
+}
+
+fn Path::point(var self&, p: CffPoint, tag: u8): () ! CffError {
+  if (self.outline.points.len() >= 32767) { return fail CffError::InvalidFileFormat; }
+  self.outline.points.push(CffPoint { x: p.x >> 10, y: p.y >> 10 }); self.outline.tags.push(tag);
+}
+
+fn Path::start_path(var self&): () ! CffError {
+  if (self.hints.hstems.len() + self.hints.vstems > 96) { return fail CffError::InvalidFileFormat; }
+  if (!self.hints.ready) { self.hints.build(); self.first_map = to_list(self.hints.current.as_slice()); }
+  self.device = self.mapped(self.current, false);
+  self.contour_first = self.outline.points.len(); self.open = true;
+}
+
+fn Path::emit_line(var self&, p: CffPoint): () ! CffError {
+  if (p == self.device) { return; }
+  if (self.outline.points.len() == self.contour_first) { try self.point(self.device, 1); }
+  try self.point(p, 1); self.device = p;
+}
+
+fn Path::flush(var self&, closing: bool): () ! CffError {
+  if (self.kind == 1) { let p = self.mapped(self.queued[0], closing); try self.emit_line(p); }
+  else if (self.kind == 2) {
+    if (self.outline.points.len() == self.contour_first) { try self.point(self.device, 1); }
+    let a = self.mapped(self.queued[0], false); let b = self.mapped(self.queued[1], false); let c = self.mapped(self.queued[2], false);
+    try self.point(a, 2); try self.point(b, 2); try self.point(c, 1); self.device = c;
+  }
+  self.kind = 0;
+}
+
+fn Path::move_to(var self&, p: CffPoint): () ! CffError {
+  if (self.hints.hstems.len() + self.hints.vstems > 96) { return fail CffError::InvalidFileFormat; }
+  try self.close(); self.start = p; self.current = p;
+  if (!self.hints.ready || self.hints.pending) { self.hints.build(); }
+  self.first_map = to_list(self.hints.current.as_slice());
+}
+
+fn Path::line_to(var self&, p: CffPoint): () ! CffError {
+  if (p == self.current && !self.hints.pending) { return; }
+  if (!self.open) { try self.start_path(); }
+  try self.flush(false);
+  // An intervening hint map can move the beginning of this segment.
+  let join = self.mapped(self.current, false); try self.emit_line(join);
+  self.queued[0] = p; self.kind = 1;
+  if (self.hints.pending) { self.hints.build(); }
+  self.current = p;
+}
+
+fn Path::curve_to(var self&, a: CffPoint, b: CffPoint, c: CffPoint): () ! CffError {
+  if (!self.open) { try self.start_path(); }
+  try self.flush(false);
+  let join = self.mapped(self.current, false); try self.emit_line(join);
+  self.queued = [a, b, c]; self.kind = 2;
+  if (self.hints.pending) { self.hints.build(); }
+  self.current = c;
+}
+
+fn Path::close(var self&): () ! CffError {
+  if (!self.open) { return; }
+  if (self.current != self.start) {
+    try self.flush(false);
+    let p = self.mapped(self.start, true); try self.emit_line(p);
+  } else { try self.flush(true); }
+  // cf2 also connects a final curve to the original contour point.
+  let p = self.mapped(self.start, true); try self.emit_line(p);
+  let first = self.contour_first;
+  var n = self.outline.points.len();
+  if (n > first + 1 && self.outline.points[first] == self.outline.points[n - 1] && self.outline.tags[n - 1] == 1) {
+    n -= 1; self.outline.points.truncate(n); self.outline.tags.truncate(n);
+  }
+  if (n == first + 1) { n -= 1; self.outline.points.truncate(n); self.outline.tags.truncate(n); }
+  if (n > first) { self.outline.contours.push((n - 1) as u16); }
+  self.open = false; self.kind = 0;
+}
