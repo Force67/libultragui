@@ -203,7 +203,7 @@ in the table, and none is unported.
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} | ported (test_layout_retained.cc ported) |
 | (yoga, third_party/yoga) | ultragui::layout::{flex_style,flex_tree} | replaced: an aki flexbox engine with yoga's results bit for bit for every style layout.cc can write (tests/yoga_fuzz_test.aki; "The layout engine" below) |
 | (FreeType: sfnt, TrueType driver, embedded bitmaps, ftcalc; hb_ft's unhinted queries) | ultragui::font::{fixed,sfnt,outline,face,tt_interp,tt_glyph,sbit,unhinted} | replacing (not wired into text_engine yet): faces, sizes and bytecode-hinted TrueType glyphs bit for bit vs FreeType 2.14.3 (tests/font_tt_test.aki; "The font engine" below); font/raster and font/cff are other modules |
-| (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,sanitize,cmap,normalize,fallback,buffer,props,ucd,language,language_tables,font_funcs,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | new, not yet wired in: an aki OpenType shaper with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below); text_engine still calls HarfBuzz until the integration step |
+| (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,sanitize,cmap,normalize,fallback,buffer,props,ucd,language,language_tables,font_funcs,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | Aki OpenType shaper used by text_engine through font_face, with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below) |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -1126,9 +1126,15 @@ Romanian cedillas, Serbian Cyrillic and CJK locl samples to the script
 samples; it reuses faces to exercise the language plan cache. `SHAPE_SWEEP=1`
 runs every font at five sizes, with 400 generated strings in the default
 language and 12 per locale (`SHAPE_LANGUAGE_GENERATED` changes the latter).
+The full sweep inspected 304 fonts (297 compared, 7 Graphite fonts skipped),
+at 9, 12, 16, 24 and 37 px: 8,512 locale/font configurations,
+10,023,750 strings / 129,332,850 glyphs compared, zero differences
+(8 min 10 s; the five fresh-process cache checks above are additional).
 The oracle also compares the actual GSUB/GPOS script indices, chosen tags,
 found flags and language indices for eight scripts per language, including
-invalid and unregistered scripts to exercise table fallbacks.
+invalid and unregistered scripts to exercise table fallbacks: 4,176 table
+selections in the nine-font default matrix, plus 240 in the fresh-process
+checks, all equal.
 
 The C++ and Aki golden runners both leave the initial C locale alone;
 all 36 Aki golden dumps (20 example scenarios, 16 extra scenarios) are
