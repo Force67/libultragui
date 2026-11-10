@@ -203,6 +203,7 @@ in the table, and none is unported.
 | (yoga, third_party/yoga) | ultragui::layout::{flex_style,flex_tree} | replaced: an aki flexbox engine with yoga's results bit for bit for every style layout.cc can write (tests/yoga_fuzz_test.aki; "The layout engine" below) |
 | (FreeType: sfnt, TrueType driver, embedded bitmaps, ftcalc; hb_ft's unhinted queries) | ultragui::font::{fixed,sfnt,outline,face,tt_interp,tt_glyph,sbit,unhinted} | replacing (not wired into text_engine yet): faces, sizes and bytecode-hinted TrueType glyphs bit for bit vs FreeType 2.14.3 (tests/font_tt_test.aki; "The font engine" below); font/raster and font/cff are other modules |
 | (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,sanitize,cmap,normalize,fallback,buffer,props,ucd,font_funcs,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | new, not yet wired in: an aki OpenType shaper with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below); text_engine still calls HarfBuzz until the integration step |
+| (FreeType: autofit outline analysis) | ultragui::font::autofit::{hints,features,metrics,latin} | shared point interpolation, Latin metrics and normal-target edge fitting; internal-stage oracle; see "Automatic hinting" |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -907,7 +908,8 @@ subpixel hinting with backward compatibility); a TrueType face without
 In /usr/share/fonts 78 TrueType faces take the autohinter (all Ubuntu, the
 KACST fonts, Malayalam, Lohit Assamese/Bengali, Padauk, Pagul, Samyak,
 fonts-{beng,deva,gujr}-extra, Gargi, Abyssinica, arphic ukai/uming, ...).
-The autohinter is **not implemented**: `load_glyph` fails with
+The default-load autohinter is **not implemented** (verified Latin building
+blocks are described under "Automatic hinting" below): `load_glyph` fails with
 `UnimplementedFeature` on those faces (strike bitmaps still load). It is
 FreeType's `autofit` module, about 21k lines of C (aflatin 5.1k, afcjk 2.4k,
 afhints 1.8k, afadjust 1.6k, afranges, afblue tables, afglobal, afloader,
@@ -1094,6 +1096,82 @@ offsets of malformed subtables, is not needed: HarfBuzz 13 drops a whole
 table its sanitizer rejects, and `shape::sanitize` ports those checks for
 GSUB, GPOS and GDEF (bounds, HarfBuzz's operation budget, the subtable limit;
 the 24-bit formats are accepted unchecked); the kern table is not sanitized.
+### Automatic hinting — `ultragui::font::autofit`
+
+`hints` owns font-unit and scaled points and implements contour topology,
+orientation, edge alignment, strong interpolation and weak IUP interpolation.
+`features` extracts Latin segments, matches stems/serifs, groups sorted edges
+and quantizes standard widths. `metrics` analyzes a selected standard glyph's
+widths and scales design metrics and blue zones, including x-height adjustment,
+extra-light detection and sub-top zone suppression. `latin` assigns blue edges
+and fits stems and serifs for the normal target, including three-stem symmetry.
+References are indices into owned lists. Arithmetic retains FreeType 2.14.3's
+fixed-point rounding and short truncation. Source attribution is in
+`src/font/autofit/NOTICE` and `FTL.TXT`.
+
+The usable stages (these do **not** form a complete default-load entry point):
+
+```aki
+let standard = try load_tt_design(face, standard_gid); // font::tt_glyph
+metrics.init_widths(standard.outline);                  // LatinMetrics
+// The global analyzer must supply style-specific blue zones first.
+metrics.scale(size.x_scale, size.y_scale, size.x_ppem as u32);
+var glyph = try load_tt_design(face, gid);
+apply_latin(hints, metrics, glyph.outline, nonbase);     // font::autofit::latin
+// The loader must still adjust phantom points, metrics and advances.
+```
+
+`load_tt_design` bypasses strikes, scales and bytecode without changing the
+face's size; it returns recursed unscaled outlines and design-unit linear
+advances (`NO_SCALE | IGNORE_TRANSFORM | LINEAR_DESIGN`). Existing `load_tt`
+behavior is unchanged.
+
+`tests/autofit_stages_test.aki` builds `tools/autofit_oracle.c` using actual
+FreeType 2.14.3 internal source routines, linked with both FreeType and
+HarfBuzz. Its default compares five fonts, 45 sizes (6..48,64,96) and every 97th glyph:
+14,580 glyph/size records, 3,236,040 points, 513,090 segments, 308,644 edges,
+zero field mismatches. It checks design-unit glyph loading, topology,
+every segment and edge field, standard-width quantization, metric scaling,
+blue assignment, normal-target edge fitting, the combined Latin fitting pass
+against `af_latin_hints_apply` (including non-base, italic and top-to-bottom
+policies), and interpolation against deliberately perturbed edge positions. The scale/fit checks use **synthetic
+style metrics**, not the real per-face global analysis. Uninitialized scratch
+fields on weak points at reload are excluded; all coordinates, flags and final
+tags are checked. `AUTOFIT_STAGES_SWEEP=1` selects all autohinted faces and
+all glyphs; `AUTOFIT_STAGES_SIZE` and `AUTOFIT_STAGES_STRIDE` narrow that
+workload. Traces are memory-mapped to bound resident allocations.
+
+The all-face sampled sweep (every 97th glyph, all 13 sizes) passes on **78
+faces**, **16,848 glyph/size records**, **2,211,092 points**, **329,953
+segments** and **222,448 edges**, with **0 field mismatches**. This includes
+design-unit Aki loading, standard-width initialization and the combined Latin
+pass against the actual FreeType entry point, with synthetic style metrics
+and an empty reverse charmap (thus no afadjust codepoint-specific work).
+
+The exhaustive sweep of topology, segments/edges, synthetic-metric scaling
+and edge fitting, and perturbed interpolation passes on **78 faces**, **13
+sizes**, **121,889 glyph indices** (**1,584,557 glyph/size records**),
+**213,070,208 points**, **31,627,089 segments**, and **20,936,307 edges**,
+with **0 field mismatches**. The additional design-load, standard-width and
+combined-pass checks above were verified with stride 97 across all 78 faces;
+they were added after the exhaustive sweep started. Shaped strings and
+end-to-end default-load/render comparisons: **0**.
+
+This is stage verification, **not** default-load or raster equivalence.
+**Remaining:** global style/script coverage and its lifetime; shaping and
+analyzing blue strings; CJK/Indic/dummy writing systems; afadjust's vertical
+separation; loader phantom-point, metric and advance adjustments; wiring into
+`Face::load_glyph`; end-to-end outlined and rendered differential sweeps.
+`Face::load_glyph` continues to return `UnimplementedFeature` for autohinted
+outlines. These stages must not be wired in as if they implement the full
+normal-target autohinter.
+
+Source checks: `afshaper.c` in 2.14.3 uses
+`hb_ot_layout_lookup_collect_glyphs` for GSUB outputs and GPOS inputs, and
+`hb_ot_layout_collect_lookups` plus `hb_ot_layout_lookup_would_substitute` for
+style selection; it does not call substitute closure. Autofit stem darkening
+is disabled by default and only considered for light rendering, so normal
+rendering never emboldens the outlines.
 
 ### Paint and the widget tree
 

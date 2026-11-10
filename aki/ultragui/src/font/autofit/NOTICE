@@ -1,0 +1,5 @@
+The autofit algorithms are derived from FreeType 2.14.3.
+Copyright (C) 2003-2026 David Turner, Robert Wilhelm, and Werner Lemberg.
+Distributed under the FreeType Project License (FTL.TXT in this directory).
+The Aki implementation uses owned lists and indices in place of FreeType's
+allocator, pointer graphs, embedded buffers and module objects.

@@ -1,0 +1,140 @@
+// Per-style Latin design metrics and their per-size scaling. Building these
+// metrics from shaped blue strings is separate from the fixed-point fitter.
+module ultragui::font::autofit::metrics;
+
+import {List} from akikit::containers::list;
+import {mul_div, mul_fix, pix_round} from ultragui::font::fixed;
+import {Outline} from ultragui::font::outline;
+import {Hints, abs, max, kNone} from ultragui::font::autofit::hints;
+import {compute_segments, link_segments, quantize_widths} from ultragui::font::autofit::features;
+
+pub comptime let kBlueActive: u32 = 1;
+pub comptime let kBlueTop: u32 = 2;
+pub comptime let kBlueSubTop: u32 = 4;
+pub comptime let kBlueNeutral: u32 = 8;
+pub comptime let kBlueAdjustment: u32 = 16;
+pub comptime let kBlueBottom: u32 = 32;
+pub comptime let kBlueSmallBottom: u32 = 64;
+
+pub struct Width : Copy {
+  pub var org: i64 = 0
+  pub var cur: i64 = 0
+  pub var fit: i64 = 0
+}
+pub struct Blue : Copy {
+  pub var reference: Width = Width {}
+  pub var shoot: Width = Width {}
+  pub var ascender: i64 = 0
+  pub var descender: i64 = 0
+  pub var flags: u32 = 0
+}
+pub struct AxisMetrics {
+  pub var scale: i64 = 0
+  pub var delta: i64 = 0
+  pub var widths: List<Width> = List()
+  pub var edge_distance: i64 = 0
+  pub var standard_width: i64 = 0
+  pub var extra_light: bool = false
+  pub var blues: List<Blue> = List()
+  pub var org_scale: i64 = 0
+  pub var org_delta: i64 = 0
+}
+pub struct LatinMetrics {
+  pub var units_per_em: i64 = 2048
+  pub var axis: [AxisMetrics; 2] = [AxisMetrics {}, AxisMetrics {}]
+  pub var x_scale: i64 = 0
+  pub var y_scale: i64 = 0
+  pub var x_delta: i64 = 0
+  pub var y_delta: i64 = 0
+  pub var ppem: u32 = 0
+  pub var increase_x_height: u32 = 0
+  pub var digits_same_width: bool = true
+  pub var italic: bool = false
+  pub var top_to_bottom: bool = false
+
+  pub fn scale(var self&, xs: i64, ys: i64, ppem: u32, xd: i64 = 0, yd: i64 = 0);
+  // The shaper chooses a single standard glyph; this analyzes its unscaled
+  // outline. An empty outline supplies the script's fallback widths.
+  pub fn init_widths(var self&, outline&: Outline);
+}
+
+fn LatinMetrics::init_widths(var self&, outline&: Outline) {
+  var h = Hints { units_per_em: self.units_per_em };
+  h.reload(outline);
+  for (let dim in 0usize..2) {
+    self.axis[dim].widths.clear();
+    compute_segments(h, dim);
+    link_segments(h, dim, 0);
+    var widths: List<i64> = List();
+    for (let i in 0..h.axis[dim].segments.len()) {
+      let s = h.axis[dim].segments[i];
+      if (s.link != kNone && h.axis[dim].segments[s.link].link == i && s.link > i && widths.len() < 16) {
+        widths.push(abs(s.pos - h.axis[dim].segments[s.link].pos));
+      }
+    }
+    if (outline.points.len() > 0) { quantize_widths(widths, self.units_per_em / 100); }
+    for (let w in widths) { self.axis[dim].widths.push(Width { org: w }); }
+    let standard = widths.len() > 0 ? widths[0] : 50 * self.units_per_em / 2048;
+    self.axis[dim].standard_width = standard;
+    self.axis[dim].edge_distance = standard / 5;
+    self.axis[dim].extra_light = false;
+  }
+}
+
+fn scale_axis(var m&: LatinMetrics, dim: usize, original: i64, delta: i64) {
+  if (m.axis[dim].org_scale == original && m.axis[dim].org_delta == delta) { return; }
+  m.axis[dim].org_scale = original;
+  m.axis[dim].org_delta = delta;
+  var scale = original;
+  for (let blue in m.axis[1].blues) {
+    if ((blue.flags & kBlueAdjustment) == 0) { continue; }
+    let scaled = mul_fix(blue.shoot.org, scale);
+    let threshold: i64 = m.increase_x_height != 0 && m.ppem <= m.increase_x_height && m.ppem >= 6 ? 52 : 40;
+    let fitted = (scaled + threshold) & -64;
+    if (dim == 1 && scaled != fitted) {
+      let adjusted = mul_div(scale, fitted, scaled);
+      var height = m.units_per_em;
+      for (let b in m.axis[1].blues) { height = max(height, max(b.ascender, -b.descender)); }
+      let dist = mul_fix(height, adjusted - scale);
+      if (dist > -128 && dist < 128) { scale = adjusted; }
+    }
+    break;
+  }
+  m.axis[dim].scale = scale;
+  m.axis[dim].delta = delta;
+  if (dim == 0) { m.x_scale = scale; m.x_delta = delta; }
+  else { m.y_scale = scale; m.y_delta = delta; }
+  for (var width& in m.axis[dim].widths) { width.cur = mul_fix(width.org, scale); width.fit = width.cur; }
+  m.axis[dim].extra_light = mul_fix(m.axis[dim].standard_width, scale) < 40;
+  if (dim != 1) { return; }
+  for (var b& in m.axis[1].blues) {
+    b.reference.cur = mul_fix(b.reference.org, scale) + delta;
+    b.reference.fit = b.reference.cur;
+    b.shoot.cur = mul_fix(b.shoot.org, scale) + delta;
+    b.shoot.fit = b.shoot.cur;
+    b.flags &= ~kBlueActive;
+    let dist = mul_fix(b.reference.org - b.shoot.org, scale);
+    if (dist >= -48 && dist <= 48) {
+      var d = dist < 0 ? -dist : dist;
+      d = d < 32 ? 0 : (d < 48 ? 32 : 64);
+      if (dist < 0) { d = -d; }
+      b.reference.fit = pix_round(b.reference.cur);
+      b.shoot.fit = b.reference.fit - d;
+      b.flags |= kBlueActive;
+    }
+  }
+  for (let i in 0..m.axis[1].blues.len()) {
+    let blue = m.axis[1].blues[i];
+    if ((blue.flags & (kBlueSubTop | kBlueActive)) != (kBlueSubTop | kBlueActive)) { continue; }
+    for (let b in m.axis[1].blues) {
+      if ((b.flags & kBlueSubTop) != 0 || (b.flags & kBlueActive) == 0) { continue; }
+      if (b.reference.fit <= blue.shoot.fit && b.shoot.fit >= blue.reference.fit) { m.axis[1].blues[i].flags &= ~kBlueActive; break; }
+    }
+  }
+}
+
+fn LatinMetrics::scale(var self&, xs: i64, ys: i64, ppem: u32, xd: i64, yd: i64) {
+  self.ppem = ppem;
+  scale_axis(self, 0, xs, xd);
+  scale_axis(self, 1, ys, yd);
+}
