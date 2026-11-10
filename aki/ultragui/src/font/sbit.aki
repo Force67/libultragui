@@ -1,0 +1,729 @@
+// Embedded bitmaps as FreeType 2.14.3 reads them: sfnt/ttsbit.c
+// (tt_face_load_sbit, tt_face_load_strike_metrics, the EBLC/EBDT decoder)
+// and the available_sizes setup of sfnt/sfobjs.c sfnt_load_face.
+//
+// Supported: EBLC/EBDT (and the identical CBLC/CBDT layout) index formats 1-5
+// with image formats 1, 2, 5, 6, 7 (bit- and byte-aligned bitmaps with or
+// without per-glyph metrics) and 8, 9 (compound glyphs). Not supported, so
+// such glyphs fail to load where FreeType would give a bitmap: PNG images
+// (CBDT formats 17-19; NotoColorEmoji's only strike is 109 ppem), sbix, and
+// Apple 'bhed'-only bitmap fonts. The corpus has EBLC in arphic/uming.ttc
+// (index 1/2, images 5/7) and kacst/mry_KacstQurn.ttf (index 1, image 2).
+
+module ultragui::font::sbit;
+
+import {List, filled} from akikit::containers::list;
+import {div_fix, pix_round} from ultragui::font::fixed;
+import {
+  Directory, FontError, TableRecord, fits, kTagBdat, kTagBloc, kTagCbdt, kTagCblc, kTagEbdt, kTagEblc, u16_at, u32_at,
+} from ultragui::font::sfnt;
+import {Bitmap, kPixelModeBgra, kPixelModeGray, kPixelModeGray2, kPixelModeGray4, kPixelModeMono} from ultragui::font::outline;
+
+// TT_SBit_MetricsRec.
+pub struct SbitMetrics : Copy {
+  pub var width: u8 = 0
+  pub var height: u8 = 0
+  pub var hori_bearing_x: i8 = 0
+  pub var hori_bearing_y: i8 = 0
+  pub var hori_advance: u8 = 0
+  pub var vert_bearing_x: i8 = 0
+  pub var vert_bearing_y: i8 = 0
+  pub var vert_advance: u8 = 0
+}
+
+// One FT_Bitmap_Size and the EBLC strike it maps to.
+pub struct StrikeSize : Copy {
+  pub var strike: u32 = 0
+  pub var height: i16 = 0
+  pub var width: i16 = 0
+  pub var x_ppem: i64 = 0
+  pub var y_ppem: i64 = 0
+}
+
+pub struct StrikeTable {
+  // EBLC (or CBLC) and EBDT (or CBDT) in the file.
+  pub var eblc_offset: u32 = 0
+  pub var eblc_size: u32 = 0
+  pub var ebdt_offset: u32 = 0
+  pub var ebdt_size: u32 = 0
+  pub var num_raw_strikes: u32 = 0
+  pub var units_per_em: u16 = 0
+  // available_sizes (sbit_strike_map).
+  pub var sizes: List<StrikeSize> = List()
+
+  pub fn num_strikes(self&): u32 => self.sizes.len() as u32;
+  // FT_Match_Size for a nominal request of w x h (26.6).
+  pub fn match_size(self&, w: i64, h: i64): u32?;
+  pub fn bsize_ppem(self&, strike: u32): (i64, i64) => (self.sizes[strike as usize].x_ppem, self.sizes[strike as usize].y_ppem);
+  // tt_face_load_strike_metrics for an available size.
+  pub fn strike_metrics(self&, d&: [u8], strike: u32): SizeMetricsRaw?;
+}
+
+// The FT_Size_Metrics a strike gives (font::face::SizeMetrics has the same
+// fields; kept separate so this module does not import face).
+pub struct SizeMetricsRaw : Copy {
+  pub var x_ppem: u16 = 0
+  pub var y_ppem: u16 = 0
+  pub var x_scale: i64 = 0
+  pub var y_scale: i64 = 0
+  pub var ascender: i64 = 0
+  pub var descender: i64 = 0
+  pub var height: i64 = 0
+  pub var max_advance: i64 = 0
+}
+
+fn first_table(dir&: Directory, a: u32, b: u32, c: u32): TableRecord? {
+  if (let r = dir.find(a)) {
+    return r;
+  }
+  if (let r = dir.find(b)) {
+    return r;
+  }
+  return dir.find(c);
+}
+
+// tt_face_load_sbit + the available_sizes loop of sfnt_load_face.
+// `avg_width` and `em_size` are OS/2's xAvgCharWidth and head's unitsPerEm
+// (1 and 1 without OS/2), for FT_Bitmap_Size.width.
+pub fn load_strikes(d&: [u8], dir&: Directory, units_per_em: u16, avg_width0: i16, has_os2: bool): StrikeTable {
+  var t = StrikeTable {};
+  t.units_per_em = units_per_em;
+  let e = first_table(dir, kTagCblc, kTagEblc, kTagBloc) else {
+    return t;
+  };
+  if (e.length < 8 || !fits(d, e.offset as u64, e.length as u64)) {
+    return t;
+  }
+  let version = u32_at(d, e.offset as usize);
+  let num_strikes = u32_at(d, (e.offset + 4) as usize);
+  if ((version & 0xFFFF_0000) != 0x0002_0000 && (version & 0xFFFF) != 0x0200 && (version & 0xFFFF_0000) != 0x0003_0000 &&
+      (version & 0xFFFF) != 0x0300) {
+    return t;
+  }
+  if (num_strikes >= 0x10000) {
+    return t;
+  }
+  var count = num_strikes;
+  if (8 + 48 * count as u64 > e.length as u64) {
+    count = (e.length - 8) / 48;
+  }
+  let b = first_table(dir, kTagCbdt, kTagEbdt, kTagBdat) else {
+    return t;
+  };
+  if (b.length == 0) {
+    return t;
+  }
+  t.eblc_offset = e.offset;
+  t.eblc_size = e.length;
+  t.ebdt_offset = b.offset;
+  t.ebdt_size = b.length;
+  t.num_raw_strikes = count;
+  var avg_width = avg_width0 as i64;
+  var em = units_per_em as i64;
+  if (em == 0 || !has_os2) {
+    avg_width = 1;
+    em = 1;
+  }
+  for (let s in 0..count) {
+    let m = t.raw_strike_metrics(d, s);
+    let x_ppem = (m.x_ppem as i64) << 6;
+    let y_ppem = (m.y_ppem as i64) << 6;
+    if (x_ppem != 0 && y_ppem != 0) {
+      t.sizes.push(StrikeSize {
+        strike: s,
+        height: (m.height >> 6) as i16,
+        width: ((avg_width * m.x_ppem as i64 + em / 2) / em) as i16,
+        x_ppem,
+        y_ppem,
+      });
+    }
+  }
+  return t;
+}
+
+// tt_face_load_strike_metrics on the raw strike index (EBLC/CBLC only).
+fn StrikeTable::raw_strike_metrics(self&, d&: [u8], s: u32): SizeMetricsRaw {
+  let st = (self.eblc_offset + 8 + 48 * s) as usize;
+  var m = SizeMetricsRaw {};
+  m.x_ppem = d[st + 44] as u16;
+  m.y_ppem = d[st + 45] as u16;
+  m.ascender = (d[st + 16] as i8) as i64 * 64;
+  m.descender = (d[st + 17] as i8) as i64 * 64;
+  let max_before_bl = (d[st + 24] as i8) as i64;
+  let min_after_bl = (d[st + 25] as i8) as i64;
+  if (m.descender > 0) {
+    if (min_after_bl < 0) {
+      m.descender = 0 - m.descender;
+    }
+  } else if (m.descender == 0) {
+    if (m.ascender == 0) {
+      if (max_before_bl != 0 || min_after_bl != 0) {
+        m.ascender = max_before_bl * 64;
+        m.descender = min_after_bl * 64;
+      } else {
+        m.ascender = m.y_ppem as i64 * 64;
+        m.descender = 0;
+      }
+    }
+  }
+  m.height = m.ascender - m.descender;
+  if (m.height == 0) {
+    m.height = m.y_ppem as i64 * 64;
+    m.descender = m.ascender - m.height;
+  }
+  m.max_advance = ((d[st + 22] as i8) as i64 + d[st + 18] as i64 + (d[st + 23] as i8) as i64) * 64;
+  m.x_scale = div_fix(m.x_ppem as i64 * 64, self.units_per_em as i64);
+  m.y_scale = div_fix(m.y_ppem as i64 * 64, self.units_per_em as i64);
+  return m;
+}
+
+fn StrikeTable::match_size(self&, w0: i64, h0: i64): u32? {
+  let w = pix_round(w0);
+  let h = pix_round(h0);
+  if (w == 0 || h == 0) {
+    return none;
+  }
+  for (let i in 0..self.sizes.len()) {
+    let b = self.sizes[i];
+    if (h != pix_round(b.y_ppem)) {
+      continue;
+    }
+    if (w == pix_round(b.x_ppem)) {
+      return i as u32;
+    }
+  }
+  return none;
+}
+
+fn StrikeTable::strike_metrics(self&, d&: [u8], strike: u32): SizeMetricsRaw? {
+  if (strike as usize >= self.sizes.len()) {
+    return none;
+  }
+  return self.raw_strike_metrics(d, self.sizes[strike as usize].strike);
+}
+
+// --- The EBLC/EBDT decoder (TT_SBitDecoderRec) ------------------------------------
+
+struct Decoder {
+  pub var eblc: usize = 0
+  pub var eblc_size: usize = 0
+  pub var ebdt: usize = 0
+  pub var ebdt_size: usize = 0
+  pub var strike_index_array: usize = 0
+  pub var strike_index_count: usize = 0
+  pub var bit_depth: u8 = 0
+  pub var metrics: SbitMetrics = SbitMetrics {}
+  pub var metrics_loaded: bool = false
+  pub var bitmap_allocated: bool = false
+  pub var bitmap: Bitmap = Bitmap {}
+}
+
+// tt_face_load_sbit_image for an EBLC/CBLC strike (available size index):
+// the bitmap and its metrics, or MissingBitmap when the strike has none.
+pub fn load_sbit_image(d&: [u8], t&: StrikeTable, strike: u32, gid: u32, metrics_only: bool): (Bitmap, SbitMetrics) ! FontError {
+  if (strike as usize >= t.sizes.len()) {
+    return fail FontError::InvalidArgument;
+  }
+  let s = t.sizes[strike as usize].strike as usize;
+  if (t.ebdt_size == 0) {
+    return fail FontError::TableMissing;
+  }
+  var dec = Decoder {
+    eblc: t.eblc_offset as usize,
+    eblc_size: t.eblc_size as usize,
+    ebdt: t.ebdt_offset as usize,
+    ebdt_size: t.ebdt_size as usize,
+  };
+  if (8 + 48 * s + 3 * 4 + 34 + 1 > dec.eblc_size) {
+    return fail FontError::InvalidFileFormat;
+  }
+  let p = dec.eblc + 8 + 48 * s;
+  dec.strike_index_array = u32_at(d, p) as usize;
+  dec.strike_index_count = u32_at(d, p + 8) as usize;
+  dec.bit_depth = d[p + 46];
+  if (dec.strike_index_array > dec.eblc_size || dec.strike_index_count > (dec.eblc_size - dec.strike_index_array) / 8) {
+    return fail FontError::InvalidFileFormat;
+  }
+  try load_image(d, dec, gid, 0, 0, 0, metrics_only);
+  return (dec.bitmap, dec.metrics);
+}
+
+// tt_sbit_decoder_load_metrics.
+fn load_metrics(d&: [u8], var dec&: Decoder, var p&: usize, limit: usize, big: bool): () ! FontError {
+  if (p + 5 > limit) {
+    return fail FontError::InvalidArgument;
+  }
+  dec.metrics.height = d[p];
+  dec.metrics.width = d[p + 1];
+  dec.metrics.hori_bearing_x = d[p + 2] as i8;
+  dec.metrics.hori_bearing_y = d[p + 3] as i8;
+  dec.metrics.hori_advance = d[p + 4];
+  p += 5;
+  if (big) {
+    if (p + 3 > limit) {
+      return fail FontError::InvalidArgument;
+    }
+    dec.metrics.vert_bearing_x = d[p] as i8;
+    dec.metrics.vert_bearing_y = d[p + 1] as i8;
+    dec.metrics.vert_advance = d[p + 2];
+    p += 3;
+  } else {
+    dec.metrics.vert_bearing_x = 0;
+    dec.metrics.vert_bearing_y = 0;
+    dec.metrics.vert_advance = 0;
+  }
+  dec.metrics_loaded = true;
+}
+
+// tt_sbit_decoder_alloc_bitmap.
+fn alloc_bitmap(var dec&: Decoder, metrics_only: bool): () ! FontError {
+  if (!dec.metrics_loaded) {
+    return fail FontError::InvalidArgument;
+  }
+  let width = dec.metrics.width as u32;
+  dec.bitmap.width = width;
+  dec.bitmap.rows = dec.metrics.height as u32;
+  switch (dec.bit_depth) {
+    case 1: {
+      dec.bitmap.pixel_mode = kPixelModeMono;
+      dec.bitmap.pitch = ((width + 7) >> 3) as i32;
+      dec.bitmap.num_grays = 2;
+    }
+    case 2: {
+      dec.bitmap.pixel_mode = kPixelModeGray2;
+      dec.bitmap.pitch = ((width + 3) >> 2) as i32;
+      dec.bitmap.num_grays = 4;
+    }
+    case 4: {
+      dec.bitmap.pixel_mode = kPixelModeGray4;
+      dec.bitmap.pitch = ((width + 1) >> 1) as i32;
+      dec.bitmap.num_grays = 16;
+    }
+    case 8: {
+      dec.bitmap.pixel_mode = kPixelModeGray;
+      dec.bitmap.pitch = width as i32;
+      dec.bitmap.num_grays = 256;
+    }
+    case 32: {
+      dec.bitmap.pixel_mode = kPixelModeBgra;
+      dec.bitmap.pitch = (width * 4) as i32;
+      dec.bitmap.num_grays = 256;
+    }
+    default: {
+      return fail FontError::InvalidFileFormat;
+    }
+  }
+  if (metrics_only) {
+    return;
+  }
+  dec.bitmap.buffer = filled(dec.bitmap.pitch as usize * dec.bitmap.rows as usize, 0u8);
+  dec.bitmap_allocated = true;
+}
+
+// tt_sbit_decoder_load_byte_aligned.
+fn load_byte_aligned(d&: [u8], var dec&: Decoder, p0: usize, limit: usize, x0: i32, y_pos: i32): () ! FontError {
+  var p = p0;
+  let bit_width = dec.bitmap.width;
+  let bit_height = dec.bitmap.rows;
+  let pitch = dec.bitmap.pitch as usize;
+  if (dec.bitmap.buffer.len() == 0) {
+    return;
+  }
+  let width = dec.metrics.width as i32;
+  let height = dec.metrics.height as i32;
+  let line_bits = width * dec.bit_depth as i32;
+  if (x0 < 0 || (x0 + width) as u32 > bit_width || y_pos < 0 || (y_pos + height) as u32 > bit_height) {
+    return fail FontError::InvalidFileFormat;
+  }
+  if (p + (((line_bits + 7) >> 3) * height) as usize > limit) {
+    return fail FontError::InvalidFileFormat;
+  }
+  var line = y_pos as usize * pitch + (x0 >> 3) as usize;
+  let x_pos = (x0 & 7) as u32;
+  if (x_pos == 0) {
+    for (let h in 0..height) {
+      var pw = line;
+      var w = line_bits;
+      while (w >= 8) {
+        dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | d[p];
+        p += 1;
+        pw += 1;
+        w -= 8;
+      }
+      if (w > 0) {
+        dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | (d[p] & ((0xFF00u32 >> w as u32) as u8));
+        p += 1;
+      }
+      line += pitch;
+    }
+  } else {
+    for (let h in 0..height) {
+      var pw = line;
+      var w = line_bits;
+      var wval: u32 = 0;
+      while (w >= 8) {
+        wval = wval | d[p] as u32;
+        p += 1;
+        dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | ((wval >> x_pos) as u8);
+        pw += 1;
+        wval = wval << 8;
+        w -= 8;
+      }
+      if (w > 0) {
+        wval = wval | ((d[p] as u32) & (0xFF00u32 >> w as u32));
+        p += 1;
+      }
+      dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | ((wval >> x_pos) as u8);
+      if (x_pos as i32 + w > 8) {
+        pw += 1;
+        wval = wval << 8;
+        dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | ((wval >> x_pos) as u8);
+      }
+      line += pitch;
+    }
+  }
+}
+
+// tt_sbit_decoder_load_bit_aligned.
+fn load_bit_aligned(d&: [u8], var dec&: Decoder, p0: usize, limit: usize, x0: i32, y_pos: i32): () ! FontError {
+  var p = p0;
+  let bit_width = dec.bitmap.width;
+  let bit_height = dec.bitmap.rows;
+  let pitch = dec.bitmap.pitch as usize;
+  let width = dec.metrics.width as i32;
+  let height = dec.metrics.height as i32;
+  let line_bits = width * dec.bit_depth as i32;
+  if (x0 < 0 || (x0 + width) as u32 > bit_width || y_pos < 0 || (y_pos + height) as u32 > bit_height) {
+    return fail FontError::InvalidFileFormat;
+  }
+  if (p + ((line_bits * height + 7) >> 3) as usize > limit) {
+    return fail FontError::InvalidFileFormat;
+  }
+  if (line_bits == 0 || height == 0) {
+    return;
+  }
+  var line = y_pos as usize * pitch + (x0 >> 3) as usize;
+  let x_pos = x0 & 7;
+  var rval: u32 = 0;
+  var nbits: i32 = 0;
+  var h = height;
+  while (h > 0) {
+    var pw = line;
+    var w = line_bits;
+    if (x_pos != 0) {
+      w = line_bits < 8 - x_pos ? line_bits : 8 - x_pos;
+      if (h == height) {
+        rval = d[p] as u32;
+        p += 1;
+        nbits = x_pos;
+      } else if (nbits < w) {
+        if (p < limit) {
+          rval = rval | d[p] as u32;
+          p += 1;
+        }
+        nbits += 8 - w;
+      } else {
+        rval = (rval >> 8) & 0xFFFF;
+        nbits -= w;
+      }
+      let mask = ((~(0xFFu32 << w as u32)) << (8 - w - x_pos) as u32) as u8;
+      dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | (((rval >> nbits as u32) & 0xFF) as u8 & mask);
+      pw += 1;
+      rval = (rval << 8) & 0xFFFF;
+      w = line_bits - w;
+    }
+    while (w >= 8) {
+      rval = rval | d[p] as u32;
+      p += 1;
+      dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | (((rval >> nbits as u32) & 0xFF) as u8);
+      pw += 1;
+      rval = (rval << 8) & 0xFFFF;
+      w -= 8;
+    }
+    if (w > 0) {
+      let mask = (0xFF00u32 >> w as u32) as u8;
+      if (nbits < w) {
+        if (p < limit) {
+          rval = rval | d[p] as u32;
+          p += 1;
+        }
+        dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | (((rval >> nbits as u32) & 0xFF) as u8 & mask);
+        nbits += 8 - w;
+        rval = (rval << 8) & 0xFFFF;
+      } else {
+        dec.bitmap.buffer[pw] = dec.bitmap.buffer[pw] | (((rval >> nbits as u32) & 0xFF) as u8 & mask);
+        nbits -= w;
+      }
+    }
+    h -= 1;
+    line += pitch;
+  }
+}
+
+// tt_sbit_decoder_load_compound.
+fn load_compound(d&: [u8], var dec&: Decoder, p0: usize, limit: usize, x_pos: i32, y_pos: i32, rc: u32): () ! FontError {
+  var p = p0;
+  let saved = dec.metrics;
+  if (p + 2 > limit) {
+    return fail FontError::InvalidFileFormat;
+  }
+  let n = u16_at(d, p) as usize;
+  p += 2;
+  if (p + 4 * n > limit) {
+    return fail FontError::InvalidFileFormat;
+  }
+  var err: FontError? = none;
+  for (let k in 0..n) {
+    let gindex = u16_at(d, p) as u32;
+    let dx = d[p + 2] as i8 as i32;
+    let dy = d[p + 3] as i8 as i32;
+    p += 4;
+    if (let ok = load_image(d, dec, gindex, x_pos + dx, y_pos + dy, rc + 1, false)) {
+    } else (let e) {
+      err = e;
+      break;
+    }
+  }
+  dec.metrics.hori_bearing_x = saved.hori_bearing_x;
+  dec.metrics.hori_bearing_y = saved.hori_bearing_y;
+  dec.metrics.hori_advance = saved.hori_advance;
+  dec.metrics.vert_bearing_x = saved.vert_bearing_x;
+  dec.metrics.vert_bearing_y = saved.vert_bearing_y;
+  dec.metrics.vert_advance = saved.vert_advance;
+  dec.metrics.width = dec.bitmap.width as u8;
+  dec.metrics.height = dec.bitmap.rows as u8;
+  if (let e = err) {
+    return fail e;
+  }
+}
+
+// tt_sbit_decoder_load_bitmap.
+fn load_bitmap(
+  d&: [u8], var dec&: Decoder, format: u32, glyph_start: usize, glyph_size: usize, x_pos: i32, y_pos: i32, rc: u32,
+  metrics_only: bool,
+): () ! FontError {
+  if (glyph_size == 0 || glyph_start + glyph_size > dec.ebdt_size) {
+    return fail FontError::InvalidArgument;
+  }
+  if (!fits(d, (dec.ebdt + glyph_start) as u64, glyph_size as u64)) {
+    return fail FontError::InvalidStreamOperation;
+  }
+  var p = dec.ebdt + glyph_start;
+  let limit = p + glyph_size;
+  switch (format) {
+    case 1, 2, 8, 17: {
+      try load_metrics(d, dec, p, limit, false);
+    }
+    case 6, 7, 9, 18: {
+      try load_metrics(d, dec, p, limit, true);
+    }
+    default: {}
+  }
+  // 0 byte aligned, 1 bit aligned, 2 compound.
+  var kind: i32 = 0;
+  switch (format) {
+    case 1, 6: {
+      kind = 0;
+    }
+    case 2, 7: {
+      let width = dec.metrics.width as u32;
+      let height = dec.metrics.height as u32;
+      let bit_size = (width * height + 7) >> 3;
+      let byte_size = height * ((width + 7) >> 3);
+      kind = (bit_size < byte_size && byte_size as usize == limit - p) ? 0 : 1;
+    }
+    case 5: {
+      kind = 1;
+    }
+    case 8: {
+      if (p + 1 > limit) {
+        return;
+      }
+      p += 1;
+      kind = 2;
+    }
+    case 9: {
+      kind = 2;
+    }
+    case 17, 18, 19: {
+      // PNG (CBDT): needs a PNG decoder and FreeType's BGRA-to-gray
+      // conversion; not supported.
+      return fail FontError::UnimplementedFeature;
+    }
+    default: {
+      return fail FontError::InvalidTable;
+    }
+  }
+  if (!dec.bitmap_allocated) {
+    try alloc_bitmap(dec, metrics_only);
+  }
+  if (metrics_only) {
+    return;
+  }
+  switch (kind) {
+    case 0: {
+      try load_byte_aligned(d, dec, p, limit, x_pos, y_pos);
+    }
+    case 1: {
+      try load_bit_aligned(d, dec, p, limit, x_pos, y_pos);
+    }
+    default: {
+      try load_compound(d, dec, p, limit, x_pos, y_pos, rc);
+    }
+  }
+}
+
+// tt_sbit_decoder_load_image.
+fn load_image(d&: [u8], var dec&: Decoder, gid: u32, x_pos: i32, y_pos: i32, rc: u32, metrics_only: bool): () ! FontError {
+  if (rc > 100) {
+    return fail FontError::InvalidTable;
+  }
+  let base = dec.eblc + dec.strike_index_array;
+  let limit = dec.eblc + dec.eblc_size;
+  var p = base;
+  var start: u32 = 0;
+  var found = false;
+  for (let k in 0..dec.strike_index_count) {
+    start = u16_at(d, p) as u32;
+    let end = u16_at(d, p + 2) as u32;
+    p += 4;
+    if (gid >= start && gid <= end) {
+      found = true;
+      break;
+    }
+    p += 4;
+  }
+  var image_start: u64 = 0;
+  var image_end: u64 = 0;
+  var image_offset: u64 = 0;
+  var index_format: u32 = 0;
+  var image_format: u32 = 0;
+  var ok = found;
+  if (ok) {
+    image_offset = u32_at(d, p) as u64;
+    if (image_offset > (limit - base) as u64) {
+      return fail FontError::InvalidTable;
+    }
+    p = base + image_offset as usize;
+    if (p + 8 > limit) {
+      ok = false;
+    }
+  }
+  if (ok) {
+    index_format = u16_at(d, p) as u32;
+    image_format = u16_at(d, p + 2) as u32;
+    image_offset = u32_at(d, p + 4) as u64;
+    p += 8;
+    let rel = (gid - start) as usize;
+    switch (index_format) {
+      case 1: {
+        p += 4 * rel;
+        if (p + 8 > limit) {
+          ok = false;
+        } else {
+          image_start = u32_at(d, p) as u64;
+          image_end = u32_at(d, p + 4) as u64;
+          ok = image_start != image_end;
+        }
+      }
+      case 2: {
+        if (p + 12 > limit) {
+          ok = false;
+        } else {
+          let image_size = u32_at(d, p) as u64;
+          p += 4;
+          if (let m = load_metrics(d, dec, p, limit, true)) {
+            image_start = image_size * rel as u64;
+            image_end = image_start + image_size;
+          } else (let e) {
+            ok = false;
+          }
+        }
+      }
+      case 3: {
+        p += 2 * rel;
+        if (p + 4 > limit) {
+          ok = false;
+        } else {
+          image_start = u16_at(d, p) as u64;
+          image_end = u16_at(d, p + 2) as u64;
+          ok = image_start != image_end;
+        }
+      }
+      case 4: {
+        if (p + 4 > limit) {
+          ok = false;
+        } else {
+          let num_glyphs = u32_at(d, p) as u64;
+          p += 4;
+          if (p + 4 > limit || num_glyphs > (((limit - p) >> 2) - 1) as u64) {
+            ok = false;
+          } else {
+            var mm: u64 = 0;
+            while (mm < num_glyphs) {
+              let gindex = u16_at(d, p) as u32;
+              p += 2;
+              if (gindex == gid) {
+                image_start = u16_at(d, p) as u64;
+                p += 4;
+                image_end = u16_at(d, p) as u64;
+                break;
+              }
+              p += 2;
+              mm += 1;
+            }
+            ok = mm < num_glyphs;
+          }
+        }
+      }
+      case 5, 19: {
+        if (p + 16 > limit) {
+          ok = false;
+        } else {
+          let image_size = u32_at(d, p) as u64;
+          p += 4;
+          if (let m = load_metrics(d, dec, p, limit, true)) {
+            let num_glyphs = u32_at(d, p) as u64;
+            p += 4;
+            if (num_glyphs > ((limit - p) >> 1) as u64) {
+              ok = false;
+            } else {
+              var mm: u64 = 0;
+              while (mm < num_glyphs) {
+                let gindex = u16_at(d, p) as u32;
+                p += 2;
+                if (gindex == gid) {
+                  break;
+                }
+                mm += 1;
+              }
+              if (mm >= num_glyphs) {
+                ok = false;
+              } else {
+                image_start = image_size * mm;
+                image_end = image_start + image_size;
+              }
+            }
+          } else (let e) {
+            ok = false;
+          }
+        }
+      }
+      default: {
+        ok = false;
+      }
+    }
+  }
+  if (ok && image_start > image_end) {
+    ok = false;
+  }
+  if (!ok) {
+    if (rc > 0) {
+      return fail FontError::InvalidComposite;
+    }
+    return fail FontError::MissingBitmap;
+  }
+  let size = image_end - image_start;
+  let start_pos = image_offset + image_start;
+  return load_bitmap(d, dec, image_format, start_pos as usize, size as usize, x_pos, y_pos, rc, metrics_only);
+}

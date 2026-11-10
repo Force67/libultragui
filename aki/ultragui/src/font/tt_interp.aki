@@ -1,0 +1,2707 @@
+// The TrueType bytecode interpreter of FreeType 2.14.3 (truetype/ttinterp.c)
+// in its default mode for this build: interpreter version 40 ("minimal
+// subpixel hinting", TT_SUPPORT_SUBPIXEL_HINTING_MINIMAL) with backward
+// compatibility, render mode normal, not pedantic, no variation blend
+// (GETVARIATION and GETDATA are unknown opcodes, GETINFO's bit 10 is clear).
+//
+// Every instruction follows its Ins_* function step for step, with FreeType's
+// fixed-point helpers (font::fixed) and wrapping 64-bit adds, because the
+// hinted outline is the observable: the same bits or nothing. FreeType's
+// non-pedantic error behavior is kept: a bad reference does nothing (or
+// pushes 0), a stack underflow reads zeros, and an error stops the program
+// where it happened, leaving the points as they are.
+//
+// Shape differences: zones are two `Zone`s (0 = twilight, 1 = the glyph) and
+// zp0/zp1/zp2 are indices; the glyph zone's lists are lent by the glyph
+// loader (moved in for a run, moved back after). The round/move/project
+// function pointers are small enums. Code ranges are offsets into the font
+// file (the glyph's instructions are read in place, not copied).
+
+module ultragui::font::tt_interp;
+
+import {List, filled} from akikit::containers::list;
+import {FontError} from ultragui::font::sfnt;
+import {Vec26, kTagOn, kTagTouchBoth, kTagTouchX, kTagTouchY} from ultragui::font::outline;
+import {
+  div_fix, dot_fix14, mul_div, mul_div_no_round, mul_fix, mul_fix14, pad_round, pix_ceil, pix_floor, pix_round,
+  vector_length, vector_norm_len,
+} from ultragui::font::fixed;
+
+// Pop_Push_Count and opcode_length, generated from ttinterp.c.
+static let kPopPush: [u8; 256] = [
+  0, 0, 0, 0, 0, 0, 32, 32, 32, 32, 32, 32, 2, 2, 0, 80,
+  16, 16, 16, 16, 16, 16, 16, 16, 0, 0, 16, 0, 16, 16, 16, 16,
+  18, 16, 0, 34, 1, 17, 16, 32, 0, 16, 32, 16, 16, 0, 16, 16,
+  0, 0, 0, 0, 16, 16, 16, 16, 16, 0, 32, 32, 0, 0, 32, 32,
+  0, 0, 32, 17, 32, 17, 17, 17, 32, 33, 33, 1, 1, 0, 0, 16,
+  33, 33, 33, 33, 33, 33, 17, 17, 16, 0, 33, 33, 17, 16, 16, 16,
+  33, 33, 33, 33, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+  32, 16, 16, 16, 16, 16, 16, 16, 32, 32, 0, 0, 0, 0, 16, 16,
+  0, 32, 32, 0, 0, 16, 32, 32, 17, 16, 51, 33, 33, 16, 32, 0,
+  0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8,
+  16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+  16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+  32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+  32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+];
+
+static let kOpcodeLength: [i8; 256] = [
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  -1, -2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  2, 3, 4, 5, 6, 7, 8, 9, 3, 5, 7, 9, 11, 13, 15, 17,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+];
+
+// TT_CONFIG_OPTION_MAX_RUNNABLE_OPCODES.
+comptime let kMaxRunnableOpcodes: u64 = 1000000;
+
+// Code ranges (tt_coderange_*).
+pub comptime let kRangeFont: i32 = 1;
+pub comptime let kRangeCvt: i32 = 2;
+pub comptime let kRangeGlyph: i32 = 3;
+
+// TT_Round_* states.
+comptime let kRoundToHalfGrid: i32 = 0;
+comptime let kRoundToGrid: i32 = 1;
+comptime let kRoundToDoubleGrid: i32 = 2;
+comptime let kRoundDownToGrid: i32 = 3;
+comptime let kRoundUpToGrid: i32 = 4;
+comptime let kRoundOff: i32 = 5;
+comptime let kRoundSuper: i32 = 6;
+comptime let kRoundSuper45: i32 = 7;
+
+// TT_GraphicsState.
+pub struct GraphicsState : Copy {
+  pub var rp0: u16 = 0
+  pub var rp1: u16 = 0
+  pub var rp2: u16 = 0
+  pub var gep0: u16 = 1
+  pub var gep1: u16 = 1
+  pub var gep2: u16 = 1
+  pub var dual_x: i64 = 0x4000
+  pub var dual_y: i64 = 0
+  pub var proj_x: i64 = 0x4000
+  pub var proj_y: i64 = 0
+  pub var free_x: i64 = 0x4000
+  pub var free_y: i64 = 0
+  pub var loop_: i64 = 1
+  pub var round_state: i32 = 1
+  pub var compensation: [i64; 4] = [0, 0, 0, 0]
+  pub var minimum_distance: i64 = 64
+  pub var control_value_cutin: i64 = 68
+  pub var single_width_cutin: i64 = 0
+  pub var single_width_value: i64 = 0
+  pub var delta_base: u16 = 9
+  pub var delta_shift: u16 = 3
+  pub var auto_flip: bool = true
+  pub var instruct_control: u8 = 0
+  pub var scan_control: bool = false
+  pub var scan_type: i32 = 0
+}
+
+// tt_default_graphics_state.
+pub fn default_graphics_state(): GraphicsState => GraphicsState {};
+
+// TT_GlyphZoneRec: a window of `n_points` points starting at `base` in the
+// lists (and `n_contours` contour ends starting at `cbase`).
+pub struct Zone {
+  pub var org: List<Vec26> = List()
+  pub var cur: List<Vec26> = List()
+  pub var orus: List<Vec26> = List()
+  pub var tags: List<u8> = List()
+  pub var contours: List<u16> = List()
+  pub var base: usize = 0
+  pub var cbase: usize = 0
+  pub var n_points: u32 = 0
+  pub var n_contours: u32 = 0
+  pub var first_point: u32 = 0
+}
+
+// TT_DefRecord.
+struct DefRecord : Copy {
+  pub var range: i32 = 0
+  pub var start: i64 = 0
+  pub var end: i64 = 0
+  pub var opc: u32 = 0
+  pub var active: bool = false
+}
+
+// TT_CallRec; `def` indexes the FDefs, or the IDefs when `idef`.
+struct CallRec : Copy {
+  pub var caller_range: i32 = 0
+  pub var caller_ip: i64 = 0
+  pub var cur_count: i64 = 0
+  pub var def: usize = 0
+  pub var idef: bool = false
+}
+
+struct CodeRange : Copy {
+  pub var offset: usize = 0
+  pub var size: i64 = 0
+  pub var valid: bool = false
+}
+
+// The size's metrics the interpreter sees (TT_Size_Metrics and the
+// FT_Size_Metrics copy in exec->metrics).
+pub struct ExecMetrics : Copy {
+  pub var x_ppem: u16 = 0
+  pub var y_ppem: u16 = 0
+  pub var x_scale: i64 = 0
+  pub var y_scale: i64 = 0
+  pub var ppem: i64 = 0
+  pub var scale: i64 = 0
+  pub var x_ratio: i64 = 0
+  pub var y_ratio: i64 = 0
+  pub var ratio: i64 = 0
+  pub var point_size: i64 = 0
+}
+
+enum Proj { X, Y, Dot }
+enum Mover { X, Y, Any }
+
+// TT_ExecContextRec, with the per-size state FreeType keeps beside it
+// (size->twilight, the stack/storage/cvt block, FDefs/IDefs).
+pub struct Interp {
+  // [0] the twilight zone (persists across glyphs), [1] the glyph's points.
+  pub var zones: [Zone; 2] = [Zone {}, Zone {}]
+  // size->twilight.n_points; zones[0].n_points is the copy TT_Run_Context caps.
+  pub var twilight_points: u32 = 0
+  pub var stack: List<i64> = List()
+  pub var stack_size: i64 = 0
+  pub var storage: List<i64> = List()
+  pub var glyf_storage: List<i64> = List()
+  pub var use_glyf_storage: bool = false
+  pub var cvt: List<i64> = List()
+  pub var glyf_cvt: List<i64> = List()
+  pub var use_glyf_cvt: bool = false
+  var fdefs: List<DefRecord> = List()
+  var idefs: List<DefRecord> = List()
+  var num_fdefs: u32 = 0
+  var num_idefs: u32 = 0
+  var max_func: u32 = 0
+  var max_ins: u32 = 0
+  var call_stack: List<CallRec> = List()
+  var call_top: i64 = 0
+  var ranges: [CodeRange; 3] = [CodeRange {}, CodeRange {}, CodeRange {}]
+  var code_off: usize = 0
+  var code_size: i64 = 0
+  pub var ip: i64 = 0
+  var cur_range: i32 = 0
+  pub var ini_range: i32 = 0
+  var opcode: u8 = 0
+  var length: i64 = 0
+  var top: i64 = 0
+  var new_top: i64 = 0
+  var args: i64 = 0
+  pub var error: FontError? = none
+  pub var gs: GraphicsState = GraphicsState {}
+  pub var metrics: ExecMetrics = ExecMetrics {}
+  var zp0: usize = 1
+  var zp1: usize = 1
+  var zp2: usize = 1
+  var move_x: i64 = 0
+  var move_y: i64 = 0
+  var proj: Proj = Proj::X
+  var dualproj: Proj = Proj::X
+  var mover: Mover = Mover::X
+  var round_fn: i32 = 1
+  var period: i64 = 0
+  var phase: i64 = 0
+  var threshold: i64 = 0
+  var stretched: bool = false
+  pub var is_composite: bool = false
+  pub var backward_compatibility: u32 = 0
+  pub var num_glyphs: u64 = 0
+  var loopcall_counter: u64 = 0
+  var loopcall_counter_max: u64 = 0
+  var neg_jump_counter: u64 = 0
+  var neg_jump_counter_max: u64 = 0
+
+  // tt_size_init_bytecode's allocations, from maxp and the cvt size.
+  pub fn create(
+    max_function_defs: u32, max_instruction_defs: u32, max_stack: u32, max_storage: u32, cvt_size: usize,
+    max_twilight: u32, num_glyphs: u64,
+  ): Interp;
+  pub fn set_code_range(var self&, range: i32, offset: usize, size: i64);
+  pub fn clear_code_range(var self&, range: i32);
+  pub fn run(var self&, data&: [u8], size_gs: GraphicsState): FontError?;
+}
+
+fn Interp::create(
+  max_function_defs: u32, max_instruction_defs: u32, max_stack: u32, max_storage: u32, cvt_size: usize,
+  max_twilight: u32, num_glyphs: u64,
+): Interp {
+  var e = Interp {};
+  e.fdefs = filled(max_function_defs as usize, DefRecord {});
+  e.idefs = filled(max_instruction_defs as usize, DefRecord {});
+  e.stack_size = max_stack as i64 + (max_stack as i64 / 2 > 128 ? max_stack as i64 / 2 : 128);
+  e.stack = filled(e.stack_size as usize, 0i64);
+  e.storage = filled(max_storage as usize, 0i64);
+  e.cvt = filled(cvt_size, 0i64);
+  e.call_stack = filled(32, CallRec {});
+  let n = max_twilight + 4;
+  e.twilight_points = n;
+  e.zones[0].org = filled(n as usize, Vec26 { x: 0, y: 0 });
+  e.zones[0].cur = filled(n as usize, Vec26 { x: 0, y: 0 });
+  e.zones[0].orus = filled(n as usize, Vec26 { x: 0, y: 0 });
+  e.zones[0].tags = filled(n as usize, 0u8);
+  e.zones[0].n_points = n;
+  e.num_glyphs = num_glyphs;
+  return e;
+}
+
+fn bounds(x: u32, n: u32): bool => x >= n;
+fn boundsl(x: u64, n: u64): bool => x >= n;
+fn abs64(x: i64): i64 => x < 0 ? 0 -% x : x;
+
+// --- Code ranges ------------------------------------------------------------------------
+
+fn Interp::set_code_range(var self&, range: i32, offset: usize, size: i64) {
+  self.ranges[(range - 1) as usize] = CodeRange { offset, size, valid: true };
+  self.code_off = offset;
+  self.code_size = size;
+  self.ip = 0;
+  self.cur_range = range;
+  self.ini_range = range;
+}
+
+fn Interp::clear_code_range(var self&, range: i32) {
+  self.ranges[(range - 1) as usize] = CodeRange {};
+}
+
+// Ins_Goto_CodeRange.
+fn Interp::goto_code_range(var self&, range: i32, ip: i64): bool {
+  if (range < 1 || range > 3) {
+    self.error = FontError::BadArgument;
+    return false;
+  }
+  let r = self.ranges[(range - 1) as usize];
+  if (!r.valid) {
+    self.error = FontError::InvalidCodeRange;
+    return false;
+  }
+  if (ip > r.size) {
+    self.error = FontError::CodeOverflow;
+    return false;
+  }
+  self.code_off = r.offset;
+  self.code_size = r.size;
+  self.ip = ip;
+  self.length = 0;
+  self.cur_range = range;
+  return true;
+}
+
+// --- Zones ------------------------------------------------------------------------------
+
+fn Interp::cur(self&, z: usize, i: u32): Vec26 => self.zones[z].cur[self.zones[z].base + i as usize];
+fn Interp::org(self&, z: usize, i: u32): Vec26 => self.zones[z].org[self.zones[z].base + i as usize];
+fn Interp::orus(self&, z: usize, i: u32): Vec26 => self.zones[z].orus[self.zones[z].base + i as usize];
+fn Interp::tag(self&, z: usize, i: u32): u8 => self.zones[z].tags[self.zones[z].base + i as usize];
+fn Interp::n_points(self&, z: usize): u32 => self.zones[z].n_points;
+
+fn Interp::set_cur(var self&, z: usize, i: u32, v: Vec26) {
+  let b = self.zones[z].base;
+  self.zones[z].cur[b + i as usize] = v;
+}
+
+fn Interp::set_org(var self&, z: usize, i: u32, v: Vec26) {
+  let b = self.zones[z].base;
+  self.zones[z].org[b + i as usize] = v;
+}
+
+fn Interp::set_tag(var self&, z: usize, i: u32, t: u8) {
+  let b = self.zones[z].base;
+  self.zones[z].tags[b + i as usize] = t;
+}
+
+fn Interp::contour(self&, z: usize, c: u32): u32 => self.zones[z].contours[self.zones[z].cbase + c as usize] as u32;
+
+// --- CVT and ppem -----------------------------------------------------------------------
+
+fn Interp::cvt_at(self&, i: u64): i64 => self.use_glyf_cvt ? self.glyf_cvt[i as usize] : self.cvt[i as usize];
+
+fn Interp::cvt_size(self&): u64 => self.cvt.len() as u64;
+
+// Current_Ratio.
+fn Interp::current_ratio(var self&): i64 {
+  if (self.metrics.ratio == 0) {
+    if (self.gs.proj_y == 0) {
+      self.metrics.ratio = self.metrics.x_ratio;
+    } else if (self.gs.proj_x == 0) {
+      self.metrics.ratio = self.metrics.y_ratio;
+    } else {
+      let x = mul_fix14(self.metrics.x_ratio, self.gs.proj_x);
+      let y = mul_fix14(self.metrics.y_ratio, self.gs.proj_y);
+      self.metrics.ratio = vector_length(x, y);
+    }
+  }
+  return self.metrics.ratio;
+}
+
+// func_cur_ppem.
+fn Interp::cur_ppem(var self&): i64 {
+  if (self.stretched) {
+    return mul_fix(self.metrics.ppem, self.current_ratio());
+  }
+  return self.metrics.ppem;
+}
+
+// func_read_cvt.
+fn Interp::read_cvt(var self&, i: u64): i64 {
+  if (self.stretched) {
+    return mul_fix(self.cvt_at(i), self.current_ratio());
+  }
+  return self.cvt_at(i);
+}
+
+// Modify_CVT_Check: a glyph program writes to its own copy.
+fn Interp::modify_cvt_check(var self&) {
+  if (self.ini_range == kRangeGlyph && !self.use_glyf_cvt) {
+    self.glyf_cvt.clear();
+    for (let v in self.cvt) {
+      self.glyf_cvt.push(v);
+    }
+    self.use_glyf_cvt = true;
+  }
+}
+
+fn Interp::put_cvt(var self&, i: u64, v: i64) {
+  if (self.use_glyf_cvt) {
+    self.glyf_cvt[i as usize] = v;
+  } else {
+    self.cvt[i as usize] = v;
+  }
+}
+
+// func_write_cvt.
+fn Interp::write_cvt(var self&, i: u64, v: i64) {
+  self.modify_cvt_check();
+  if (self.stretched) {
+    let r = self.current_ratio();
+    self.put_cvt(i, div_fix(v, r));
+  } else {
+    self.put_cvt(i, v);
+  }
+}
+
+// func_move_cvt.
+fn Interp::move_cvt(var self&, i: u64, v: i64) {
+  self.modify_cvt_check();
+  if (self.stretched) {
+    let r = self.current_ratio();
+    self.put_cvt(i, self.cvt_at(i) +% div_fix(v, r));
+  } else {
+    self.put_cvt(i, self.cvt_at(i) +% v);
+  }
+}
+
+// --- Moves ------------------------------------------------------------------------------
+
+// func_move: Direct_Move, Direct_Move_X or Direct_Move_Y.
+fn Interp::move_point(var self&, z: usize, point: u32, distance: i64) {
+  let b = self.zones[z].base + point as usize;
+  match (self.mover) {
+    Mover::X => {
+      if (self.backward_compatibility == 0) {
+        self.zones[z].cur[b].x = self.zones[z].cur[b].x +% distance;
+      }
+      self.zones[z].tags[b] = self.zones[z].tags[b] | kTagTouchX;
+    },
+    Mover::Y => {
+      if (self.backward_compatibility != 0x7) {
+        self.zones[z].cur[b].y = self.zones[z].cur[b].y +% distance;
+      }
+      self.zones[z].tags[b] = self.zones[z].tags[b] | kTagTouchY;
+    },
+    Mover::Any => {
+      if (self.move_x != 0) {
+        if (self.backward_compatibility == 0) {
+          self.zones[z].cur[b].x = self.zones[z].cur[b].x +% mul_fix(distance, self.move_x);
+        }
+        self.zones[z].tags[b] = self.zones[z].tags[b] | kTagTouchX;
+      }
+      if (self.move_y != 0) {
+        if (self.backward_compatibility != 0x7) {
+          self.zones[z].cur[b].y = self.zones[z].cur[b].y +% mul_fix(distance, self.move_y);
+        }
+        self.zones[z].tags[b] = self.zones[z].tags[b] | kTagTouchY;
+      }
+    },
+  }
+}
+
+// func_move_orig.
+fn Interp::move_orig(var self&, z: usize, point: u32, distance: i64) {
+  let b = self.zones[z].base + point as usize;
+  match (self.mover) {
+    Mover::X => {
+      self.zones[z].org[b].x = self.zones[z].org[b].x +% distance;
+    },
+    Mover::Y => {
+      self.zones[z].org[b].y = self.zones[z].org[b].y +% distance;
+    },
+    Mover::Any => {
+      if (self.move_x != 0) {
+        self.zones[z].org[b].x = self.zones[z].org[b].x +% mul_fix(distance, self.move_x);
+      }
+      if (self.move_y != 0) {
+        self.zones[z].org[b].y = self.zones[z].org[b].y +% mul_fix(distance, self.move_y);
+      }
+    },
+  }
+}
+
+// --- Rounding ---------------------------------------------------------------------------
+
+fn round_none(distance: i64, compensation: i64): i64 {
+  var val: i64 = 0;
+  if (distance >= 0) {
+    val = distance +% compensation;
+    if (val < 0) {
+      val = 0;
+    }
+  } else {
+    val = distance -% compensation;
+    if (val > 0) {
+      val = 0;
+    }
+  }
+  return val;
+}
+
+// func_round for the current rounding state.
+fn Interp::round(self&, distance: i64, compensation: i64): i64 {
+  var val: i64 = 0;
+  switch (self.round_fn) {
+    case kRoundToGrid: {
+      if (distance >= 0) {
+        val = pix_round(distance +% compensation);
+        if (val < 0) {
+          val = 0;
+        }
+      } else {
+        val = 0 -% pix_round(compensation -% distance);
+        if (val > 0) {
+          val = 0;
+        }
+      }
+    }
+    case kRoundToHalfGrid: {
+      if (distance >= 0) {
+        val = pix_floor(distance +% compensation) +% 32;
+        if (val < 0) {
+          val = 32;
+        }
+      } else {
+        val = 0 -% (pix_floor(compensation -% distance) +% 32);
+        if (val > 0) {
+          val = -32;
+        }
+      }
+    }
+    case kRoundDownToGrid: {
+      if (distance >= 0) {
+        val = pix_floor(distance +% compensation);
+        if (val < 0) {
+          val = 0;
+        }
+      } else {
+        val = 0 -% pix_floor(compensation -% distance);
+        if (val > 0) {
+          val = 0;
+        }
+      }
+    }
+    case kRoundUpToGrid: {
+      if (distance >= 0) {
+        val = pix_ceil(distance +% compensation);
+        if (val < 0) {
+          val = 0;
+        }
+      } else {
+        val = 0 -% pix_ceil(compensation -% distance);
+        if (val > 0) {
+          val = 0;
+        }
+      }
+    }
+    case kRoundToDoubleGrid: {
+      if (distance >= 0) {
+        val = pad_round(distance +% compensation, 32);
+        if (val < 0) {
+          val = 0;
+        }
+      } else {
+        val = 0 -% pad_round(compensation -% distance, 32);
+        if (val > 0) {
+          val = 0;
+        }
+      }
+    }
+    case kRoundSuper: {
+      if (distance >= 0) {
+        val = (distance +% (self.threshold - self.phase + compensation)) & (0 - self.period);
+        val = val +% self.phase;
+        if (val < 0) {
+          val = self.phase;
+        }
+      } else {
+        val = 0 -% (((self.threshold - self.phase + compensation) -% distance) & (0 - self.period));
+        val = val -% self.phase;
+        if (val > 0) {
+          val = 0 - self.phase;
+        }
+      }
+    }
+    case kRoundSuper45: {
+      if (distance >= 0) {
+        val = ((distance +% (self.threshold - self.phase + compensation)) / self.period) * self.period;
+        val = val +% self.phase;
+        if (val < 0) {
+          val = self.phase;
+        }
+      } else {
+        val = 0 -% ((((self.threshold - self.phase + compensation) -% distance) / self.period) * self.period);
+        val = val -% self.phase;
+        if (val > 0) {
+          val = 0 - self.phase;
+        }
+      }
+    }
+    default: {
+      val = round_none(distance, compensation);
+    }
+  }
+  return val;
+}
+
+// SetSuperRound.
+fn Interp::set_super_round(var self&, grid_period: i64, selector: i64) {
+  switch ((selector & 0xC0) as i32) {
+    case 0: {
+      self.period = grid_period / 2;
+    }
+    case 0x40: {
+      self.period = grid_period;
+    }
+    case 0x80: {
+      self.period = grid_period * 2;
+    }
+    default: {
+      self.period = grid_period;
+    }
+  }
+  switch ((selector & 0x30) as i32) {
+    case 0: {
+      self.phase = 0;
+    }
+    case 0x10: {
+      self.phase = self.period / 4;
+    }
+    case 0x20: {
+      self.phase = self.period / 2;
+    }
+    default: {
+      self.phase = self.period * 3 / 4;
+    }
+  }
+  if ((selector & 0x0F) == 0) {
+    self.threshold = self.period - 1;
+  } else {
+    self.threshold = ((selector & 0x0F) - 4) * self.period / 8;
+  }
+  self.period = self.period >> 8;
+  self.phase = self.phase >> 8;
+  self.threshold = self.threshold >> 8;
+}
+
+// --- Projections ------------------------------------------------------------------------
+
+fn Interp::project(self&, dx: i64, dy: i64): i64 => match (self.proj) {
+  Proj::X => dx,
+  Proj::Y => dy,
+  Proj::Dot => dot_fix14(dx, dy, self.gs.proj_x, self.gs.proj_y),
+};
+
+fn Interp::dual_project(self&, dx: i64, dy: i64): i64 => match (self.dualproj) {
+  Proj::X => dx,
+  Proj::Y => dy,
+  Proj::Dot => dot_fix14(dx, dy, self.gs.dual_x, self.gs.dual_y),
+};
+
+// PROJECT(v1, v2) and DUALPROJ(v1, v2).
+fn Interp::project2(self&, a: Vec26, b: Vec26): i64 => self.project(a.x -% b.x, a.y -% b.y);
+fn Interp::dual_project2(self&, a: Vec26, b: Vec26): i64 => self.dual_project(a.x -% b.x, a.y -% b.y);
+
+// Compute_Funcs.
+fn Interp::compute_funcs(var self&) {
+  let f_dot_p = (self.gs.proj_x * self.gs.free_x + self.gs.proj_y * self.gs.free_y + 0x2000) >> 14;
+  if (f_dot_p >= 0x3FFE) {
+    self.move_x = self.gs.free_x * 4;
+    self.move_y = self.gs.free_y * 4;
+  } else if (-0x400 < f_dot_p && f_dot_p < 0x400) {
+    self.move_x = 0;
+    self.move_y = 0;
+  } else {
+    self.move_x = self.gs.free_x * 0x10000 / f_dot_p;
+    self.move_y = self.gs.free_y * 0x10000 / f_dot_p;
+  }
+  if (f_dot_p >= 0x3FFE && self.gs.free_x == 0x4000) {
+    self.mover = Mover::X;
+  } else if (f_dot_p >= 0x3FFE && self.gs.free_y == 0x4000) {
+    self.mover = Mover::Y;
+  } else {
+    self.mover = Mover::Any;
+  }
+  self.proj = self.gs.proj_x == 0x4000 ? Proj::X : (self.gs.proj_y == 0x4000 ? Proj::Y : Proj::Dot);
+  self.dualproj = self.gs.dual_x == 0x4000 ? Proj::X : (self.gs.dual_y == 0x4000 ? Proj::Y : Proj::Dot);
+  self.metrics.ratio = 0;
+}
+
+// Normalize: a unit vector in 2.14; (0, 0) leaves the vector as it was.
+fn normalize(vx: i64, vy: i64, old: (i64, i64)): (i64, i64) {
+  if (vx == 0 && vy == 0) {
+    return old;
+  }
+  let (nx, ny, _) = vector_norm_len(vx, vy);
+  return (((nx / 4) as i16) as i64, ((ny / 4) as i16) as i64);
+}
+
+// --- The stack --------------------------------------------------------------------------
+
+fn Interp::arg(self&, k: i64): i64 => self.stack[(self.args + k) as usize];
+
+fn Interp::set_arg(var self&, k: i64, v: i64) {
+  let i = (self.args + k) as usize;
+  self.stack[i] = v;
+}
+
+// --- Instructions -----------------------------------------------------------------------
+
+fn Interp::ins_sxytca(var self&) {
+  let aa = ((self.opcode & 1) as i64) << 14;
+  let bb = aa ^ 0x4000;
+  if (self.opcode < 4) {
+    self.gs.proj_x = aa;
+    self.gs.proj_y = bb;
+    self.gs.dual_x = aa;
+    self.gs.dual_y = bb;
+  }
+  if ((self.opcode & 2) == 0) {
+    self.gs.free_x = aa;
+    self.gs.free_y = bb;
+  }
+  self.compute_funcs();
+}
+
+// Ins_SxVTL: the vector from point aIdx2 (zp1) to aIdx1 (zp2), or its
+// perpendicular; none when a point is out of range.
+fn Interp::sxvtl(self&, idx1: u32, idx2: u32, old: (i64, i64)): (i64, i64)? {
+  if (bounds(idx1, self.n_points(self.zp2)) || bounds(idx2, self.n_points(self.zp1))) {
+    return none;
+  }
+  let p1 = self.cur(self.zp1, idx2);
+  let p2 = self.cur(self.zp2, idx1);
+  var a = p1.x -% p2.x;
+  var b = p1.y -% p2.y;
+  var opcode = self.opcode;
+  if (a == 0 && b == 0) {
+    a = 0x4000;
+    opcode = 0;
+  }
+  if ((opcode & 1) != 0) {
+    let c = b;
+    b = a;
+    a = 0 -% c;
+  }
+  return normalize(a, b, old);
+}
+
+fn Interp::ins_spvtl(var self&) {
+  let idx1 = self.arg(1) as u16 as u32;
+  let idx2 = self.arg(0) as u16 as u32;
+  if (let v = self.sxvtl(idx1, idx2, (self.gs.proj_x, self.gs.proj_y))) {
+    self.gs.proj_x = v.0;
+    self.gs.proj_y = v.1;
+    self.gs.dual_x = v.0;
+    self.gs.dual_y = v.1;
+    self.compute_funcs();
+  }
+}
+
+fn Interp::ins_sfvtl(var self&) {
+  let idx1 = self.arg(1) as u16 as u32;
+  let idx2 = self.arg(0) as u16 as u32;
+  if (let v = self.sxvtl(idx1, idx2, (self.gs.free_x, self.gs.free_y))) {
+    self.gs.free_x = v.0;
+    self.gs.free_y = v.1;
+    self.compute_funcs();
+  }
+}
+
+fn Interp::ins_spvfs(var self&) {
+  let y = (self.arg(1) as i16) as i64;
+  let x = (self.arg(0) as i16) as i64;
+  let v = normalize(x, y, (self.gs.proj_x, self.gs.proj_y));
+  self.gs.proj_x = v.0;
+  self.gs.proj_y = v.1;
+  self.gs.dual_x = v.0;
+  self.gs.dual_y = v.1;
+  self.compute_funcs();
+}
+
+fn Interp::ins_sfvfs(var self&) {
+  let y = (self.arg(1) as i16) as i64;
+  let x = (self.arg(0) as i16) as i64;
+  let v = normalize(x, y, (self.gs.free_x, self.gs.free_y));
+  self.gs.free_x = v.0;
+  self.gs.free_y = v.1;
+  self.compute_funcs();
+}
+
+fn Interp::ins_szp(var self&, which: i32) {
+  let a = self.arg(0);
+  var z: usize = 0;
+  switch (a as i32) {
+    case 0: {
+      z = 0;
+    }
+    case 1: {
+      z = 1;
+    }
+    default: {
+      return;
+    }
+  }
+  let g = a as u16;
+  switch (which) {
+    case 0: {
+      self.zp0 = z;
+      self.gs.gep0 = g;
+    }
+    case 1: {
+      self.zp1 = z;
+      self.gs.gep1 = g;
+    }
+    case 2: {
+      self.zp2 = z;
+      self.gs.gep2 = g;
+    }
+    default: {
+      self.zp0 = z;
+      self.zp1 = z;
+      self.zp2 = z;
+      self.gs.gep0 = g;
+      self.gs.gep1 = g;
+      self.gs.gep2 = g;
+    }
+  }
+}
+
+// Ins_RS, Ins_WS.
+fn Interp::ins_rs(var self&) {
+  let i = self.arg(0) as u64;
+  if (boundsl(i, self.storage.len() as u64)) {
+    self.set_arg(0, 0);
+  } else {
+    let v = self.use_glyf_storage ? self.glyf_storage[i as usize] : self.storage[i as usize];
+    self.set_arg(0, v);
+  }
+}
+
+fn Interp::ins_ws(var self&) {
+  let i = self.arg(0) as u64;
+  if (boundsl(i, self.storage.len() as u64)) {
+    return;
+  }
+  if (self.ini_range == kRangeGlyph && !self.use_glyf_storage) {
+    self.glyf_storage.clear();
+    for (let v in self.storage) {
+      self.glyf_storage.push(v);
+    }
+    self.use_glyf_storage = true;
+  }
+  let v = self.arg(1);
+  if (self.use_glyf_storage) {
+    self.glyf_storage[i as usize] = v;
+  } else {
+    self.storage[i as usize] = v;
+  }
+}
+
+fn Interp::ins_wcvtp(var self&) {
+  let i = self.arg(0) as u64;
+  if (!boundsl(i, self.cvt_size())) {
+    self.write_cvt(i, self.arg(1));
+  }
+}
+
+// Ins_WCVTF writes the size's cvt directly, even from a glyph program.
+fn Interp::ins_wcvtf(var self&) {
+  let i = self.arg(0) as u64;
+  if (!boundsl(i, self.cvt_size())) {
+    self.put_cvt(i, mul_fix(self.arg(1), self.metrics.scale));
+  }
+}
+
+fn Interp::ins_rcvt(var self&) {
+  let i = self.arg(0) as u64;
+  if (boundsl(i, self.cvt_size())) {
+    self.set_arg(0, 0);
+  } else {
+    self.set_arg(0, self.read_cvt(i));
+  }
+}
+
+fn Interp::ins_mindex(var self&) {
+  let l = self.arg(0);
+  if (l <= 0 || l > self.args) {
+    return;
+  }
+  let base = self.args;
+  let k = self.stack[(base - l) as usize];
+  var i = base - l;
+  while (i < base - 1) {
+    self.stack[i as usize] = self.stack[(i + 1) as usize];
+    i += 1;
+  }
+  self.stack[(base - 1) as usize] = k;
+}
+
+fn Interp::ins_cindex(var self&) {
+  let l = self.arg(0);
+  if (l <= 0 || l > self.args) {
+    self.set_arg(0, 0);
+  } else {
+    self.set_arg(0, self.stack[(self.args - l) as usize]);
+  }
+}
+
+// SkipCode: moves to the next instruction; false at the end of the code.
+fn Interp::skip_code(var self&, data&: [u8]): bool {
+  self.ip += self.length;
+  if (self.ip < self.code_size) {
+    self.opcode = data[self.code_off + self.ip as usize];
+    self.length = kOpcodeLength[self.opcode as usize] as i64;
+    if (self.length < 0) {
+      if (self.ip + 1 >= self.code_size) {
+        self.error = FontError::CodeOverflow;
+        return false;
+      }
+      self.length = 2 - self.length * (data[self.code_off + (self.ip + 1) as usize] as i64);
+    }
+    return true;
+  }
+  self.error = FontError::CodeOverflow;
+  return false;
+}
+
+fn Interp::ins_if(var self&, data&: [u8]) {
+  if (self.arg(0) != 0) {
+    return;
+  }
+  var n_ifs: i32 = 1;
+  var out = false;
+  while (!out) {
+    if (!self.skip_code(data)) {
+      return;
+    }
+    switch (self.opcode) {
+      case 0x58: {
+        n_ifs += 1;
+      }
+      case 0x1B: {
+        out = n_ifs == 1;
+      }
+      case 0x59: {
+        n_ifs -= 1;
+        out = n_ifs == 0;
+      }
+      default: {}
+    }
+  }
+}
+
+fn Interp::ins_else(var self&, data&: [u8]) {
+  var n_ifs: i32 = 1;
+  while (n_ifs != 0) {
+    if (!self.skip_code(data)) {
+      return;
+    }
+    switch (self.opcode) {
+      case 0x58: {
+        n_ifs += 1;
+      }
+      case 0x59: {
+        n_ifs -= 1;
+      }
+      default: {}
+    }
+  }
+}
+
+fn Interp::def_end(self&, c: CallRec): i64 => c.idef ? self.idefs[c.def].end : self.fdefs[c.def].end;
+fn Interp::def_start(self&, c: CallRec): i64 => c.idef ? self.idefs[c.def].start : self.fdefs[c.def].start;
+fn Interp::def_range(self&, c: CallRec): i32 => c.idef ? self.idefs[c.def].range : self.fdefs[c.def].range;
+
+// Ins_JMPR (also JROT and JROF).
+fn Interp::ins_jmpr(var self&) {
+  let a = self.arg(0);
+  if (a == 0 && self.args == 0) {
+    self.error = FontError::BadArgument;
+    return;
+  }
+  self.ip = self.ip +% a;
+  if (self.ip < 0 || (self.call_top > 0 && self.ip > self.def_end(self.call_stack[(self.call_top - 1) as usize]))) {
+    self.error = FontError::BadArgument;
+    return;
+  }
+  self.length = 0;
+  if (a < 0) {
+    self.neg_jump_counter += 1;
+    if (self.neg_jump_counter > self.neg_jump_counter_max) {
+      self.error = FontError::ExecutionTooLong;
+    }
+  }
+}
+
+fn Interp::ins_fdef(var self&, data&: [u8]) {
+  if (self.ini_range == kRangeGlyph) {
+    self.error = FontError::DefInGlyfBytecode;
+    return;
+  }
+  let n = self.arg(0) as u64;
+  var rec: u32 = 0;
+  while (rec < self.num_fdefs) {
+    if (self.fdefs[rec as usize].opc as u64 == n) {
+      break;
+    }
+    rec += 1;
+  }
+  if (rec == self.num_fdefs) {
+    if (self.num_fdefs as usize >= self.fdefs.len()) {
+      self.error = FontError::TooManyFunctionDefs;
+      return;
+    }
+    self.num_fdefs += 1;
+  }
+  if (n > 0xFFFF) {
+    self.error = FontError::TooManyFunctionDefs;
+    return;
+  }
+  let r = rec as usize;
+  self.fdefs[r].range = self.cur_range;
+  self.fdefs[r].opc = n as u32;
+  self.fdefs[r].start = self.ip + 1;
+  self.fdefs[r].active = true;
+  if (n as u32 > self.max_func) {
+    self.max_func = n as u32;
+  }
+  while (self.skip_code(data)) {
+    switch (self.opcode) {
+      case 0x89, 0x2C: {
+        self.error = FontError::NestedDefs;
+        return;
+      }
+      case 0x2D: {
+        self.fdefs[r].end = self.ip;
+        return;
+      }
+      default: {}
+    }
+  }
+}
+
+fn Interp::ins_endf(var self&) {
+  if (self.call_top <= 0) {
+    self.error = FontError::EndfInExecStream;
+    return;
+  }
+  self.call_top -= 1;
+  let t = self.call_top as usize;
+  self.call_stack[t].cur_count -= 1;
+  let rec = self.call_stack[t];
+  if (rec.cur_count > 0) {
+    self.call_top += 1;
+    self.ip = self.def_start(rec);
+    self.length = 0;
+  } else {
+    let _ = self.goto_code_range(rec.caller_range, rec.caller_ip);
+  }
+}
+
+// The FDef for function f, as Ins_CALL and Ins_LOOPCALL find it.
+fn Interp::find_fdef(self&, f: u64): usize? {
+  if (boundsl(f, self.max_func as u64 + 1)) {
+    return none;
+  }
+  if (self.fdefs.len() == 0) {
+    return none;
+  }
+  var def = f as usize;
+  if (self.max_func + 1 != self.num_fdefs || def >= self.fdefs.len() || self.fdefs[def].opc as u64 != f) {
+    def = 0;
+    while (def < self.num_fdefs as usize && self.fdefs[def].opc as u64 != f) {
+      def += 1;
+    }
+    if (def == self.num_fdefs as usize) {
+      return none;
+    }
+  }
+  if (!self.fdefs[def].active) {
+    return none;
+  }
+  return def;
+}
+
+fn Interp::ins_call(var self&) {
+  let f = self.arg(0) as u64;
+  let def = self.find_fdef(f) else {
+    self.error = FontError::InvalidReference;
+    return;
+  };
+  if (self.call_top >= self.call_stack.len() as i64) {
+    self.error = FontError::StackOverflow;
+    return;
+  }
+  self.call_stack[self.call_top as usize] = CallRec {
+    caller_range: self.cur_range,
+    caller_ip: self.ip + 1,
+    cur_count: 1,
+    def,
+    idef: false,
+  };
+  self.call_top += 1;
+  let _ = self.goto_code_range(self.fdefs[def].range, self.fdefs[def].start);
+}
+
+fn Interp::ins_loopcall(var self&) {
+  let f = self.arg(1) as u64;
+  let def = self.find_fdef(f) else {
+    self.error = FontError::InvalidReference;
+    return;
+  };
+  if (self.call_top >= self.call_stack.len() as i64) {
+    self.error = FontError::StackOverflow;
+    return;
+  }
+  let count = self.arg(0);
+  if (count > 0) {
+    self.call_stack[self.call_top as usize] = CallRec {
+      caller_range: self.cur_range,
+      caller_ip: self.ip + 1,
+      cur_count: (count as i32) as i64,
+      def,
+      idef: false,
+    };
+    self.call_top += 1;
+    let _ = self.goto_code_range(self.fdefs[def].range, self.fdefs[def].start);
+    self.loopcall_counter = self.loopcall_counter +% count as u64;
+    if (self.loopcall_counter > self.loopcall_counter_max) {
+      self.error = FontError::ExecutionTooLong;
+    }
+  }
+}
+
+fn Interp::ins_idef(var self&, data&: [u8]) {
+  if (self.ini_range == kRangeGlyph) {
+    self.error = FontError::DefInGlyfBytecode;
+    return;
+  }
+  let a = self.arg(0);
+  var def: u32 = 0;
+  while (def < self.num_idefs) {
+    if (self.idefs[def as usize].opc as u64 == a as u64) {
+      break;
+    }
+    def += 1;
+  }
+  if (def == self.num_idefs) {
+    if (self.num_idefs as usize >= self.idefs.len()) {
+      self.error = FontError::TooManyInstructionDefs;
+      return;
+    }
+    self.num_idefs += 1;
+  }
+  if (0 > a || a > 0xFF) {
+    self.error = FontError::TooManyInstructionDefs;
+    return;
+  }
+  let d = def as usize;
+  self.idefs[d].opc = a as u32;
+  self.idefs[d].start = self.ip + 1;
+  self.idefs[d].range = self.cur_range;
+  self.idefs[d].active = true;
+  if (a as u32 > self.max_ins) {
+    self.max_ins = a as u32;
+  }
+  while (self.skip_code(data)) {
+    switch (self.opcode) {
+      case 0x89, 0x2C: {
+        self.error = FontError::NestedDefs;
+        return;
+      }
+      case 0x2D: {
+        self.idefs[d].end = self.ip;
+        return;
+      }
+      default: {}
+    }
+  }
+}
+
+fn Interp::ins_npushb(var self&, data&: [u8]) {
+  var ip = self.ip + 1;
+  if (ip >= self.code_size) {
+    self.error = FontError::CodeOverflow;
+    return;
+  }
+  let l = data[self.code_off + ip as usize] as i64;
+  if (ip + l >= self.code_size) {
+    self.error = FontError::CodeOverflow;
+    return;
+  }
+  if (bounds(l as u32, (self.stack_size + 1 - self.top) as u32)) {
+    self.error = FontError::StackOverflow;
+    return;
+  }
+  for (let k in 0..l) {
+    ip += 1;
+    self.set_arg(k, data[self.code_off + ip as usize] as i64);
+  }
+  self.new_top += l;
+  self.ip = ip;
+}
+
+fn Interp::ins_npushw(var self&, data&: [u8]) {
+  var ip = self.ip + 1;
+  if (ip >= self.code_size) {
+    self.error = FontError::CodeOverflow;
+    return;
+  }
+  let l = data[self.code_off + ip as usize] as i64;
+  if (ip + 2 * l >= self.code_size) {
+    self.error = FontError::CodeOverflow;
+    return;
+  }
+  if (bounds(l as u32, (self.stack_size + 1 - self.top) as u32)) {
+    self.error = FontError::StackOverflow;
+    return;
+  }
+  for (let k in 0..l) {
+    let hi = data[self.code_off + (ip + 1) as usize] as u16;
+    let lo = data[self.code_off + (ip + 2) as usize] as u16;
+    self.set_arg(k, (((hi << 8) | lo) as i16) as i64);
+    ip += 2;
+  }
+  self.new_top += l;
+  self.ip = ip;
+}
+
+fn Interp::ins_pushb(var self&, data&: [u8]) {
+  var ip = self.ip;
+  let l = (self.opcode - 0xB0 + 1) as i64;
+  if (ip + l >= self.code_size) {
+    self.error = FontError::CodeOverflow;
+    return;
+  }
+  if (bounds(l as u32, (self.stack_size + 1 - self.top) as u32)) {
+    self.error = FontError::StackOverflow;
+    return;
+  }
+  for (let k in 0..l) {
+    ip += 1;
+    self.set_arg(k, data[self.code_off + ip as usize] as i64);
+  }
+  self.ip = ip;
+}
+
+fn Interp::ins_pushw(var self&, data&: [u8]) {
+  var ip = self.ip;
+  let l = (self.opcode - 0xB8 + 1) as i64;
+  if (ip + 2 * l >= self.code_size) {
+    self.error = FontError::CodeOverflow;
+    return;
+  }
+  if (bounds(l as u32, (self.stack_size + 1 - self.top) as u32)) {
+    self.error = FontError::StackOverflow;
+    return;
+  }
+  for (let k in 0..l) {
+    let hi = data[self.code_off + (ip + 1) as usize] as u16;
+    let lo = data[self.code_off + (ip + 2) as usize] as u16;
+    self.set_arg(k, (((hi << 8) | lo) as i16) as i64);
+    ip += 2;
+  }
+  self.ip = ip;
+}
+
+fn Interp::ins_gc(var self&) {
+  let l = self.arg(0) as u64;
+  var r: i64 = 0;
+  if (!boundsl(l, self.n_points(self.zp2) as u64)) {
+    if ((self.opcode & 1) != 0) {
+      let p = self.org(self.zp2, l as u32);
+      r = self.dual_project(p.x, p.y);
+    } else {
+      let p = self.cur(self.zp2, l as u32);
+      r = self.project(p.x, p.y);
+    }
+  }
+  self.set_arg(0, r);
+}
+
+fn Interp::ins_scfs(var self&) {
+  let l = self.arg(0) as u16 as u32;
+  if (bounds(l, self.n_points(self.zp2))) {
+    return;
+  }
+  let p = self.cur(self.zp2, l);
+  let k = self.project(p.x, p.y);
+  let z = self.zp2;
+  self.move_point(z, l, self.arg(1) -% k);
+  if (self.gs.gep2 == 0) {
+    self.set_org(z, l, self.cur(z, l));
+  }
+}
+
+fn Interp::ins_md(var self&) {
+  let k = self.arg(1) as u16 as u32;
+  let l = self.arg(0) as u16 as u32;
+  var d: i64 = 0;
+  if (!(bounds(l, self.n_points(self.zp0)) || bounds(k, self.n_points(self.zp1)))) {
+    if ((self.opcode & 1) != 0) {
+      d = self.project2(self.cur(self.zp0, l), self.cur(self.zp1, k));
+    } else if (self.gs.gep0 == 0 || self.gs.gep1 == 0) {
+      d = self.dual_project2(self.org(self.zp0, l), self.org(self.zp1, k));
+    } else {
+      let v1 = self.orus(self.zp0, l);
+      let v2 = self.orus(self.zp1, k);
+      if (self.metrics.x_scale == self.metrics.y_scale) {
+        d = self.dual_project2(v1, v2);
+        d = mul_fix(d, self.metrics.x_scale);
+      } else {
+        let vx = mul_fix(v1.x - v2.x, self.metrics.x_scale);
+        let vy = mul_fix(v1.y - v2.y, self.metrics.y_scale);
+        d = self.dual_project(vx, vy);
+      }
+    }
+  }
+  self.set_arg(0, d);
+}
+
+fn Interp::ins_sdpvtl(var self&) {
+  let p1 = self.arg(1) as u16 as u32;
+  let p2 = self.arg(0) as u16 as u32;
+  if (bounds(p2, self.n_points(self.zp1)) || bounds(p1, self.n_points(self.zp2))) {
+    return;
+  }
+  var opcode = self.opcode;
+  let v1 = self.org(self.zp1, p2);
+  let v2 = self.org(self.zp2, p1);
+  var a = v1.x -% v2.x;
+  var b = v1.y -% v2.y;
+  if (a == 0 && b == 0) {
+    a = 0x4000;
+    opcode = 0;
+  }
+  if ((opcode & 1) != 0) {
+    let c = b;
+    b = a;
+    a = 0 -% c;
+  }
+  let dv = normalize(a, b, (self.gs.dual_x, self.gs.dual_y));
+  self.gs.dual_x = dv.0;
+  self.gs.dual_y = dv.1;
+  let w1 = self.cur(self.zp1, p2);
+  let w2 = self.cur(self.zp2, p1);
+  a = w1.x -% w2.x;
+  b = w1.y -% w2.y;
+  if (a == 0 && b == 0) {
+    a = 0x4000;
+    opcode = 0;
+  }
+  if ((opcode & 1) != 0) {
+    let c = b;
+    b = a;
+    a = 0 -% c;
+  }
+  let pv = normalize(a, b, (self.gs.proj_x, self.gs.proj_y));
+  self.gs.proj_x = pv.0;
+  self.gs.proj_y = pv.1;
+  self.compute_funcs();
+}
+
+fn Interp::ins_instctrl(var self&) {
+  let k = self.arg(1) as u64;
+  let l = self.arg(0) as u64;
+  if (k < 1 || k > 3) {
+    return;
+  }
+  let kf = 1u64 << (k - 1);
+  if (l != 0 && l != kf) {
+    return;
+  }
+  if (self.ini_range == kRangeCvt) {
+    self.gs.instruct_control = self.gs.instruct_control & ~(kf as u8);
+    self.gs.instruct_control = self.gs.instruct_control | (l as u8);
+  } else if (self.ini_range == kRangeGlyph && k == 3) {
+    self.backward_compatibility = ((l & 4) ^ 4) as u32;
+  }
+}
+
+fn Interp::ins_scanctrl(var self&) {
+  let a0 = self.arg(0);
+  let a = (a0 & 0xFF) as i64;
+  if (a == 0xFF) {
+    self.gs.scan_control = true;
+    return;
+  } else if (a == 0) {
+    self.gs.scan_control = false;
+    return;
+  }
+  if ((a0 & 0x100) != 0 && self.metrics.ppem <= a) {
+    self.gs.scan_control = true;
+  }
+  if ((a0 & 0x800) != 0 && self.metrics.ppem > a) {
+    self.gs.scan_control = false;
+  }
+}
+
+fn Interp::ins_flippt(var self&) {
+  var loop_ = self.gs.loop_;
+  if (self.new_top < loop_) {
+    self.gs.loop_ = 1;
+    return;
+  }
+  self.new_top -= loop_;
+  if (self.backward_compatibility == 0x7) {
+    self.gs.loop_ = 1;
+    return;
+  }
+  var args = self.args;
+  while (loop_ > 0) {
+    loop_ -= 1;
+    args -= 1;
+    let point = self.stack[args as usize] as u16 as u32;
+    if (!bounds(point, self.zones[1].n_points)) {
+      self.set_tag(1, point, self.tag(1, point) ^ kTagOn);
+    }
+  }
+  self.gs.loop_ = 1;
+}
+
+fn Interp::ins_fliprg(var self&, on: bool) {
+  if (self.backward_compatibility == 0x7) {
+    return;
+  }
+  let k = self.arg(1) as u16 as u32;
+  let l = self.arg(0) as u16 as u32;
+  if (bounds(k, self.zones[1].n_points) || bounds(l, self.zones[1].n_points)) {
+    return;
+  }
+  var i = l;
+  while (i <= k) {
+    let t = self.tag(1, i);
+    self.set_tag(1, i, on ? t | kTagOn : t & ~kTagOn);
+    i += 1;
+  }
+}
+
+// Compute_Point_Displacement: (dx, dy, zone, refp), none when the reference
+// point is out of range.
+fn Interp::point_displacement(self&): (i64, i64, usize, u32)? {
+  var zp = self.zp1;
+  var p = self.gs.rp2 as u32;
+  if ((self.opcode & 1) != 0) {
+    zp = self.zp0;
+    p = self.gs.rp1 as u32;
+  }
+  if (bounds(p, self.n_points(zp))) {
+    return none;
+  }
+  let d = self.project2(self.cur(zp, p), self.org(zp, p));
+  return (mul_fix(d, self.move_x), mul_fix(d, self.move_y), zp, p);
+}
+
+// Move_Zp2_Point.
+fn Interp::move_zp2_point(var self&, point: u32, dx: i64, dy: i64, touch: bool) {
+  let z = self.zp2;
+  let b = self.zones[z].base + point as usize;
+  if (self.gs.free_x != 0) {
+    if (self.backward_compatibility == 0) {
+      self.zones[z].cur[b].x = self.zones[z].cur[b].x +% dx;
+    }
+    if (touch) {
+      self.zones[z].tags[b] = self.zones[z].tags[b] | kTagTouchX;
+    }
+  }
+  if (self.gs.free_y != 0) {
+    if (self.backward_compatibility != 0x7) {
+      self.zones[z].cur[b].y = self.zones[z].cur[b].y +% dy;
+    }
+    if (touch) {
+      self.zones[z].tags[b] = self.zones[z].tags[b] | kTagTouchY;
+    }
+  }
+}
+
+// The same zone in FreeType's sense (`zp.cur == exc->zp2.cur`): the same
+// lists at the same window.
+fn Interp::same_zone(self&, a: usize, b: usize): bool => a == b;
+
+fn Interp::ins_shp(var self&) {
+  var loop_ = self.gs.loop_;
+  if (self.new_top < loop_) {
+    self.gs.loop_ = 1;
+    return;
+  }
+  self.new_top -= loop_;
+  let (dx, dy, _, _) = self.point_displacement() else {
+    return;
+  };
+  var args = self.args;
+  while (loop_ > 0) {
+    loop_ -= 1;
+    args -= 1;
+    let point = self.stack[args as usize] as u16 as u32;
+    if (!bounds(point, self.n_points(self.zp2))) {
+      self.move_zp2_point(point, dx, dy, true);
+    }
+  }
+  self.gs.loop_ = 1;
+}
+
+fn Interp::ins_shc(var self&) {
+  let contour = self.arg(0) as u16 as u32;
+  let limit_c = self.gs.gep2 == 0 ? 1u32 : self.zones[self.zp2].n_contours;
+  if (bounds(contour, limit_c)) {
+    return;
+  }
+  let (dx, dy, zp, refp) = self.point_displacement() else {
+    return;
+  };
+  let z2 = self.zp2;
+  let fp = self.zones[z2].first_point;
+  var start: u32 = 0;
+  if (contour != 0) {
+    start = (self.contour(z2, contour - 1) + 1 -% fp) & 0xFFFF;
+  }
+  var limit: u32 = 0;
+  if (self.gs.gep2 == 0) {
+    limit = self.zones[z2].n_points;
+  } else {
+    limit = (self.contour(z2, contour) + 1 -% fp) & 0xFFFF;
+  }
+  var i = start;
+  while (i < limit) {
+    if (!self.same_zone(zp, z2) || refp != i) {
+      self.move_zp2_point(i, dx, dy, true);
+    }
+    i += 1;
+  }
+}
+
+fn Interp::ins_shz(var self&) {
+  if (bounds(self.arg(0) as u32, 2)) {
+    return;
+  }
+  let (dx, dy, zp, refp) = self.point_displacement() else {
+    return;
+  };
+  let z2 = self.zp2;
+  var limit: u32 = 0;
+  if (self.gs.gep2 == 0) {
+    limit = self.zones[z2].n_points;
+  } else if (self.gs.gep2 == 1 && self.zones[z2].n_contours > 0) {
+    limit = (self.contour(z2, self.zones[z2].n_contours - 1) + 1) & 0xFFFF;
+    // FreeType does not subtract first_point here; points past the zone of
+    // a nested composite would be written beyond it, which this stops at.
+    if (limit > self.zones[z2].n_points) {
+      limit = self.zones[z2].n_points;
+    }
+  }
+  var i: u32 = 0;
+  while (i < limit) {
+    if (!self.same_zone(zp, z2) || refp != i) {
+      self.move_zp2_point(i, dx, dy, false);
+    }
+    i += 1;
+  }
+}
+
+fn Interp::ins_shpix(var self&) {
+  var loop_ = self.gs.loop_;
+  let in_twilight = self.gs.gep0 == 0 || self.gs.gep1 == 0 || self.gs.gep2 == 0;
+  if (self.new_top < loop_) {
+    self.gs.loop_ = 1;
+    return;
+  }
+  self.new_top -= loop_;
+  let dx = mul_fix14(self.arg(0), self.gs.free_x);
+  let dy = mul_fix14(self.arg(0), self.gs.free_y);
+  var args = self.args;
+  while (loop_ > 0) {
+    loop_ -= 1;
+    args -= 1;
+    let point = self.stack[args as usize] as u16 as u32;
+    if (!bounds(point, self.n_points(self.zp2))) {
+      if (self.backward_compatibility != 0) {
+        if (in_twilight ||
+            (self.backward_compatibility != 0x7 &&
+             ((self.is_composite && self.gs.free_y != 0) || (self.tag(self.zp2, point) & kTagTouchY) != 0))) {
+          self.move_zp2_point(point, 0, dy, true);
+        }
+      } else {
+        self.move_zp2_point(point, dx, dy, true);
+      }
+    }
+  }
+  self.gs.loop_ = 1;
+}
+
+fn Interp::ins_msirp(var self&) {
+  let point = self.arg(0) as u16 as u32;
+  let rp0 = self.gs.rp0 as u32;
+  if (bounds(point, self.n_points(self.zp1)) || bounds(rp0, self.n_points(self.zp0))) {
+    return;
+  }
+  let z1 = self.zp1;
+  if (self.gs.gep1 == 0) {
+    self.set_org(z1, point, self.org(self.zp0, rp0));
+    self.move_orig(z1, point, self.arg(1));
+    self.set_cur(z1, point, self.org(z1, point));
+  }
+  let distance = self.project2(self.cur(z1, point), self.cur(self.zp0, rp0));
+  self.move_point(z1, point, self.arg(1) -% distance);
+  self.gs.rp1 = self.gs.rp0;
+  self.gs.rp2 = point as u16;
+  if ((self.opcode & 1) != 0) {
+    self.gs.rp0 = point as u16;
+  }
+}
+
+fn Interp::ins_mdap(var self&) {
+  let point = self.arg(0) as u16 as u32;
+  if (bounds(point, self.n_points(self.zp0))) {
+    return;
+  }
+  var distance: i64 = 0;
+  if ((self.opcode & 1) != 0) {
+    let p = self.cur(self.zp0, point);
+    let cur_dist = self.project(p.x, p.y);
+    distance = self.round(cur_dist, 0) -% cur_dist;
+  }
+  self.move_point(self.zp0, point, distance);
+  self.gs.rp0 = point as u16;
+  self.gs.rp1 = point as u16;
+}
+
+fn Interp::ins_miap(var self&) {
+  let cvt_entry = self.arg(1) as u64;
+  let point = self.arg(0) as u16 as u32;
+  if (bounds(point, self.n_points(self.zp0)) || boundsl(cvt_entry, self.cvt_size())) {
+    self.gs.rp0 = point as u16;
+    self.gs.rp1 = point as u16;
+    return;
+  }
+  var distance = self.read_cvt(cvt_entry);
+  let z0 = self.zp0;
+  if (self.gs.gep0 == 0) {
+    let o = Vec26 { x: mul_fix14(distance, self.gs.free_x), y: mul_fix14(distance, self.gs.free_y) };
+    self.set_org(z0, point, o);
+    self.set_cur(z0, point, o);
+  }
+  let p = self.cur(z0, point);
+  let org_dist = self.project(p.x, p.y);
+  if ((self.opcode & 1) != 0) {
+    var delta = distance -% org_dist;
+    if (delta < 0) {
+      delta = 0 -% delta;
+    }
+    if (delta > self.gs.control_value_cutin) {
+      distance = org_dist;
+    }
+    distance = self.round(distance, 0);
+  }
+  self.move_point(z0, point, distance -% org_dist);
+  self.gs.rp0 = point as u16;
+  self.gs.rp1 = point as u16;
+}
+
+fn Interp::ins_mdrp(var self&) {
+  let point = self.arg(0) as u16 as u32;
+  let rp0 = self.gs.rp0 as u32;
+  if (bounds(point, self.n_points(self.zp1)) || bounds(rp0, self.n_points(self.zp0))) {
+    self.gs.rp1 = self.gs.rp0;
+    self.gs.rp2 = point as u16;
+    if ((self.opcode & 16) != 0) {
+      self.gs.rp0 = point as u16;
+    }
+    return;
+  }
+  var org_dist: i64 = 0;
+  if (self.gs.gep0 == 0 || self.gs.gep1 == 0) {
+    org_dist = self.dual_project2(self.org(self.zp1, point), self.org(self.zp0, rp0));
+  } else {
+    let v1 = self.orus(self.zp1, point);
+    let v2 = self.orus(self.zp0, rp0);
+    if (self.metrics.x_scale == self.metrics.y_scale) {
+      org_dist = self.dual_project2(v1, v2);
+      org_dist = mul_fix(org_dist, self.metrics.x_scale);
+    } else {
+      let vx = mul_fix(v1.x -% v2.x, self.metrics.x_scale);
+      let vy = mul_fix(v1.y -% v2.y, self.metrics.y_scale);
+      org_dist = self.dual_project(vx, vy);
+    }
+  }
+  if (self.gs.single_width_cutin > 0 && org_dist < self.gs.single_width_value +% self.gs.single_width_cutin &&
+      org_dist > self.gs.single_width_value -% self.gs.single_width_cutin) {
+    if (org_dist >= 0) {
+      org_dist = self.gs.single_width_value;
+    } else {
+      org_dist = 0 -% self.gs.single_width_value;
+    }
+  }
+  let compensation = self.gs.compensation[(self.opcode & 3) as usize];
+  var distance: i64 = 0;
+  if ((self.opcode & 4) != 0) {
+    distance = self.round(org_dist, compensation);
+  } else {
+    distance = round_none(org_dist, compensation);
+  }
+  if ((self.opcode & 8) != 0) {
+    let minimum_distance = self.gs.minimum_distance;
+    if (org_dist >= 0) {
+      if (distance < minimum_distance) {
+        distance = minimum_distance;
+      }
+    } else if (distance > 0 -% minimum_distance) {
+      distance = 0 -% minimum_distance;
+    }
+  }
+  let cur_dist = self.project2(self.cur(self.zp1, point), self.cur(self.zp0, rp0));
+  self.move_point(self.zp1, point, distance -% cur_dist);
+  self.gs.rp1 = self.gs.rp0;
+  self.gs.rp2 = point as u16;
+  if ((self.opcode & 16) != 0) {
+    self.gs.rp0 = point as u16;
+  }
+}
+
+fn Interp::ins_mirp(var self&) {
+  let point = self.arg(0) as u16 as u32;
+  let cvt_entry = (self.arg(1) +% 1) as u64;
+  let rp0 = self.gs.rp0 as u32;
+  if (bounds(point, self.n_points(self.zp1)) || boundsl(cvt_entry, self.cvt_size() + 1) ||
+      bounds(rp0, self.n_points(self.zp0))) {
+    self.gs.rp1 = self.gs.rp0;
+    self.gs.rp2 = point as u16;
+    if ((self.opcode & 16) != 0) {
+      self.gs.rp0 = point as u16;
+    }
+    return;
+  }
+  var cvt_dist: i64 = 0;
+  if (cvt_entry != 0) {
+    cvt_dist = self.read_cvt(cvt_entry - 1);
+  }
+  var delta = cvt_dist -% self.gs.single_width_value;
+  if (delta < 0) {
+    delta = 0 -% delta;
+  }
+  if (delta < self.gs.single_width_cutin) {
+    if (cvt_dist >= 0) {
+      cvt_dist = self.gs.single_width_value;
+    } else {
+      cvt_dist = 0 -% self.gs.single_width_value;
+    }
+  }
+  let z0 = self.zp0;
+  let z1 = self.zp1;
+  if (self.gs.gep1 == 0) {
+    let o0 = self.org(z0, rp0);
+    let o = Vec26 { x: o0.x +% mul_fix14(cvt_dist, self.gs.free_x), y: o0.y +% mul_fix14(cvt_dist, self.gs.free_y) };
+    self.set_org(z1, point, o);
+    self.set_cur(z1, point, o);
+  }
+  let org_dist = self.dual_project2(self.org(z1, point), self.org(z0, rp0));
+  let cur_dist = self.project2(self.cur(z1, point), self.cur(z0, rp0));
+  if (self.gs.auto_flip) {
+    if ((org_dist ^ cvt_dist) < 0) {
+      cvt_dist = 0 -% cvt_dist;
+    }
+  }
+  let compensation = self.gs.compensation[(self.opcode & 3) as usize];
+  var distance: i64 = 0;
+  if ((self.opcode & 4) != 0) {
+    if (self.gs.gep0 == self.gs.gep1) {
+      var d = cvt_dist -% org_dist;
+      if (d < 0) {
+        d = 0 -% d;
+      }
+      if (d > self.gs.control_value_cutin) {
+        cvt_dist = org_dist;
+      }
+    }
+    distance = self.round(cvt_dist, compensation);
+  } else {
+    distance = round_none(cvt_dist, compensation);
+  }
+  if ((self.opcode & 8) != 0) {
+    let minimum_distance = self.gs.minimum_distance;
+    if (org_dist >= 0) {
+      if (distance < minimum_distance) {
+        distance = minimum_distance;
+      }
+    } else if (distance > 0 -% minimum_distance) {
+      distance = 0 -% minimum_distance;
+    }
+  }
+  self.move_point(z1, point, distance -% cur_dist);
+  self.gs.rp1 = self.gs.rp0;
+  self.gs.rp2 = point as u16;
+  if ((self.opcode & 16) != 0) {
+    self.gs.rp0 = point as u16;
+  }
+}
+
+fn Interp::ins_alignrp(var self&) {
+  var loop_ = self.gs.loop_;
+  if (self.new_top < loop_) {
+    self.gs.loop_ = 1;
+    return;
+  }
+  self.new_top -= loop_;
+  let rp0 = self.gs.rp0 as u32;
+  if (bounds(rp0, self.n_points(self.zp0))) {
+    self.gs.loop_ = 1;
+    return;
+  }
+  var args = self.args;
+  while (loop_ > 0) {
+    loop_ -= 1;
+    args -= 1;
+    let point = self.stack[args as usize] as u16 as u32;
+    if (!bounds(point, self.n_points(self.zp1))) {
+      let distance = self.project2(self.cur(self.zp1, point), self.cur(self.zp0, rp0));
+      self.move_point(self.zp1, point, 0 -% distance);
+    }
+  }
+  self.gs.loop_ = 1;
+}
+
+fn Interp::ins_isect(var self&) {
+  let point = self.arg(0) as u16 as u32;
+  let a0 = self.arg(1) as u16 as u32;
+  let a1 = self.arg(2) as u16 as u32;
+  let b0 = self.arg(3) as u16 as u32;
+  let b1 = self.arg(4) as u16 as u32;
+  let z0 = self.zp0;
+  let z1 = self.zp1;
+  let z2 = self.zp2;
+  if (bounds(b0, self.n_points(z0)) || bounds(b1, self.n_points(z0)) || bounds(a0, self.n_points(z1)) ||
+      bounds(a1, self.n_points(z1)) || bounds(point, self.n_points(z2))) {
+    return;
+  }
+  let pb0 = self.cur(z0, b0);
+  let pb1 = self.cur(z0, b1);
+  let pa0 = self.cur(z1, a0);
+  let pa1 = self.cur(z1, a1);
+  let dbx = pb1.x -% pb0.x;
+  let dby = pb1.y -% pb0.y;
+  let dax = pa1.x -% pa0.x;
+  let day = pa1.y -% pa0.y;
+  let dx = pb0.x -% pa0.x;
+  let dy = pb0.y -% pa0.y;
+  let discriminant = mul_div(dax, 0 -% dby, 0x40) +% mul_div(day, dbx, 0x40);
+  let dotproduct = mul_div(dax, dbx, 0x40) +% mul_div(day, dby, 0x40);
+  var r = Vec26 { x: 0, y: 0 };
+  if (19 *% abs64(discriminant) > abs64(dotproduct)) {
+    let val = mul_div(dx, 0 -% dby, 0x40) +% mul_div(dy, dbx, 0x40);
+    let rx = mul_div(val, dax, discriminant);
+    let ry = mul_div(val, day, discriminant);
+    r = Vec26 { x: pa0.x +% rx, y: pa0.y +% ry };
+  } else {
+    r = Vec26 {
+      x: ((pa0.x +% pa1.x) +% (pb0.x +% pb1.x)) / 4,
+      y: ((pa0.y +% pa1.y) +% (pb0.y +% pb1.y)) / 4,
+    };
+  }
+  self.set_cur(z2, point, r);
+  self.set_tag(z2, point, self.tag(z2, point) | kTagTouchBoth);
+}
+
+fn Interp::ins_alignpts(var self&) {
+  let p1 = self.arg(0) as u16 as u32;
+  let p2 = self.arg(1) as u16 as u32;
+  if (bounds(p1, self.n_points(self.zp1)) || bounds(p2, self.n_points(self.zp0))) {
+    return;
+  }
+  let distance = self.project2(self.cur(self.zp0, p2), self.cur(self.zp1, p1)) / 2;
+  self.move_point(self.zp1, p1, distance);
+  self.move_point(self.zp0, p2, 0 -% distance);
+}
+
+fn Interp::ins_ip(var self&) {
+  var loop_ = self.gs.loop_;
+  if (self.new_top < loop_) {
+    self.gs.loop_ = 1;
+    return;
+  }
+  self.new_top -= loop_;
+  let rp1 = self.gs.rp1 as u32;
+  let rp2 = self.gs.rp2 as u32;
+  let z0 = self.zp0;
+  let z1 = self.zp1;
+  let z2 = self.zp2;
+  if (bounds(rp1, self.n_points(z0))) {
+    self.gs.loop_ = 1;
+    return;
+  }
+  let twilight = self.gs.gep0 == 0 || self.gs.gep1 == 0 || self.gs.gep2 == 0;
+  let orus_base = twilight ? self.org(z0, rp1) : self.orus(z0, rp1);
+  let cur_base = self.cur(z0, rp1);
+  var old_range: i64 = 0;
+  var cur_range: i64 = 0;
+  if (!bounds(rp2, self.n_points(z1))) {
+    if (twilight) {
+      old_range = self.dual_project2(self.org(z1, rp2), orus_base);
+    } else if (self.metrics.x_scale == self.metrics.y_scale) {
+      old_range = self.dual_project2(self.orus(z1, rp2), orus_base);
+    } else {
+      let o = self.orus(z1, rp2);
+      let vx = mul_fix(o.x -% orus_base.x, self.metrics.x_scale);
+      let vy = mul_fix(o.y -% orus_base.y, self.metrics.y_scale);
+      old_range = self.dual_project(vx, vy);
+    }
+    cur_range = self.project2(self.cur(z1, rp2), cur_base);
+  }
+  var args = self.args;
+  while (loop_ > 0) {
+    loop_ -= 1;
+    args -= 1;
+    let point = (self.stack[args as usize] as u32);
+    if (bounds(point, self.n_points(z2))) {
+      continue;
+    }
+    var org_dist: i64 = 0;
+    if (twilight) {
+      org_dist = self.dual_project2(self.org(z2, point), orus_base);
+    } else if (self.metrics.x_scale == self.metrics.y_scale) {
+      org_dist = self.dual_project2(self.orus(z2, point), orus_base);
+    } else {
+      let o = self.orus(z2, point);
+      let vx = mul_fix(o.x -% orus_base.x, self.metrics.x_scale);
+      let vy = mul_fix(o.y -% orus_base.y, self.metrics.y_scale);
+      org_dist = self.dual_project(vx, vy);
+    }
+    let cur_dist = self.project2(self.cur(z2, point), cur_base);
+    var new_dist: i64 = 0;
+    if (org_dist != 0) {
+      if (old_range != 0) {
+        new_dist = mul_div(org_dist, cur_range, old_range);
+      } else {
+        new_dist = org_dist;
+      }
+    }
+    self.move_point(z2, (point as u16) as u32, new_dist -% cur_dist);
+  }
+  self.gs.loop_ = 1;
+}
+
+fn Interp::ins_utp(var self&) {
+  let point = self.arg(0) as u16 as u32;
+  if (bounds(point, self.n_points(self.zp0))) {
+    return;
+  }
+  var mask: u8 = 0xFF;
+  if (self.gs.free_x != 0) {
+    mask = mask & ~kTagTouchX;
+  }
+  if (self.gs.free_y != 0) {
+    mask = mask & ~kTagTouchY;
+  }
+  self.set_tag(self.zp0, point, self.tag(self.zp0, point) & mask);
+}
+
+// The coordinate IUP works on: x or y.
+fn axis(v: Vec26, y: bool): i64 => y ? v.y : v.x;
+
+fn with_axis(v: Vec26, y: bool, c: i64): Vec26 => y ? Vec26 { x: v.x, y: c } : Vec26 { x: c, y: v.y };
+
+// iup_worker_shift_.
+fn Interp::iup_shift(var self&, y: bool, p1: u32, p2: u32, p: u32) {
+  let b = self.zones[1].base;
+  let dx = axis(self.zones[1].cur[b + p as usize], y) -% axis(self.zones[1].org[b + p as usize], y);
+  if (dx != 0) {
+    var i = p1;
+    while (i < p) {
+      let c = self.zones[1].cur[b + i as usize];
+      self.zones[1].cur[b + i as usize] = with_axis(c, y, axis(c, y) +% dx);
+      i += 1;
+    }
+    i = p + 1;
+    while (i <= p2) {
+      let c = self.zones[1].cur[b + i as usize];
+      self.zones[1].cur[b + i as usize] = with_axis(c, y, axis(c, y) +% dx);
+      i += 1;
+    }
+  }
+}
+
+// iup_worker_interpolate_.
+fn Interp::iup_interpolate(var self&, y: bool, p1: u32, p2: u32, ref1_: u32, ref2_: u32) {
+  if (p1 > p2) {
+    return;
+  }
+  let max_points = self.zones[1].n_points;
+  if (bounds(ref1_, max_points) || bounds(ref2_, max_points)) {
+    return;
+  }
+  let b = self.zones[1].base;
+  var ref1 = ref1_;
+  var ref2 = ref2_;
+  var orus1 = axis(self.zones[1].orus[b + ref1 as usize], y);
+  var orus2 = axis(self.zones[1].orus[b + ref2 as usize], y);
+  if (orus1 > orus2) {
+    let t = orus1;
+    orus1 = orus2;
+    orus2 = t;
+    let r = ref1;
+    ref1 = ref2;
+    ref2 = r;
+  }
+  let org1 = axis(self.zones[1].org[b + ref1 as usize], y);
+  let org2 = axis(self.zones[1].org[b + ref2 as usize], y);
+  let cur1 = axis(self.zones[1].cur[b + ref1 as usize], y);
+  let cur2 = axis(self.zones[1].cur[b + ref2 as usize], y);
+  let delta1 = cur1 -% org1;
+  let delta2 = cur2 -% org2;
+  if (cur1 == cur2 || orus1 == orus2) {
+    var i = p1;
+    while (i <= p2) {
+      var x = axis(self.zones[1].org[b + i as usize], y);
+      if (x <= org1) {
+        x = x +% delta1;
+      } else if (x >= org2) {
+        x = x +% delta2;
+      } else {
+        x = cur1;
+      }
+      let c = self.zones[1].cur[b + i as usize];
+      self.zones[1].cur[b + i as usize] = with_axis(c, y, x);
+      i += 1;
+    }
+  } else {
+    var scale: i64 = 0;
+    var scale_valid = false;
+    var i = p1;
+    while (i <= p2) {
+      var x = axis(self.zones[1].org[b + i as usize], y);
+      if (x <= org1) {
+        x = x +% delta1;
+      } else if (x >= org2) {
+        x = x +% delta2;
+      } else {
+        if (!scale_valid) {
+          scale_valid = true;
+          scale = div_fix(cur2 -% cur1, orus2 -% orus1);
+        }
+        x = cur1 +% mul_fix(axis(self.zones[1].orus[b + i as usize], y) -% orus1, scale);
+      }
+      let c = self.zones[1].cur[b + i as usize];
+      self.zones[1].cur[b + i as usize] = with_axis(c, y, x);
+      i += 1;
+    }
+  }
+}
+
+fn Interp::ins_iup(var self&) {
+  if (self.backward_compatibility == 0x7) {
+    return;
+  } else if (self.backward_compatibility != 0) {
+    self.backward_compatibility = self.backward_compatibility | (1u32 << (self.opcode & 1) as u32);
+  }
+  if (self.zones[1].n_contours == 0) {
+    return;
+  }
+  let y = (self.opcode & 1) == 0;
+  let mask = y ? kTagTouchY : kTagTouchX;
+  let n_points = self.zones[1].n_points;
+  let fp = self.zones[1].first_point;
+  var contour: u32 = 0;
+  var point: u32 = 0;
+  while (true) {
+    var end_point = self.contour(1, contour) -% fp;
+    let first_point = point;
+    if (bounds(end_point, n_points)) {
+      end_point = n_points - 1;
+    }
+    while (point <= end_point && (self.tag(1, point) & mask) == 0) {
+      point += 1;
+    }
+    if (point <= end_point) {
+      let first_touched = point;
+      var cur_touched = point;
+      point += 1;
+      while (point <= end_point) {
+        if ((self.tag(1, point) & mask) != 0) {
+          self.iup_interpolate(y, cur_touched + 1, point - 1, cur_touched, point);
+          cur_touched = point;
+        }
+        point += 1;
+      }
+      if (cur_touched == first_touched) {
+        self.iup_shift(y, first_point, end_point, cur_touched);
+      } else {
+        self.iup_interpolate(y, (cur_touched + 1) & 0xFFFF, end_point, cur_touched, first_touched);
+        if (first_touched > 0) {
+          self.iup_interpolate(y, first_point, first_touched - 1, cur_touched, first_touched);
+        }
+      }
+    }
+    contour += 1;
+    if (!(contour < self.zones[1].n_contours)) {
+      break;
+    }
+  }
+}
+
+fn Interp::ins_deltap(var self&) {
+  var nump = self.arg(0);
+  if (nump < 0 || nump > self.new_top / 2) {
+    nump = self.new_top / 2;
+  }
+  self.new_top -= 2 * nump;
+  var p = self.cur_ppem() - self.gs.delta_base as i64;
+  if (self.opcode == 0x71) {
+    p -= 16;
+  } else if (self.opcode == 0x72) {
+    p -= 32;
+  }
+  if ((p & ~0xF) != 0) {
+    return;
+  }
+  p = p << 4;
+  let f = 1i64 << (6 - self.gs.delta_shift as i64);
+  var args = self.args;
+  while (nump > 0) {
+    nump -= 1;
+    args -= 1;
+    let a = self.stack[args as usize] as u16 as u32;
+    args -= 1;
+    var b = self.stack[args as usize];
+    if (!bounds(a, self.n_points(self.zp0))) {
+      if ((b & 0xF0) == p) {
+        b = (b & 0xF) - 8;
+        if (b >= 0) {
+          b += 1;
+        }
+        b *= f;
+        if (self.backward_compatibility != 0) {
+          if (self.backward_compatibility != 0x7 &&
+              ((self.is_composite && self.gs.free_y != 0) || (self.tag(self.zp0, a) & kTagTouchY) != 0)) {
+            self.move_point(self.zp0, a, b);
+          }
+        } else {
+          self.move_point(self.zp0, a, b);
+        }
+      }
+    }
+  }
+}
+
+fn Interp::ins_deltac(var self&) {
+  var nump = self.arg(0);
+  if (nump < 0 || nump > self.new_top / 2) {
+    nump = self.new_top / 2;
+  }
+  self.new_top -= 2 * nump;
+  var p = self.cur_ppem() - self.gs.delta_base as i64;
+  if (self.opcode == 0x74) {
+    p -= 16;
+  } else if (self.opcode == 0x75) {
+    p -= 32;
+  }
+  if ((p & ~0xF) != 0) {
+    return;
+  }
+  p = p << 4;
+  let f = 1i64 << (6 - self.gs.delta_shift as i64);
+  var args = self.args;
+  while (nump > 0) {
+    nump -= 1;
+    args -= 1;
+    let a = self.stack[args as usize] as u64;
+    args -= 1;
+    var b = self.stack[args as usize];
+    if (!boundsl(a, self.cvt_size())) {
+      if ((b & 0xF0) == p) {
+        b = (b & 0xF) - 8;
+        if (b >= 0) {
+          b += 1;
+        }
+        b *= f;
+        self.move_cvt(a, b);
+      }
+    }
+  }
+}
+
+fn Interp::ins_getinfo(var self&) {
+  let a = self.arg(0);
+  var k: i64 = 0;
+  if ((a & 1) != 0) {
+    k = 40;
+  }
+  // Interpreter v40, render mode normal, not grayscale (v40 clears it), no blend.
+  if ((a & 64) != 0) {
+    k = k | (1 << 13);
+  }
+  if ((a & 1024) != 0) {
+    k = k | (1 << 17);
+  }
+  if ((a & 2048) != 0) {
+    k = k | (1 << 18);
+  }
+  if ((a & 4096) != 0) {
+    k = k | (1 << 19);
+  }
+  self.set_arg(0, k);
+}
+
+// Ins_UNKNOWN: an IDEF'd opcode calls its definition.
+fn Interp::ins_unknown(var self&) {
+  for (let d in 0..self.num_idefs as usize) {
+    if ((self.idefs[d].opc as u8) == self.opcode && self.idefs[d].active) {
+      if (self.call_top >= self.call_stack.len() as i64) {
+        self.error = FontError::StackOverflow;
+        return;
+      }
+      self.call_stack[self.call_top as usize] = CallRec {
+        caller_range: self.cur_range,
+        caller_ip: self.ip + 1,
+        cur_count: 1,
+        def: d,
+        idef: true,
+      };
+      self.call_top += 1;
+      let _ = self.goto_code_range(self.idefs[d].range, self.idefs[d].start);
+      return;
+    }
+  }
+  self.error = FontError::InvalidOpcode;
+}
+
+// --- Running ----------------------------------------------------------------------------
+
+// TT_Run_Context: sets up a run of the current code range over zones[1]
+// (zones[0] is the twilight zone) and the size's graphics state, then
+// TT_RunIns. `cvt_size` and `n_points` are the run's (pts.n_points
+// includes the four phantom points).
+fn Interp::run(var self&, data&: [u8], size_gs: GraphicsState): FontError? {
+  self.zp0 = 1;
+  self.zp1 = 1;
+  self.zp2 = 1;
+  let pts = self.zones[1].n_points as u64;
+  let cvt_size = self.cvt.len() as u64;
+  var num_twilight = 2 * (pts + cvt_size);
+  if (num_twilight < 30) {
+    num_twilight = 30;
+  }
+  if (self.zones[0].n_points as u64 > num_twilight) {
+    if (num_twilight > 0xFFFF) {
+      num_twilight = 0xFFFF;
+    }
+    self.zones[0].n_points = num_twilight as u32;
+  }
+  self.loopcall_counter = 0;
+  self.neg_jump_counter = 0;
+  if (pts != 0) {
+    let a = 10 * pts > 50 ? 10 * pts : 50;
+    let b = cvt_size / 10 > 50 ? cvt_size / 10 : 50;
+    self.loopcall_counter_max = a + b;
+  } else {
+    self.loopcall_counter_max = 300 + 22 * cvt_size;
+  }
+  if (self.loopcall_counter_max > 100 * self.num_glyphs) {
+    self.loopcall_counter_max = 100 * self.num_glyphs;
+  }
+  self.neg_jump_counter_max = self.loopcall_counter_max;
+  self.stretched = self.metrics.x_ppem != self.metrics.y_ppem;
+  self.gs = size_gs;
+  self.round_fn = kRoundToGrid;
+  self.compute_funcs();
+  self.backward_compatibility = self.backward_compatibility & ~0x3u32;
+  self.top = 0;
+  self.call_top = 0;
+  return self.run_ins(data);
+}
+
+// TT_RunIns.
+fn Interp::run_ins(var self&, data&: [u8]): FontError? {
+  var ins_counter: u64 = 0;
+  while (true) {
+    ins_counter += 1;
+    if (ins_counter > kMaxRunnableOpcodes) {
+      self.error = FontError::ExecutionTooLong;
+      return self.error;
+    }
+    self.error = none;
+    self.opcode = data[self.code_off + self.ip as usize];
+    self.length = 1;
+    let pops = (kPopPush[self.opcode as usize] >> 4) as i64;
+    self.args = self.top - pops;
+    if (self.args < 0) {
+      for (let i in 0..pops) {
+        self.stack[i as usize] = 0;
+      }
+      self.args = 0;
+    }
+    self.new_top = self.args + (kPopPush[self.opcode as usize] & 15) as i64;
+    if (self.new_top > self.stack_size) {
+      self.error = FontError::StackOverflow;
+      return self.error;
+    }
+    self.execute(data);
+    if (let e = self.error) {
+      // ttinterp.c looks for an IDEF again on Invalid_Opcode; Ins_UNKNOWN
+      // already did, so every error ends the run here.
+      return e;
+    }
+    self.top = self.new_top;
+    self.ip += self.length;
+    if (self.ip >= self.code_size) {
+      if (self.call_top > 0) {
+        self.error = FontError::CodeOverflow;
+        return self.error;
+      }
+      return none;
+    }
+  }
+  return none;
+}
+
+fn Interp::execute(var self&, data&: [u8]) {
+  let op = self.opcode;
+  switch (op) {
+    case 0x00, 0x01, 0x02, 0x03, 0x04, 0x05: {
+      self.ins_sxytca();
+    }
+    case 0x06, 0x07: {
+      self.ins_spvtl();
+    }
+    case 0x08, 0x09: {
+      self.ins_sfvtl();
+    }
+    case 0x0A: {
+      self.ins_spvfs();
+    }
+    case 0x0B: {
+      self.ins_sfvfs();
+    }
+    case 0x0C: {
+      self.set_arg(0, self.gs.proj_x);
+      self.set_arg(1, self.gs.proj_y);
+    }
+    case 0x0D: {
+      self.set_arg(0, self.gs.free_x);
+      self.set_arg(1, self.gs.free_y);
+    }
+    case 0x0E: {
+      self.gs.free_x = self.gs.proj_x;
+      self.gs.free_y = self.gs.proj_y;
+      self.compute_funcs();
+    }
+    case 0x0F: {
+      self.ins_isect();
+    }
+    case 0x10: {
+      self.gs.rp0 = self.arg(0) as u16;
+    }
+    case 0x11: {
+      self.gs.rp1 = self.arg(0) as u16;
+    }
+    case 0x12: {
+      self.gs.rp2 = self.arg(0) as u16;
+    }
+    case 0x13: {
+      self.ins_szp(0);
+    }
+    case 0x14: {
+      self.ins_szp(1);
+    }
+    case 0x15: {
+      self.ins_szp(2);
+    }
+    case 0x16: {
+      self.ins_szp(3);
+    }
+    case 0x17: {
+      let a = self.arg(0);
+      if (a < 0) {
+        self.error = FontError::BadArgument;
+      } else {
+        self.gs.loop_ = a > 0xFFFF ? 0xFFFF : a;
+      }
+    }
+    case 0x18: {
+      self.gs.round_state = kRoundToGrid;
+      self.round_fn = kRoundToGrid;
+    }
+    case 0x19: {
+      self.gs.round_state = kRoundToHalfGrid;
+      self.round_fn = kRoundToHalfGrid;
+    }
+    case 0x1A: {
+      self.gs.minimum_distance = self.arg(0);
+    }
+    case 0x1B: {
+      self.ins_else(data);
+    }
+    case 0x1C: {
+      self.ins_jmpr();
+    }
+    case 0x1D: {
+      self.gs.control_value_cutin = self.arg(0);
+    }
+    case 0x1E: {
+      self.gs.single_width_cutin = self.arg(0);
+    }
+    case 0x1F: {
+      self.gs.single_width_value = mul_fix(self.arg(0), self.metrics.scale);
+    }
+    case 0x20: {
+      self.set_arg(1, self.arg(0));
+    }
+    case 0x21: {}
+    case 0x22: {
+      self.new_top = 0;
+    }
+    case 0x23: {
+      let l = self.arg(0);
+      self.set_arg(0, self.arg(1));
+      self.set_arg(1, l);
+    }
+    case 0x24: {
+      self.set_arg(0, self.top);
+    }
+    case 0x25: {
+      self.ins_cindex();
+    }
+    case 0x26: {
+      self.ins_mindex();
+    }
+    case 0x27: {
+      self.ins_alignpts();
+    }
+    case 0x28: {
+      self.ins_unknown();
+    }
+    case 0x29: {
+      self.ins_utp();
+    }
+    case 0x2A: {
+      self.ins_loopcall();
+    }
+    case 0x2B: {
+      self.ins_call();
+    }
+    case 0x2C: {
+      self.ins_fdef(data);
+    }
+    case 0x2D: {
+      self.ins_endf();
+    }
+    case 0x2E, 0x2F: {
+      self.ins_mdap();
+    }
+    case 0x30, 0x31: {
+      self.ins_iup();
+    }
+    case 0x32, 0x33: {
+      self.ins_shp();
+    }
+    case 0x34, 0x35: {
+      self.ins_shc();
+    }
+    case 0x36, 0x37: {
+      self.ins_shz();
+    }
+    case 0x38: {
+      self.ins_shpix();
+    }
+    case 0x39: {
+      self.ins_ip();
+    }
+    case 0x3A, 0x3B: {
+      self.ins_msirp();
+    }
+    case 0x3C: {
+      self.ins_alignrp();
+    }
+    case 0x3D: {
+      self.gs.round_state = kRoundToDoubleGrid;
+      self.round_fn = kRoundToDoubleGrid;
+    }
+    case 0x3E, 0x3F: {
+      self.ins_miap();
+    }
+    case 0x40: {
+      self.ins_npushb(data);
+    }
+    case 0x41: {
+      self.ins_npushw(data);
+    }
+    case 0x42: {
+      self.ins_ws();
+    }
+    case 0x43: {
+      self.ins_rs();
+    }
+    case 0x44: {
+      self.ins_wcvtp();
+    }
+    case 0x45: {
+      self.ins_rcvt();
+    }
+    case 0x46, 0x47: {
+      self.ins_gc();
+    }
+    case 0x48: {
+      self.ins_scfs();
+    }
+    case 0x49, 0x4A: {
+      self.ins_md();
+    }
+    case 0x4B: {
+      let v = self.cur_ppem();
+      self.set_arg(0, v);
+    }
+    case 0x4C: {
+      self.set_arg(0, self.metrics.point_size);
+    }
+    case 0x4D: {
+      self.gs.auto_flip = true;
+    }
+    case 0x4E: {
+      self.gs.auto_flip = false;
+    }
+    case 0x4F: {
+      self.error = FontError::DebugOpCode;
+    }
+    case 0x50: {
+      self.set_arg(0, self.arg(0) < self.arg(1) ? 1 : 0);
+    }
+    case 0x51: {
+      self.set_arg(0, self.arg(0) <= self.arg(1) ? 1 : 0);
+    }
+    case 0x52: {
+      self.set_arg(0, self.arg(0) > self.arg(1) ? 1 : 0);
+    }
+    case 0x53: {
+      self.set_arg(0, self.arg(0) >= self.arg(1) ? 1 : 0);
+    }
+    case 0x54: {
+      self.set_arg(0, self.arg(0) == self.arg(1) ? 1 : 0);
+    }
+    case 0x55: {
+      self.set_arg(0, self.arg(0) != self.arg(1) ? 1 : 0);
+    }
+    case 0x56: {
+      let r = self.round(self.arg(0), 0);
+      self.set_arg(0, (r & 64) == 64 ? 1 : 0);
+    }
+    case 0x57: {
+      let r = self.round(self.arg(0), 0);
+      self.set_arg(0, (r & 64) == 0 ? 1 : 0);
+    }
+    case 0x58: {
+      self.ins_if(data);
+    }
+    case 0x59: {}
+    case 0x5A: {
+      self.set_arg(0, self.arg(0) != 0 && self.arg(1) != 0 ? 1 : 0);
+    }
+    case 0x5B: {
+      self.set_arg(0, self.arg(0) != 0 || self.arg(1) != 0 ? 1 : 0);
+    }
+    case 0x5C: {
+      self.set_arg(0, self.arg(0) == 0 ? 1 : 0);
+    }
+    case 0x5D, 0x71, 0x72: {
+      self.ins_deltap();
+    }
+    case 0x5E: {
+      self.gs.delta_base = self.arg(0) as u16;
+    }
+    case 0x5F: {
+      let a = self.arg(0) as u64;
+      if (a > 6) {
+        self.error = FontError::BadArgument;
+      } else {
+        self.gs.delta_shift = a as u16;
+      }
+    }
+    case 0x60: {
+      self.set_arg(0, self.arg(0) +% self.arg(1));
+    }
+    case 0x61: {
+      self.set_arg(0, self.arg(0) -% self.arg(1));
+    }
+    case 0x62: {
+      if (self.arg(1) == 0) {
+        self.error = FontError::DivideByZero;
+      } else {
+        self.set_arg(0, mul_div_no_round(self.arg(0), 64, self.arg(1)));
+      }
+    }
+    case 0x63: {
+      self.set_arg(0, mul_div(self.arg(0), self.arg(1), 64));
+    }
+    case 0x64: {
+      let a = self.arg(0);
+      if (a < 0) {
+        self.set_arg(0, 0 -% a);
+      }
+    }
+    case 0x65: {
+      self.set_arg(0, 0 -% self.arg(0));
+    }
+    case 0x66: {
+      self.set_arg(0, pix_floor(self.arg(0)));
+    }
+    case 0x67: {
+      self.set_arg(0, pix_ceil(self.arg(0)));
+    }
+    case 0x68, 0x69, 0x6A, 0x6B: {
+      let r = self.round(self.arg(0), self.gs.compensation[(self.opcode & 3) as usize]);
+      self.set_arg(0, r);
+    }
+    case 0x6C, 0x6D, 0x6E, 0x6F: {
+      self.set_arg(0, round_none(self.arg(0), self.gs.compensation[(self.opcode & 3) as usize]));
+    }
+    case 0x70: {
+      self.ins_wcvtf();
+    }
+    case 0x73, 0x74, 0x75: {
+      self.ins_deltac();
+    }
+    case 0x76: {
+      self.set_super_round(0x4000, self.arg(0));
+      self.gs.round_state = kRoundSuper;
+      self.round_fn = kRoundSuper;
+    }
+    case 0x77: {
+      self.set_super_round(0x2D41, self.arg(0));
+      self.gs.round_state = kRoundSuper45;
+      self.round_fn = kRoundSuper45;
+    }
+    case 0x78: {
+      if (self.arg(1) != 0) {
+        self.ins_jmpr();
+      }
+    }
+    case 0x79: {
+      if (self.arg(1) == 0) {
+        self.ins_jmpr();
+      }
+    }
+    case 0x7A: {
+      self.gs.round_state = kRoundOff;
+      self.round_fn = kRoundOff;
+    }
+    case 0x7B: {
+      self.ins_unknown();
+    }
+    case 0x7C: {
+      self.gs.round_state = kRoundUpToGrid;
+      self.round_fn = kRoundUpToGrid;
+    }
+    case 0x7D: {
+      self.gs.round_state = kRoundDownToGrid;
+      self.round_fn = kRoundDownToGrid;
+    }
+    case 0x7E, 0x7F: {}
+    case 0x80: {
+      self.ins_flippt();
+    }
+    case 0x81: {
+      self.ins_fliprg(true);
+    }
+    case 0x82: {
+      self.ins_fliprg(false);
+    }
+    case 0x83, 0x84: {
+      self.ins_unknown();
+    }
+    case 0x85: {
+      self.ins_scanctrl();
+    }
+    case 0x86, 0x87: {
+      self.ins_sdpvtl();
+    }
+    case 0x88: {
+      self.ins_getinfo();
+    }
+    case 0x89: {
+      self.ins_idef(data);
+    }
+    case 0x8A: {
+      let a = self.arg(2);
+      let b = self.arg(1);
+      let c = self.arg(0);
+      self.set_arg(2, c);
+      self.set_arg(1, a);
+      self.set_arg(0, b);
+    }
+    case 0x8B: {
+      if (self.arg(1) > self.arg(0)) {
+        self.set_arg(0, self.arg(1));
+      }
+    }
+    case 0x8C: {
+      if (self.arg(1) < self.arg(0)) {
+        self.set_arg(0, self.arg(1));
+      }
+    }
+    case 0x8D: {
+      let a = self.arg(0);
+      if (a >= 0) {
+        self.gs.scan_type = (a & 0xFFFF) as i32;
+      }
+    }
+    case 0x8E: {
+      self.ins_instctrl();
+    }
+    default: {
+      if (op >= 0xE0) {
+        self.ins_mirp();
+      } else if (op >= 0xC0) {
+        self.ins_mdrp();
+      } else if (op >= 0xB8) {
+        self.ins_pushw(data);
+      } else if (op >= 0xB0) {
+        self.ins_pushb(data);
+      } else {
+        self.ins_unknown();
+      }
+    }
+  }
+}

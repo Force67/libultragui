@@ -1,0 +1,951 @@
+// TrueType glyph loading as FreeType 2.14.3 does it for FT_Load_Glyph with
+// FT_LOAD_DEFAULT (hinted) and FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING:
+// truetype/ttgload.c (TT_Load_Glyph, load_truetype_glyph, the simple and
+// composite readers, TT_Process_*_Glyph, TT_Hint_Glyph,
+// compute_glyph_metrics), the FT_GlyphLoader bookkeeping of base/ftgloadr.c,
+// ttdriver.c tt_glyph_load and the tail of base/ftobjs.c FT_Load_Glyph
+// (FT_Outline_Check, ft_glyphslot_grid_fit_metrics, advance and linear
+// advances).
+//
+// The FT_GlyphLoader's base/current outlines are one set of lists with two
+// counts: points of finished components (base) and of the component being
+// read (current, right after them). The interpreter borrows the lists for a
+// run (Zone), as FreeType's zone points into the loader's arrays.
+
+module ultragui::font::tt_glyph;
+
+import {List} from akikit::containers::list;
+import {swap} from akikit::algorithm;
+import {Face, kFaceFlagSbix} from ultragui::font::face;
+import {div_fix, mul_div, mul_fix, pix_ceil, pix_floor, pix_round, vector_length} from ultragui::font::fixed;
+import {
+  GlyphFormat, GlyphMetrics, LoadedGlyph, Outline, Vec26, kOutlineHighPrecision, kOutlineIgnoreDropouts,
+  kOutlineIncludeStubs, kOutlineOverlap, kOutlineSinglePass, kOutlineSmartDropouts, kTagHasScanmode, kTagTouchBoth,
+} from ultragui::font::outline;
+import {FontError, fits, i16_at, i8_at, u16_at} from ultragui::font::sfnt;
+import {Zone, kRangeGlyph} from ultragui::font::tt_interp;
+import {load_sbit_image} from ultragui::font::sbit;
+
+// Simple glyph flags.
+comptime let kOnCurvePoint: u8 = 0x01;
+comptime let kXShortVector: u8 = 0x02;
+comptime let kYShortVector: u8 = 0x04;
+comptime let kRepeatFlag: u8 = 0x08;
+comptime let kXPositive: u8 = 0x10;
+comptime let kYPositive: u8 = 0x20;
+comptime let kOverlapSimple: u8 = 0x40;
+
+// Composite flags.
+comptime let kArgsAreWords: u16 = 0x0001;
+comptime let kArgsAreXyValues: u16 = 0x0002;
+comptime let kRoundXyToGrid: u16 = 0x0004;
+comptime let kWeHaveAScale: u16 = 0x0008;
+comptime let kMoreComponents: u16 = 0x0020;
+comptime let kWeHaveAnXyScale: u16 = 0x0040;
+comptime let kWeHaveA2x2: u16 = 0x0080;
+comptime let kWeHaveInstr: u16 = 0x0100;
+comptime let kUseMyMetrics: u16 = 0x0200;
+comptime let kOverlapCompound: u16 = 0x0400;
+comptime let kScaledComponentOffset: u16 = 0x0800;
+
+// FT_SubGlyphRec.
+struct SubGlyph : Copy {
+  pub var index: u32 = 0
+  pub var flags: u16 = 0
+  pub var arg1: i64 = 0
+  pub var arg2: i64 = 0
+  pub var xx: i64 = 0x10000
+  pub var xy: i64 = 0
+  pub var yx: i64 = 0
+  pub var yy: i64 = 0x10000
+}
+
+fn v(x: i64, y: i64): Vec26 => Vec26 { x, y };
+
+// TT_LoaderRec + the FT_GlyphLoader it fills. Its lists are kept between
+// loads (Face::scratch), as FreeType keeps its glyph loader's buffers.
+pub struct Loader {
+  // FT_GlyphLoader: points (cur), extra_points (org), extra_points2 (orus).
+  pub var points: List<Vec26> = List()
+  pub var org: List<Vec26> = List()
+  pub var orus: List<Vec26> = List()
+  pub var tags: List<u8> = List()
+  pub var contours: List<u16> = List()
+  pub var base_points: u32 = 0
+  pub var base_contours: u32 = 0
+  pub var cur_points: u32 = 0
+  pub var cur_contours: u32 = 0
+  pub var subglyphs: List<SubGlyph> = List()
+  pub var base_subglyphs: u32 = 0
+  pub var outline_flags: u32 = 0
+  // TT_LoaderRec.
+  pub var hinted: bool = false
+  pub var has_exec: bool = false
+  pub var backward_compatibility: u32 = 0
+  pub var x_scale: i64 = 0
+  pub var y_scale: i64 = 0
+  pub var glyph_index: u32 = 0
+  pub var n_contours: i32 = 0
+  pub var bbox_x_min: i64 = 0
+  pub var bbox_y_min: i64 = 0
+  pub var bbox_x_max: i64 = 0
+  pub var bbox_y_max: i64 = 0
+  pub var left_bearing: i16 = 0
+  pub var advance: u16 = 0
+  pub var top_bearing: i16 = 0
+  pub var vadvance: u16 = 0
+  pub var linear: i64 = 0
+  pub var linear_def: bool = false
+  pub var pp1: Vec26 = Vec26 { x: 0, y: 0 }
+  pub var pp2: Vec26 = Vec26 { x: 0, y: 0 }
+  pub var pp3: Vec26 = Vec26 { x: 0, y: 0 }
+  pub var pp4: Vec26 = Vec26 { x: 0, y: 0 }
+  pub var byte_len: u32 = 0
+  // The glyph's frame in the file (TT_Access_Glyph_Frame).
+  pub var cursor: usize = 0
+  pub var limit: usize = 0
+  pub var ins_pos: usize = 0
+  // The current glyph's instructions in the file (exec->glyphIns).
+  pub var ins_offset: usize = 0
+  pub var ins_size: i64 = 0
+  pub var composites: List<u32> = List()
+}
+
+// FT_GLYPHLOADER_CHECK_POINTS: room for the current outline's points.
+fn Loader::ensure(var self&, n: u32) {
+  let need = (self.base_points + self.cur_points + n) as usize;
+  while (self.points.len() < need) {
+    self.points.push(v(0, 0));
+    self.org.push(v(0, 0));
+    self.orus.push(v(0, 0));
+    self.tags.push(0);
+  }
+}
+
+fn Loader::ensure_contours(var self&, n: u32) {
+  let need = (self.base_contours + self.cur_contours + n) as usize;
+  while (self.contours.len() < need) {
+    self.contours.push(0);
+  }
+}
+
+// FT_GlyphLoader_Add.
+fn Loader::add(var self&) {
+  for (let n in 0..self.cur_contours) {
+    let i = (self.base_contours + n) as usize;
+    self.contours[i] = (self.contours[i] as u32 + self.base_points) as u16;
+  }
+  self.base_points += self.cur_points;
+  self.base_contours += self.cur_contours;
+  self.cur_points = 0;
+  self.cur_contours = 0;
+}
+
+// Moves the point/tag/contour/subglyph buffers from one loader to another
+// (their contents are only scratch: every slot a load reads it wrote first).
+fn lend_buffers(var from&: Loader, var to&: Loader) {
+  swap(from.points, to.points);
+  swap(from.org, to.org);
+  swap(from.orus, to.orus);
+  swap(from.tags, to.tags);
+  swap(from.contours, to.contours);
+  swap(from.subglyphs, to.subglyphs);
+}
+
+// tt_get_metrics (hmtx/vmtx through TT_Get_HMetrics/TT_Get_VMetrics).
+fn get_metrics(face&: Face, var ld&: Loader, gid: u32) {
+  let (lsb, aw) = face_metrics(face, false, gid);
+  ld.left_bearing = lsb;
+  ld.advance = aw;
+  let (tsb, ah) = v_metrics(face, gid, ld.bbox_y_max);
+  ld.top_bearing = tsb;
+  ld.vadvance = ah;
+  if (!ld.linear_def) {
+    ld.linear_def = true;
+    ld.linear = aw as i64;
+  }
+}
+
+// tt_face_get_metrics: (bearing, advance) from hmtx or vmtx.
+pub fn face_metrics(face&: Face, vertical: bool, gindex: u32): (i16, u16) {
+  let d = face.data.as_slice();
+  let h = vertical ? face.vhea : face.hhea;
+  var table_pos = h.mtx_offset as u64;
+  let table_end = table_pos + h.mtx_size as u64;
+  let k = h.number_of_metrics as u64;
+  if (k > 0) {
+    if ((gindex as u64) < k) {
+      table_pos += 4 * gindex as u64;
+      if (table_pos + 4 > table_end || !fits(d, table_pos, 4)) {
+        return (0, 0);
+      }
+      return (i16_at(d, (table_pos + 2) as usize), u16_at(d, table_pos as usize));
+    }
+    table_pos += 4 * (k - 1);
+    if (table_pos + 2 > table_end || !fits(d, table_pos, 2)) {
+      return (0, 0);
+    }
+    let aw = u16_at(d, table_pos as usize);
+    table_pos += 4 + 2 * (gindex as u64 - k);
+    if (table_pos + 2 > table_end || !fits(d, table_pos, 2)) {
+      return (0, aw);
+    }
+    return (i16_at(d, table_pos as usize), aw);
+  }
+  return (0, 0);
+}
+
+// TT_Get_VMetrics.
+fn v_metrics(face&: Face, gid: u32, y_max: i64): (i16, u16) {
+  if (face.vertical_info) {
+    return face_metrics(face, true, gid);
+  }
+  if (face.os2.version != 0xFFFF) {
+    let a = face.os2.typo_ascender as i64;
+    let d = face.os2.typo_descender as i64;
+    return ((a - y_max) as i16, ((a - d) < 0 ? d - a : a - d) as u16);
+  }
+  let a = face.hhea.ascender as i64;
+  let d = face.hhea.descender as i64;
+  return ((a - y_max) as i16, ((a - d) < 0 ? d - a : a - d) as u16);
+}
+
+// tt_loader_set_pp.
+fn set_pp(var ld&: Loader) {
+  ld.pp1 = v(ld.bbox_x_min - ld.left_bearing as i64, 0);
+  ld.pp2 = v(ld.pp1.x + ld.advance as i64, 0);
+  ld.pp3 = v(0, ld.bbox_y_max + ld.top_bearing as i64);
+  ld.pp4 = v(0, ld.pp3.y - ld.vadvance as i64);
+  // Interpreter v40, render mode normal, and an exec context.
+  if (ld.has_exec) {
+    ld.pp3.x = ld.advance as i64 / 2;
+    ld.pp4.x = ld.advance as i64 / 2;
+  }
+}
+
+fn Loader::scale_pp(var self&) {
+  self.pp1.x = mul_fix(self.pp1.x, self.x_scale);
+  self.pp2.x = mul_fix(self.pp2.x, self.x_scale);
+  self.pp3.x = mul_fix(self.pp3.x, self.x_scale);
+  self.pp3.y = mul_fix(self.pp3.y, self.y_scale);
+  self.pp4.x = mul_fix(self.pp4.x, self.x_scale);
+  self.pp4.y = mul_fix(self.pp4.y, self.y_scale);
+}
+
+// TT_Load_Simple_Glyph: reads the current glyph into the current outline.
+fn load_simple(face&: Face, var ld&: Loader): () ! FontError {
+  let d = face.data.as_slice();
+  var p = ld.cursor;
+  let limit = ld.limit;
+  let n_contours = ld.n_contours;
+  ld.ensure_contours(n_contours as u32);
+  if (n_contours >= 0xFFF || p + 2 * n_contours as usize + 2 > limit) {
+    return fail FontError::InvalidOutline;
+  }
+  let cbase = (ld.base_contours) as usize;
+  var last: i64 = -1;
+  for (let c in 0..n_contours as usize) {
+    let e = u16_at(d, p) as i64;
+    p += 2;
+    if (e <= last) {
+      return fail FontError::InvalidOutline;
+    }
+    ld.contours[cbase + c] = e as u16;
+    last = e;
+  }
+  let n_points = (last + 1) as u32;
+  ld.ensure(n_points + 4);
+  let n_ins = u16_at(d, p) as usize;
+  p += 2;
+  if (p + n_ins > limit) {
+    return fail FontError::TooManyHints;
+  }
+  if (ld.hinted) {
+    ld.ins_offset = p;
+    ld.ins_size = n_ins as i64;
+  }
+  p += n_ins;
+  let base = ld.base_points as usize;
+  var f: usize = 0;
+  let flag_limit = n_points as usize;
+  while (f < flag_limit) {
+    if (p + 1 > limit) {
+      return fail FontError::InvalidOutline;
+    }
+    let c = d[p];
+    p += 1;
+    ld.tags[base + f] = c;
+    f += 1;
+    if ((c & kRepeatFlag) != 0) {
+      if (p + 1 > limit) {
+        return fail FontError::InvalidOutline;
+      }
+      let count = d[p] as usize;
+      p += 1;
+      if (f + count > flag_limit) {
+        return fail FontError::InvalidOutline;
+      }
+      for (let k in 0..count) {
+        ld.tags[base + f] = c;
+        f += 1;
+      }
+    }
+  }
+  if (n_points > 0 && (ld.tags[base] & kOverlapSimple) != 0) {
+    ld.outline_flags = ld.outline_flags | kOutlineOverlap;
+  }
+  var x: i64 = 0;
+  for (let i in 0..n_points as usize) {
+    let fl = ld.tags[base + i];
+    var delta: i64 = 0;
+    if ((fl & kXShortVector) != 0) {
+      if (p + 1 > limit) {
+        return fail FontError::InvalidOutline;
+      }
+      delta = d[p] as i64;
+      p += 1;
+      if ((fl & kXPositive) == 0) {
+        delta = 0 - delta;
+      }
+    } else if ((fl & kXPositive) == 0) {
+      if (p + 2 > limit) {
+        return fail FontError::InvalidOutline;
+      }
+      delta = i16_at(d, p) as i64;
+      p += 2;
+    }
+    x += delta;
+    ld.points[base + i].x = x;
+  }
+  var y: i64 = 0;
+  for (let i in 0..n_points as usize) {
+    let fl = ld.tags[base + i];
+    var delta: i64 = 0;
+    if ((fl & kYShortVector) != 0) {
+      if (p + 1 > limit) {
+        return fail FontError::InvalidOutline;
+      }
+      delta = d[p] as i64;
+      p += 1;
+      if ((fl & kYPositive) == 0) {
+        delta = 0 - delta;
+      }
+    } else if ((fl & kYPositive) == 0) {
+      if (p + 2 > limit) {
+        return fail FontError::InvalidOutline;
+      }
+      delta = i16_at(d, p) as i64;
+      p += 2;
+    }
+    y += delta;
+    ld.points[base + i].y = y;
+    ld.tags[base + i] = fl & kOnCurvePoint;
+  }
+  ld.cur_points = n_points;
+  ld.cur_contours = n_contours as u32;
+  ld.cursor = p;
+}
+
+// TT_Load_Composite_Glyph: the component records into current subglyphs.
+fn load_composite(face&: Face, var ld&: Loader): u32 ! FontError {
+  let d = face.data.as_slice();
+  var p = ld.cursor;
+  let limit = ld.limit;
+  var num: u32 = 0;
+  while (true) {
+    if (p + 4 > limit) {
+      return fail FontError::InvalidComposite;
+    }
+    var sg = SubGlyph {};
+    sg.flags = u16_at(d, p);
+    sg.index = u16_at(d, p + 2) as u32;
+    p += 4;
+    if (sg.index >= face.num_glyphs) {
+      return fail FontError::InvalidComposite;
+    }
+    var count: usize = 2;
+    if ((sg.flags & kArgsAreWords) != 0) {
+      count += 2;
+    }
+    if ((sg.flags & kWeHaveAScale) != 0) {
+      count += 2;
+    } else if ((sg.flags & kWeHaveAnXyScale) != 0) {
+      count += 4;
+    } else if ((sg.flags & kWeHaveA2x2) != 0) {
+      count += 8;
+    }
+    if (p + count > limit) {
+      return fail FontError::InvalidComposite;
+    }
+    if ((sg.flags & kArgsAreXyValues) != 0) {
+      if ((sg.flags & kArgsAreWords) != 0) {
+        sg.arg1 = i16_at(d, p) as i64;
+        sg.arg2 = i16_at(d, p + 2) as i64;
+        p += 4;
+      } else {
+        sg.arg1 = i8_at(d, p) as i64;
+        sg.arg2 = i8_at(d, p + 1) as i64;
+        p += 2;
+      }
+    } else if ((sg.flags & kArgsAreWords) != 0) {
+      sg.arg1 = u16_at(d, p) as i64;
+      sg.arg2 = u16_at(d, p + 2) as i64;
+      p += 4;
+    } else {
+      sg.arg1 = d[p] as i64;
+      sg.arg2 = d[p + 1] as i64;
+      p += 2;
+    }
+    if ((sg.flags & kWeHaveAScale) != 0) {
+      sg.xx = i16_at(d, p) as i64 * 4;
+      sg.yy = sg.xx;
+      p += 2;
+    } else if ((sg.flags & kWeHaveAnXyScale) != 0) {
+      sg.xx = i16_at(d, p) as i64 * 4;
+      sg.yy = i16_at(d, p + 2) as i64 * 4;
+      p += 4;
+    } else if ((sg.flags & kWeHaveA2x2) != 0) {
+      sg.xx = i16_at(d, p) as i64 * 4;
+      sg.yx = i16_at(d, p + 2) as i64 * 4;
+      sg.xy = i16_at(d, p + 4) as i64 * 4;
+      sg.yy = i16_at(d, p + 6) as i64 * 4;
+      p += 8;
+    }
+    let slot = (ld.base_subglyphs + num) as usize;
+    if (slot < ld.subglyphs.len()) {
+      ld.subglyphs[slot] = sg;
+    } else {
+      ld.subglyphs.push(sg);
+    }
+    num += 1;
+    if ((sg.flags & kMoreComponents) == 0) {
+      break;
+    }
+  }
+  ld.ins_pos = p;
+  ld.cursor = p;
+  return num;
+}
+
+// Lends the loader's lists to the interpreter's glyph zone (tt_prepare_zone).
+fn lend_zone(var ld&: Loader, var z&: Zone, start_point: u32, start_contour: u32, n_points: u32, n_contours: u32, first: u32) {
+  swap(ld.points, z.cur);
+  swap(ld.org, z.org);
+  swap(ld.orus, z.orus);
+  swap(ld.tags, z.tags);
+  swap(ld.contours, z.contours);
+  z.base = start_point as usize;
+  z.cbase = start_contour as usize;
+  z.n_points = n_points;
+  z.n_contours = n_contours;
+  z.first_point = first;
+}
+
+fn take_back(var ld&: Loader, var z&: Zone) {
+  swap(ld.points, z.cur);
+  swap(ld.org, z.org);
+  swap(ld.orus, z.orus);
+  swap(ld.tags, z.tags);
+  swap(ld.contours, z.contours);
+}
+
+// TT_Hint_Glyph over the zone [start, start + n) (n includes the four
+// phantom points); `tags0` is the index current.outline.tags[0] refers to.
+fn hint_glyph(var face&: Face, var ld&: Loader, start: u32, start_contour: u32, n: u32, n_contours: u32, first: u32, composite: bool, tags0: usize) {
+  let n_ins = ld.ins_size;
+  let b = start as usize;
+  if (n_ins > 0) {
+    for (let i in 0..n as usize) {
+      ld.org[b + i] = ld.points[b + i];
+    }
+  }
+  let xs = composite ? 0x10000 : ld.x_scale;
+  let ys = composite ? 0x10000 : ld.y_scale;
+  if (composite) {
+    for (let i in 0..n as usize) {
+      ld.orus[b + i] = ld.points[b + i];
+    }
+  }
+  let nn = n as usize;
+  ld.points[b + nn - 4].x = pix_round(ld.points[b + nn - 4].x);
+  ld.points[b + nn - 3].x = pix_round(ld.points[b + nn - 3].x);
+  ld.points[b + nn - 2].y = pix_round(ld.points[b + nn - 2].y);
+  ld.points[b + nn - 1].y = pix_round(ld.points[b + nn - 1].y);
+  let size_gs = face.size.gs;
+  let data = face.data.as_slice();
+  if (var x& = face.size.exec) {
+    x.metrics.x_scale = xs;
+    x.metrics.y_scale = ys;
+    if (n_ins > 0) {
+      x.set_code_range(kRangeGlyph, ld.ins_offset, n_ins);
+      x.is_composite = composite;
+      lend_zone(ld, x.zones[1], start, start_contour, n, n_contours, first);
+      let _ = x.run(data, size_gs);
+      take_back(ld, x.zones[1]);
+      ld.tags[tags0] = ld.tags[tags0] | ((x.gs.scan_type << 5) as u8) | kTagHasScanmode;
+    }
+    ld.backward_compatibility = x.backward_compatibility;
+  }
+  if (ld.backward_compatibility != 0) {
+    return;
+  }
+  ld.pp1 = ld.points[b + nn - 4];
+  ld.pp2 = ld.points[b + nn - 3];
+  ld.pp3 = ld.points[b + nn - 2];
+  ld.pp4 = ld.points[b + nn - 1];
+}
+
+// TT_Process_Simple_Glyph.
+fn process_simple(var face&: Face, var ld&: Loader) {
+  let base = ld.base_points as usize;
+  let n = ld.cur_points as usize;
+  ld.points[base + n] = ld.pp1;
+  ld.points[base + n + 1] = ld.pp2;
+  ld.points[base + n + 2] = ld.pp3;
+  ld.points[base + n + 3] = ld.pp4;
+  let np = n + 4;
+  if (ld.hinted) {
+    for (let i in 0..np) {
+      ld.orus[base + i] = ld.points[base + i];
+    }
+  }
+  for (let i in 0..np) {
+    let q = ld.points[base + i];
+    ld.points[base + i] = v(mul_fix(q.x, ld.x_scale), mul_fix(q.y, ld.y_scale));
+  }
+  ld.pp1 = ld.points[base + np - 4];
+  ld.pp2 = ld.points[base + np - 3];
+  ld.pp3 = ld.points[base + np - 2];
+  ld.pp4 = ld.points[base + np - 1];
+  if (ld.hinted) {
+    hint_glyph(face, ld, ld.base_points, ld.base_contours, np as u32, ld.cur_contours, 0, false, base);
+  }
+}
+
+// TT_Process_Composite_Component.
+fn process_component(var lw&: Loader, sg: SubGlyph, start_point: u32, num_base_points: u32): () ! FontError {
+  let first = num_base_points as usize;
+  let last = lw.base_points as usize;
+  let have_scale = (sg.flags & (kWeHaveAScale | kWeHaveAnXyScale | kWeHaveA2x2)) != 0;
+  if (have_scale) {
+    for (let i in first..last) {
+      let q = lw.points[i];
+      lw.points[i] = v(mul_fix(q.x, sg.xx) +% mul_fix(q.y, sg.xy), mul_fix(q.x, sg.yx) +% mul_fix(q.y, sg.yy));
+    }
+  }
+  var x: i64 = 0;
+  var y: i64 = 0;
+  if ((sg.flags & kArgsAreXyValues) == 0) {
+    let k = (sg.arg1 as u32) + start_point;
+    let l = (sg.arg2 as u32) + num_base_points;
+    if (k >= num_base_points || l >= lw.base_points) {
+      return fail FontError::InvalidComposite;
+    }
+    let p1 = lw.points[k as usize];
+    let p2 = lw.points[l as usize];
+    x = p1.x -% p2.x;
+    y = p1.y -% p2.y;
+  } else {
+    x = sg.arg1;
+    y = sg.arg2;
+    if (x == 0 && y == 0) {
+      return;
+    }
+    if (have_scale && (sg.flags & kScaledComponentOffset) != 0) {
+      let mac_xscale = vector_length(sg.xx, sg.xy);
+      let mac_yscale = vector_length(sg.yy, sg.yx);
+      x = mul_fix(x, mac_xscale);
+      y = mul_fix(y, mac_yscale);
+    }
+    x = mul_fix(x, lw.x_scale);
+    y = mul_fix(y, lw.y_scale);
+    if ((sg.flags & kRoundXyToGrid) != 0 && lw.hinted) {
+      if (lw.backward_compatibility == 0) {
+        x = pix_round(x);
+      }
+      y = pix_round(y);
+    }
+  }
+  if (x != 0 || y != 0) {
+    for (let i in first..last) {
+      lw.points[i] = v(lw.points[i].x +% x, lw.points[i].y +% y);
+    }
+  }
+}
+
+// TT_Process_Composite_Glyph.
+fn process_composite(var face&: Face, var ld&: Loader, start_point: u32, start_contour: u32): () ! FontError {
+  ld.ensure(4);
+  let b = ld.base_points as usize;
+  ld.points[b] = ld.pp1;
+  ld.points[b + 1] = ld.pp2;
+  ld.points[b + 2] = ld.pp3;
+  ld.points[b + 3] = ld.pp4;
+  ld.ins_size = 0;
+  let d = face.data.as_slice();
+  if (!fits(d, ld.ins_pos as u64, 2)) {
+    return fail FontError::InvalidStreamOperation;
+  }
+  let n_ins = u16_at(d, ld.ins_pos) as u32;
+  if (n_ins == 0) {
+    return;
+  }
+  if (n_ins > ld.byte_len) {
+    return fail FontError::TooManyHints;
+  }
+  if (!fits(d, (ld.ins_pos + 2) as u64, n_ins as u64)) {
+    return fail FontError::InvalidStreamOperation;
+  }
+  ld.ins_offset = ld.ins_pos + 2;
+  ld.ins_size = n_ins as i64;
+  let n = ld.base_points + 4 - start_point;
+  for (let i in 0..(n - 4) as usize) {
+    let k = start_point as usize + i;
+    ld.tags[k] = ld.tags[k] & ~kTagTouchBoth;
+  }
+  hint_glyph(face, ld, start_point, start_contour, n, ld.base_contours - start_contour, start_point, true, ld.base_points as usize);
+}
+
+// load_truetype_glyph.
+fn load_tt_glyph(var face&: Face, var ld&: Loader, gid: u32, recurse_count: u32, header_only: bool): () ! FontError {
+  if (recurse_count > 100) {
+    return fail FontError::InvalidComposite;
+  }
+  if (gid >= face.num_glyphs) {
+    return fail FontError::InvalidGlyphIndex;
+  }
+  ld.glyph_index = gid;
+  let (offset, len) = face.glyph_location(gid);
+  ld.byte_len = len;
+  if (len > 0) {
+    if (face.glyf_offset == 0) {
+      return fail FontError::InvalidTable;
+    }
+    let start = face.glyf_offset as u64 + offset as u64;
+    if (!fits(face.data.as_slice(), start, len as u64)) {
+      return fail FontError::InvalidStreamOperation;
+    }
+    if (len < 10) {
+      return fail FontError::InvalidOutline;
+    }
+    let d = face.data.as_slice();
+    let s = start as usize;
+    ld.n_contours = i16_at(d, s) as i32;
+    ld.bbox_x_min = i16_at(d, s + 2) as i64;
+    ld.bbox_y_min = i16_at(d, s + 4) as i64;
+    ld.bbox_x_max = i16_at(d, s + 6) as i64;
+    ld.bbox_y_max = i16_at(d, s + 8) as i64;
+    ld.cursor = s + 10;
+    ld.limit = s + len as usize;
+  }
+  if (len == 0 || ld.n_contours == 0) {
+    ld.bbox_x_min = 0;
+    ld.bbox_x_max = 0;
+    ld.bbox_y_min = 0;
+    ld.bbox_y_max = 0;
+  }
+  get_metrics(face, ld, gid);
+  if (header_only) {
+    return;
+  }
+  set_pp(ld);
+  if (len == 0 || ld.n_contours == 0) {
+    ld.scale_pp();
+    return;
+  }
+  if (ld.n_contours > 0) {
+    try load_simple(face, ld);
+    process_simple(face, ld);
+    ld.add();
+    return;
+  }
+  // A composite glyph.
+  ld.n_contours = -1;
+  let rc = recurse_count as usize;
+  for (let k in rc..ld.composites.len()) {
+    ld.composites[k] = 0xFFFF_FFFF;
+  }
+  for (let c in ld.composites) {
+    if (c == gid) {
+      return fail FontError::InvalidComposite;
+    }
+  }
+  if (rc < ld.composites.len()) {
+    ld.composites[rc] = gid;
+  } else {
+    ld.composites.push(gid);
+  }
+  let start_point = ld.base_points;
+  let start_contour = ld.base_contours;
+  let num_subglyphs = try load_composite(face, ld);
+  let ins_pos = ld.ins_pos;
+  ld.scale_pp();
+  // FT_GlyphLoader_Add (no points; the subglyphs join the base).
+  let num_base_subgs = ld.base_subglyphs;
+  ld.base_subglyphs += num_subglyphs;
+  let old_byte_len = ld.byte_len;
+  var last: SubGlyph? = none;
+  var num_points = start_point;
+  for (let n in 0..num_subglyphs) {
+    let sg = ld.subglyphs[(num_base_subgs + n) as usize];
+    let pp = [ld.pp1, ld.pp2, ld.pp3, ld.pp4];
+    let linear_hadvance = ld.linear;
+    let linear_vadvance = ld.vadvance;
+    let num_base_points = ld.base_points;
+    try load_tt_glyph(face, ld, sg.index, recurse_count + 1, false);
+    if ((sg.flags & kUseMyMetrics) == 0) {
+      ld.pp1 = pp[0];
+      ld.pp2 = pp[1];
+      ld.pp3 = pp[2];
+      ld.pp4 = pp[3];
+      ld.linear = linear_hadvance;
+      ld.vadvance = linear_vadvance;
+    }
+    last = sg;
+    num_points = ld.base_points;
+    if (num_points == num_base_points) {
+      continue;
+    }
+    try process_component(ld, sg, start_point, num_base_points);
+  }
+  ld.byte_len = old_byte_len;
+  ld.ins_pos = ins_pos;
+  if (ld.hinted) {
+    if (let sg = last) {
+      if ((sg.flags & kWeHaveInstr) != 0 && num_points > start_point) {
+        try process_composite(face, ld, start_point, start_contour);
+      }
+    }
+  }
+  if (ld.base_subglyphs > 0 && (ld.subglyphs[0].flags & kOverlapCompound) != 0) {
+    ld.outline_flags = ld.outline_flags | kOutlineOverlap;
+  }
+}
+
+// FT_Outline_Check.
+fn outline_ok(o&: Outline): bool {
+  let n_points = o.points.len();
+  let n_contours = o.contours.len();
+  if (n_points == 0 && n_contours == 0) {
+    return true;
+  }
+  if (n_points == 0 || n_contours == 0) {
+    return false;
+  }
+  var end0: i64 = -1;
+  for (let c in o.contours) {
+    let end = c as i64;
+    if (end <= end0 || end >= n_points as i64) {
+      return false;
+    }
+    end0 = end;
+  }
+  return end0 == n_points as i64 - 1;
+}
+
+// compute_glyph_metrics.
+fn compute_metrics(face&: Face, ld&: Loader, var g&: LoadedGlyph, gid: u32, widthp: usize?) {
+  let (x_min, y_min, x_max, y_max) = g.outline.cbox();
+  g.linear_hori_advance = ld.linear;
+  g.metrics.hori_bearing_x = x_min;
+  g.metrics.hori_bearing_y = y_max;
+  if (let w = widthp) {
+    g.metrics.hori_advance = face.data[w + gid as usize] as i64 * 64;
+  } else {
+    g.metrics.hori_advance = ld.pp2.x -% ld.pp1.x;
+  }
+  g.metrics.width = x_max -% x_min;
+  g.metrics.height = y_max -% y_min;
+  var top: i64 = 0;
+  var advance: i64 = 0;
+  let y_scale = ld.y_scale;
+  if (face.vertical_info && face.vhea.number_of_metrics > 0) {
+    top = (div_fix(ld.pp3.y -% y_max, y_scale) as i16) as i64;
+    if (ld.pp3.y <= ld.pp4.y) {
+      advance = 0;
+    } else {
+      advance = (div_fix(ld.pp3.y -% ld.pp4.y, y_scale) as u16) as i64;
+    }
+  } else {
+    let height = (div_fix(y_max -% y_min, y_scale) as i16) as i64;
+    if (face.os2.version != 0xFFFF) {
+      advance = face.os2.typo_ascender as i64 - face.os2.typo_descender as i64;
+    } else {
+      advance = face.hhea.ascender as i64 - face.hhea.descender as i64;
+    }
+    top = (advance - height) / 2;
+  }
+  g.linear_vert_advance = advance;
+  top = mul_fix(top, y_scale);
+  advance = mul_fix(advance, y_scale);
+  g.metrics.vert_bearing_x = g.metrics.hori_bearing_x -% g.metrics.hori_advance / 2;
+  g.metrics.vert_bearing_y = top;
+  g.metrics.vert_advance = advance;
+}
+
+// ft_glyphslot_grid_fit_metrics (horizontal layout).
+fn grid_fit_metrics(var m&: GlyphMetrics) {
+  m.vert_bearing_x = pix_floor(m.vert_bearing_x);
+  m.vert_bearing_y = pix_floor(m.vert_bearing_y);
+  let right = pix_ceil(m.hori_bearing_x +% m.width);
+  let bottom = pix_floor(m.hori_bearing_y -% m.height);
+  m.hori_bearing_x = pix_floor(m.hori_bearing_x);
+  m.hori_bearing_y = pix_ceil(m.hori_bearing_y);
+  m.width = right -% m.hori_bearing_x;
+  m.height = m.hori_bearing_y -% bottom;
+  m.hori_advance = pix_round(m.hori_advance);
+  m.vert_advance = pix_round(m.vert_advance);
+}
+
+// FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT) (hint = true) or
+// FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING (hint = false) on a TrueType face
+// hinted by its bytecode (see Face::uses_autohinter).
+pub fn load_tt(var face&: Face, gid: u32, hint: bool): LoadedGlyph ! FontError {
+  if (gid >= face.num_glyphs) {
+    return fail FontError::InvalidArgument;
+  }
+  // No size yet (or a bitmap-only face at a size it has no strike for):
+  // FT_Load_Glyph loads unscaled (FT_LOAD_NO_SCALE), unhinted, no bitmaps.
+  let no_scale = face.size.metrics.x_ppem == 0 || face.size.metrics.y_ppem == 0;
+  var hinted = hint && !no_scale;
+  if (!hint && !no_scale && face.is_tricky()) {
+    hinted = true;
+  }
+  if (face.size.strike_index != 0xFFFF_FFFF && !(no_scale && face.is_scalable())) {
+    if (let b = load_sbit_glyph(face, gid)) {
+      return b;
+    } else (let e) {
+      if (!face.is_scalable()) {
+        return fail e;
+      }
+    }
+  }
+  if (!no_scale && face.size.ppem == 0) {
+    return fail FontError::InvalidSizeHandle;
+  }
+  let sm = hinted ? face.size.hinted : face.size.metrics;
+  var ld = Loader {};
+  lend_buffers(face.scratch, ld);
+  ld.x_scale = no_scale ? 0x10000 : sm.x_scale;
+  ld.y_scale = no_scale ? 0x10000 : sm.y_scale;
+  var widthp: usize? = none;
+  if (hinted) {
+    let still = try face.prepare_hinting();
+    ld.has_exec = true;
+    ld.hinted = still;
+    if (var x& = face.size.exec) {
+      ld.backward_compatibility = x.backward_compatibility;
+    }
+    if (still && ld.backward_compatibility == 0 && !face.is_fixed_pitch) {
+      widthp = face.size.widthp;
+    }
+  }
+  try load_tt_glyph(face, ld, gid, 0, false);
+  var g = LoadedGlyph {};
+  g.format = GlyphFormat::Outline;
+  let np = ld.base_points as usize;
+  let nc = ld.base_contours as usize;
+  for (let i in 0..np) {
+    g.outline.points.push(ld.points[i]);
+    g.outline.tags.push(ld.tags[i]);
+  }
+  for (let i in 0..nc) {
+    g.outline.contours.push(ld.contours[i]);
+  }
+  g.outline.flags = ld.outline_flags & ~kOutlineSinglePass;
+  if (!no_scale && sm.y_ppem < 24) {
+    g.outline.flags = g.outline.flags | kOutlineHighPrecision;
+  }
+  if (ld.pp1.x != 0) {
+    for (var p& in g.outline.points) {
+      p.x = p.x -% ld.pp1.x;
+    }
+  }
+  if (hinted) {
+    var scan_control = false;
+    var scan_type: i32 = 0;
+    if (var x& = face.size.exec) {
+      scan_control = x.gs.scan_control;
+      scan_type = x.gs.scan_type;
+    }
+    if (scan_control) {
+      switch (scan_type) {
+        case 0: {
+          g.outline.flags = g.outline.flags | kOutlineIncludeStubs;
+        }
+        case 1: {}
+        case 4: {
+          g.outline.flags = g.outline.flags | kOutlineSmartDropouts | kOutlineIncludeStubs;
+        }
+        case 5: {
+          g.outline.flags = g.outline.flags | kOutlineSmartDropouts;
+        }
+        default: {
+          g.outline.flags = g.outline.flags | kOutlineIgnoreDropouts;
+        }
+      }
+    } else {
+      g.outline.flags = g.outline.flags | kOutlineIgnoreDropouts;
+    }
+  }
+  compute_metrics(face, ld, g, gid, widthp);
+  lend_buffers(ld, face.scratch);
+  // FT_Load_Glyph's tail.
+  if (!outline_ok(g.outline)) {
+    return fail FontError::InvalidOutline;
+  }
+  if (hint && !no_scale) {
+    grid_fit_metrics(g.metrics);
+  }
+  g.advance_x = g.metrics.hori_advance;
+  if (face.is_scalable()) {
+    g.linear_hori_advance = mul_div(g.linear_hori_advance, face.size.metrics.x_scale, 64);
+    g.linear_vert_advance = mul_div(g.linear_vert_advance, face.size.metrics.y_scale, 64);
+  }
+  return g;
+}
+
+// TT_Load_Glyph's embedded bitmap branch (load_sbit_image) and the tail of
+// FT_Load_Glyph for a bitmap: the strike's bitmap with its metrics, the
+// linear advances from the glyph's header and hmtx/vmtx when the face is
+// scalable.
+pub fn load_sbit_glyph(var face&: Face, gid: u32): LoadedGlyph ! FontError {
+  if (gid >= face.num_glyphs) {
+    return fail FontError::InvalidArgument;
+  }
+  let (bitmap, m) = try load_sbit_image(face.data.as_slice(), face.strikes, face.size.strike_index, gid, false);
+  var g = LoadedGlyph {};
+  g.format = GlyphFormat::Bitmap;
+  g.metrics.width = m.width as i64 * 64;
+  g.metrics.height = m.height as i64 * 64;
+  g.metrics.hori_bearing_x = m.hori_bearing_x as i64 * 64;
+  g.metrics.hori_bearing_y = m.hori_bearing_y as i64 * 64;
+  g.metrics.hori_advance = m.hori_advance as i64 * 64;
+  g.metrics.vert_bearing_x = m.vert_bearing_x as i64 * 64;
+  g.metrics.vert_bearing_y = m.vert_bearing_y as i64 * 64;
+  g.metrics.vert_advance = m.vert_advance as i64 * 64;
+  g.bitmap_left = m.hori_bearing_x as i32;
+  g.bitmap_top = m.hori_bearing_y as i32;
+  g.bitmap = bitmap;
+  let scalable = face.is_scalable();
+  if (scalable || (face.face_flags & kFaceFlagSbix) != 0) {
+    let xs = face.size.metrics.x_scale;
+    let ys = face.size.metrics.y_scale;
+    var ld = Loader {};
+    let _ = load_tt_glyph(face, ld, gid, 0, true);
+    g.linear_hori_advance = ld.linear;
+    g.linear_vert_advance = ld.vadvance as i64;
+    if (g.metrics.hori_advance == 0 && g.linear_hori_advance != 0) {
+      g.metrics.hori_advance = mul_fix(g.linear_hori_advance, xs);
+    }
+    if (g.metrics.vert_advance == 0 && g.linear_vert_advance != 0) {
+      g.metrics.vert_advance = mul_fix(g.linear_vert_advance, ys);
+    }
+  }
+  g.advance_x = g.metrics.hori_advance;
+  if (scalable) {
+    g.linear_hori_advance = mul_div(g.linear_hori_advance, face.size.metrics.x_scale, 64);
+    g.linear_vert_advance = mul_div(g.linear_vert_advance, face.size.metrics.y_scale, 64);
+  }
+  return g;
+}

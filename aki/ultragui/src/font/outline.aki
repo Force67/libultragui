@@ -1,0 +1,126 @@
+// What a glyph load produces, in FreeType's terms (ftimage.h FT_Outline and
+// FT_Bitmap, freetype.h FT_Glyph_Metrics and the FT_GlyphSlot fields the text
+// engine reads). Coordinates are 26.6 fixed point in i64 (FT_Pos on LP64).
+//
+// An outline keeps FreeType's tags byte for byte: bits 0-1 are the curve tag
+// (on, conic, cubic), and a hinted TrueType glyph also carries the
+// interpreter's touch bits (0x08, 0x10) and, on its first point, the
+// scan-mode bits (0x04 | scan_type << 5) that TT_Hint_Glyph adds. A
+// rasterizer reads `tag & 3` only, as FreeType's do.
+
+module ultragui::font::outline;
+
+import {List} from akikit::containers::list;
+
+pub struct Vec26 : Copy, Equal {
+  pub var x: i64
+  pub var y: i64
+}
+
+// FT_OUTLINE_* flags.
+pub comptime let kOutlineEvenOddFill: u32 = 0x2;
+pub comptime let kOutlineReverseFill: u32 = 0x4;
+pub comptime let kOutlineIgnoreDropouts: u32 = 0x8;
+pub comptime let kOutlineSmartDropouts: u32 = 0x10;
+pub comptime let kOutlineIncludeStubs: u32 = 0x20;
+pub comptime let kOutlineOverlap: u32 = 0x40;
+pub comptime let kOutlineHighPrecision: u32 = 0x100;
+pub comptime let kOutlineSinglePass: u32 = 0x200;
+
+// FT_CURVE_TAG_* bits.
+pub comptime let kTagOn: u8 = 0x01;
+pub comptime let kTagCubic: u8 = 0x02;
+pub comptime let kTagHasScanmode: u8 = 0x04;
+pub comptime let kTagTouchX: u8 = 0x08;
+pub comptime let kTagTouchY: u8 = 0x10;
+pub comptime let kTagTouchBoth: u8 = 0x18;
+
+// FT_Outline: points, their tags, the index of each contour's last point.
+pub struct Outline {
+  pub var points: List<Vec26> = List()
+  pub var tags: List<u8> = List()
+  pub var contours: List<u16> = List()
+  pub var flags: u32 = 0
+
+  pub fn n_points(self&): usize => self.points.len();
+  pub fn n_contours(self&): usize => self.contours.len();
+
+  // FT_Outline_Get_CBox: the control box (0s for an empty outline).
+  pub fn cbox(self&): (i64, i64, i64, i64);
+}
+
+fn Outline::cbox(self&): (i64, i64, i64, i64) {
+  if (self.points.len() == 0) {
+    return (0, 0, 0, 0);
+  }
+  var x_min = self.points[0].x;
+  var y_min = self.points[0].y;
+  var x_max = x_min;
+  var y_max = y_min;
+  for (let p in self.points) {
+    if (p.x < x_min) {
+      x_min = p.x;
+    }
+    if (p.x > x_max) {
+      x_max = p.x;
+    }
+    if (p.y < y_min) {
+      y_min = p.y;
+    }
+    if (p.y > y_max) {
+      y_max = p.y;
+    }
+  }
+  return (x_min, y_min, x_max, y_max);
+}
+
+// FT_Pixel_Mode.
+pub comptime let kPixelModeNone: u8 = 0;
+pub comptime let kPixelModeMono: u8 = 1;
+pub comptime let kPixelModeGray: u8 = 2;
+pub comptime let kPixelModeGray2: u8 = 3;
+pub comptime let kPixelModeGray4: u8 = 4;
+pub comptime let kPixelModeLcd: u8 = 5;
+pub comptime let kPixelModeLcdV: u8 = 6;
+pub comptime let kPixelModeBgra: u8 = 7;
+
+// FT_Bitmap: `rows` rows of `pitch` bytes (pitch >= 0 here: rows run top
+// down), of which a row uses `width` pixels.
+pub struct Bitmap {
+  pub var width: u32 = 0
+  pub var rows: u32 = 0
+  pub var pitch: i32 = 0
+  pub var pixel_mode: u8 = 0
+  pub var num_grays: u16 = 0
+  pub var buffer: List<u8> = List()
+}
+
+// FT_Glyph_Metrics, 26.6.
+pub struct GlyphMetrics : Copy, Equal {
+  pub var width: i64 = 0
+  pub var height: i64 = 0
+  pub var hori_bearing_x: i64 = 0
+  pub var hori_bearing_y: i64 = 0
+  pub var hori_advance: i64 = 0
+  pub var vert_bearing_x: i64 = 0
+  pub var vert_bearing_y: i64 = 0
+  pub var vert_advance: i64 = 0
+}
+
+pub enum GlyphFormat { Outline, Bitmap }
+
+// The glyph slot after FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT): an outline
+// for the rasterizer, or an embedded bitmap ready to copy (bitmap_left/top set).
+pub struct LoadedGlyph {
+  pub var format: GlyphFormat = GlyphFormat::Outline
+  pub var outline: Outline = Outline {}
+  pub var bitmap: Bitmap = Bitmap {}
+  pub var bitmap_left: i32 = 0
+  pub var bitmap_top: i32 = 0
+  pub var metrics: GlyphMetrics = GlyphMetrics {}
+  // slot->advance.x (the grid-fitted horiAdvance of a hinted load).
+  pub var advance_x: i64 = 0
+  // slot->linearHoriAdvance / linearVertAdvance, 16.16 pixels.
+  pub var linear_hori_advance: i64 = 0
+  pub var linear_vert_advance: i64 = 0
+}

@@ -189,7 +189,12 @@ with the C++ itself, in three ways:
    engine, is fuzzed against yoga itself: `tests/yoga_fuzz_test.aki` builds
    `aki/ultragui/tools/yoga_fuzz.cc` (seeded random trees through
    `third_party/yoga`, relaid out incrementally) and compares every result
-   float of 20,000 trees bit for bit.
+   float of 20,000 trees bit for bit. The font engine that is to replace
+   FreeType (`ultragui::font`, not wired into the text engine yet) is
+   compared with FreeType and hb_ft by `tests/font_tt_test.aki`, which builds
+   `aki/ultragui/tools/ft_oracle.c`: every glyph of four fonts at 45 sizes,
+   hinted outlines and metrics field by field (`FONT_SWEEP=1` for every font
+   in /usr/share/fonts).
 2. **Golden draw-data comparison.** Both implementations play the same
    scenario (a `.ugui`, optionally its Lua, and a seeded stream of input) in
    draw-data mode with a fixed clock, and dump every frame: vertex and index
