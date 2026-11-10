@@ -1145,7 +1145,7 @@ both sides, and replays size after size, glyph after glyph:
 FT_Load_Glyph(FT_LOAD_RENDER) against `load_glyph` + font::raster, comparing
 the error, the 8 slot metrics, advance.x, both linear advances, the hinted
 outline (points, tags, contours, flags) and the bitmap (size, pitch,
-placement, every byte) or the strike bitmap. Default (about 40 s unoptimized,
+placement, every byte) or the strike bitmap. Default (about 35 s with `akiko test`,
 8 s at -O2): Ubuntu-R, KacstBook, uming.ttc (every 29th glyph; its strikes
 cover 11-16 px), Lohit-Bengali, Rachana-Regular at 6..48, 64, 96:
 224,595 glyph loads, 220,382 outlines rendered, 4,213 strike bitmaps, **0
