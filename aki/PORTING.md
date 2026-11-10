@@ -857,18 +857,30 @@ advance.x, linear advances) and hb_ft's unhinted answers for every glyph
 the same calls in the same order and compares every field. Default:
 DejaVuSans, DejaVuSans-Bold, LiberationSans-Regular, NotoSansMono-Regular
 (the corpus has no NotoSans-Regular), sizes 6..48, 64, 96, all glyphs:
-848,520 hinted loads and 848,520 unhinted queries, 0 mismatches (about 50 s).
+848,520 hinted loads and 848,520 unhinted queries, 0 mismatches (about 50 s,
+plus the damaged fonts below).
 `FONT_SWEEP=1` runs every font file under /usr/share/fonts (face 0) at 7 9 11
 12 13 14 16 18 20 24 32 48 72; `FONT_SIZES`, `FONT_SWEEP_FROM` and font
-arguments narrow it. Sweep results: SWEEP_RESULTS. Changing one reproduced
+arguments narrow it. Sweep (304 font files: 251 TrueType, 47 OTTO, 6
+collections): 3,952 sizes, 9,921,470 glyph records; 4,481,123 hinted loads
+compared (101,813 of them embedded bitmaps) and 9,921,470 unhinted query
+records, 0 mismatches. Skipped hinted records: 1,482,744 on autohinted faces
+(strike bitmaps of those still compared) and 3,957,603 on CFF faces (only
+their face, size and advance records compare). Damaged fonts (`FONT_CORRUPT`,
+64 by default): copies of DejaVuSans/LiberationSans with directory or table
+bytes changed or truncated; 4,000 variants, 0 mismatches (528 rejected by
+FreeType and the engine alike), which found two FT_Open_Face details (maxp's
+signed version, the negated negative height). Changing one reproduced
 behavior (rounding by one unit) gives 1,238 mismatches at two sizes of
 DejaVuSans.
 
 **Known gaps.** The autohinter (above). CFF faces: directory, design metrics
 and size metrics only (their glyphs are font/cff's; `load_glyph` fails with
 `CffNotLoaded`; GLYPH_NAMES needs the CFF top dict). Embedded bitmaps in PNG
-(CBDT 17-19: NotoColorEmoji at its only strike, 109 ppem), sbix and 'bhed'
-fonts. Variable fonts are read at their default instance with no blend (hb_ft
+(CBDT 17-19: NotoColorEmoji at its only strike, 109 ppem; FreeType decodes the
+PNG and converts BGRA to gray without FT_LOAD_COLOR), sbix and 'bhed' fonts.
+(At other sizes that face matches: FT_Set_Pixel_Sizes fails, leaves zeroed
+metrics, and loads are unscaled, as FreeType's.) Variable fonts are read at their default instance with no blend (hb_ft
 calls FT_Get_MM_Var, which gives FreeType a blend: GETINFO bit 10 and
 GETVARIATION would then answer; only the autohinted Ubuntu faces are variable
 here). FreeType's `.notdef` name check of tt_check_single_notdef reads only
