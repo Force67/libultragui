@@ -1,0 +1,23 @@
+// Integer arithmetic at the CFF / FreeType boundary. Intermediate products
+// are widened, and signed rounding follows FT_MulFix / FT_DivFix.
+module ultragui::font::cff::fixed;
+
+pub fn mul_fix(a: i32, b: i32): i32 {
+  let v = a as i64 * b as i64;
+  return ((v + 32768 - (v < 0 ? 1i64 : 0i64)) >> 16) as i32;
+}
+
+pub fn mul_div(a: i32, b: i32, c: i32): i32 {
+  let v = a as i64 * b as i64;
+  let neg = (v < 0) != (c < 0);
+  let n = v < 0 ? -v : v;
+  let d = c < 0 ? -(c as i64) : c as i64;
+  let q = d == 0 ? 2147483647i64 : (n + d / 2) / d;
+  return (neg ? -q : q) as i32;
+}
+
+pub fn div_fix(a: i32, b: i32): i32 => mul_div(a, 65536, b);
+pub fn round_fixed(a: i32): i32 => (a +% 32768) & -65536;
+pub fn pixel_round(a: i32): i32 => (a +% 32) & -64;
+pub fn pixel_ceil(a: i32): i32 => (a +% 63) & -64;
+pub fn pixel_floor(a: i32): i32 => a & -64;

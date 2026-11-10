@@ -1,0 +1,252 @@
+// The normal-target CFF hinter maps only the vertical coordinate. A map
+// consists of nonoverlapping stem edges, anchored to blue zones or retained
+// placements. Widths remain fractional; one edge of each free stem snaps.
+// Darkening is disabled by FreeType 2.14.3's default CFF driver setting.
+module ultragui::font::cff::hints;
+
+import {List, filled, to_list} from akikit::containers::list;
+import {PrivateDict} from ultragui::font::cff::data;
+import {mul_fix, mul_div, div_fix, round_fixed} from ultragui::font::cff::fixed;
+
+pub struct Stem : Copy {
+  pub var low: i32
+  pub var high: i32
+  pub var used: bool = false
+  pub var ds_low: i32 = 0
+  pub var ds_high: i32 = 0
+}
+
+pub struct Edge : Copy {
+  pub var cs: i32 = 0
+  pub var ds: i32 = 0
+  pub var scale: i32 = 0
+  pub var stem: usize = 0
+  pub var valid: bool = true
+  pub var top: bool = false
+  pub var pair: bool = false
+  pub var locked: bool = false
+  pub var synthetic: bool = false
+}
+
+struct Zone : Copy {
+  pub var low: i32
+  pub var high: i32
+  pub var flat: i32
+  pub var ds: i32 = 0
+  pub var bottom: bool
+}
+
+pub fn map_y(edges&: [Edge], scale: i32, y: i32): i32 {
+  if (#edges == 0) { return mul_fix(y, scale); }
+  if (y < edges[0].cs) { return mul_fix(y -% edges[0].cs, scale) +% edges[0].ds; }
+  var i = 0usize;
+  while (i + 1 < #edges && y >= edges[i + 1].cs) { i += 1; }
+  return mul_fix(y -% edges[i].cs, edges[i].scale) +% edges[i].ds;
+}
+
+pub struct Hints {
+  pub var scale: i32 = 1024
+  pub var enabled: bool = false
+  pub var hstems: List<Stem> = List()
+  pub var vstems: usize = 0
+  pub var mask: List<bool> = List()
+  pub var mask_valid: bool = false
+  pub var pending: bool = false
+  pub var current: List<Edge> = List()
+  pub var initial: List<Edge> = List()
+  pub var ready: bool = false
+  pub var initial_ready: bool = false
+  pub var origin: i32 = 0
+  var zones: List<Zone> = List()
+  var fuzz: i32 = 65536
+  var shift: i32 = 7 * 65536
+  var suppress: bool = false
+  var em_box: bool = false
+  pub fn Hints(priv&: PrivateDict, scale: i32, enabled: bool, origin: i32): Hints;
+  pub fn build(var self&);
+  pub fn counter(var self&, mask&: [bool]);
+}
+
+fn Hints::Hints(priv&: PrivateDict, scale: i32, enabled: bool, origin: i32): Hints {
+  var out = Hints { scale, enabled, origin, fuzz: priv.blue_fuzz *% 65536, shift: priv.blue_shift *% 65536 };
+  out.em_box = priv.language_group == 1 && (priv.blues.len() == 0 ||
+    (priv.blues.len() == 4 && priv.blues[0] < -120 * 65536 && priv.blues[1] < -120 * 65536 &&
+      priv.blues[2] > 880 * 65536 && priv.blues[3] > 880 * 65536));
+  var max_height = 0i32;
+  for (let values in [priv.blues.as_slice(), priv.other_blues.as_slice()]) {
+    for (let i in 0..#values / 2) {
+      let low = values[i * 2]; let high = values[i * 2 + 1];
+      if (high < low) { continue; }
+      if (high - low > max_height) { max_height = high - low; }
+      let bottom = i == 0 || @ptr(values) == @ptr(priv.other_blues.as_slice());
+      out.zones.push(Zone { low, high, flat: bottom ? high : low, bottom });
+    }
+  }
+  let threshold = div_fix(65536, scale);
+  for (var z& in out.zones) {
+    var best = 2147483647i32;
+    if (z.bottom) {
+      for (let i in 0..priv.family_other_blues.len() / 2) {
+        let v = priv.family_other_blues[i * 2 + 1]; let d = @abs(z.flat - v);
+        if (d < best && d < threshold) { z.flat = v; best = d; }
+      }
+      if (priv.family_blues.len() >= 2) {
+        let v = priv.family_blues[1]; let d = @abs(z.flat - v);
+        if (d < best && d < threshold) { z.flat = v; }
+      }
+    } else {
+      let original = z.flat;
+      for (let i in 1..priv.family_blues.len() / 2) {
+        let v = priv.family_blues[i * 2]; let d = @abs(original - v);
+        if (d < best && d < threshold) { z.flat = v; best = d; }
+      }
+    }
+  }
+  var blue_scale = div_fix(priv.blue_scale, 1000 * 65536);
+  if (max_height > 0) { let limit = div_fix(65536, max_height); if (blue_scale > limit) { blue_scale = limit; } }
+  out.suppress = scale < blue_scale;
+  var boost = 0i32;
+  if (out.suppress) { boost = 39322 - mul_div(39322, scale, blue_scale); if (boost > 32767) { boost = 32767; } }
+  for (var z& in out.zones) { z.ds = round_fixed(mul_fix(z.flat, scale) + (z.bottom ? -boost : boost)); }
+  return out;
+}
+
+fn Hints::edge(self&, i: usize, top: bool): Edge {
+  let s = self.hstems[i]; let width = s.high -% s.low;
+  var e = Edge { scale: self.scale, stem: i, top };
+  if (width == -21 * 65536) { e.valid = !top; e.cs = s.high; }
+  else if (width == -20 * 65536) { e.valid = top; e.cs = s.low; }
+  else { e.pair = true; e.cs = (width < 0) != top ? s.high : s.low; }
+  e.cs = e.cs +% self.origin;
+  e.ds = mul_fix(e.cs, self.scale);
+  if (e.valid && s.used) { e.ds = top ? s.ds_high : s.ds_low; e.locked = true; }
+  return e;
+}
+
+fn Hints::capture(self&, var low&: Edge, var high&: Edge): bool {
+  for (let z in self.zones) {
+    let cs = z.bottom ? low.cs : high.cs;
+    if ((z.bottom ? low.valid : high.valid) && cs >= z.low -% self.fuzz && cs <= z.high +% self.fuzz) {
+      let old = z.bottom ? low.ds : high.ds;
+      var ds = round_fixed(old);
+      if (self.suppress) { ds = z.ds; }
+      else if ((z.bottom ? z.high -% cs : cs -% z.low) >= self.shift) {
+        if (z.bottom && ds > z.ds - 65536) { ds = z.ds - 65536; }
+        if (!z.bottom && ds < z.ds + 65536) { ds = z.ds + 65536; }
+      }
+      let delta = ds -% old;
+      if (low.valid) { low.ds = low.ds +% delta; low.locked = true; }
+      if (high.valid) { high.ds = high.ds +% delta; high.locked = true; }
+      return true;
+    }
+  }
+  return false;
+}
+
+fn insert(var edges&: List<Edge>, low: Edge, high: Edge, initial&: [Edge], scale: i32) {
+  var a = low.valid ? low : high; var b = high; let pair = low.valid && high.valid;
+  if (!a.valid || (pair && b.cs < a.cs)) { return; }
+  var i = 0usize;
+  while (i < edges.len() && edges[i].cs < a.cs) { i += 1; }
+  if (i < edges.len() && (edges[i].cs == a.cs || (pair && edges[i].cs <= b.cs) || (edges[i].pair && edges[i].top))) { return; }
+  if (#initial > 0 && !a.locked) {
+    if (pair) {
+      let half = (b.cs -% a.cs) / 2; let center = map_y(initial, scale, a.cs +% half);
+      let width = mul_fix(half, scale); a.ds = center -% width; b.ds = center +% width;
+    } else { a.ds = map_y(initial, scale, a.cs); }
+  }
+  if (i > 0 && a.ds < edges[i - 1].ds) { return; }
+  if (i < edges.len() && (pair ? b.ds : a.ds) > edges[i].ds) { return; }
+  if (edges.len() + (pair ? 2usize : 1usize) > 192) { return; }
+  edges.insert(i, a); if (pair) { edges.insert(i + 1, b); }
+}
+
+struct Move : Copy { pub var i: usize pub var amount: i32 }
+fn adjust(var edges&: List<Edge>) {
+  var moves = List::<Move>(); var i = 0usize;
+  while (i < edges.len()) {
+    let pair = edges[i].pair; let j = i + (pair ? 1usize : 0usize);
+    if (j >= edges.len()) { break; }
+    let low = edges[i].ds; let high = edges[j].ds;
+    if (!edges[i].locked) {
+      let fl = low & 65535; let fh = high & 65535;
+      let dl = -fl; let dh = -fh; let ul = fl == 0 ? 0 : 65536 - fl; let uh = fh == 0 ? 0 : 65536 - fh;
+      let up = ul < uh ? ul : uh; let down = dl > dh ? dl : dh;
+      let can_up = j + 1 >= edges.len() || edges[j + 1].ds >= high +% (up + 32768);
+      let can_down = i == 0 || edges[i - 1].ds <= low +% (down - 32768);
+      var amount = 0i32; var save = false;
+      if (can_up) { amount = can_down && -down < up ? down : up; }
+      else if (can_down) { amount = down; save = up < -down; }
+      else { save = true; }
+      if (save && j + 1 < edges.len() && !edges[j + 1].locked) { moves.push(Move { i: j, amount: up - amount }); }
+      edges[i].ds = low +% amount; if (pair) { edges[j].ds = high +% amount; }
+    }
+    if (i > 0 && edges[i].cs != edges[i - 1].cs) {
+      edges[i - 1].scale = div_fix(edges[i].ds -% edges[i - 1].ds, edges[i].cs -% edges[i - 1].cs);
+    }
+    if (pair && edges[j].cs != edges[i].cs) { edges[i].scale = div_fix(edges[j].ds -% edges[i].ds, edges[j].cs -% edges[i].cs); }
+    i = j + 1;
+  }
+  while (let m = moves.pop()) {
+    let j = m.i;
+    if (edges[j + 1].ds >= edges[j].ds +% (m.amount + 32768)) {
+      edges[j].ds = edges[j].ds +% m.amount;
+      if (edges[j].pair) { edges[j - 1].ds = edges[j - 1].ds +% m.amount; }
+    }
+  }
+}
+
+fn Hints::make_map(var self&, mask&: [bool], initial: bool): List<Edge> {
+  var out = List::<Edge>(); var remaining = filled(self.hstems.len(), false);
+  if (self.em_box) {
+    let low = Edge { cs: -120 * 65536 - 1, ds: round_fixed(mul_fix(-120 * 65536 - 1, self.scale)) - 32768,
+      scale: self.scale, locked: true, synthetic: true };
+    let high = Edge { cs: 880 * 65536 + 1, ds: round_fixed(mul_fix(880 * 65536 + 1, self.scale)) + 32768,
+      scale: self.scale, top: true, locked: true, synthetic: true };
+    insert(out, low, Edge { valid: false }, self.initial.as_slice(), self.scale);
+    insert(out, Edge { valid: false }, high, self.initial.as_slice(), self.scale);
+  }
+  for (let i in 0..self.hstems.len()) {
+    if (i >= #mask || !mask[i]) { continue; }
+    var low = self.edge(i, false); var high = self.edge(i, true);
+    if (low.locked || high.locked || self.capture(low, high)) { insert(out, low, high, self.initial.as_slice(), self.scale); }
+    else { remaining[i] = true; }
+  }
+  if (initial) {
+    if (out.len() == 0 || out[0].cs > 0 || out[out.len() - 1].cs < 0) {
+      insert(out, Edge { scale: self.scale, locked: true, synthetic: true }, Edge { valid: false }, self.initial.as_slice(), self.scale);
+    }
+  } else {
+    for (let i in 0..self.hstems.len()) {
+      if (remaining[i]) { insert(out, self.edge(i, false), self.edge(i, true), self.initial.as_slice(), self.scale); }
+    }
+  }
+  adjust(out);
+  if (!initial) {
+    for (let e in out) {
+      if (!e.synthetic) {
+        if (e.top) { self.hstems[e.stem].ds_high = e.ds; } else { self.hstems[e.stem].ds_low = e.ds; }
+        self.hstems[e.stem].used = true;
+      }
+    }
+  }
+  return out;
+}
+
+fn Hints::build(var self&) {
+  if (!self.initial_ready) {
+    let all = filled(self.hstems.len(), true);
+    self.initial = self.make_map(all.as_slice(), true); self.initial_ready = true;
+  }
+  if (!self.mask_valid) { self.mask = filled(self.hstems.len() + self.vstems, true); self.mask_valid = true; }
+  let mask = to_list(self.mask.as_slice());
+  self.current = self.make_map(mask.as_slice(), false); self.ready = true; self.pending = false;
+}
+
+fn Hints::counter(var self&, mask&: [bool]) {
+  if (!self.initial_ready) {
+    let all = filled(self.hstems.len(), true);
+    self.initial = self.make_map(all.as_slice(), true); self.initial_ready = true;
+  }
+  let temporary = self.make_map(mask, false);
+}

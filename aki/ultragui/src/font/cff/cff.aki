@@ -1,0 +1,112 @@
+// Public CFF glyph-loading API. The sfnt owner supplies face-wide metrics
+// and hmtx bytes; this module owns copies of everything needed for gid loads.
+module ultragui::font::cff::cff;
+
+import {List} from akikit::containers::list;
+import {CffError, uint_at} from ultragui::font::cff::data;
+import {Program} from ultragui::font::cff::table;
+import {evaluate} from ultragui::font::cff::charstring;
+import {CffPoint} from ultragui::font::cff::outline;
+import {mul_fix, mul_div, div_fix, pixel_ceil, pixel_floor, pixel_round} from ultragui::font::cff::fixed;
+
+// Values of FT_FaceRec after sfnt metrics selection (including USE_TYPO_METRICS).
+// units_per_em comes from head. Glyph advances come from the hmtx slice.
+pub struct CffFaceInfo : Copy {
+  pub var units_per_em: u32 = 1000
+  pub var ascender: i32 = 0
+  pub var descender: i32 = 0
+  pub var height: i32 = 0
+  pub var max_advance: i32 = 0
+  pub var horizontal_metrics: u32 = 0
+}
+
+pub struct CffSizeMetrics : Copy, Equal {
+  pub var x_ppem: u32 = 0
+  pub var y_ppem: u32 = 0
+  pub var x_scale: i32 = 0
+  pub var y_scale: i32 = 0
+  pub var ascender: i32 = 0
+  pub var descender: i32 = 0
+  pub var height: i32 = 0
+  pub var max_advance: i32 = 0
+}
+
+pub struct CffGlyph {
+  pub var points: List<CffPoint> = List()
+  pub var tags: List<u8> = List()
+  pub var contours: List<u16> = List()
+  pub var flags: i32 = 4
+  pub var advance_x: i32 = 0
+  pub var linear_hori_advance: i32 = 0
+  pub var width: i32 = 0
+  pub var height: i32 = 0
+  pub var hori_bearing_x: i32 = 0
+  pub var hori_bearing_y: i32 = 0
+  pub var hori_advance: i32 = 0
+}
+
+pub struct CffFont {
+  var program: Program
+  var info: CffFaceInfo
+  var advances: List<i32> = List()
+  var size: CffSizeMetrics = CffSizeMetrics {}
+  pub fn parse(cff&: [u8], info: CffFaceInfo, hmtx&: [u8]): CffFont ! CffError;
+  pub fn glyph_count(self&): u32 => self.program.charstrings.entries.len() as u32;
+  pub fn is_cff2(self&): bool => self.program.cff2;
+  pub fn set_pixel_size(var self&, px: u32): () ! CffError;
+  pub fn size_metrics(self&): CffSizeMetrics => self.size;
+  pub fn load_glyph(self&, gid: u32, hinted: bool): CffGlyph ! CffError;
+}
+
+fn CffFont::parse(cff&: [u8], info: CffFaceInfo, hmtx&: [u8]): CffFont ! CffError {
+  if (info.units_per_em == 0 || info.units_per_em > 32767) { return fail CffError::InvalidArgument; }
+  let program = try Program::parse(cff);
+  var out = CffFont { program, info };
+  if (info.horizontal_metrics > 0) {
+    if (info.horizontal_metrics as usize > #hmtx / 4) { return fail CffError::InvalidTable; }
+    for (let i in 0..out.program.charstrings.entries.len()) {
+      let j = i < info.horizontal_metrics as usize ? i : info.horizontal_metrics as usize - 1;
+      out.advances.push(try uint_at(hmtx, j * 4, 2) as i32);
+    }
+  }
+  return out;
+}
+
+fn CffFont::set_pixel_size(var self&, px: u32): () ! CffError {
+  let pixels = px == 0 ? 1u32 : px;
+  if (pixels > 65535) { return fail CffError::InvalidArgument; }
+  let scale = div_fix((pixels * 64) as i32, self.info.units_per_em as i32);
+  self.size = CffSizeMetrics {
+    x_ppem: pixels, y_ppem: pixels, x_scale: scale, y_scale: scale,
+    ascender: pixel_ceil(mul_fix(self.info.ascender, scale)),
+    descender: pixel_floor(mul_fix(self.info.descender, scale)),
+    height: pixel_round(mul_fix(self.info.height, scale)),
+    max_advance: pixel_round(mul_fix(self.info.max_advance, scale)),
+  };
+}
+
+fn CffFont::load_glyph(self&, gid: u32, hinted: bool): CffGlyph ! CffError {
+  if (self.size.y_ppem == 0) { return fail CffError::InvalidArgument; }
+  let hint = hinted && self.size.y_ppem <= 2000;
+  let result = try evaluate(self.program, gid as usize, hint ? (self.size.x_scale + 32) / 64 : 1024, hint);
+  let advance = self.advances.len() == 0 ? result.width : self.advances[gid as usize];
+  var out = CffGlyph {
+    points: result.outline.points, tags: result.outline.tags, contours: result.outline.contours,
+    flags: self.size.y_ppem < 24 ? 260 : 4,
+    hori_advance: mul_fix(advance, self.size.x_scale),
+    linear_hori_advance: mul_div(advance, self.size.x_scale, 64),
+  };
+  if (!hint) { for (var p& in out.points) { p.x = mul_fix(p.x, self.size.x_scale); p.y = mul_fix(p.y, self.size.y_scale); } }
+  var xmin = 0i32; var xmax = 0i32; var ymin = 0i32; var ymax = 0i32;
+  if (out.points.len() > 0) {
+    xmin = out.points[0].x; xmax = xmin; ymin = out.points[0].y; ymax = ymin;
+    for (let p in out.points) {
+      if (p.x < xmin) { xmin = p.x; } if (p.x > xmax) { xmax = p.x; }
+      if (p.y < ymin) { ymin = p.y; } if (p.y > ymax) { ymax = p.y; }
+    }
+  }
+  if (hinted) { xmin = pixel_floor(xmin); xmax = pixel_ceil(xmax); ymin = pixel_floor(ymin); ymax = pixel_ceil(ymax); out.hori_advance = pixel_round(out.hori_advance); }
+  out.width = xmax - xmin; out.height = ymax - ymin; out.hori_bearing_x = xmin; out.hori_bearing_y = ymax;
+  out.advance_x = out.hori_advance;
+  return out;
+}

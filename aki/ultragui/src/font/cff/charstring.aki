@@ -1,0 +1,276 @@
+// A bounded Type 2 stack machine with shared operand stack across subroutine
+// calls. All path coordinates use signed 16.16, including wrapped additions.
+module ultragui::font::cff::charstring;
+
+import {List, filled} from akikit::containers::list;
+import {CffError, Reader, subr_bias} from ultragui::font::cff::data;
+import {Program} from ultragui::font::cff::table;
+import {Path, CffOutline, CffPoint} from ultragui::font::cff::outline;
+import {Hints, Stem} from ultragui::font::cff::hints;
+import {mul_fix, div_fix} from ultragui::font::cff::fixed;
+import {kStandardEncoding} from ultragui::font::cff::standard;
+
+pub struct CharstringResult {
+  pub var outline: CffOutline
+  pub var width: i32
+}
+
+struct Frame : Copy { pub var pos: usize pub var limit: usize }
+
+struct Machine<'a> {
+  pub let font: &'a Program
+  pub var fd: usize
+  pub var stack: List<i32> = List()
+  pub var transient: [i32; 32] = [0; 32]
+  pub var path: Path
+  pub var x: i32 = 0
+  pub var y: i32 = 0
+  pub var width: i32 = 0
+  pub var have_width: bool = false
+  pub var vsindex: usize = 0
+  pub var blended: bool = false
+}
+
+fn Machine::push(var self&, v: i32): () ! CffError {
+  if (self.stack.len() >= self.font.max_stack) { return fail CffError::InvalidFileFormat; }
+  self.stack.push(v);
+}
+fn Machine::pop(var self&): i32 ! CffError {
+  let v = self.stack.pop() else { return fail CffError::InvalidFileFormat; }; return v;
+}
+fn Machine::arg(self&, i: usize): i32 ! CffError {
+  if (i >= self.stack.len()) { return fail CffError::InvalidFileFormat; } return self.stack[i];
+}
+fn Machine::move_to(var self&): () ! CffError => try self.path.move_to(CffPoint { x: self.x, y: self.y });
+fn Machine::line(var self&, dx: i32, dy: i32): () ! CffError {
+  self.x = self.x +% dx; self.y = self.y +% dy;
+  try self.path.line_to(CffPoint { x: self.x, y: self.y });
+}
+fn Machine::curve(var self&, dx1: i32, dy1: i32, dx2: i32, dy2: i32, dx3: i32, dy3: i32): () ! CffError {
+  let a = CffPoint { x: self.x +% dx1, y: self.y +% dy1 };
+  let b = CffPoint { x: a.x +% dx2, y: a.y +% dy2 };
+  let c = CffPoint { x: b.x +% dx3, y: b.y +% dy3 };
+  try self.path.curve_to(a, b, c); self.x = c.x; self.y = c.y;
+}
+fn Machine::width(var self&, extra: bool) {
+  if (!self.have_width && extra && self.stack.len() > 0) {
+    self.width = (self.stack[0] +% self.font.privates[self.fd].nominal_width *% 65536) >> 16;
+  }
+  self.have_width = true;
+}
+fn Machine::stems(var self&, horizontal: bool): () ! CffError {
+  if (self.path.hints.mask_valid) { return; }
+  let n = self.stack.len(); let odd = n & 1;
+  self.width(odd != 0);
+  var position = 0i32;
+  for (let i in 0..n / 2) {
+    let low = position +% self.stack[odd + i * 2]; let high = low +% self.stack[odd + i * 2 + 1]; position = high;
+    if (horizontal) { self.path.hints.hstems.push(Stem { low, high }); }
+    else { self.path.hints.vstems += 1; }
+  }
+  if (self.path.hints.hstems.len() + self.path.hints.vstems > 96) { return fail CffError::InvalidFileFormat; }
+}
+
+fn Machine::escaped(var self&, op: u8): () ! CffError {
+  if (op >= 34 && op <= 37) {
+    let n = self.stack.len();
+    var d: [i32; 12] = [0; 12];
+    if (op == 35) { if (n < 13) { return fail CffError::InvalidFileFormat; } for (let i in 0..12usize) { d[i] = self.stack[i]; } }
+    else if (op == 34) {
+      if (n < 7) { return fail CffError::InvalidFileFormat; }
+      d = [self.stack[0], 0, self.stack[1], self.stack[2], self.stack[3], 0,
+        self.stack[4], 0, self.stack[5], (0i32 -% self.stack[2]), self.stack[6], 0];
+    } else if (op == 36) {
+      if (n < 9) { return fail CffError::InvalidFileFormat; }
+      d = [self.stack[0], self.stack[1], self.stack[2], self.stack[3], self.stack[4], 0,
+        self.stack[5], 0, self.stack[6], self.stack[7], self.stack[8], (0i32 -% (self.stack[1] +% self.stack[3] +% self.stack[7]))];
+    } else {
+      if (n < 11) { return fail CffError::InvalidFileFormat; }
+      var dx = 0i32; var dy = 0i32;
+      for (let i in 0..10usize) { d[i] = self.stack[i]; if ((i & 1) == 0) { dx = dx +% d[i]; } else { dy = dy +% d[i]; } }
+      if (@abs(dx as i64) > @abs(dy as i64)) { d[10] = self.stack[10]; d[11] = (0i32 -% dy); }
+      else { d[10] = (0i32 -% dx); d[11] = self.stack[10]; }
+    }
+    try self.curve(d[0], d[1], d[2], d[3], d[4], d[5]);
+    try self.curve(d[6], d[7], d[8], d[9], d[10], d[11]); self.stack.clear(); return;
+  }
+  if (self.font.cff2) { self.stack.clear(); return; }
+  if (op == 0) { self.stack.clear(); return; }
+  if (op == 3 || op == 4 || op == 10 || op == 11 || op == 12 || op == 15 || op == 24) {
+    let b = try self.pop(); let a = try self.pop(); var v = 0i32;
+    if (op == 3) { v = a != 0 && b != 0 ? 65536 : 0; }
+    else if (op == 4) { v = a != 0 || b != 0 ? 65536 : 0; }
+    else if (op == 10) { v = a +% b; } else if (op == 11) { v = a -% b; }
+    else if (op == 12) { v = div_fix(a, b); }
+    else if (op == 15) { v = a == b ? 65536 : 0; }
+    else { v = mul_fix(a, b); }
+    try self.push(v); return;
+  }
+  if (op == 5 || op == 9 || op == 14 || op == 26 || op == 27) {
+    let a = try self.pop(); var v = a;
+    if (op == 5) { v = a == 0 ? 65536 : 0; }
+    else if (op == 9) { v = a < 0 ? (0i32 -% a) : a; }
+    else if (op == 14) { v = (0i32 -% a); }
+    else if (op == 26) {
+      if (a > 0) { var root = a; var next = (root +% div_fix(a, root) +% 1) >> 1;
+        while (next != root) { root = next; next = (root +% div_fix(a, root) +% 1) >> 1; }
+        v = root;
+      } else { v = 0; }
+    } else { try self.push(a); }
+    try self.push(v); return;
+  }
+  if (op == 18) { let ignored = try self.pop(); return; }
+  if (op == 20) {
+    let i = try self.pop() >> 16; let v = try self.pop();
+    if (i >= 0 && i < 32) { self.transient[i as usize] = v; } return;
+  }
+  if (op == 21) { let i = try self.pop() >> 16; try self.push(i >= 0 && i < 32 ? self.transient[i as usize] : 0); return; }
+  if (op == 22) {
+    let b = try self.pop(); let a = try self.pop(); let v2 = try self.pop(); let v1 = try self.pop();
+    try self.push(a <= b ? v1 : v2); return;
+  }
+  if (op == 23) { return fail CffError::Unsupported; } // FreeType seeds random from process addresses.
+  if (op == 28) { let b = try self.pop(); let a = try self.pop(); try self.push(b); try self.push(a); return; }
+  if (op == 29) {
+    var i = try self.pop() >> 16;
+    if (self.stack.len() == 0) { return fail CffError::InvalidFileFormat; }
+    if (i < 0) { i = 0; } if (i as usize >= self.stack.len()) { i = (self.stack.len() - 1) as i32; }
+    let v = self.stack[self.stack.len() - i as usize - 1]; try self.push(v); return;
+  }
+  if (op == 30) {
+    let j = try self.pop() >> 16; let n = try self.pop() >> 16;
+    if (n < 0 || n as usize > self.stack.len()) { return fail CffError::InvalidFileFormat; }
+    if (n != 0) {
+      let count = n as usize; let first = self.stack.len() - count; var shift = j % n; if (shift < 0) { shift += n; }
+      var temp = List::<i32>(); for (let i in 0..count) { temp.push(self.stack[first + i]); }
+      for (let i in 0..count) { self.stack[first + (i + shift as usize) % count] = temp[i]; }
+    } return;
+  }
+  // Reserved escaped operators clear the stack in cf2.
+  self.stack.clear();
+}
+
+fn component(font&: Program, code: i32): usize ! CffError {
+  if (code < 0 || code > 255) { return fail CffError::InvalidFileFormat; }
+  let sid = kStandardEncoding[code as usize];
+  for (let i in 0..font.charset.len()) { if (font.charset[i] == sid) { return i; } }
+  return fail CffError::InvalidFileFormat;
+}
+
+pub fn evaluate(font&: Program, gid: usize, scale: i32, hinted: bool, dx: i32 = 0, dy: i32 = 0, seac: bool = false): CharstringResult ! CffError {
+  if (gid >= font.charstrings.entries.len()) { return fail CffError::InvalidArgument; }
+  let fd = font.fd_select[gid];
+  var m = Machine { font, fd, path: Path(Hints(font.privates[fd], scale, hinted, dy)), x: dx, y: dy,
+    width: font.privates[fd].default_width, have_width: font.cff2, vsindex: font.privates[fd].vsindex };
+  let span = font.charstrings.entries[gid]; var frame = Frame { pos: span.start, limit: span.limit() };
+  var frames = List::<Frame>(); var instructions = 0u32;
+  while (true) {
+    instructions += 1; if (instructions >= 20000000) { return fail CffError::InvalidFileFormat; }
+    var op = 14u8;
+    if (frame.pos >= frame.limit) { op = frames.len() > 0 ? 11u8 : 14u8; }
+    else {
+      op = font.data[frame.pos]; frame.pos += 1;
+      if (font.cff2 && (op == 11 || op == 14)) { continue; }
+    }
+    var r = Reader { data: font.data.as_slice()[..frame.limit], pos: frame.pos };
+    if (op >= 32 || op == 28) {
+      var v = 0i32;
+      if (op <= 246 && op >= 32) { v = (op as i32 - 139) * 65536; }
+      else if (op <= 250 && op >= 247) { v = ((op as i32 - 247) * 256 + try r.byte() as i32 + 108) * 65536; }
+      else if (op <= 254 && op >= 251) { v = (-(op as i32 - 251) * 256 - try r.byte() as i32 - 108) * 65536; }
+      else if (op == 28) { v = try r.uint(2) as i16 as i32 * 65536; }
+      else { v = try r.uint(4) as i32; }
+      try m.push(v); frame.pos = r.pos; continue;
+    }
+    let n = m.stack.len();
+    if (op == 10 || op == 29) {
+      let subrs& = op == 10 ? font.privates[fd].local_subrs : font.global_subrs;
+      let i = (try m.pop() >> 16) + subr_bias(subrs.entries.len());
+      if (i < 0 || i as usize >= subrs.entries.len() || frames.len() >= 10) { return fail CffError::InvalidFileFormat; }
+      frames.push(frame); let s = subrs.entries[i as usize]; frame = Frame { pos: s.start, limit: s.limit() }; continue;
+    }
+    if (op == 11) { let previous = frames.pop() else { return fail CffError::InvalidFileFormat; }; frame = previous; continue; }
+    if (op == 12) { let escaped = try r.byte(); frame.pos = r.pos; try m.escaped(escaped); continue; }
+    if (op == 1 || op == 3 || op == 18 || op == 23) { try m.stems(op == 1 || op == 18); }
+    else if (op == 19 || op == 20) {
+      if (!(n > 1 && m.path.hints.mask_valid)) {
+        try m.stems(false);
+        let count = m.path.hints.hstems.len() + m.path.hints.vstems;
+        var mask = filled(count, false);
+        for (let i in 0..(count + 7) / 8) {
+          let b = try r.byte(); for (let j in 0..8usize) { if (i * 8 + j < count) { mask[i * 8 + j] = (b & (128u8 >> j as u8)) != 0; } }
+        }
+        if (op == 19) { m.path.hints.mask = mask; m.path.hints.mask_valid = true; m.path.hints.pending = true; }
+        else { m.path.hints.counter(mask.as_slice()); }
+        frame.pos = r.pos;
+      }
+    } else if (op == 4 || op == 21 || op == 22) {
+      m.width(n > (op == 21 ? 2usize : 1usize));
+      if (op != 22) { m.y = m.y +% try m.pop(); }
+      if (op != 4) { m.x = m.x +% try m.pop(); }
+      try m.move_to();
+    } else if (op == 5) {
+      for (let i in 0..n / 2) { try m.line(try m.arg(i * 2), try m.arg(i * 2 + 1)); }
+    } else if (op == 6 || op == 7) {
+      for (let i in 0..n) { let v = try m.arg(i); let horizontal = (i & 1) == (op == 6 ? 0usize : 1usize); try m.line(horizontal ? v : 0, horizontal ? 0 : v); }
+    } else if (op == 8 || op == 24 || op == 25) {
+      var i = 0usize;
+      if (op == 25) { while (i + 6 < n) { try m.line(try m.arg(i), try m.arg(i + 1)); i += 2; } }
+      while (i + 5 < n) {
+        try m.curve(try m.arg(i), try m.arg(i + 1), try m.arg(i + 2), try m.arg(i + 3), try m.arg(i + 4), try m.arg(i + 5)); i += 6;
+      }
+      if (op == 24 && i < n) { try m.line(try m.arg(i), try m.arg(i + 1)); }
+      else if (i != n) { return fail CffError::InvalidFileFormat; }
+    } else if (op == 26 || op == 27 || op == 30 || op == 31) {
+      let count = n & ~2usize; var i = n - count; var horizontal = op == 31;
+      while (i < count) {
+        var a = 0i32; var b = 0i32; var c = 0i32; var d = 0i32; var e = 0i32; var f = 0i32;
+        if (op == 26 || op == 27) {
+          var extra = 0i32; if (((count - i) & 1) != 0) { extra = try m.arg(i); i += 1; }
+          let v0 = try m.arg(i); let v1 = try m.arg(i + 1); let v2 = try m.arg(i + 2); let v3 = try m.arg(i + 3);
+          if (op == 26) { a = extra; b = v0; c = v1; d = v2; f = v3; }
+          else { a = v0; b = extra; c = v1; d = v2; e = v3; }
+        } else {
+          let v0 = try m.arg(i); let v1 = try m.arg(i + 1); let v2 = try m.arg(i + 2); let v3 = try m.arg(i + 3);
+          var extra = 0i32; if (count - i == 5) { extra = try m.arg(i + 4); i += 1; }
+          if (horizontal) { a = v0; c = v1; d = v2; e = extra; f = v3; }
+          else { b = v0; c = v1; d = v2; e = v3; f = extra; }
+          horizontal = !horizontal;
+        }
+        try m.curve(a, b, c, d, e, f); i += 4;
+      }
+    } else if (op == 15 && font.cff2) {
+      if (m.blended) { return fail CffError::InvalidFileFormat; }
+      let v = try m.pop() >> 16; if (v >= 0) { m.vsindex = v as usize; }
+    } else if (op == 16 && font.cff2) {
+      let count = try m.pop() >> 16;
+      if (count < 0 || m.vsindex >= font.blend_weights.len()) { return fail CffError::InvalidFileFormat; }
+      let weights& = font.blend_weights[m.vsindex]; let k = count as usize;
+      if (k > m.stack.len() / (weights.len() + 1)) { return fail CffError::InvalidFileFormat; }
+      let first = m.stack.len() - k * (weights.len() + 1);
+      for (let i in 0..k) {
+        var v = m.stack[first + i];
+        for (let j in 0..weights.len()) { v = v +% mul_fix(m.stack[first + k + i * weights.len() + j], weights[j]); }
+        m.stack[first + i] = v;
+      }
+      m.stack.truncate(first + k); m.blended = true; continue;
+    } else if (op == 14) {
+      m.width((n & 1) != 0); try m.path.close();
+      if (!font.cff2 && n > 1) {
+        if (seac || n < 4) { return fail CffError::InvalidFileFormat; }
+        let accent = try component(font, m.stack[n - 1] >> 16); let base = try component(font, m.stack[n - 2] >> 16);
+        let ax = m.stack[n - 4]; let ay = m.stack[n - 3];
+        let ac = try evaluate(font, accent, scale, hinted, ax, ay, true);
+        let bc = try evaluate(font, base, scale, hinted, 0, 0, true);
+        for (let part in [ac.outline, bc.outline]) {
+          let first = m.path.outline.points.len();
+          for (let p in part.points) { m.path.outline.points.push(p); }
+          for (let t in part.tags) { m.path.outline.tags.push(t); }
+          for (let end_ in part.contours) { m.path.outline.contours.push((first + end_ as usize) as u16); }
+        }
+      }
+      return CharstringResult { outline: m.path.outline, width: m.width };
+    }
+    m.stack.clear();
+  }
+}
