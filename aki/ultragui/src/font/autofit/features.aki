@@ -1,0 +1,280 @@
+// Segment extraction, stem/serif matching and edge grouping for Latin
+// writing systems. All short fields deliberately truncate as in FreeType.
+module ultragui::font::autofit::features;
+
+import {List} from akikit::containers::list;
+import {div_fix, mul_fix} from ultragui::font::fixed;
+import {Axis, Edge, Hints, Point, Segment, abs, min, max, short, kNone, kDirNone, kControl, kIgnore, kRound, kSerif} from ultragui::font::autofit::hints;
+
+struct Bounds : Copy {
+  pub var min_pos: i64 = 32000
+  pub var max_pos: i64 = -32000
+  pub var min_coord: i64 = 32000
+  pub var max_coord: i64 = -32000
+  pub var min_flags: u32 = 0
+  pub var max_flags: u32 = 0
+  pub var min_on: i64 = 32000
+  pub var max_on: i64 = -32000
+
+  pub fn add(var self&, p: Point) {
+    self.min_pos = min(self.min_pos, p.u);
+    self.max_pos = max(self.max_pos, p.u);
+    if (p.v < self.min_coord) { self.min_coord = p.v; self.min_flags = p.flags; }
+    if (p.v > self.max_coord) { self.max_coord = p.v; self.max_flags = p.flags; }
+    if ((p.flags & kControl) == 0) { self.min_on = min(self.min_on, p.v); self.max_on = max(self.max_on, p.v); }
+  }
+}
+
+fn finish(var seg&: Segment, b: Bounds, last: usize, flat: i64) {
+  seg.last = last;
+  seg.pos = short((b.min_pos + b.max_pos) >> 1);
+  seg.delta = short((b.max_pos - b.min_pos) >> 1);
+  seg.flags &= ~kRound;
+  if (((b.min_flags | b.max_flags) & kControl) != 0 && b.max_on - b.min_on < flat) { seg.flags |= kRound; }
+  seg.min_coord = short(b.min_coord);
+  seg.max_coord = short(b.max_coord);
+  seg.height = short(seg.max_coord - seg.min_coord);
+}
+
+pub fn compute_segments(var h&: Hints, dim: usize) {
+  h.axis[dim].segments.clear();
+  let major = abs(h.axis[dim].major_dir as i64);
+  let flat = h.units_per_em / 14;
+  for (var p& in h.points) {
+    p.u = dim == 0 ? p.fx : p.fy;
+    p.v = dim == 0 ? p.fy : p.fx;
+  }
+  for (let contour in h.contours) {
+    var point = contour;
+    var last = h.points[point].prev;
+    var on_edge = false;
+    var seg_dir: i32 = major as i32;
+    var seg = kNone;
+    var prev_seg = kNone;
+    var b = Bounds {};
+    var prev = Bounds {};
+    if ((h.points[point].flags & kIgnore) == 0 && abs(h.points[last].out_dir as i64) == major && abs(h.points[point].out_dir as i64) == major) {
+      last = point;
+      while (true) {
+        point = h.points[point].prev;
+        if (abs(h.points[point].out_dir as i64) != major) { point = h.points[point].next; break; }
+        if (point == last) { break; }
+      }
+    }
+    last = point;
+    var passed = false;
+    while (true) {
+      let p = h.points[point];
+      if (on_edge) {
+        b.add(p);
+        if ((p.flags & kIgnore) != 0 || p.out_dir != seg_dir || point == last) {
+          if ((p.flags & kIgnore) != 0 || prev_seg == kNone || h.axis[dim].segments[seg].first != h.axis[dim].segments[prev_seg].last) {
+            finish(h.axis[dim].segments[seg], b, point, flat);
+            prev_seg = seg;
+            prev = b;
+          } else {
+            if (h.points[h.axis[dim].segments[prev_seg].last].in_dir == p.in_dir) {
+              b.min_pos = min(b.min_pos, prev.min_pos);
+              b.max_pos = max(b.max_pos, prev.max_pos);
+              if (prev.min_coord < b.min_coord) { b.min_coord = prev.min_coord; b.min_flags = prev.min_flags; }
+              if (prev.max_coord > b.max_coord) { b.max_coord = prev.max_coord; b.max_flags = prev.max_flags; }
+              b.min_on = min(b.min_on, prev.min_on);
+              b.max_on = max(b.max_on, prev.max_on);
+              finish(h.axis[dim].segments[prev_seg], b, point, flat);
+            } else if (abs(prev.max_coord - prev.min_coord) > abs(b.max_coord - b.min_coord)) {
+              prev.min_pos = min(prev.min_pos, b.min_pos);
+              prev.max_pos = max(prev.max_pos, b.max_pos);
+              h.axis[dim].segments[prev_seg].last = point;
+              h.axis[dim].segments[prev_seg].pos = short((prev.min_pos + prev.max_pos) >> 1);
+              h.axis[dim].segments[prev_seg].delta = short((prev.max_pos - prev.min_pos) >> 1);
+            } else {
+              b.min_pos = min(b.min_pos, prev.min_pos);
+              b.max_pos = max(b.max_pos, prev.max_pos);
+              finish(h.axis[dim].segments[seg], b, point, flat);
+              h.axis[dim].segments[prev_seg] = h.axis[dim].segments[seg];
+              prev = b;
+            }
+            h.axis[dim].segments.pop();
+          }
+          on_edge = false;
+          seg = kNone;
+        }
+      }
+      if (point == last) { if (passed) { break; } passed = true; }
+      if ((p.flags & kIgnore) == 0 && !on_edge && (abs(p.out_dir as i64) == major || point == p.prev)) {
+        if (h.axis[dim].segments.len() > 1000) { h.axis[dim].segments.clear(); return; }
+        seg_dir = p.out_dir;
+        seg = h.axis[dim].segments.len();
+        h.axis[dim].segments.push(Segment { dir: seg_dir, first: point, last: point });
+        b = Bounds { min_pos: p.u, max_pos: p.u, min_coord: p.v, max_coord: p.v, min_flags: p.flags, max_flags: p.flags };
+        if ((p.flags & kControl) == 0) { b.min_on = p.v; b.max_on = p.v; }
+        on_edge = true;
+        if (point == p.prev) {
+          h.axis[dim].segments[seg].pos = short(p.u);
+          if ((p.flags & kControl) != 0) { h.axis[dim].segments[seg].flags |= kRound; }
+          h.axis[dim].segments[seg].min_coord = short(p.v);
+          h.axis[dim].segments[seg].max_coord = short(p.v);
+          on_edge = false;
+          seg = kNone;
+        }
+      }
+      point = p.next;
+    }
+  }
+  for (var seg& in h.axis[dim].segments) {
+    let f = h.points[seg.first];
+    let l = h.points[seg.last];
+    let prev = h.points[f.prev].v;
+    let next = h.points[l.next].v;
+    if (f.v < l.v) {
+      if (prev < f.v) { seg.height = short(seg.height + ((f.v - prev) >> 1)); }
+      if (next > l.v) { seg.height = short(seg.height + ((next - l.v) >> 1)); }
+    } else {
+      if (prev > f.v) { seg.height = short(seg.height + ((prev - f.v) >> 1)); }
+      if (next < l.v) { seg.height = short(seg.height + ((l.v - next) >> 1)); }
+    }
+  }
+}
+
+pub fn link_segments(var h&: Hints, dim: usize, max_width: i64) {
+  let count = h.axis[dim].segments.len();
+  let threshold = max(8 * h.units_per_em / 2048, 1);
+  let weight = 6000 * h.units_per_em / 2048;
+  for (let i in 0..count) {
+    if (h.axis[dim].segments[i].dir != h.axis[dim].major_dir) { continue; }
+    for (let j in 0..count) {
+      let a = h.axis[dim].segments[i];
+      let b = h.axis[dim].segments[j];
+      if (a.dir + b.dir != 0 || b.pos <= a.pos) { continue; }
+      let len = min(a.max_coord, b.max_coord) - max(a.min_coord, b.min_coord);
+      if (len < threshold) { continue; }
+      let dist = b.pos - a.pos;
+      var demerit = dist;
+      if (max_width != 0) {
+        let delta = (dist << 10) / max_width - 1024;
+        demerit = delta > 10000 ? 32000 : (delta > 0 ? delta * delta / 3000 : 0);
+      }
+      let score = demerit + weight / len;
+      if (score < a.score) { h.axis[dim].segments[i].score = score; h.axis[dim].segments[i].link = j; }
+      if (score < b.score) { h.axis[dim].segments[j].score = score; h.axis[dim].segments[j].link = i; }
+    }
+  }
+  for (let i in 0..count) {
+    let j = h.axis[dim].segments[i].link;
+    if (j != kNone && h.axis[dim].segments[j].link != i) {
+      h.axis[dim].segments[i].link = kNone;
+      h.axis[dim].segments[i].serif = h.axis[dim].segments[j].link;
+    }
+  }
+}
+
+// Keep segment lists in insertion order; edge sorting must not change the
+// tie break between equal-position major and minor directions.
+fn insert_edge(var axis&: Axis, edge: Edge, descending: bool): usize {
+  var at = axis.edges.len();
+  axis.edges.push(edge);
+  while (at > 0) {
+    let prev = axis.edges[at - 1];
+    if ((descending ? prev.fpos > edge.fpos : prev.fpos < edge.fpos) || (prev.fpos == edge.fpos && edge.dir == axis.major_dir)) { break; }
+    axis.edges[at] = prev;
+    at -= 1;
+  }
+  axis.edges[at] = edge;
+  return at;
+}
+
+fn attach(var axis&: Axis, edge: usize, segment: usize) {
+  let first = axis.edges[edge].first;
+  axis.segments[segment].edge_next = first;
+  axis.segments[axis.edges[edge].last].edge_next = segment;
+  axis.edges[edge].last = segment;
+}
+
+pub fn compute_edges(var h&: Hints, dim: usize, distance: i64, descending: bool) {
+  let scale = dim == 0 ? h.x_scale : h.y_scale;
+  let length_threshold = dim == 0 ? div_fix(64, h.y_scale) : 0;
+  let width_threshold = div_fix(32, scale);
+  let threshold = div_fix(min(mul_fix(distance, scale), 16), scale);
+  h.axis[dim].edges.clear();
+  let count = h.axis[dim].segments.len();
+  for (let i in 0..count) {
+    let seg = h.axis[dim].segments[i];
+    if (seg.height < length_threshold || seg.delta > width_threshold || seg.dir == kDirNone ||
+        (seg.serif != kNone && 2 * seg.height < 3 * length_threshold)) { continue; }
+    var found = kNone;
+    for (let j in 0..h.axis[dim].edges.len()) {
+      let edge = h.axis[dim].edges[j];
+      if (abs(seg.pos - edge.fpos) < threshold && edge.dir == seg.dir) { found = j; break; }
+    }
+    if (found == kNone) {
+      let pos = mul_fix(seg.pos, scale);
+      insert_edge(h.axis[dim], Edge { first: i, last: i, dir: seg.dir, fpos: seg.pos, opos: pos, pos }, descending);
+      h.axis[dim].segments[i].edge_next = i;
+    } else { attach(h.axis[dim], found, i); }
+  }
+  for (let i in 0..count) {
+    let seg = h.axis[dim].segments[i];
+    if (seg.dir != kDirNone) { continue; }
+    for (let j in 0..h.axis[dim].edges.len()) {
+      if (abs(seg.pos - h.axis[dim].edges[j].fpos) < threshold) { attach(h.axis[dim], j, i); break; }
+    }
+  }
+  for (let i in 0..h.axis[dim].edges.len()) {
+    let first = h.axis[dim].edges[i].first;
+    var seg = first;
+    while (true) {
+      h.axis[dim].segments[seg].edge = i;
+      seg = h.axis[dim].segments[seg].edge_next;
+      if (seg == first) { break; }
+    }
+  }
+  for (let i in 0..h.axis[dim].edges.len()) {
+    var rounded: i64 = 0;
+    var straight: i64 = 0;
+    let first = h.axis[dim].edges[i].first;
+    var s = first;
+    while (true) {
+      let seg = h.axis[dim].segments[s];
+      if ((seg.flags & kRound) != 0) { rounded += 1; } else { straight += 1; }
+      let serif = seg.serif != kNone && h.axis[dim].segments[seg.serif].edge != kNone && h.axis[dim].segments[seg.serif].edge != i;
+      if ((seg.link != kNone && h.axis[dim].segments[seg.link].edge != kNone) || serif) {
+        let seg2 = h.axis[dim].segments[serif ? seg.serif : seg.link];
+        var edge2 = serif ? h.axis[dim].edges[i].serif : h.axis[dim].edges[i].link;
+        if (edge2 == kNone || abs(seg.pos - seg2.pos) < abs(h.axis[dim].edges[i].fpos - h.axis[dim].edges[edge2].fpos)) { edge2 = seg2.edge; }
+        if (serif) { h.axis[dim].edges[i].serif = edge2; h.axis[dim].edges[edge2].flags |= kSerif; }
+        else { h.axis[dim].edges[i].link = edge2; }
+      }
+      s = seg.edge_next;
+      if (s == first) { break; }
+    }
+    h.axis[dim].edges[i].flags = rounded > 0 && rounded >= straight ? kRound : 0;
+    if (h.axis[dim].edges[i].serif != kNone && h.axis[dim].edges[i].link != kNone) { h.axis[dim].edges[i].serif = kNone; }
+  }
+}
+
+// Preserve FreeType's cluster denominator, including its unusual absolute
+// table index when averaging a cluster after the first one.
+pub fn quantize_widths(var widths&: List<i64>, threshold: i64) {
+  let count = widths.len();
+  if (count <= 1) { return; }
+  for (let i in 1..count) {
+    var j = i;
+    while (j > 0 && widths[j] < widths[j - 1]) { widths.swap(j, j - 1); j -= 1; }
+  }
+  var cur: usize = 0;
+  var value = widths[0];
+  var i: usize = 1;
+  while (i < count) {
+    if (widths[i] - value > threshold || i == count - 1) {
+      var sum: i64 = 0;
+      if (widths[i] - value <= threshold && i == count - 1) { i += 1; }
+      for (let j in cur..i) { sum += widths[j]; widths[j] = 0; }
+      widths[cur] = sum / i as i64;
+      if (i < count - 1) { cur = i + 1; value = widths[cur]; }
+    }
+    i += 1;
+  }
+  var out: usize = 1;
+  for (let j in 1..count) { if (widths[j] != 0) { widths[out] = widths[j]; out += 1; } }
+  while (widths.len() > out) { widths.pop(); }
+}

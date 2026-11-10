@@ -1,0 +1,162 @@
+// Differential tests of actual FreeType 2.14.3 internal analysis stages.
+// This does NOT claim end-to-end autohinter equivalence. The stage oracle
+// supplies unscaled outlines, then records every point/segment/edge field
+// and all three interpolation passes independently of face/global metrics.
+// AUTOFIT_STAGES_SWEEP=1: every autohinted face, all glyphs, 13 sizes.
+// AUTOFIT_STAGES_STRIDE and AUTOFIT_STAGES_SIZE narrow the workload.
+module autofit_stages_test;
+
+import {List} from akikit::containers::list;
+import {create_directories, is_directory, list_directory} from akikit::filesystem::directory;
+import {delete_file, read_bytes, real_path} from akikit::filesystem::file_util;
+import {eprintln, println} from akikit::logging;
+import {getpid} from akikit::os::sys;
+import {Command, exit_code} from akikit::process::child;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {String, from_str} from akikit::strings::string;
+import {Face} from ultragui::font::face;
+import {Outline, Vec26} from ultragui::font::outline;
+import {Hints} from ultragui::font::autofit::hints;
+import {compute_segments, link_segments, compute_edges} from ultragui::font::autofit::features;
+import {pix_round} from ultragui::font::fixed;
+
+struct Reader {
+  pub var data: List<byte>
+  pub var pos: usize = 0
+  pub fn word(var self&): u32 {
+    var v: u32 = 0;
+    for (let i in 0u32..4) { v |= (self.data[self.pos] as u32) << (i * 8); self.pos += 1; }
+    return v;
+  }
+  pub fn num(var self&): i64 { let lo = self.word() as u64; return (lo | (self.word() as u64 << 32)) as i64; }
+}
+struct Totals {
+  pub var fonts: u64 = 0
+  pub var records: u64 = 0
+  pub var points: u64 = 0
+  pub var segments: u64 = 0
+  pub var edges: u64 = 0
+  pub var mismatches: u64 = 0
+}
+fn run(var cmd&: Command): bool {
+  if (let status = cmd.status()) {
+    if (exit_code(status) == 0) { return true; }
+    eprintln(f"command failed: {exit_code(status)}");
+  }
+  return false;
+}
+fn compare(var r&: Reader, values: &[i64], path: str, gid: u32, px: u32, stage: str, index: usize, var t&: Totals) {
+  for (let i in 0..#values) {
+    let want = r.num();
+    if (values[i] != want) {
+      t.mismatches += 1;
+      if (t.mismatches <= 30) { eprintln(f"{path} {px}px gid={gid} {stage}[{index}].{i}: got {values[i]}, want {want}"); }
+    }
+  }
+}
+fn points(var r&: Reader, h&: Hints, path: str, gid: u32, px: u32, stage: str, var t&: Totals) {
+  for (let i in 0..h.points.len()) {
+    let p = h.points[i];
+    let values = [p.flags as i64, p.in_dir as i64, p.out_dir as i64, p.fx, p.fy, p.ox, p.oy, p.x, p.y, (stage == "reload" && (p.flags & 16) != 0 ? 0 : p.u), (stage == "reload" && (p.flags & 16) != 0 ? 0 : p.v), p.next as i64, p.prev as i64];
+    compare(r, values[..], path, gid, px, stage, i, t);
+  }
+}
+fn replay(path: str, record: str, var t&: Totals): bool {
+  var r = Reader { data: read_bytes(record) ?? List() };
+  if (r.data.len() < 20 || r.word() != 0x41464831 || r.word() != 2 || r.word() != 14 || r.word() != 3) { eprintln("invalid stage oracle header"); return false; }
+  let glyph_count = r.word();
+  var h = Hints {};
+  while (r.word() != 0) {
+    let gid = r.word();
+    let px = r.word();
+    h.units_per_em = r.word() as i64;
+    h.x_scale = r.num(); h.y_scale = r.num();
+    let np = r.word() as usize;
+    let nc = r.word() as usize;
+    var o = Outline { flags: r.word() };
+    for (let i in 0..np) { let x = r.num(); let y = r.num(); o.points.push(Vec26 { x, y }); o.tags.push(r.word() as u8); }
+    for (let i in 0..nc) { o.contours.push(r.word() as u16); }
+    h.reload(o);
+    points(r, h, path, gid, px, "reload", t);
+    for (let dim in 0usize..2) {
+      compute_segments(h, dim);
+      link_segments(h, dim, (gid & 1) != 0 ? h.units_per_em / 12 : 0);
+      compute_edges(h, dim, h.units_per_em / 100, false);
+      let ns = r.word() as usize;
+      let ne = r.word() as usize;
+      let major = r.num();
+      if (ns != h.axis[dim].segments.len() || ne != h.axis[dim].edges.len() || major != h.axis[dim].major_dir as i64) {
+        eprintln(f"{path} {px}px gid={gid} dim={dim}: segments {h.axis[dim].segments.len()}/{ns}, edges {h.axis[dim].edges.len()}/{ne}");
+        return false;
+      }
+      t.segments += ns as u64; t.edges += ne as u64;
+      for (let i in 0..ns) {
+        let s = h.axis[dim].segments[i];
+        let values = [s.flags as i64, s.dir as i64, s.pos, s.delta, s.min_coord, s.max_coord, s.height, s.edge as i64, s.edge_next as i64, s.link as i64, s.serif as i64, s.score, s.len, s.first as i64, s.last as i64];
+        compare(r, values[..], path, gid, px, "segments", i, t);
+      }
+      for (let i in 0..ne) {
+        let e = h.axis[dim].edges[i];
+        let values = [e.fpos, e.opos, e.pos, e.flags as i64, e.dir as i64, e.scale, e.link as i64, e.serif as i64, e.first as i64, e.last as i64];
+        compare(r, values[..], path, gid, px, "edges", i, t);
+        h.axis[dim].edges[i].pos = pix_round(e.opos) + ((i * 17 + gid as usize * 7) % 41) as i64 - 20;
+      }
+      h.align_edges(dim); h.align_strong(dim); h.align_weak(dim);
+      points(r, h, path, gid, px, "interpolation", t);
+    }
+    h.save(o);
+    for (let i in 0..np) {
+      let x = r.num(); let y = r.num(); let tag = r.word() as u8;
+      if (o.points[i].x != x || o.points[i].y != y || o.tags[i] != tag) { t.mismatches += 1; }
+    }
+    t.records += 1; t.points += np as u64;
+  }
+  t.fonts += 1;
+  println(f"stages: {path}: glyphs={glyph_count}; cumulative {t.records} records, {t.mismatches} field mismatches");
+  return r.pos == r.data.len();
+}
+fn collect(dir: str, var fonts&: List<String>) {
+  let entries = list_directory(dir) else { return; };
+  for (let entry in entries) {
+    if (entry == "." || entry == "..") { continue; }
+    let path = f"{dir}/{entry}";
+    if (is_directory(path.as_str())) { collect(path.as_str(), fonts); }
+    else if (true) {
+      if (let f = Face::open_file(path.as_str(), 0)) { if (f.uses_autohinter() && !f.is_cff()) { fonts.push(path); } }
+    }
+  }
+}
+pub fn main(): i32 {
+  let pkg = real_path(@package_dir()) else { return 1; };
+  let build = f"{pkg}/build/autofit_oracle";
+  create_directories(build.as_str());
+  var compile = Command("bash");
+  compile.arg(f"{pkg}/tools/build_autofit_oracle.sh".as_str()); compile.arg(build.as_str());
+  if (!run(compile)) { return 1; }
+  var fonts: List<String> = List();
+  let sweep = get_environment_variable("AUTOFIT_STAGES_SWEEP") != none;
+  if (sweep) { collect("/usr/share/fonts", fonts); }
+  else {
+    fonts.push(from_str("/usr/share/fonts/truetype/ubuntu/Ubuntu[wdth,wght].ttf"));
+    fonts.push(from_str("/usr/share/fonts/truetype/kacst/KacstBook.ttf"));
+    fonts.push(from_str("/usr/share/fonts/truetype/arphic/uming.ttc"));
+    fonts.push(from_str("/usr/share/fonts/truetype/lohit-bengali/Lohit-Bengali.ttf"));
+    fonts.push(from_str("/usr/share/fonts/truetype/malayalam/Rachana-Regular.ttf"));
+  }
+  let stride = get_environment_variable("AUTOFIT_STAGES_STRIDE") ?? from_str(sweep ? "1" : "97");
+  let record = f"{build}/stages-{getpid()}.bin";
+  var t = Totals {};
+  for (let path in fonts) {
+    var cmd = Command(f"{build}/autofit_oracle".as_str());
+    cmd.arg(path.as_str()); cmd.arg(record.as_str()); cmd.arg(stride.as_str());
+    if (let size = get_environment_variable("AUTOFIT_STAGES_SIZE")) { cmd.arg(size.as_str()); }
+    else {
+      let sizes = ["7", "9", "11", "12", "13", "14", "16", "18", "20", "24", "32", "48", "72"];
+      for (let size in sizes) { cmd.arg(size); }
+    }
+    if (!run(cmd) || !replay(path.as_str(), record.as_str(), t)) { return 1; }
+  }
+  if (let d = delete_file(record.as_str())) {} else (let e) {}
+  println(f"autofit stages: {t.fonts} fonts, {t.records} glyph/size records, {t.points} points, {t.segments} segments, {t.edges} edges, {t.mismatches} field mismatches");
+  return t.mismatches == 0 ? 0 : 1;
+}

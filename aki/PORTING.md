@@ -199,6 +199,7 @@ in the table, and none is unported.
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} | ported (test_layout_retained.cc ported) |
 | (yoga, third_party/yoga) | ultragui::layout::{flex_style,flex_tree} | replaced: an aki flexbox engine with yoga's results bit for bit for every style layout.cc can write (tests/yoga_fuzz_test.aki; "The layout engine" below) |
 | (FreeType: sfnt, TrueType driver, embedded bitmaps, ftcalc; hb_ft's unhinted queries) | ultragui::font::{fixed,sfnt,outline,face,tt_interp,tt_glyph,sbit,unhinted} | replacing (not wired into text_engine yet): faces, sizes and bytecode-hinted TrueType glyphs bit for bit vs FreeType 2.14.3 (tests/font_tt_test.aki; "The font engine" below); font/raster and font/cff are other modules |
+| (FreeType: autofit outline analysis) | ultragui::font::autofit::{hints,features} | shared point interpolation, Latin segments/edges and standard-width quantization; internal-stage oracle; see "Automatic hinting" |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -960,6 +961,30 @@ calls FT_Get_MM_Var, which gives FreeType a blend: GETINFO bit 10 and
 GETVARIATION would then answer; only the autohinted Ubuntu faces are variable
 here). FreeType's `.notdef` name check of tt_check_single_notdef reads only
 index 0. WOFF/WOFF2 and Type 1 wrappers are not opened.
+
+### Automatic hinting — `ultragui::font::autofit`
+
+`hints` owns font-unit and scaled points and implements contour topology,
+orientation, edge alignment, strong interpolation and weak IUP interpolation.
+`features` extracts Latin segments, matches stems/serifs, groups sorted edges
+and quantizes standard widths. References are indices into owned lists.
+Arithmetic retains FreeType 2.14.3's fixed-point rounding and short truncation.
+
+`tests/autofit_stages_test.aki` builds `tools/autofit_oracle.c` using actual
+FreeType 2.14.3 internal source routines, linked with both FreeType and
+HarfBuzz. Its default compares five fonts, 13 sizes and every 97th glyph:
+4,212 glyph/size records, 934,856 points, 148,226 segments, 85,885 edges,
+zero field mismatches. It compares original outlines, topology, every segment
+and edge field and interpolation against deliberately perturbed edge positions.
+Uninitialized scratch fields on weak points at reload are excluded; all
+coordinates, flags and final tags are checked. `AUTOFIT_STAGES_SWEEP=1`
+selects all autohinted faces and all glyphs; `AUTOFIT_STAGES_SIZE` and
+`AUTOFIT_STAGES_STRIDE` narrow that workload.
+
+This is stage verification, **not** default-load or raster equivalence.
+Global coverage, shaping of blue strings, metrics initialization, writing-system
+edge fitting and loader integration are still required. `Face::load_glyph`
+continues to return `UnimplementedFeature` for autohinted outlines.
 
 ### Paint and the widget tree
 
