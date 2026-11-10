@@ -848,7 +848,9 @@ machines and vowel constraints into `machines.aki`). Optimizations HarfBuzz
 makes that cannot change the result are left out (set digests on the apply
 path, subtable caches, the rule-set fast paths, glyph flags); the digest is
 kept where it changes a result (`would_substitute`'s prefilter, which the
-Indic shaper's consonant positions depend on).
+Indic shaper's consonant positions depend on). Speed at -O2, with the plan
+cached: about 5 µs for a 17-glyph Latin string on DejaVuSans (kerning and
+marks), 3 µs for Devanagari on Lohit, 2 µs for Arabic on KacstBook.
 
 **Verification.** `tests/shape_test.aki` builds `tools/shape_oracle.c`
 (the dev shell's FreeType + HarfBuzz, used exactly as text_engine uses them)
