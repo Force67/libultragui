@@ -13,6 +13,10 @@
 // cmap (random runs of its letters, marks, digits, punctuation, spaces,
 // joiners, variation selectors and ill-formed UTF-8).
 //
+// Fonts with a Silf table that graphite2 accepts are shaped by graphite2 in
+// HarfBuzz and by ultragui::shape::graphite here; the test checks both pick
+// the same shaper.
+//
 // Default: a curated set of fonts at 12, 16 and 24 px. SHAPE_SWEEP=1 runs
 // every font of /usr/share/fonts at 9, 12, 16, 24 and 37 px with
 // SHAPE_GENERATED (default 400) generated strings per font; SHAPE_FONTS=a:b
@@ -39,7 +43,7 @@ import {gc_is_mark, general_category} from ultragui::shape::ucd;
 import {open_ft_font, set_pixel_size} from support::shape_ft;
 import {kSamples} from support::shape_samples;
 
-comptime let kCurated: [str; 9] = [
+comptime let kCurated: [str; 12] = [
   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
   "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
   "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -49,6 +53,10 @@ comptime let kCurated: [str; 9] = [
   "/usr/share/fonts/truetype/tlwg/Garuda.ttf",
   "/usr/share/fonts/truetype/ttf-khmeros-core/KhmerOS.ttf",
   "/usr/share/fonts/truetype/freefont/FreeSerif.ttf",
+  // Fonts HarfBuzz shapes with graphite2 (a Silf table).
+  "/usr/share/fonts/truetype/padauk/Padauk-Regular.ttf",
+  "/usr/share/fonts/truetype/abyssinica/AbyssinicaSIL-Regular.ttf",
+  "/usr/share/fonts/truetype/annapurna/AnnapurnaSIL-Regular.ttf",
 ];
 
 comptime let kMaxReported: u64 = 30;
@@ -59,7 +67,9 @@ struct Totals {
   pub var glyphs: u64 = 0
   pub var mismatches: u64 = 0
   pub var reported: u64 = 0
-  pub var skipped_graphite: u64 = 0
+  pub var graphite: u64 = 0
+  pub var graphite_strings: u64 = 0
+  pub var graphite_glyphs: u64 = 0
 }
 
 // --- Strings ----------------------------------------------------------------------------------
@@ -345,10 +355,13 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
     totals.mismatches += 1;
     eprintln(f"TABLES {path}: HarfBuzz keeps GSUB {hb_gsub} GPOS {hb_gpos} GDEF classes {hb_gdef}, aki {face.gsub.version != 0} {face.gpos.version != 0} {face.gdef.glyph_class_def < kNull}");
   }
+  // The shaper HarfBuzz picked (graphite2 when graphite2 accepts the face).
+  if (is_graphite != face.uses_graphite()) {
+    totals.mismatches += 1;
+    eprintln(f"SHAPER {path}: HarfBuzz uses graphite2 {is_graphite}, aki {face.uses_graphite()}");
+  }
   if (is_graphite) {
-    totals.skipped_graphite += 1;
-    println(f"{path}: HarfBuzz shapes it with graphite2; not compared");
-    return true;
+    totals.graphite += 1;
   }
   var font_mismatches = 0u64;
   for (let px in sizes) {
@@ -375,6 +388,10 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
       let got = shape_utf8(face, ft, xs, ys, strings[si].as_slice());
       totals.strings += 1;
       totals.glyphs += n as u64;
+      if (is_graphite) {
+        totals.graphite_strings += 1;
+        totals.graphite_glyphs += n as u64;
+      }
       var same = got.len() == want.len();
       if (same) {
         for (let k in 0..n) {
@@ -463,6 +480,7 @@ pub fn main(): i32 {
     let sizes = sweep ? sizes_sweep[..] : sizes_default[..];
     ok = check_font(f.as_str(), root, out_dir.as_str(), oracle.as_str(), sizes, generated, seed, totals) && ok;
   }
-  println(f"{totals.fonts} fonts ({totals.skipped_graphite} shaped by graphite2, not compared), {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
+  println(f"{totals.fonts} fonts, {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
+  println(f"  of which {totals.graphite} fonts shaped by graphite2: {totals.graphite_strings} strings, {totals.graphite_glyphs} glyphs");
   return ok && totals.mismatches == 0 ? 0 : 1;
 }
