@@ -3,7 +3,7 @@
 //
 // tools/shape_oracle.c shapes a list of strings with the dev shell's
 // FreeType + HarfBuzz exactly as text/text_engine does; this test builds it
-// with clang into build/shape_oracle/ (once; again when the tool is newer),
+// with clang into a process-specific build/shape_oracle_* directory,
 // shapes the same strings with ultragui::shape (font metrics from the real
 // FreeType through support::shape_ft, so only the shaping is compared) and
 // compares every value.
@@ -17,7 +17,11 @@
 // every font of /usr/share/fonts at 9, 12, 16, 24 and 37 px with
 // SHAPE_GENERATED (default 400) generated strings per font; SHAPE_FONTS=a:b
 // picks fonts by path; SHAPE_SEED changes the generated strings. The first
-// differences are printed with the font, size and string.
+// differences are printed with the font, size and string. Every font also
+// runs a 28-locale matrix over the samples and SHAPE_LANGUAGE_GENERATED
+// (default 4; sweep 12) generated strings. Available locales use setlocale
+// in both processes; unavailable locales use the explicit canonical language.
+// Fresh child processes verify default-language initialization and caching.
 
 module shape_test;
 
@@ -29,14 +33,17 @@ import {parent} from akikit::filesystem::path;
 import {eprintln, println} from akikit::logging;
 import {Command, exit_code} from akikit::process::child;
 import {get_environment_variable} from akikit::process::environment_variables;
-import {String, from_str} from akikit::strings::string;
+import {String, from_c_string, from_str} from akikit::strings::string;
 import {ends_with} from akikit::strings::string_search;
 import {parse_u64} from akikit::strings::string_to_number;
 import {ShapeFace} from ultragui::shape::face;
-import {kNull} from ultragui::shape::otl;
+import {default_language, from_bytes, from_string, ot_tags} from ultragui::shape::language;
+import {kLanguageRules} from ultragui::shape::language_tables;
+import {plan_index} from ultragui::shape::plan;
+import {kNull, select_language, select_script} from ultragui::shape::otl;
 import {ShapedGlyph, shape_utf8} from ultragui::shape::shape;
-import {gc_is_mark, general_category} from ultragui::shape::ucd;
-import {open_ft_font, set_pixel_size} from support::shape_ft;
+import {gc_is_mark, general_category, tag} from ultragui::shape::ucd;
+import {FtFont, open_ft_font, set_pixel_size} from support::shape_ft;
 import {kSamples} from support::shape_samples;
 
 comptime let kCurated: [str; 9] = [
@@ -60,6 +67,8 @@ struct Totals {
   pub var mismatches: u64 = 0
   pub var reported: u64 = 0
   pub var skipped_graphite: u64 = 0
+  pub var locale_cases: u64 = 0
+  pub var table_selections: u64 = 0
 }
 
 // --- Strings ----------------------------------------------------------------------------------
@@ -275,16 +284,8 @@ fn glyphs_text(g&: List<ShapedGlyph>): String {
   return out;
 }
 
-fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], generated: u64, seed: u64, var totals&: Totals): bool {
-  var strings: List<List<u8>> = List();
-  example_strings(root, strings);
-  for (let s in kSamples) {
-    var b: List<u8> = List();
-    for (let c in s as &[u8]) {
-      b.push(c);
-    }
-    strings.push(b);
-  }
+fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], generated: u64, seed: u64, var totals&: Totals, locale: str = "", use_default: bool = false, matrix: bool = false): bool {
+  var strings = sample_strings(root, #locale == 0);
   let bytes_b = read_bytes(path) else {
     eprintln(f"cannot read {path}");
     return false;
@@ -298,9 +299,48 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
     return false;
   };
   var face = ShapeFace::from_bytes(bytes, 0, ft.num_glyphs);
+  // A face must retain distinct language plans and return the original plan
+  // when the language switches back (independent of whether locl is present).
+  let en = plan_index(face, tag("Latn"), 4, "en");
+  let tr = plan_index(face, tag("Latn"), 4, "tr");
+  if (en == tr || plan_index(face, tag("Latn"), 4, "en") != en) { return false; }
   if (generated > 0) {
     generated_strings(face, generated, seed, strings);
   }
+  var ok = check_font_runs(path, out_dir, oracle, sizes, strings, face, ft, totals, locale, use_default);
+  if (matrix) {
+    var localized = sample_strings(root, false);
+    let count = env_u64("SHAPE_LANGUAGE_GENERATED", get_environment_variable("SHAPE_SWEEP") != none ? 12u64 : 4u64);
+    if (count > 0) { generated_strings(face, count, seed, localized); }
+    for (let language in kLocales) {
+      set_test_locale(language);
+      ok = check_font_runs(path, out_dir, oracle, sizes, localized, face, ft, totals, language, false) && ok;
+    }
+    set_test_locale("C");
+  }
+  return ok;
+}
+
+fn sample_strings(root: str, examples: bool): List<List<u8>> {
+  var strings: List<List<u8>> = List();
+  if (examples) { example_strings(root, strings); }
+  for (let s in kLocaleSamples) {
+    var b: List<u8> = List();
+    for (let c in s as &[u8]) { b.push(c); }
+    strings.push(b);
+  }
+  for (let s in kSamples) {
+    var b: List<u8> = List();
+    for (let c in s as &[u8]) {
+      b.push(c);
+    }
+    strings.push(b);
+  }
+  return strings;
+}
+
+fn check_font_runs(path: str, out_dir: str, oracle: str, sizes: &[u32], strings&: List<List<u8>>,
+                   var face&: ShapeFace, var ft&: FtFont, var totals&: Totals, locale: str, use_default: bool): bool {
   var hex = String();
   for (let s in strings) {
     push_hex(hex, s.as_slice());
@@ -313,6 +353,7 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
     return false;
   }
   var cmd = Command(oracle);
+  if (#locale > 0) { cmd.add_env("SHAPE_LOCALE", locale); }
   cmd.arg(path);
   cmd.arg(strings_path.as_str());
   for (let px in sizes) {
@@ -333,21 +374,53 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
     return false;
   };
   var r = Reader { text: text.as_str() };
+  let l_tag = r.token();
+  let locale_ok = r.int() != 0;
+  let canonical = r.token();
+  let lang = #locale == 0 || locale_ok ? from_string(test_locale().as_str()) : from_string(locale);
+  if (lang.as_str() != (canonical == "-" ? "" : canonical)) {
+    eprintln(f"language mismatch {locale}: {lang.as_str()} vs {canonical}");
+    return false;
+  }
+  if (#locale > 0) { totals.locale_cases += 1; }
   let f_tag = r.token();
   let ft_glyphs = r.int();
   let is_graphite = r.token() == "graphite2";
   let hb_gsub = r.int() != 0;
   let hb_gpos = r.int() != 0;
   let hb_gdef = r.int() != 0;
-  totals.fonts += 1;
+  if (#locale == 0) { totals.fonts += 1; }
   // HarfBuzz's sanitizer and ours must keep the same tables.
   if (hb_gsub != (face.gsub.version != 0) || hb_gpos != (face.gpos.version != 0) || hb_gdef != (face.gdef.glyph_class_def < kNull)) {
     totals.mismatches += 1;
     eprintln(f"TABLES {path}: HarfBuzz keeps GSUB {hb_gsub} GPOS {hb_gpos} GDEF classes {hb_gdef}, aki {face.gsub.version != 0} {face.gpos.version != 0} {face.gdef.glyph_class_def < kNull}");
   }
+  let m_tag = r.token();
+  let scripts = r.int() as usize;
+  for (let i in 0..scripts) {
+    let script = r.int() as u32;
+    let tags = ot_tags(script, lang.as_str());
+    for (let table in 0u32..2) {
+      let si = r.int() as u32;
+      let chosen = r.int() as u32;
+      let found = r.int() != 0;
+      let li = r.int() as u32;
+      let data = table == 0 ? face.gsub_t() : face.gpos_t();
+      let gg = table == 0 ? face.gsub : face.gpos;
+      let (actual_si, actual_chosen, actual_found) = select_script(data, gg, tags.scripts[..tags.script_count]);
+      let actual_li = select_language(data, gg, actual_si, tags.languages[..tags.language_count]);
+      totals.table_selections += 1;
+      if (si != actual_si || chosen != actual_chosen || found != actual_found || li != actual_li) {
+        totals.mismatches += 1;
+        eprintln(f"LANGSYS {path} {locale} script {script} table {table}: want {si}/{chosen}/{found}/{li}, got {actual_si}/{actual_chosen}/{actual_found}/{actual_li}");
+      }
+    }
+  }
   if (is_graphite) {
-    totals.skipped_graphite += 1;
-    println(f"{path}: HarfBuzz shapes it with graphite2; not compared");
+    if (#locale == 0) {
+      totals.skipped_graphite += 1;
+      println(f"{path}: HarfBuzz shapes it with graphite2; not compared");
+    }
     return true;
   }
   var font_mismatches = 0u64;
@@ -372,7 +445,7 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
         let yo = r.int() as i32;
         want.push(ShapedGlyph { glyph_id: g, cluster: c, x_advance: xa, y_advance: ya, x_offset: xo, y_offset: yo });
       }
-      let got = shape_utf8(face, ft, xs, ys, strings[si].as_slice());
+      let got = use_default ? shape_utf8(face, ft, xs, ys, strings[si].as_slice()) : shape_utf8(face, ft, xs, ys, strings[si].as_slice(), lang.as_str());
       totals.strings += 1;
       totals.glyphs += n as u64;
       var same = got.len() == want.len();
@@ -392,14 +465,14 @@ fn check_font(path: str, root: str, out_dir: str, oracle: str, sizes: &[u32], ge
         font_mismatches += 1;
         if (totals.reported < kMaxReported) {
           totals.reported += 1;
-          eprintln(f"MISMATCH {path} {px}px string {si} ({describe(strings[si])}):");
+          eprintln(f"MISMATCH {path} {locale} {px}px string {si} ({describe(strings[si])}):");
           eprintln(f"  harfbuzz: {glyphs_text(want)}");
           eprintln(f"  aki:      {glyphs_text(got)}");
         }
       }
     }
   }
-  println(f"{path}: {strings.len()} strings x {#sizes} sizes, {font_mismatches} differ");
+  if (#locale == 0 || font_mismatches > 0) { println(f"{path} {locale}: {strings.len()} strings x {#sizes} sizes, {font_mismatches} differ"); }
   return true;
 }
 
@@ -422,17 +495,164 @@ fn all_fonts(var out&: List<String>) {
   }
 }
 
+// setlocale is only mutated by the single-threaded test. The core reads it.
+extern fn getpid(): i32;
+extern fn setlocale(category: i32, locale: *const c_char): *const c_char;
+
+fn test_locale(): String => unsafe from_c_string(setlocale(0, null));
+fn set_test_locale(locale: str): bool {
+  var c = from_str(locale);
+  c.push_c8('\0');
+  return unsafe setlocale(0, @ptr(c.as_str()) as *const c_char) != null;
+}
+
+comptime let kLocaleSamples: [str; 12] = [
+  "i I İ ı fi ffi", "i\u{307} I\u{307} f\u{307}i", "ş ţ Ş Ţ ș ț Ș Ț", "б г д п т Б Г Д П Т",
+  "Türkçe İstanbul fiili", "Română ştiinţă ţară", "Српски бгдпт", "骨 直 令 遍 曜 角 辻 葛",
+  "漢字 你好 語 言 統 龍", "日本語 骨 直", "한국어 骨 直", "ᠮᠣᠩᠭᠣᠯ ᠪᠢᠴᠢᠭ",
+];
+
+comptime let kLocales: [str; 28] = [
+  "C", "POSIX", "C.UTF-8", "en_US.UTF-8", "de_DE.UTF-8", "tr_TR.UTF-8", "sr_RS@latin",
+  "ar_EG.UTF-8", "fa_IR", "hi_IN", "ur_PK", "ja_JP.UTF-8", "ko_KR.UTF-8", "zh_CN.UTF-8",
+  "zh_TW.UTF-8", "zh_HK.UTF-8", "zh_MO.UTF-8", "ro_RO", "mo_MD", "mn_MN", "az_AZ",
+  "zh-Hant-MO", "zh-Hans", "zh-Hant", "ro-MD", "sr-Cyrl", "my-MM", "en-x-hbotTRK",
+];
+
+struct LanguageCase {
+  pub let raw: List<u8>
+  pub let script: u32
+  pub let length: i32 = -1
+}
+
+fn language_case(var cases&: List<LanguageCase>, raw: str, script: u32, length: i32 = -1) {
+  var bytes: List<u8> = List();
+  for (let b in raw as &[u8]) { bytes.push(b); }
+  cases.push(LanguageCase { raw: bytes, script, length });
+}
+
+fn check_languages(oracle: str, out_dir: str): bool {
+  var cases: List<LanguageCase> = List();
+  let scripts = [0u32, tag("Latn"), tag("Hani"), tag("Arab"), tag("Deva"), tag("Mong"), tag("Qaaa"), tag("Mymr")];
+  // Exhaust the two- and three-letter ISO spaces, including blocked/fallback
+  // tags absent from the generated mapping. Script tags alternate per case.
+  for (let a in 0u32..26) {
+    for (let b in 0u32..26) {
+      var raw = String(); raw.push_c8((97 + a) as c8); raw.push_c8((97 + b) as c8);
+      language_case(cases, raw.as_str(), scripts[(a * 26 + b) as usize % #scripts]);
+      for (let c in 0u32..26) {
+        var three = from_str(raw.as_str()); three.push_c8((97 + c) as c8);
+        language_case(cases, three.as_str(), scripts[(a * 676 + b * 26 + c) as usize % #scripts]);
+      }
+    }
+  }
+  for (let rule in kLanguageRules) {
+    let raw = rule.mode == 3 ? f"und{rule.subtag}" : (rule.mode == 2 ? f"{rule.prefix}latn{rule.subtag}" : from_str(rule.prefix));
+    for (let suffix in ["", "-extra", "-a-foo", "-x-foo", "a", "-x-hbotTRK", "-x-hbscdeva"]) {
+      for (let script in scripts) { language_case(cases, f"{raw}{suffix}".as_str(), script); }
+    }
+  }
+  for (let locale in kLocales) {
+    for (let script in scripts) { language_case(cases, locale, script); }
+  }
+  let private_samples = ["x-hbot", "x-hbotTRK", "en-x-hbotdflt", "en-x-hbscDFLT", "x-hbot-64666c74",
+    "x-hbsc-44464C54", "x-hbot-12345678", "en-x-hbot-1234567", "en-x-hbot12345", "x-hbscmym2-hbotJAN",
+    "zh-cmn-Hant-HK", "en-abc", "en-u-abc-x-hbotJAN", "zh-u-hant-hk", "i-default", "und-fonipa",
+    "c", "POSIX", "", ".", "_", "-", "--", "x-", "a-x-", "abc-x-hbot", "abcd-x-hbot", "abc-u-xyz", "abc--def"];
+  for (let raw in private_samples) {
+    for (let script in scripts) { language_case(cases, raw, script); }
+  }
+  // Every possible byte in and at the start of a locale. str_from_bytes is
+  // deliberately avoided: malformed UTF-8 is accepted by hb_language too.
+  for (let b in 0u32..256) {
+    var raw: List<u8> = List(); raw.push(101); raw.push(110); raw.push(b as u8);
+    for (let c in "US.UTF-8" as &[u8]) { raw.push(c); }
+    cases.push(LanguageCase { raw, script: tag("Latn") });
+    var first: List<u8> = List(); first.push(b as u8);
+    for (let c in "abc" as &[u8]) { first.push(c); }
+    cases.push(LanguageCase { raw: first, script: tag("Latn") });
+  }
+  var long = from_str("en");
+  for (let i in 0..100) { long.push_str("-a"); }
+  for (let length in [-1i32, 0, 1, 2, 3, 62, 63, 64, 150]) {
+    language_case(cases, long.as_str(), tag("Deva"), length);
+  }
+  var hex = String();
+  for (let c in cases) {
+    hex.push_str(f"{c.length} {c.script} "); push_hex(hex, c.raw.as_slice());
+  }
+  let input = f"{out_dir}/languages.hex";
+  let output = f"{out_dir}/languages.out";
+  if (let result = write_file(input.as_str(), hex.as_str())) {} else (let e) { return false; }
+  var cmd = Command(oracle); cmd.arg("--languages"); cmd.arg(input.as_str()); cmd.stdout_to(output.as_str());
+  if (let status = cmd.status()) { if (exit_code(status) != 0) { return false; } } else (let e) { return false; }
+  let text = read_file(output.as_str()) else { return false; };
+  var r = Reader { text: text.as_str() };
+  var mismatches = 0u64;
+  for (let c in cases) {
+    let got = from_bytes(c.raw.as_slice(), c.length);
+    let n = r.int() as usize;
+    var want = String();
+    for (let i in 0..n) { want.push_c8(r.int() as c8); }
+    var same = want.as_str() == got.as_str();
+    let tags = ot_tags(c.script, got.as_str());
+    let sn = r.int() as usize;
+    if (sn != tags.script_count) { same = false; }
+    for (let i in 0..sn) { if (r.int() as u32 != tags.scripts[i]) { same = false; } }
+    let ln = r.int() as usize;
+    if (ln != tags.language_count) { same = false; }
+    for (let i in 0..ln) { if (r.int() as u32 != tags.languages[i]) { same = false; } }
+    if (!same) {
+      if (mismatches < 20) { eprintln(f"LANGUAGE mismatch raw={describe(c.raw)} length={c.length} script={c.script} canonical={got.as_str()} want={want.as_str()}"); }
+      mismatches += 1;
+    }
+  }
+  // The first default read must survive later changes to LC_CTYPE.
+  set_test_locale("C");
+  let first = from_str(default_language());
+  set_test_locale("en_US.UTF-8");
+  if (default_language() != first.as_str() || first.as_str() != "c") { mismatches += 1; }
+  set_test_locale("C");
+  println(f"{cases.len()} language canonicalization/tag cases, {mismatches} differ; default locale cached");
+  return mismatches == 0;
+}
+
 pub fn main(): i32 {
   let pkg = real_path(@package_dir()) else {
     eprintln("cannot resolve the package dir");
     return 1;
   };
   let root = parent(parent(pkg.as_str()));
-  let out_dir = f"{pkg}/build/shape_oracle";
+  let cache_locale = get_environment_variable("SHAPE_DEFAULT_LOCALE");
+  let suffix = cache_locale != none ? "cache" : (get_environment_variable("SHAPE_SWEEP") != none ? "sweep" : "default");
+  let pid = unsafe getpid();
+  let out_dir = f"{pkg}/build/shape_oracle_{suffix}_{pid}";
   create_directories(out_dir.as_str());
   let oracle = build_oracle(root, out_dir.as_str()) else {
     return 1;
   };
+  if (let locale = cache_locale) {
+    if (!set_test_locale(locale.as_str())) { println(f"default locale {locale} unavailable"); return 0; }
+    let initial = from_str(test_locale().as_str());
+    var totals = Totals {};
+    var ok = true;
+    let sizes = [12u32, 16, 24];
+    for (let f in [kCurated[0], kCurated[3], kCurated[4]]) {
+      ok = check_font(f, root, out_dir.as_str(), oracle.as_str(), sizes[..], 0, 1, totals, locale.as_str(), true) && ok;
+    }
+    set_test_locale("C");
+    if (default_language() != from_string(initial.as_str()).as_str()) { ok = false; }
+    println(f"default locale {locale}: {totals.strings} strings, {totals.glyphs} glyphs, {totals.mismatches} differ; cached after setlocale(C)");
+    return ok && totals.mismatches == 0 ? 0 : 1;
+  }
+  if (!check_languages(oracle.as_str(), out_dir.as_str())) { return 1; }
+  // Each child starts with an uninitialized language cache, as a real UI
+  // program does after GLFW sets the process locale.
+  for (let locale in ["C", "POSIX", "C.UTF-8", "en_US.UTF-8", "de_DE.UTF-8"]) {
+    var cmd = Command(f"{pkg}/build/tests/shape_test".as_str());
+    cmd.add_env("SHAPE_DEFAULT_LOCALE", locale);
+    if (let status = cmd.status()) { if (exit_code(status) != 0) { return 1; } } else (let e) { return 1; }
+  }
   let sweep = get_environment_variable("SHAPE_SWEEP") != none;
   let seed = env_u64("SHAPE_SEED", 1);
   var fonts: List<String> = List();
@@ -461,8 +681,8 @@ pub fn main(): i32 {
   var ok = true;
   for (let f in fonts) {
     let sizes = sweep ? sizes_sweep[..] : sizes_default[..];
-    ok = check_font(f.as_str(), root, out_dir.as_str(), oracle.as_str(), sizes, generated, seed, totals) && ok;
+    ok = check_font(f.as_str(), root, out_dir.as_str(), oracle.as_str(), sizes, generated, seed, totals, "", false, true) && ok;
   }
-  println(f"{totals.fonts} fonts ({totals.skipped_graphite} shaped by graphite2, not compared), {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
+  println(f"{totals.fonts} fonts ({totals.skipped_graphite} shaped by graphite2, not compared), {totals.locale_cases} locale/font cases, {totals.table_selections} table selections, {totals.strings} strings, {totals.glyphs} glyphs compared, {totals.mismatches} strings differ");
   return ok && totals.mismatches == 0 ? 0 : 1;
 }

@@ -30,6 +30,7 @@ aki/
     tools/ft_oracle.c    the font engine's oracle: FreeType's and hb_ft's results for a face as binary
                          records; tests/font_tt_test.aki builds it (clang, pkg-config) and compares field by field
     tools/shape_oracle.c the shaper's oracle (FreeType + HarfBuzz as text_engine uses them); tests/shape_test.aki
+    tools/gen_shape_languages.py  generates src/shape/language_tables.aki from HarfBuzz 13.2.1's hb-ot-tag-table.hh
     tools/gen_shape_tables.{cc,py}, gen_shape_machines.py  generate src/shape/{ucd_tables.aki,data/ucd.bin,machines.aki}
                          from HarfBuzz 13.2.1's source (see "The shaper")
   ultragui_audio/        miniaudio AudioBackend (csrc/ugui_ma.c shim)
@@ -204,6 +205,7 @@ in the table, and none is unported.
 | (FreeType: sfnt, TrueType driver, embedded bitmaps, ftcalc; hb_ft's unhinted queries) | ultragui::font::{fixed,sfnt,outline,face,tt_interp,tt_glyph,sbit,unhinted} | replacing (not wired into text_engine yet): faces, sizes and bytecode-hinted TrueType glyphs bit for bit vs FreeType 2.14.3 (tests/font_tt_test.aki; "The font engine" below); font/raster and font/cff are other modules |
 | (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,sanitize,cmap,normalize,fallback,buffer,props,ucd,font_funcs,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | new, not yet wired in: an aki OpenType shaper with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below); text_engine still calls HarfBuzz until the integration step |
 | (FreeType: autofit outline analysis) | ultragui::font::autofit::{hints,features,metrics,latin} | shared point interpolation, Latin metrics and normal-target edge fitting; internal-stage oracle; see "Automatic hinting" |
+| (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,sanitize,cmap,normalize,fallback,buffer,props,ucd,language,language_tables,font_funcs,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | Aki OpenType shaper used by text_engine through font_face, with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below) |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -1016,9 +1018,9 @@ replacement, Unicode properties (general category, combining classes and
 HarfBuzz's modified classes, scripts, mirroring, decompositions and
 compositions, default ignorables, Extended_Pictographic, Arabic joining
 types, Indic and USE categories) generated from HarfBuzz's own tables;
-script, direction and language guessing (the language is the C locale's,
-"c", which maps to no OpenType language tag: the language system is 'dflt' or
-the script's default); the cmap as FreeType selects and reads it (formats 0,
+script and direction guessing, and the process locale's language (cached at
+first use, with HarfBuzz's canonicalization and OpenType language-system
+selection); the cmap as FreeType selects and reads it (formats 0,
 4 with its sorted/overlapping variants, 6, 12, 13, 14, FT_VALIDATE_DEFAULT,
 the symbol-font fallbacks of hb_ft); grapheme clusters, native direction,
 mirroring, normalization (decompose, reorder, recompose, variation
@@ -1041,7 +1043,7 @@ when the face is made and drops what it rejects. `shape::buffer` is hb_buffer_t'
 var1/var2 scratch values as named fields; `otl` reads tables in place
 (offsets into the table bytes; a zero offset or a read past the end gives
 HarfBuzz's all-zero Null object); `layout` is the apply context and every
-subtable; `map`/`plan` build and cache plans per (script, direction) in the
+subtable; `map`/`plan` build and cache plans per (script, direction, language) in the
 face; `shapers` dispatches the shaper hooks and pause functions by shaper
 number. Tables come from `tools/gen_shape_tables.cc`, which compiles
 HarfBuzz 13.2.1's amalgamated source and dumps its Unicode and shaper data
@@ -1079,13 +1081,78 @@ all equal. The oracle also reports which of GSUB, GPOS and GDEF HarfBuzz kept
 after its sanitizer, and the test checks the aki face keeps the same ones
 (it does on every font; chandas1-2's GPOS is one HarfBuzz drops).
 
+**Buffer languages — `shape::language`.** `default_language()` initializes a
+thread-safe `OnceLock<String>` at first shape by reading libc's
+`setlocale(LC_CTYPE, NULL)`; subsequent locale changes leave it unchanged,
+as with `hb_language_get_default`. The small `sys::locale` FFI seam copies
+the libc-owned string immediately (the rest of the language module is safe
+Aki). `from_string` / `from_bytes` retain ASCII letters, digits and hyphens,
+map `_` to `-`, lowercase ASCII and terminate at everything else, including
+`.` and `@`; explicit nonnegative lengths have HarfBuzz's 63-byte cap.
+`ot_tags(script, canonical_language)` returns up to three script and three
+ordered language tags. It handles BCP 47 extlangs and extension boundaries,
+private-use `-x-hbot` / `-x-hbsc` overrides (text and eight hexadecimal digits,
+including the special DFLT/dflt case), blocked ISO codes, ISO-639-3 fallback,
+and the ordered disambiguation rules (Chinese script/region, Romanian in
+Moldova, phonetic variants, etc.). `tools/gen_shape_languages.py HB_SOURCE`
+extracts 1,266 mappings and 148 complex rules from HarfBuzz 13.2.1's
+`src/hb-ot-tag-table.hh` into `language_tables.aki`; the source's copyright
+and permission notice is in `shape/data/HARFBUZZ-LICENSE`.
+
+`map_builder` selects each table's script by the ordered candidates, then
+DFLT, dflt, latn; its language selection tries the ordered language tags,
+then an explicit dflt record, then the script's default LangSys. This also
+selects language-specific `locl` features and required features. Plans are
+cached by script, direction and canonical language, so switching languages
+on one face cannot reuse another language's feature map. The public
+`shape` / `shape_utf8` calls pick the cached process language automatically;
+`shape_utf8(..., language)` accepts an explicit canonical language for
+callers that need it. The HarfBuzz 13.2.1 Arabic, Indic, USE, Mongolian and
+Myanmar implementations have no other direct language-dependent branches;
+Zawgyi is selected by the buffer script Qaag, which guessing never produces,
+and a private OT script tag does not change the buffer's Unicode script.
+
+The differential language tests exhaust the two-/three-letter ISO space,
+every generated complex rule and extensions, private tags, all 256 input
+bytes and length boundaries: 27,517 canonicalization/tag cases, zero
+differences. Five fresh processes start in C, POSIX, C.UTF-8, en_US.UTF-8
+and de_DE.UTF-8, shape through the default-language API and verify the cached
+language survives a later setlocale(C): 6,750 strings / 99,135 glyphs at
+12, 16 and 24 px on DejaVuSans, NotoSansCJK and KacstBook, all equal.
+The nine-font default also runs 28 locale/language cases per font (including
+Turkish, Serbian, Arabic, Persian, Hindi, Urdu, Japanese, Korean, Chinese,
+Romanian and Mongolian): 167,022 strings / 2,255,238 glyphs, zero differences,
+about 25 seconds including the fresh-process tests. Both sides call
+setlocale for installed locales; missing locales use the requested string
+as an explicit buffer language. The matrix adds Turkish dotted/dotless i,
+Romanian cedillas, Serbian Cyrillic and CJK locl samples to the script
+samples; it reuses faces to exercise the language plan cache. `SHAPE_SWEEP=1`
+runs every font at five sizes, with 400 generated strings in the default
+language and 12 per locale (`SHAPE_LANGUAGE_GENERATED` changes the latter).
+The full sweep inspected 304 fonts (297 compared, 7 Graphite fonts skipped),
+at 9, 12, 16, 24 and 37 px: 8,512 locale/font configurations,
+10,023,750 strings / 129,332,850 glyphs compared, zero differences
+(8 min 10 s; the five fresh-process cache checks above are additional).
+The oracle also compares the actual GSUB/GPOS script indices, chosen tags,
+found flags and language indices for eight scripts per language, including
+invalid and unregistered scripts to exercise table fallbacks: 4,176 table
+selections in the nine-font default matrix, plus 240 in the fresh-process
+checks, all equal.
+
+The C++ and Aki golden runners both leave the initial C locale alone;
+all 36 Aki golden dumps (20 example scenarios, 16 extra scenarios) are
+byte-identical to the supplied text-wip base after this change. With a
+fresh C++ golden runner, 33/36 compare equal; pre-existing font-atlas
+failures remain for `text_kacst_book`, `text_ubuntu`, `text_uming_ttc`.
+A GLFW/X11 probe under Xvfb confirms the example initialization path reads
+the same default language in Aki and HarfBuzz under C, C.UTF-8, en_US.UTF-8
+and de_DE.UTF-8 (`c`, `c`, `en-us`, `de-de`). Linux and Windows checks pass;
+all 29 core tests pass.
+
 **Known gaps.** HarfBuzz is built with graphite2 here and shapes fonts with a
 `Silf` table (Padauk, Abyssinica SIL, Annapurna SIL) with it; the aki shaper
-shapes them with OpenType, so they differ and the test skips them. The
-language is fixed to the C locale's (a program whose toolkit calls
-`setlocale (LC_CTYPE, "")` before the first shape, as GLFW on X11 does, gives
-HarfBuzz the environment's language, which can select another language
-system). Not implemented (no font of the corpus needs them): AAT
+shapes them with OpenType, so they differ and the test skips them.
+Not implemented (no font of the corpus needs them): AAT
 (morx/kerx/trak), `kern` subtable formats 1-3 and Apple's kern table, the
 24-bit ("beyond 64K") GSUB/GPOS/GDEF formats, cmap formats 2, 8 and 10 and
 the Unicode charmap FreeType synthesizes for fonts without one, variation

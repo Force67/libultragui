@@ -1,0 +1,13 @@
+// The sole libc seam for shape::language. setlocale returns libc-owned text;
+// copy it immediately, without changing the process locale. LC_CTYPE's value
+// is platform ABI (Linux/Android 0, BSD/Darwin 2, Windows 2).
+module ultragui::sys::locale;
+
+import {String, from_c_string} from akikit::strings::string;
+
+extern fn setlocale(category: i32, locale: *const c_char): *const c_char;
+
+pub fn ctype_locale(): String {
+  let category = (comptime @target_os() == "linux" || @target_os() == "android") ? 0 : 2;
+  return unsafe from_c_string(setlocale(category, null));
+}

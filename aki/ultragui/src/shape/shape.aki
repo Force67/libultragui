@@ -25,6 +25,7 @@ import {ShapeFace} from ultragui::shape::face;
 import {apply_kern, fallback_mark_position, fallback_spaces, recategorize_marks} from ultragui::shape::fallback;
 import {ShapeFontFuncs} from ultragui::shape::font_funcs;
 import {Scale, apply_string, is_default_ignorable, new_ctx, position_finish_offsets, set_lookup} from ultragui::shape::layout;
+import {default_language} from ultragui::shape::language;
 import {normalize} from ultragui::shape::normalize;
 import {gdef_glyph_props} from ultragui::shape::otl;
 import {ShapePlan, kZeroByGdefEarly, kZeroByGdefLate, plan_index, zero_width_marks} from ultragui::shape::plan;
@@ -436,7 +437,7 @@ fn guess_script(buf&: Buffer): u32 {
 }
 
 // Shapes UTF-8 bytes (ill-formed sequences become U+FFFD, as HarfBuzz reads them).
-pub fn shape_utf8<F: ShapeFontFuncs>(var face&: ShapeFace, var funcs&: F, x_scale: i32, y_scale: i32, text: &[u8]): List<ShapedGlyph> {
+pub fn shape_utf8<F: ShapeFontFuncs>(var face&: ShapeFace, var funcs&: F, x_scale: i32, y_scale: i32, text: &[u8], language: str = default_language()): List<ShapedGlyph> {
   var out: List<ShapedGlyph> = List();
   var buf = Buffer();
   var p = 0usize;
@@ -456,7 +457,7 @@ pub fn shape_utf8<F: ShapeFontFuncs>(var face&: ShapeFace, var funcs&: F, x_scal
   buf.direction = direction;
   buf.enter();
 
-  let pi = plan_index(face, buf.script, buf.direction);
+  let pi = plan_index(face, buf.script, buf.direction, language);
   let scale = Scale::of(x_scale, y_scale, face.upem);
   let plan& = face.plans[pi];
   shape_buffer(plan, face, funcs, scale, buf);

@@ -335,25 +335,14 @@ pub fn select_script(t: &[u8], g&: GsubGpos, tags&: [u32]): (u32, u32, bool) {
   return (kNotFound, 0, false);
 }
 
-// hb_ot_layout_script_select_language with no language tags: 'dflt' if the
-// script has it, else the default language system.
-pub fn select_language(t: &[u8], g&: GsubGpos, script_index: u32): u32 {
+// hb_ot_layout_script_select_language: ordered language tags, then the
+// explicit 'dflt' record, then the Script's default LangSys (NOT_FOUND).
+pub fn select_language(t: &[u8], g&: GsubGpos, script_index: u32, tags&: [u32] = []): u32 {
   let s = script_offset(t, g, script_index);
-  let count = rd16(t, s + 2) as i64;
-  var lo: i64 = 0;
-  var hi: i64 = count - 1;
-  let dflt = 0x64666C74u32;
-  while (lo <= hi) {
-    let mid = (lo + hi) / 2;
-    let v = rd32(t, s + 4 + mid as usize * 6);
-    if (dflt < v) {
-      hi = mid - 1;
-    } else if (dflt > v) {
-      lo = mid + 1;
-    } else {
-      return mid as u32;
-    }
+  for (let tag in tags) {
+    if (let i = find_record(t, s + 2, tag)) { return i; }
   }
+  if (let i = find_record(t, s + 2, 0x64666C74)) { return i; }
   return kNotFound;
 }
 
