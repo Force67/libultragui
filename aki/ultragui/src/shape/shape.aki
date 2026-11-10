@@ -420,7 +420,7 @@ fn shape_buffer<F: ShapeFontFuncs>(plan&: ShapePlan, face&: ShapeFace, var funcs
     // not_found_variation_selector is HB_CODEPOINT_INVALID by default: nothing to do.
   }
   hide_default_ignorables(buf, face);
-  postprocess_glyphs(plan, buf, face);
+  postprocess_glyphs(plan, buf, face, funcs, scale.x_scale);
   buf.direction = target_direction;
 }
 

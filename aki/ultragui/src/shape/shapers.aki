@@ -10,7 +10,11 @@ import {Buffer} from ultragui::shape::buffer;
 import {ShapeFace} from ultragui::shape::face;
 import {MapBuilder, MapTable, OtMap} from ultragui::shape::map;
 import {ShapeFontFuncs} from ultragui::shape::font_funcs;
-import {ShapePlan, kShaperHangul, kShaperHebrew, kShaperThai} from ultragui::shape::plan;
+import {ShapePlan, kShaperArabic, kShaperHangul, kShaperHebrew, kShaperThai} from ultragui::shape::plan;
+import {
+  ArabicPlan, apply_stch, arabic_fallback_shape, collect_features_arabic, kPauseArabicFallback, kPauseRecordStch, plan_arabic,
+  record_stch, reorder_marks_arabic, setup_masks_arabic,
+} from ultragui::shape::shaper_arabic;
 import {
   collect_features_hangul, compose_hebrew, override_features_hangul, preprocess_text_hangul, preprocess_text_thai, reorder_marks_hebrew,
   setup_masks_hangul,
@@ -22,12 +26,17 @@ pub comptime let kPauseClearSubstitutionFlags: u32 = 1;  // _hb_clear_substituti
 
 // What a shaper keeps in its plan (data_create).
 pub struct ShaperData {
+  pub var arabic: ArabicPlan = ArabicPlan {}
 }
 
 // collect_features: whether the shaper has one (it makes the map not simple).
 pub fn collect_features(shaper: u32, var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable, script: u32): bool {
   if (shaper == kShaperHangul) {
     collect_features_hangul(b);
+    return true;
+  }
+  if (shaper == kShaperArabic) {
+    collect_features_arabic(b, gsub, gpos, script);
     return true;
   }
   return false;
@@ -39,7 +48,13 @@ pub fn override_features(shaper: u32, var b&: MapBuilder, gsub&: MapTable, gpos&
   }
 }
 
-pub fn plan_data(shaper: u32, map&: OtMap, face&: ShapeFace, script: u32): ShaperData => ShaperData {};
+pub fn plan_data(shaper: u32, map&: OtMap, face&: ShapeFace, script: u32): ShaperData {
+  var d = ShaperData {};
+  if (shaper == kShaperArabic) {
+    d.arabic = plan_arabic(map, face, script);
+  }
+  return d;
+}
 
 pub fn preprocess_text<F: ShapeFontFuncs>(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace, var funcs&: F) {
   if (plan.shaper == kShaperThai) {
@@ -62,16 +77,23 @@ pub fn compose(plan&: ShapePlan, a: u32, b: u32): (u32?)? {
 pub fn setup_masks(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
   if (plan.shaper == kShaperHangul) {
     setup_masks_hangul(plan, buf);
+  } else if (plan.shaper == kShaperArabic) {
+    setup_masks_arabic(plan.data.arabic, buf, plan.script);
   }
 }
 
 pub fn reorder_marks(plan&: ShapePlan, var buf&: Buffer, start: usize, end: usize) {
   if (plan.shaper == kShaperHebrew) {
     reorder_marks_hebrew(buf, start, end);
+  } else if (plan.shaper == kShaperArabic) {
+    reorder_marks_arabic(buf, start, end);
   }
 }
 
-pub fn postprocess_glyphs(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
+pub fn postprocess_glyphs<F: ShapeFontFuncs>(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace, var funcs&: F, x_scale: i32) {
+  if (plan.shaper == kShaperArabic) {
+    apply_stch(buf, funcs, x_scale);
+  }
 }
 
 // A pause function; true when it may have added glyphs.
@@ -81,6 +103,14 @@ pub fn run_pause(pause: u32, plan&: ShapePlan, var buf&: Buffer, face&: ShapeFac
       g.glyph_props &= ~0x10u32;
     }
     return false;
+  }
+  if (pause == kPauseRecordStch) {
+    record_stch(plan.data.arabic, buf);
+    return false;
+  }
+  if (pause == kPauseArabicFallback) {
+    arabic_fallback_shape(plan.data.arabic, face, buf);
+    return true;
   }
   return false;
 }
