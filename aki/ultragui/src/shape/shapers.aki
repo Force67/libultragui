@@ -9,7 +9,12 @@ module ultragui::shape::shapers;
 import {Buffer} from ultragui::shape::buffer;
 import {ShapeFace} from ultragui::shape::face;
 import {MapBuilder, MapTable, OtMap} from ultragui::shape::map;
-import {ShapePlan} from ultragui::shape::plan;
+import {ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {ShapePlan, kShaperHangul, kShaperHebrew, kShaperThai} from ultragui::shape::plan;
+import {
+  collect_features_hangul, compose_hebrew, override_features_hangul, preprocess_text_hangul, preprocess_text_thai, reorder_marks_hebrew,
+  setup_masks_hangul,
+} from ultragui::shape::shaper_simple;
 
 // Pause functions (hb_ot_map_t::pause_func_t).
 pub comptime let kPauseNone: u32 = 0;
@@ -21,26 +26,49 @@ pub struct ShaperData {
 
 // collect_features: whether the shaper has one (it makes the map not simple).
 pub fn collect_features(shaper: u32, var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable, script: u32): bool {
+  if (shaper == kShaperHangul) {
+    collect_features_hangul(b);
+    return true;
+  }
   return false;
 }
 
 pub fn override_features(shaper: u32, var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable) {
+  if (shaper == kShaperHangul) {
+    override_features_hangul(b);
+  }
 }
 
 pub fn plan_data(shaper: u32, map&: OtMap, face&: ShapeFace, script: u32): ShaperData => ShaperData {};
 
-pub fn preprocess_text(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
+pub fn preprocess_text<F: ShapeFontFuncs>(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace, var funcs&: F) {
+  if (plan.shaper == kShaperThai) {
+    preprocess_text_thai(plan, buf, face);
+  } else if (plan.shaper == kShaperHangul) {
+    preprocess_text_hangul(buf, face, funcs);
+  }
 }
 
 // decompose: none when the shaper has no hook (the Unicode decomposition applies).
 pub fn decompose(plan&: ShapePlan, face&: ShapeFace, ab: u32): ((u32, u32)?)? => none;
 
-pub fn compose(plan&: ShapePlan, a: u32, b: u32): (u32?)? => none;
+pub fn compose(plan&: ShapePlan, a: u32, b: u32): (u32?)? {
+  if (plan.shaper == kShaperHebrew) {
+    return compose_hebrew(plan, a, b);
+  }
+  return none;
+}
 
 pub fn setup_masks(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
+  if (plan.shaper == kShaperHangul) {
+    setup_masks_hangul(plan, buf);
+  }
 }
 
 pub fn reorder_marks(plan&: ShapePlan, var buf&: Buffer, start: usize, end: usize) {
+  if (plan.shaper == kShaperHebrew) {
+    reorder_marks_hebrew(buf, start, end);
+  }
 }
 
 pub fn postprocess_glyphs(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {

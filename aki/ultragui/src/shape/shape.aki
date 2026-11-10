@@ -339,7 +339,7 @@ fn shape_buffer<F: ShapeFontFuncs>(plan&: ShapePlan, face&: ShapeFace, var funcs
   insert_dotted_circle(buf, face);
   form_clusters(buf);
   ensure_native_direction(buf);
-  preprocess_text(plan, buf, face);
+  preprocess_text(plan, buf, face, funcs);
 
   // hb_ot_substitute_pre: hb_ot_substitute_default
   rotate_chars(plan, face, buf, target_direction);

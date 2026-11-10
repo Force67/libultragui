@@ -215,22 +215,23 @@ fn recategorize_combining_class(u: u32, klass_: u32): u32 {
       klass = kCccBelowRight;
     }
   }
+  // HB_MODIFIED_COMBINING_CLASS_CCC* values.
   return match (klass) {
-    10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 20 | 22 => kCccBelow,
-    23 => kCccAttachedAbove,
-    24 => kCccAboveRight,
-    25 | 19 => kCccAboveLeft,
-    26 => kCccAbove,
-    21 => klass,
-    27 | 28 | 30 | 31 | 33 | 34 | 35 | 36 => kCccAbove,
-    29 | 32 => kCccBelow,
-    103 => kCccBelowRight,
-    107 => kCccAboveRight,
-    118 => kCccBelow,
-    122 => kCccAbove,
-    129 => kCccBelow,
-    130 => kCccAbove,
-    132 => kCccBelow,
+    22 | 15 | 16 | 17 | 23 | 18 | 19 | 20 | 21 | 24 | 25 => kCccBelow,  // CCC10..18, CCC20, CCC22
+    13 => kCccAttachedAbove,                                     // CCC23 rafe
+    10 => kCccAboveRight,                                        // CCC24 shin dot
+    11 | 14 => kCccAboveLeft,                                    // CCC25 sin dot, CCC19 holam
+    26 => kCccAbove,                                             // CCC26 point varika
+    12 => klass,                                                 // CCC21 dagesh
+    28 | 29 | 31 | 32 | 27 | 34 | 35 | 36 => kCccAbove,          // CCC27, 28, 30, 31, 33, 34, 35, 36
+    30 | 33 => kCccBelow,                                        // CCC29 kasratan, CCC32 kasra
+    3 => kCccBelowRight,                                         // CCC103 sara u / uu
+    107 => kCccAboveRight,                                       // CCC107 mai
+    118 => kCccBelow,                                            // CCC118 sign u / uu
+    122 => kCccAbove,                                            // CCC122 mai
+    129 => kCccBelow,                                            // CCC129 sign aa
+    132 => kCccAbove,                                            // CCC130 sign i
+    131 => kCccBelow,                                            // CCC132 sign u
     _ => klass,
   };
 }
