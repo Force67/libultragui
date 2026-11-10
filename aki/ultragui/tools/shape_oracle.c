@@ -23,6 +23,7 @@
 #include <hb.h>
 #include <hb-ft.h>
 #include <hb-ot.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,8 +36,53 @@ static int hexval(int c)
   return -1;
 }
 
+/* Independent language/tag oracle. Each row: length, hb_script_t, hex bytes.
+ * Prints canonical bytes and the ordered script/language tags. */
+static int languages(const char *path)
+{
+  FILE *in = fopen(path, "rb");
+  if (!in) return 1;
+  char *line = NULL;
+  size_t cap = 0;
+  while (getline(&line, &cap, in) >= 0) {
+    char *end;
+    int length = strtol(line, &end, 10);
+    unsigned script = strtoul(end, &end, 10);
+    while (*end == ' ') end++;
+    size_t n = strcspn(end, "\r\n");
+    char *raw = calloc(n / 2 + 1, 1);
+    for (size_t i = 0; i + 1 < n; i += 2)
+      raw[i / 2] = (char) (hexval(end[i]) * 16 + hexval(end[i + 1]));
+    hb_language_t lang = hb_language_from_string(raw, length);
+    const char *canon = hb_language_to_string(lang);
+    size_t len = canon ? strlen(canon) : 0;
+    printf("%zu", len);
+    for (size_t i = 0; i < len; i++) printf(" %u", (unsigned char) canon[i]);
+    unsigned sn = 3, ln = 3;
+    hb_tag_t st[3], lt[3];
+    hb_ot_tags_from_script_and_language((hb_script_t) script, lang, &sn, st, &ln, lt);
+    printf(" %u", sn);
+    for (unsigned i = 0; i < sn; i++) printf(" %u", st[i]);
+    printf(" %u", ln);
+    for (unsigned i = 0; i < ln; i++) printf(" %u", lt[i]);
+    printf("\n");
+    free(raw);
+  }
+  free(line);
+  fclose(in);
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
+  if (argc == 3 && !strcmp(argv[1], "--languages")) return languages(argv[2]);
+  const char *requested = getenv("SHAPE_LOCALE");
+  hb_language_t language = HB_LANGUAGE_INVALID;
+  int locale_ok = requested && setlocale(LC_CTYPE, requested);
+  if (requested && !locale_ok) language = hb_language_from_string(requested, -1);
+  if (!language) language = hb_language_get_default();
+  const char *canonical = hb_language_to_string(language);
+  printf("L %d %s\n", locale_ok, canonical && *canonical ? canonical : "-");
   if (argc < 4) {
     fprintf(stderr, "usage: %s FONT STRINGS SIZE...\n", argv[0]);
     return 2;
@@ -84,6 +130,7 @@ int main(int argc, char **argv)
       /* Which shaper runs: plan a buffer like the first string's. */
       hb_buffer_t *buf = hb_buffer_create();
       if (count) hb_buffer_add_utf8(buf, strings[0], lengths[0], 0, lengths[0]);
+      hb_buffer_set_language(buf, language);
       hb_buffer_guess_segment_properties(buf);
       hb_segment_properties_t props;
       hb_buffer_get_segment_properties(buf, &props);
@@ -100,6 +147,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < count; i++) {
       hb_buffer_t *buf = hb_buffer_create();
       hb_buffer_add_utf8(buf, strings[i], lengths[i], 0, lengths[i]);
+      hb_buffer_set_language(buf, language);
       hb_buffer_guess_segment_properties(buf);
       hb_shape(font, buf, NULL, 0);
       unsigned n = 0;

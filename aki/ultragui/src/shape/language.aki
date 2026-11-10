@@ -23,11 +23,13 @@ fn at(s: str, i: usize): u8 => i < #s ? s[i] as u8 : 0;
 // A nonnegative explicit length has hb_language_from_string's 63-byte cap.
 // Locale names are NUL terminated (length -1): '.', '@', non-ASCII and every
 // byte outside [A-Za-z0-9_-] terminate; '_' becomes '-', ASCII becomes lower.
-pub fn from_string(s: str, length: i32 = -1): String {
+pub fn from_string(s: str, length: i32 = -1): String => from_bytes(s as &[u8], length);
+
+pub fn from_bytes(s: &[u8], length: i32 = -1): String {
   var out = String();
   let n = length < 0 ? #s : min(#s, min(length as usize, 63usize));
   for (let i in 0..n) {
-    let c = at(s, i);
+    let c = s[i];
     if (alnum(c) || c == 45 || c == 95) {
       out.push_c8((c == 95 ? 45u8 : lower(c)) as c8);
     } else {
