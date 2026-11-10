@@ -976,6 +976,7 @@ calls FT_Get_MM_Var, which gives FreeType a blend: GETINFO bit 10 and
 GETVARIATION would then answer; only the autohinted Ubuntu faces are variable
 here). FreeType's `.notdef` name check of tt_check_single_notdef reads only
 index 0. WOFF/WOFF2 and Type 1 wrappers are not opened.
+
 ### The shaper — `ultragui::shape`
 
 The C++ library shapes with HarfBuzz on an hb_ft font. `ultragui::shape` is
