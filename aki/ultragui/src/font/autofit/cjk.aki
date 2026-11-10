@@ -1,0 +1,819 @@
+// The CJK writing system (FreeType 2.14.3 afcjk.c): style metrics (standard
+// widths, horizontal and vertical blue zones, digit widths), their scaling,
+// and the normal-target glyph fitting: CJK segment rounding, linking and
+// serifs, edges, blue edges, stem fitting (af_hint_normal_stem), the
+// lowercase-m symmetry, serif and remaining edges, and moving the edge
+// points by their edge's shift. Hani is every face's fallback style, so
+// every autohinted face needs this.
+//
+// Only the normal target is implemented (stems adjusted, no snapping, not
+// monochrome); `hints` carries the normal-target flags implicitly.
+
+module ultragui::font::autofit::cjk;
+
+import {List} from akikit::containers::list;
+import {Face} from ultragui::font::face;
+import {div_fix, mul_div, mul_fix, pix_floor, pix_round} from ultragui::font::fixed;
+import {Outline} from ultragui::font::outline;
+import {Edge, Hints, abs, kControl, kDone, kNone, kRound, kSerif, kTouchX, kTouchY} from ultragui::font::autofit::hints;
+import {attach, compute_segments, insert_edge} from ultragui::font::autofit::features;
+import {LatinMetrics, Width} from ultragui::font::autofit::metrics;
+import {AfShaper, clusters} from ultragui::font::autofit::shaper;
+import {design_outline, standard_glyph, style_blue_strings, style_feature, style_script} from ultragui::font::autofit::style;
+
+pub comptime let kCjkBlueActive: u32 = 1;
+pub comptime let kCjkBlueTop: u32 = 2;
+
+pub struct CjkBlue : Copy {
+  pub var reference: Width = Width {}
+  pub var shoot: Width = Width {}
+  pub var flags: u32 = 0
+}
+
+pub struct CjkAxis {
+  pub var scale: i64 = 0
+  pub var delta: i64 = 0
+  pub var widths: List<Width> = List()
+  pub var edge_distance: i64 = 0
+  pub var standard_width: i64 = 0
+  pub var extra_light: bool = false
+  pub var blues: List<CjkBlue> = List()
+  pub var org_scale: i64 = 0
+  pub var org_delta: i64 = 0
+}
+
+pub struct CjkMetrics {
+  pub var units_per_em: i64 = 2048
+  pub var axis: [CjkAxis; 2] = [CjkAxis {}, CjkAxis {}]
+  pub var digits_same_width: bool = false
+
+  // af_cjk_metrics_init (`unicode`: FT_Select_Charmap(UNICODE) succeeds).
+  pub fn init(var face&: Face, var shaper&: AfShaper, style: u32, unicode: bool): CjkMetrics;
+  // af_cjk_metrics_scale
+  pub fn scale(var self&, x_scale: i64, y_scale: i64, x_delta: i64, y_delta: i64);
+}
+
+// af_sort_pos
+pub fn sort_pos(var table&: List<i64>) {
+  let count = table.len();
+  for (let i in 1..count) {
+    var j = i;
+    while (j > 0) {
+      if (table[j] > table[j - 1]) {
+        break;
+      }
+      let swap = table[j];
+      table[j] = table[j - 1];
+      table[j - 1] = swap;
+      j -= 1;
+    }
+  }
+}
+
+fn init_blues(var m&: CjkMetrics, var face&: Face, var shaper&: AfShaper, style: u32) {
+  let feature = style_feature(style);
+  for (let bs in style_blue_strings(style)) {
+    let dim: usize = (bs.properties & 2) != 0 ? 0 : 1;
+    let top = (bs.properties & 1) != 0;
+    var fills: List<i64> = List();
+    var flats: List<i64> = List();
+    var fill = true;
+    let s = bs.chars;
+    for (let (a, b) in clusters(s)) {
+      if (s[a] == 124) {  // '|': switch to the flat values
+        fill = false;
+        if (b > a + 1) {
+          // The rest of this run is the next cluster.
+          shape_blue(m, face, shaper, s[a + 1..b], feature, dim, top, fill, fills, flats);
+        }
+        continue;
+      }
+      shape_blue(m, face, shaper, s[a..b], feature, dim, top, fill, fills, flats);
+    }
+    if (flats.len() == 0 && fills.len() == 0) {
+      continue;
+    }
+    sort_pos(fills);
+    sort_pos(flats);
+    var blue = CjkBlue {};
+    if (flats.len() == 0) {
+      blue.reference.org = fills[fills.len() / 2];
+      blue.shoot.org = blue.reference.org;
+    } else if (fills.len() == 0) {
+      blue.reference.org = flats[flats.len() / 2];
+      blue.shoot.org = blue.reference.org;
+    } else {
+      blue.reference.org = fills[fills.len() / 2];
+      blue.shoot.org = flats[flats.len() / 2];
+    }
+    if (blue.shoot.org != blue.reference.org) {
+      let reference = blue.reference.org;
+      let shoot = blue.shoot.org;
+      let under_ref = shoot < reference;
+      if (top != under_ref) {
+        blue.reference.org = (shoot + reference) / 2;
+        blue.shoot.org = blue.reference.org;
+      }
+    }
+    if (top) {
+      blue.flags |= kCjkBlueTop;
+    }
+    m.axis[dim].blues.push(blue);
+  }
+}
+
+fn shape_blue(m&: CjkMetrics, var face&: Face, var shaper&: AfShaper, text: &[u8], feature: u32, dim: usize, top: bool, fill: bool,
+              var fills&: List<i64>, var flats&: List<i64>) {
+  let glyphs = shaper.get_cluster(text, feature);
+  if (glyphs.len() > 1) {
+    return;
+  }
+  let gid = glyphs.len() == 1 ? glyphs[0].glyph_id : 0;
+  if (gid == 0) {
+    return;
+  }
+  let o = design_outline(face, gid) else {
+    return;
+  };
+  if (o.points.len() <= 2) {
+    return;
+  }
+  var best_point: i64 = -1;
+  var best_pos: i64 = 0;
+  var first: usize = 0;
+  for (let c in o.contours) {
+    let last = c as usize;
+    let begin = first;
+    first = last + 1;
+    if (last <= begin) {
+      continue;
+    }
+    for (let pp in begin..last + 1) {
+      let v = dim == 0 ? o.points[pp].x : o.points[pp].y;
+      if (best_point < 0 || (top ? v > best_pos : v < best_pos)) {
+        best_point = pp as i64;
+        best_pos = v;
+      }
+    }
+  }
+  if (fill) {
+    fills.push(best_pos);
+  } else {
+    flats.push(best_pos);
+  }
+}
+
+fn check_digits(var m&: CjkMetrics, var shaper&: AfShaper, style: u32) {
+  let feature = style_feature(style);
+  let digits = "0 1 2 3 4 5 6 7 8 9" as &[u8];
+  var started = false;
+  var same_width = true;
+  var old_advance: i64 = 0;
+  for (let (a, b) in clusters(digits)) {
+    let glyphs = shaper.get_cluster(digits[a..b], feature);
+    if (glyphs.len() > 1 || glyphs.len() == 0 || glyphs[0].glyph_id == 0) {
+      continue;
+    }
+    let advance = glyphs[0].x_advance as i64;
+    if (started) {
+      if (advance != old_advance) {
+        same_width = false;
+        break;
+      }
+    } else {
+      old_advance = advance;
+      started = true;
+    }
+  }
+  m.digits_same_width = same_width;
+}
+
+fn CjkMetrics::init(var face&: Face, var shaper&: AfShaper, style: u32, unicode: bool): CjkMetrics {
+  var m = CjkMetrics { units_per_em: face.units_per_em as i64 };
+  if (!unicode) {
+    return m;
+  }
+  // af_cjk_metrics_init_widths: Latin's segment linking on the standard glyph.
+  var lm = LatinMetrics { units_per_em: m.units_per_em };
+  var outline = Outline {};
+  let gid = standard_glyph(shaper, style_script(style), style_feature(style));
+  if (gid != 0) {
+    if (let o = design_outline(face, gid)) {
+      if (o.points.len() > 0) {
+        outline = o;
+      }
+    }
+  }
+  lm.init_widths(outline);
+  for (let dim in 0usize..2) {
+    for (let w in lm.axis[dim].widths) {
+      m.axis[dim].widths.push(w);
+    }
+    m.axis[dim].standard_width = lm.axis[dim].standard_width;
+    m.axis[dim].edge_distance = lm.axis[dim].edge_distance;
+    m.axis[dim].extra_light = false;
+  }
+  init_blues(m, face, shaper, style);
+  check_digits(m, shaper, style);
+  return m;
+}
+
+fn scale_dim(var a&: CjkAxis, scale: i64, delta: i64) {
+  if (a.org_scale == scale && a.org_delta == delta) {
+    return;
+  }
+  a.org_scale = scale;
+  a.org_delta = delta;
+  a.scale = scale;
+  a.delta = delta;
+  for (var blue& in a.blues) {
+    blue.reference.cur = mul_fix(blue.reference.org, scale) + delta;
+    blue.reference.fit = blue.reference.cur;
+    blue.shoot.cur = mul_fix(blue.shoot.org, scale) + delta;
+    blue.shoot.fit = blue.shoot.cur;
+    blue.flags &= ~kCjkBlueActive;
+    let dist = mul_fix(blue.reference.org - blue.shoot.org, scale);
+    if (dist <= 48 && dist >= -48) {
+      blue.reference.fit = pix_round(blue.reference.cur);
+      let delta1 = div_fix(blue.reference.fit, scale) - blue.shoot.org;
+      var delta2 = delta1 < 0 ? -delta1 : delta1;
+      delta2 = mul_fix(delta2, scale);
+      delta2 = delta2 < 32 ? 0 : pix_round(delta2);
+      if (delta1 < 0) {
+        delta2 = -delta2;
+      }
+      blue.shoot.fit = blue.reference.fit - delta2;
+      blue.flags |= kCjkBlueActive;
+    }
+  }
+}
+
+fn CjkMetrics::scale(var self&, x_scale: i64, y_scale: i64, x_delta: i64, y_delta: i64) {
+  scale_dim(self.axis[0], x_scale, x_delta);
+  scale_dim(self.axis[1], y_scale, y_delta);
+}
+
+// --- Glyph analysis -------------------------------------------------------------------
+
+fn seg_dist(a: i64, b: i64): i64 => a > b ? a - b : b - a;
+
+// af_cjk_hints_compute_segments: Latin's segments, round when no two
+// successive points are on the curve.
+fn cjk_segments(var h&: Hints, dim: usize) {
+  compute_segments(h, dim);
+  for (let i in 0..h.axis[dim].segments.len()) {
+    var pt = h.axis[dim].segments[i].first;
+    let last = h.axis[dim].segments[i].last;
+    var f0 = h.points[pt].flags & kControl;
+    h.axis[dim].segments[i].flags &= ~kRound;
+    while (pt != last) {
+      pt = h.points[pt].next;
+      let f1 = h.points[pt].flags & kControl;
+      if (f0 == 0 && f1 == 0) {
+        break;
+      }
+      if (pt == last) {
+        h.axis[dim].segments[i].flags |= kRound;
+      }
+      f0 = f1;
+    }
+  }
+}
+
+fn cjk_link_segments(var h&: Hints, dim: usize) {
+  let count = h.axis[dim].segments.len();
+  let major = h.axis[dim].major_dir;
+  let len_threshold = 8 * h.units_per_em / 2048;
+  let dist_threshold = div_fix(64 * 3, dim == 0 ? h.x_scale : h.y_scale);
+  for (let i in 0..count) {
+    if (h.axis[dim].segments[i].dir != major) {
+      continue;
+    }
+    for (let j in 0..count) {
+      if (j == i || h.axis[dim].segments[i].dir + h.axis[dim].segments[j].dir != 0) {
+        continue;
+      }
+      let s1 = h.axis[dim].segments[i];
+      let s2 = h.axis[dim].segments[j];
+      let dist = s2.pos - s1.pos;
+      if (dist < 0) {
+        continue;
+      }
+      let lo = s1.min_coord < s2.min_coord ? s2.min_coord : s1.min_coord;
+      let hi = s1.max_coord > s2.max_coord ? s2.max_coord : s1.max_coord;
+      let len = hi - lo;
+      if (len >= len_threshold) {
+        if (dist * 8 < s1.score * 9 && (dist * 8 < s1.score * 7 || s1.len < len)) {
+          h.axis[dim].segments[i].score = dist;
+          h.axis[dim].segments[i].len = len;
+          h.axis[dim].segments[i].link = j;
+        }
+        let t2 = h.axis[dim].segments[j];
+        if (dist * 8 < t2.score * 9 && (dist * 8 < t2.score * 7 || t2.len < len)) {
+          h.axis[dim].segments[j].score = dist;
+          h.axis[dim].segments[j].len = len;
+          h.axis[dim].segments[j].link = i;
+        }
+      }
+    }
+  }
+  // Serifs: strokes wider at their ends.
+  for (let i in 0..count) {
+    let link1 = h.axis[dim].segments[i].link;
+    if (link1 == kNone || h.axis[dim].segments[link1].link != i || h.axis[dim].segments[link1].pos <= h.axis[dim].segments[i].pos) {
+      continue;
+    }
+    if (h.axis[dim].segments[i].score >= dist_threshold) {
+      continue;
+    }
+    for (let j in 0..count) {
+      let s1 = h.axis[dim].segments[i];
+      let s2 = h.axis[dim].segments[j];
+      if (s2.pos > s1.pos || i == j) {
+        continue;
+      }
+      let link2 = s2.link;
+      if (link2 == kNone || h.axis[dim].segments[link2].link != j || h.axis[dim].segments[link2].pos < h.axis[dim].segments[link1].pos) {
+        continue;
+      }
+      if (s1.pos == s2.pos && h.axis[dim].segments[link1].pos == h.axis[dim].segments[link2].pos) {
+        continue;
+      }
+      if (s2.score <= s1.score || s1.score * 4 <= s2.score) {
+        continue;
+      }
+      if (s1.len >= s2.len * 3) {
+        for (let k in 0..count) {
+          let link = h.axis[dim].segments[k].link;
+          if (link == j) {
+            h.axis[dim].segments[k].link = kNone;
+            h.axis[dim].segments[k].serif = link1;
+          } else if (link == link2) {
+            h.axis[dim].segments[k].link = kNone;
+            h.axis[dim].segments[k].serif = i;
+          }
+        }
+      } else {
+        h.axis[dim].segments[i].link = kNone;
+        h.axis[dim].segments[link1].link = kNone;
+        break;
+      }
+    }
+  }
+  for (let i in 0..count) {
+    let j = h.axis[dim].segments[i].link;
+    if (j != kNone && h.axis[dim].segments[j].link != i) {
+      h.axis[dim].segments[i].link = kNone;
+      if (h.axis[dim].segments[j].score < dist_threshold || h.axis[dim].segments[i].score < h.axis[dim].segments[j].score * 4) {
+        h.axis[dim].segments[i].serif = h.axis[dim].segments[j].link;
+      }
+    }
+  }
+}
+
+fn cjk_compute_edges(var h&: Hints, m&: CjkMetrics, dim: usize) {
+  let scale = dim == 0 ? h.x_scale : h.y_scale;
+  var threshold = mul_fix(m.axis[dim].edge_distance, scale);
+  threshold = threshold > 64 / 4 ? div_fix(64 / 4, scale) : m.axis[dim].edge_distance;
+  h.axis[dim].edges.clear();
+  let count = h.axis[dim].segments.len();
+  for (let i in 0..count) {
+    let seg = h.axis[dim].segments[i];
+    var found = kNone;
+    var best: i64 = 0xFFFF;
+    for (let e in 0..h.axis[dim].edges.len()) {
+      let edge = h.axis[dim].edges[e];
+      if (edge.dir != seg.dir) {
+        continue;
+      }
+      let dist = abs(seg.pos - edge.fpos);
+      if (dist < threshold && dist < best) {
+        if (seg.link != kNone) {
+          let link_pos = h.axis[dim].segments[seg.link].pos;
+          var s1 = edge.first;
+          var dist2: i64 = 0;
+          while (true) {
+            let link1 = h.axis[dim].segments[s1].link;
+            if (link1 != kNone) {
+              dist2 = seg_dist(link_pos, h.axis[dim].segments[link1].pos);
+              if (dist2 >= threshold) {
+                break;
+              }
+            }
+            s1 = h.axis[dim].segments[s1].edge_next;
+            if (s1 == edge.first) {
+              break;
+            }
+          }
+          if (dist2 >= threshold) {
+            continue;
+          }
+        }
+        best = dist;
+        found = e;
+      }
+    }
+    if (found == kNone) {
+      let opos = mul_fix(seg.pos, scale);
+      let _ = insert_edge(h.axis[dim], Edge { first: i, last: i, dir: seg.dir, fpos: seg.pos, opos, pos: opos }, false);
+      h.axis[dim].segments[i].edge_next = i;
+    } else {
+      attach(h.axis[dim], found, i);
+    }
+  }
+  for (let e in 0..h.axis[dim].edges.len()) {
+    let first = h.axis[dim].edges[e].first;
+    var s = first;
+    while (true) {
+      h.axis[dim].segments[s].edge = e;
+      s = h.axis[dim].segments[s].edge_next;
+      if (s == first) {
+        break;
+      }
+    }
+  }
+  for (let e in 0..h.axis[dim].edges.len()) {
+    var is_round: i64 = 0;
+    var is_straight: i64 = 0;
+    let first = h.axis[dim].edges[e].first;
+    var s = first;
+    while (true) {
+      let seg = h.axis[dim].segments[s];
+      if ((seg.flags & kRound) != 0) {
+        is_round += 1;
+      } else {
+        is_straight += 1;
+      }
+      let is_serif = seg.serif != kNone && h.axis[dim].segments[seg.serif].edge != e;
+      if (seg.link != kNone || is_serif) {
+        var edge2 = h.axis[dim].edges[e].link;
+        var seg2 = seg.link;
+        if (is_serif) {
+          seg2 = seg.serif;
+          edge2 = h.axis[dim].edges[e].serif;
+        }
+        if (edge2 != kNone) {
+          let edge_delta = abs(h.axis[dim].edges[e].fpos - h.axis[dim].edges[edge2].fpos);
+          let seg_delta = seg_dist(seg.pos, h.axis[dim].segments[seg2].pos);
+          if (seg_delta < edge_delta) {
+            edge2 = h.axis[dim].segments[seg2].edge;
+          }
+        } else {
+          edge2 = h.axis[dim].segments[seg2].edge;
+        }
+        if (is_serif) {
+          h.axis[dim].edges[e].serif = edge2;
+          h.axis[dim].edges[edge2].flags |= kSerif;
+        } else {
+          h.axis[dim].edges[e].link = edge2;
+        }
+      }
+      s = seg.edge_next;
+      if (s == first) {
+        break;
+      }
+    }
+    h.axis[dim].edges[e].flags = is_round > 0 && is_round >= is_straight ? kRound : 0;
+    if (h.axis[dim].edges[e].serif != kNone && h.axis[dim].edges[e].link != kNone) {
+      h.axis[dim].edges[e].serif = kNone;
+    }
+  }
+}
+
+fn cjk_blue_edges(var h&: Hints, m&: CjkMetrics, dim: usize) {
+  let a& = m.axis[dim];
+  var best0 = mul_fix(m.units_per_em / 40, a.scale);
+  if (best0 > 64 / 2) {
+    best0 = 64 / 2;
+  }
+  let major = h.axis[dim].major_dir;
+  for (var e& in h.axis[dim].edges) {
+    var best_blue = kNone;
+    var best_shoot = false;
+    var best_dist = best0;
+    for (let bb in 0..a.blues.len()) {
+      let blue = a.blues[bb];
+      if ((blue.flags & kCjkBlueActive) == 0) {
+        continue;
+      }
+      let is_top_right = (blue.flags & kCjkBlueTop) != 0;
+      let is_major = e.dir == major;
+      if (is_top_right != is_major) {
+        let shoot = abs(e.fpos - blue.reference.org) > abs(e.fpos - blue.shoot.org);
+        let org = shoot ? blue.shoot.org : blue.reference.org;
+        let dist = mul_fix(abs(e.fpos - org), a.scale);
+        if (dist < best_dist) {
+          best_dist = dist;
+          best_blue = bb;
+          best_shoot = shoot;
+        }
+      }
+    }
+    if (best_blue != kNone) {
+      e.blue = best_blue;
+      e.blue_shoot = best_shoot;
+    }
+  }
+}
+
+// --- Grid fitting ---------------------------------------------------------------------
+
+// af_cjk_compute_stem_width, normal target (stems adjusted, not snapped).
+fn stem_width(m&: CjkMetrics, dim: usize, width: i64): i64 {
+  var dist = width;
+  var sign = false;
+  if (dist < 0) {
+    dist = -width;
+    sign = true;
+  }
+  let a& = m.axis[dim];
+  if (a.widths.len() > 0 && abs(dist - a.widths[0].cur) < 40) {
+    dist = a.widths[0].cur;
+    if (dist < 48) {
+      dist = 48;
+    }
+  } else if (dist < 54) {
+    dist += (54 - dist) / 2;
+  } else if (dist < 3 * 64) {
+    let delta = dist & 63;
+    dist &= -64;
+    if (delta < 10) {
+      dist += delta;
+    } else if (delta < 22) {
+      dist += 10;
+    } else if (delta < 42) {
+      dist += delta;
+    } else if (delta < 54) {
+      dist += 54;
+    } else {
+      dist += delta;
+    }
+  }
+  return sign ? -dist : dist;
+}
+
+fn blue_fit(m&: CjkMetrics, dim: usize, e: Edge): i64 {
+  let b = m.axis[dim].blues[e.blue];
+  return e.blue_shoot ? b.shoot.fit : b.reference.fit;
+}
+
+fn align_linked(var h&: Hints, m&: CjkMetrics, dim: usize, base: usize, stem: usize) {
+  let dist = h.axis[dim].edges[stem].opos - h.axis[dim].edges[base].opos;
+  h.axis[dim].edges[stem].pos = h.axis[dim].edges[base].pos + stem_width(m, dim, dist);
+}
+
+// af_hint_normal_stem (stems adjusted: threshold 64).
+fn hint_normal_stem(var h&: Hints, m&: CjkMetrics, e1: usize, e2: usize, anchor: i64, dim: usize): i64 {
+  let threshold: i64 = 64;
+  let edge = h.axis[dim].edges[e1];
+  let edge2 = h.axis[dim].edges[e2];
+  let org_len = edge2.opos - edge.opos;
+  let cur_len = stem_width(m, dim, org_len);
+  let org_center = (edge.opos + edge2.opos) / 2 + anchor;
+  var cur_pos1 = org_center - cur_len / 2;
+  let cur_pos2 = cur_pos1 + cur_len;
+  var d_off1 = cur_pos1 - pix_floor(cur_pos1);
+  var d_off2 = cur_pos2 - pix_floor(cur_pos2);
+  var u_off1 = 64 - d_off1;
+  var u_off2 = 64 - d_off2;
+  var delta: i64 = 0;
+  while (true) {
+    if (d_off1 == 0 || d_off2 == 0) {
+      break;
+    }
+    if (cur_len <= threshold) {
+      if (d_off2 < cur_len) {
+        delta = u_off1 <= d_off2 ? u_off1 : -d_off2;
+      }
+      break;
+    }
+    var offset = cur_len & 63;
+    if (offset < 32) {
+      if (u_off1 <= offset || d_off2 <= offset) {
+        break;
+      }
+    } else {
+      offset = 64 - threshold;
+    }
+    d_off1 = threshold - u_off1;
+    u_off1 = u_off1 - offset;
+    u_off2 = threshold - d_off2;
+    d_off2 = d_off2 - offset;
+    if (d_off1 <= u_off1) {
+      u_off1 = -d_off1;
+    }
+    if (d_off2 <= u_off2) {
+      u_off2 = -d_off2;
+    }
+    delta = abs(u_off1) <= abs(u_off2) ? u_off1 : u_off2;
+    break;
+  }
+  cur_pos1 += delta;
+  if (edge.opos < edge2.opos) {
+    h.axis[dim].edges[e1].pos = cur_pos1;
+    h.axis[dim].edges[e2].pos = cur_pos1 + cur_len;
+  } else {
+    h.axis[dim].edges[e1].pos = cur_pos1 + cur_len;
+    h.axis[dim].edges[e2].pos = cur_pos1;
+  }
+  return delta;
+}
+
+fn cjk_hint_edges(var h&: Hints, m&: CjkMetrics, dim: usize) {
+  let count = h.axis[dim].edges.len();
+  var anchor = kNone;
+  var delta: i64 = 0;
+  var skipped: i64 = 0;
+  var has_last_stem = false;
+  var last_stem_pos: i64 = 0;
+  // Stems relative to the blue zones.
+  for (let i in 0..count) {
+    let e = h.axis[dim].edges[i];
+    if ((e.flags & kDone) != 0) {
+      continue;
+    }
+    var edge1 = kNone;
+    var edge2 = e.link;
+    if (e.blue != kNone) {
+      edge1 = i;
+    } else if (edge2 != kNone && h.axis[dim].edges[edge2].blue != kNone) {
+      edge1 = edge2;
+      edge2 = i;
+    }
+    if (edge1 == kNone) {
+      continue;
+    }
+    h.axis[dim].edges[edge1].pos = blue_fit(m, dim, h.axis[dim].edges[edge1]);
+    h.axis[dim].edges[edge1].flags |= kDone;
+    if (edge2 != kNone && h.axis[dim].edges[edge2].blue == kNone) {
+      align_linked(h, m, dim, edge1, edge2);
+      h.axis[dim].edges[edge2].flags |= kDone;
+    }
+    if (anchor == kNone) {
+      anchor = i;
+    }
+  }
+  // The stems.
+  for (let i in 0..count) {
+    if ((h.axis[dim].edges[i].flags & kDone) != 0) {
+      continue;
+    }
+    let edge2 = h.axis[dim].edges[i].link;
+    if (edge2 == kNone) {
+      skipped += 1;
+      continue;
+    }
+    if (has_last_stem && (h.axis[dim].edges[i].pos < last_stem_pos + 64 || h.axis[dim].edges[edge2].pos < last_stem_pos + 64)) {
+      skipped += 1;
+      continue;
+    }
+    if (h.axis[dim].edges[edge2].blue != kNone) {
+      align_linked(h, m, dim, edge2, i);
+      h.axis[dim].edges[i].flags |= kDone;
+      continue;
+    }
+    if (edge2 < i) {
+      align_linked(h, m, dim, edge2, i);
+      h.axis[dim].edges[i].flags |= kDone;
+      has_last_stem = true;
+      last_stem_pos = h.axis[dim].edges[i].pos;
+      continue;
+    }
+    if (dim != 1 && anchor == kNone) {
+      delta = hint_normal_stem(h, m, i, edge2, 0, 0);
+    } else {
+      let _ = hint_normal_stem(h, m, i, edge2, delta, dim);
+    }
+    anchor = i;
+    h.axis[dim].edges[i].flags |= kDone;
+    h.axis[dim].edges[edge2].flags |= kDone;
+    has_last_stem = true;
+    last_stem_pos = h.axis[dim].edges[edge2].pos;
+  }
+  // Lowercase m symmetry.
+  if (dim == 0 && (count == 6 || count == 12)) {
+    let i1: usize = count == 6 ? 0 : 1;
+    let i2: usize = count == 6 ? 2 : 5;
+    let i3: usize = count == 6 ? 4 : 9;
+    let e1 = h.axis[dim].edges[i1];
+    let e2 = h.axis[dim].edges[i2];
+    let e3 = h.axis[dim].edges[i3];
+    let dist1 = e2.opos - e1.opos;
+    let dist2 = e3.opos - e2.opos;
+    let span = abs(dist1 - dist2);
+    if (e1.link == i1 + 1 && e2.link == i2 + 1 && e3.link == i3 + 1 && span < 8) {
+      delta = e3.pos - (2 * e2.pos - e1.pos);
+      h.axis[dim].edges[i3].pos -= delta;
+      if (e3.link != kNone) {
+        h.axis[dim].edges[e3.link].pos -= delta;
+      }
+      if (count == 12) {
+        h.axis[dim].edges[8].pos -= delta;
+        h.axis[dim].edges[11].pos -= delta;
+      }
+      h.axis[dim].edges[i3].flags |= kDone;
+      if (e3.link != kNone) {
+        h.axis[dim].edges[e3.link].flags |= kDone;
+      }
+    }
+  }
+  if (skipped == 0) {
+    return;
+  }
+  // Serifs, then the remaining edges.
+  for (let i in 0..count) {
+    let e = h.axis[dim].edges[i];
+    if ((e.flags & kDone) != 0) {
+      continue;
+    }
+    if (e.serif != kNone) {
+      let base = h.axis[dim].edges[e.serif];
+      h.axis[dim].edges[i].pos = base.pos + (e.opos - base.opos);
+      h.axis[dim].edges[i].flags |= kDone;
+      skipped -= 1;
+    }
+  }
+  if (skipped == 0) {
+    return;
+  }
+  for (let i in 0..count) {
+    let e = h.axis[dim].edges[i];
+    if ((e.flags & kDone) != 0) {
+      continue;
+    }
+    var before: i64 = i as i64 - 1;
+    while (before >= 0 && (h.axis[dim].edges[before as usize].flags & kDone) == 0) {
+      before -= 1;
+    }
+    var after = i + 1;
+    while (after < count && (h.axis[dim].edges[after].flags & kDone) == 0) {
+      after += 1;
+    }
+    if (before >= 0 || after < count) {
+      if (before < 0) {
+        let base = h.axis[dim].edges[after];
+        h.axis[dim].edges[i].pos = base.pos + (e.opos - base.opos);
+      } else if (after >= count) {
+        let base = h.axis[dim].edges[before as usize];
+        h.axis[dim].edges[i].pos = base.pos + (e.opos - base.opos);
+      } else {
+        let b = h.axis[dim].edges[before as usize];
+        let a = h.axis[dim].edges[after];
+        h.axis[dim].edges[i].pos = a.fpos == b.fpos ? b.pos : b.pos + mul_div(e.fpos - b.fpos, a.pos - b.pos, a.fpos - b.fpos);
+      }
+    }
+  }
+}
+
+// af_cjk_align_edge_points without snapping: the points move with their edge.
+fn cjk_align_edge_points(var h&: Hints, dim: usize) {
+  for (let e in 0..h.axis[dim].edges.len()) {
+    let edge = h.axis[dim].edges[e];
+    let delta = edge.pos - edge.opos;
+    var s = edge.first;
+    while (true) {
+      let seg = h.axis[dim].segments[s];
+      var point = seg.first;
+      while (true) {
+        if (dim == 0) {
+          h.points[point].x += delta;
+          h.points[point].flags |= kTouchX;
+        } else {
+          h.points[point].y += delta;
+          h.points[point].flags |= kTouchY;
+        }
+        if (point == seg.last) {
+          break;
+        }
+        point = h.points[point].next;
+      }
+      s = seg.edge_next;
+      if (s == edge.first) {
+        break;
+      }
+    }
+  }
+}
+
+// af_cjk_hints_init + af_cjk_hints_apply for the normal target.
+pub fn apply_cjk(var h&: Hints, m&: CjkMetrics, var outline&: Outline) {
+  h.units_per_em = m.units_per_em;
+  h.x_scale = m.axis[0].scale;
+  h.x_delta = m.axis[0].delta;
+  h.y_scale = m.axis[1].scale;
+  h.y_delta = m.axis[1].delta;
+  h.reload(outline);
+  for (let dim in 0usize..2) {
+    cjk_segments(h, dim);
+    cjk_link_segments(h, dim);
+    cjk_compute_edges(h, m, dim);
+    cjk_blue_edges(h, m, dim);
+  }
+  for (let dim in 0usize..2) {
+    cjk_hint_edges(h, m, dim);
+    cjk_align_edge_points(h, dim);
+    h.align_strong(dim);
+    h.align_weak(dim);
+  }
+  h.save(outline);
+}

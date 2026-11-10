@@ -170,7 +170,7 @@ pub fn link_segments(var h&: Hints, dim: usize, max_width: i64) {
 
 // Keep segment lists in insertion order; edge sorting must not change the
 // tie break between equal-position major and minor directions.
-fn insert_edge(var axis&: Axis, edge: Edge, descending: bool): usize {
+pub fn insert_edge(var axis&: Axis, edge: Edge, descending: bool): usize {
   var at = axis.edges.len();
   axis.edges.push(edge);
   while (at > 0) {
@@ -183,7 +183,7 @@ fn insert_edge(var axis&: Axis, edge: Edge, descending: bool): usize {
   return at;
 }
 
-fn attach(var axis&: Axis, edge: usize, segment: usize) {
+pub fn attach(var axis&: Axis, edge: usize, segment: usize) {
   let first = axis.edges[edge].first;
   axis.segments[segment].edge_next = first;
   axis.segments[axis.edges[edge].last].edge_next = segment;

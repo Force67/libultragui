@@ -1,0 +1,604 @@
+// The autohinter's per-face state (FreeType 2.14.3 afglobal.c, built on the
+// first autohinted load of a face and kept as long as the face):
+//
+// - the style of every glyph (af_face_globals_compute_style_coverage): the
+//   script ranges of the default-coverage styles through the Unicode
+//   charmap, the non-base and digit flags, then the GSUB output glyphs of
+//   each style's OpenType feature (afshaper's coverage), the default
+//   features of every script, those of the default script with DFLT, and
+//   the fallback style (hani) for the rest;
+// - the style metrics, made when a glyph of the style is first loaded
+//   (af_face_globals_get_metrics), including the Latin "no blue zones"
+//   fallback that moves the style's glyphs to none_dflt;
+// - the GSUB single/alternate lookups (afgsub.c) and the reverse character
+//   map of each Latin style (afadjust.c), which drive afadjust's vertical
+//   separation adjustments.
+
+module ultragui::font::autofit::globals;
+
+import {List} from akikit::containers::list;
+import {Face} from ultragui::font::face;
+import {FontError, tag} from ultragui::font::sfnt;
+import {CjkMetrics} from ultragui::font::autofit::cjk;
+import {FtHash} from ultragui::font::autofit::fthash;
+import {LatinMetrics} from ultragui::font::autofit::metrics;
+import {AfShaper, utf8_char} from ultragui::font::autofit::shaper;
+import {
+  script_ot_tags, script_ranges, script_top_to_bottom, style_blue_strings, style_coverage, style_feature, style_script,
+  style_writing_system,
+} from ultragui::font::autofit::style;
+import {
+  kAdjustDb, kCoverageDefault, kScriptLatn, kStyleCount, kStyleHaniDflt, kStyleNoneDflt, kWritingSystemCjk,
+  kWritingSystemIndic, kWritingSystemLatin,
+} from ultragui::font::autofit::tables;
+import {char_index, mapped_ranges} from ultragui::shape::cmap;
+import {GlyphSet, collect_lookups, gpos_lookup_input, gsub_lookup_output} from ultragui::shape::collect;
+import {Digest, lookup_digest, would_substitute} from ultragui::shape::syllabic;
+
+pub comptime let kStyleMask: u32 = 0x1FFF;
+pub comptime let kStyleUnassigned: u32 = 0x1FFF;
+pub comptime let kDigit: u32 = 0x8000;
+pub comptime let kNonbase: u32 = 0x4000;
+pub comptime let kHasCmapEntry: u32 = 0x2000;
+
+comptime let kTagDflt: u32 = 0x44464C54;  // 'DFLT'
+
+// AF_StyleMetricsRec and its writing system's part.
+pub struct StyleMetrics {
+  pub var style: u32 = 0
+  pub var writing_system: u32 = 0
+  // root.scaler's scales and deltas (the dummy system's only metrics).
+  pub var x_scale: i64 = 0
+  pub var y_scale: i64 = 0
+  pub var x_delta: i64 = 0
+  pub var y_delta: i64 = 0
+  pub var digits_same_width: bool = false
+  // root.reverse_charmap (Latin styles only; none is FreeType's NULL map).
+  pub var reverse_charmap: FtHash? = none
+  pub var latin: LatinMetrics = LatinMetrics {}
+  pub var cjk: CjkMetrics = CjkMetrics {}
+}
+
+pub struct FaceGlobals {
+  pub var glyph_count: u32 = 0
+  pub var glyph_styles: List<u16> = List()
+  pub var shaper: AfShaper
+  // FT_Select_Charmap(face, FT_ENCODING_UNICODE) succeeds.
+  pub var unicode: bool = false
+  // afgsub: where the face's GSUB table is, and per lookup the offset of a
+  // valid SingleSubst/AlternateSubst lookup in it (0 for the others).
+  pub var gsub_start: usize = 0
+  pub var gsub_lookups: List<u32> = List()
+  pub var metrics: List<StyleMetrics?> = List()
+  pub var increase_x_height: u32 = 0
+
+  // af_face_globals_new
+  pub fn create(face&: Face): FaceGlobals;
+  // af_face_globals_get_metrics: the style of the glyph's metrics (made now
+  // if needed). Fails like FreeType for a glyph index past the face's.
+  pub fn get_metrics(var self&, var face&: Face, gid: u32): u32 ! FontError;
+  // af_face_globals_is_digit
+  pub fn is_digit(self&, gid: u32): bool => gid < self.glyph_count && (self.glyph_styles[gid as usize] as u32 & kDigit) != 0;
+  pub fn is_nonbase(self&, gid: u32): bool => gid < self.glyph_count && (self.glyph_styles[gid as usize] as u32 & kNonbase) != 0;
+
+  fn char_index(self&, code: u32): u32 => char_index(self.shaper.face.data(), self.shaper.face.cmap, code);
+}
+
+// --- afgsub.c ---------------------------------------------------------------------------
+
+fn pu16(d: &[u8], o: usize): u32 => o + 2 <= #d ? (d[o] as u32 << 8) | d[o + 1] as u32 : 0;
+fn pu32(d: &[u8], o: usize): u32 => (pu16(d, o) << 16) | pu16(d, o + 2);
+
+// af_validate_coverage: (valid, glyph count). `limit` is the table's end.
+fn validate_coverage(d: &[u8], t: usize, limit: usize): (bool, u32) {
+  if (limit < t + 4) {
+    return (false, 0);
+  }
+  let format = pu16(d, t);
+  var count = 0u32;
+  if (format == 1) {
+    let n = pu16(d, t + 2);
+    if (limit < t + 4 + n as usize * 2) {
+      return (false, 0);
+    }
+    count = n;
+  } else if (format == 2) {
+    let n = pu16(d, t + 2) as usize;
+    let end = t + 4 + n * 6;
+    if (limit < end) {
+      return (false, 0);
+    }
+    var p = t + 4;
+    while (p < end) {
+      let start_glyph = pu16(d, p);
+      let end_glyph = pu16(d, p + 2);
+      if (start_glyph > end_glyph) {
+        return (false, 0);
+      }
+      count += end_glyph - start_glyph + 1;
+      p += 6;
+    }
+  } else {
+    return (false, 0);
+  }
+  return (true, count);
+}
+
+fn validate_lookup(d: &[u8], table: usize, limit: usize): bool {
+  if (limit < table + 6) {
+    return false;
+  }
+  let lookup_type = pu16(d, table);
+  let count = pu16(d, table + 4) as usize;
+  let end = table + 6 + count * 2;
+  if (limit < end) {
+    return false;
+  }
+  var real_type = 0u32;
+  var p = table + 6;
+  while (p < end) {
+    var sub = table + pu16(d, p) as usize;
+    p += 2;
+    if (lookup_type == 7) {
+      if (limit < sub + 8) {
+        return false;
+      }
+      if (pu16(d, sub) != 1) {
+        return false;
+      }
+      let t = pu16(d, sub + 2);
+      if (real_type == 0) {
+        real_type = t;
+      } else if (real_type != t) {
+        return false;
+      }
+      sub += pu32(d, sub + 4) as usize;
+    } else {
+      real_type = lookup_type;
+    }
+    if (limit < sub + 6) {
+      return false;
+    }
+    let format = pu16(d, sub);
+    if (real_type == 1) {
+      if (format == 1) {
+        let (ok, _) = validate_coverage(d, sub + pu16(d, sub + 2) as usize, limit);
+        if (!ok) {
+          return false;
+        }
+      } else if (format == 2) {
+        let (ok, n) = validate_coverage(d, sub + pu16(d, sub + 2) as usize, limit);
+        if (!ok) {
+          return false;
+        }
+        let glyph_count = pu16(d, sub + 4);
+        if (limit < sub + 6 + glyph_count as usize * 2 || glyph_count != n) {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    } else if (real_type == 3) {
+      if (format != 1) {
+        return false;
+      }
+      let (ok, n) = validate_coverage(d, sub + pu16(d, sub + 2) as usize, limit);
+      if (!ok) {
+        return false;
+      }
+      let set_count = pu16(d, sub + 4) as usize;
+      let set_end = sub + 6 + set_count * 2;
+      if (limit < set_end || set_count as u32 != n) {
+        return false;
+      }
+      var q = sub + 6;
+      while (q < set_end) {
+        let set = sub + pu16(d, q) as usize;
+        q += 2;
+        if (limit < set + 2) {
+          return false;
+        }
+        if (limit < set + 2 + pu16(d, set) as usize * 2) {
+          return false;
+        }
+      }
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+// af_parse_gsub
+fn parse_gsub(var g&: FaceGlobals, face&: Face) {
+  let rec = face.dir.find(tag("GSUB")) else {
+    return;
+  };
+  let d = face.data.as_slice();
+  let start = rec.offset as usize;
+  let len = rec.length as usize;
+  if (start > #d || len > #d - start || len < 10) {
+    return;
+  }
+  let lookup_list = pu16(d, start + 8) as usize;
+  if (len < lookup_list + 2) {
+    return;
+  }
+  let count = pu16(d, start + lookup_list) as usize;
+  if (len < lookup_list + 2 + count * 2) {
+    return;
+  }
+  g.gsub_start = start;
+  let limit = start + len;
+  for (let i in 0..count) {
+    let offset = pu16(d, start + lookup_list + 2 + i * 2) as usize;
+    let ok = validate_lookup(d, start + lookup_list + offset, limit);
+    g.gsub_lookups.push(ok ? (lookup_list + offset) as u32 : 0);
+  }
+}
+
+// The glyphs af_coverage_iterator yields: format 1's list, and for format 2
+// each range until the last record is read (FreeType's iterator stops as
+// soon as it has read the last range record, after that range's first glyph).
+fn gsub_coverage(d: &[u8], c: usize): List<u32> {
+  var out: List<u32> = List();
+  let format = pu16(d, c);
+  var p = c + 4;
+  let limit = format == 1 ? c + 4 + pu16(d, c + 2) as usize * 2 : c + 4 + pu16(d, c + 2) as usize * 6;
+  var glyph: u32 = 1;
+  var glyph_limit: u32 = 0;
+  while (p < limit) {
+    if (format == 1) {
+      out.push(pu16(d, p));
+      p += 2;
+    } else {
+      if (glyph > glyph_limit) {
+        glyph = pu16(d, p);
+        glyph_limit = pu16(d, p + 2);
+        p += 6;
+      }
+      out.push(glyph);
+      glyph = (glyph + 1) & 0xFFFF;
+    }
+  }
+  return out;
+}
+
+// af_hash_insert: several substitutes of a glyph go to keys glyph + (k << 16).
+fn hash_insert(var map&: FtHash, glyph: u32, substitute: u32) {
+  if (let value = map.lookup(glyph as i64)) {
+    let mask = (value & 0xFFFF0000) + 0x10000;
+    map.insert((glyph as u64 | mask) as i64, substitute as u64);
+    map.add_to(glyph as i64, 0x10000);
+  } else {
+    map.insert(glyph as i64, substitute as u64);
+  }
+}
+
+// af_map_lookup
+fn map_lookup(d: &[u8], table: usize, var map&: FtHash) {
+  let lookup_type = pu16(d, table);
+  let count = pu16(d, table + 4) as usize;
+  for (let i in 0..count) {
+    var sub = table + pu16(d, table + 6 + i * 2) as usize;
+    var real_type = lookup_type;
+    if (lookup_type == 7) {
+      real_type = pu16(d, sub + 2);
+      sub += pu32(d, sub + 4) as usize;
+    }
+    let coverage = sub + pu16(d, sub + 2) as usize;
+    if (real_type == 1) {
+      if (pu16(d, sub) == 1) {
+        let delta = pu16(d, sub + 4);
+        for (let g in gsub_coverage(d, coverage)) {
+          hash_insert(map, g, (g + delta) % 0x10000);
+        }
+      } else {
+        var p = sub + 6;
+        for (let g in gsub_coverage(d, coverage)) {
+          hash_insert(map, g, pu16(d, p));
+          p += 2;
+        }
+      }
+    } else {
+      var p = sub + 6;
+      for (let g in gsub_coverage(d, coverage)) {
+        let set = sub + pu16(d, p) as usize;
+        p += 2;
+        for (let k in 0..pu16(d, set)) {
+          hash_insert(map, g, pu16(d, set + 2 + k as usize * 2));
+        }
+      }
+    }
+  }
+}
+
+// --- afadjust.c: the reverse character map ------------------------------------------
+
+fn add_substitute(glyph_idx: i64, value: u64, codepoint: u64, var reverse&: FtHash, subst&: FtHash) {
+  let first = (value & 0xFFFF) as i64;
+  var used = reverse.used;
+  reverse.insert(first, codepoint, false);
+  if (reverse.used > used) {
+    if (let s = subst.lookup(first)) {
+      add_substitute(first, s, codepoint, reverse, subst);
+    }
+  }
+  if ((value & 0xFFFF0000) != 0) {
+    let n = value >> 16;
+    for (let i in 1..n + 1) {
+      let idx = glyph_idx + (i << 16) as i64;
+      let substitute = subst.lookup(idx) ?? 0;
+      used = reverse.used;
+      reverse.insert(substitute as i64, codepoint, false);
+      if (reverse.used > used) {
+        if (let s = subst.lookup(substitute as i64)) {
+          add_substitute(substitute as i64, s, codepoint, reverse, subst);
+        }
+      }
+    }
+  }
+}
+
+// af_reverse_character_map_new (none when the face has no Unicode charmap).
+fn reverse_character_map(g&: FaceGlobals, face&: Face, style: u32): FtHash? {
+  if (!g.unicode) {
+    return none;
+  }
+  var map = FtHash();
+  for (let i in 0..kAdjustDb.len() / 2) {
+    let codepoint = kAdjustDb[i * 2];
+    let gid = g.char_index(codepoint);
+    if (gid == 0) {
+      continue;
+    }
+    map.insert(gid as i64, codepoint as u64);
+  }
+  let tags = script_ot_tags(style_script(style));
+  let script_tags = [tags[0]];
+  let t = g.shaper.face.gsub_t();
+  let lookups = collect_lookups(t, g.shaper.face.gsub, script_tags[..], none);
+  var subst = FtHash();
+  let d = face.data.as_slice();
+  for (let idx in lookups.members()) {
+    let offset = idx < g.gsub_lookups.len() as u32 ? g.gsub_lookups[idx as usize] : 0;
+    if (offset != 0) {
+      map_lookup(d, g.gsub_start + offset as usize, subst);
+    }
+  }
+  for (let (glyph_idx, value) in subst.entries()) {
+    if ((glyph_idx as u64 & 0xFFFF0000) != 0) {
+      continue;
+    }
+    let codepoint = map.lookup(glyph_idx) else {
+      continue;
+    };
+    add_substitute(glyph_idx, value, codepoint, map, subst);
+  }
+  return map;
+}
+
+// --- Style coverage -------------------------------------------------------------------
+
+// af_shaper_get_coverage_hb
+fn shaper_coverage(var g&: FaceGlobals, style: u32, default_script: bool) {
+  let script = style_script(style);
+  var tags = script_ot_tags(script);
+  if (default_script) {
+    if (tags[0] == 0) {
+      tags[0] = kTagDflt;
+    } else if (tags[1] == 0) {
+      tags[1] = kTagDflt;
+    } else if (tags[1] != kTagDflt) {
+      tags[2] = kTagDflt;
+    }
+  } else if (tags[0] == kTagDflt) {
+    return;
+  }
+  let feature = style_feature(style);
+  let features = [feature];
+  let gsub_t = g.shaper.face.gsub_t();
+  let gsub = g.shaper.face.gsub;
+  let gpos_t = g.shaper.face.gpos_t();
+  let gpos = g.shaper.face.gpos;
+  let filter: (&[u32])? = feature != 0 ? features[..] : none;
+  let gsub_lookups = collect_lookups(gsub_t, gsub, tags[..], filter);
+  if (gsub_lookups.is_empty()) {
+    return;
+  }
+  var gsub_glyphs = GlyphSet();
+  let lookup_list = gsub_lookups.members();
+  for (let idx in lookup_list) {
+    gsub_lookup_output(gsub_t, gsub, idx, gsub_glyphs);
+  }
+  let gpos_lookups = collect_lookups(gpos_t, gpos, tags[..], filter);
+  var gpos_glyphs = GlyphSet();
+  for (let idx in gpos_lookups.members()) {
+    gpos_lookup_input(gpos_t, gpos, idx, gpos_glyphs);
+  }
+  if (style_coverage(style) != kCoverageDefault) {
+    var digests: List<Digest> = List();
+    for (let idx in lookup_list) {
+      digests.push(lookup_digest(gsub_t, gsub, idx));
+    }
+    var found = false;
+    for (let bs in style_blue_strings(style)) {
+      let s = bs.chars;
+      var p = 0usize;
+      while (p < #s) {
+        let (ch, next) = utf8_char(s, p);
+        p = next;
+        for (let k in 0..lookup_list.len()) {
+          let glyphs = [g.char_index(ch)];
+          if (would_substitute(gsub_t, gsub, lookup_list[k], digests[k], glyphs[..], true)) {
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!found) {
+      return;
+    }
+    gsub_glyphs.subtract(gpos_glyphs);
+  }
+  for (let idx in gsub_glyphs.members()) {
+    if (idx >= g.glyph_count) {
+      continue;
+    }
+    if (g.glyph_styles[idx as usize] as u32 == kStyleUnassigned) {
+      g.glyph_styles[idx as usize] = style as u16;
+    }
+  }
+}
+
+// The codes of [first, last] the charmap maps, ascending, with their glyphs.
+fn range_codes(g&: FaceGlobals, mapped&: List<(u32, u32)>, first: u32, last: u32, var out&: List<(u32, u32)>) {
+  out.clear();
+  for (let (a, b) in mapped) {
+    let lo = a > first ? a : first;
+    let hi = b < last ? b : last;
+    if (lo > hi) {
+      continue;
+    }
+    for (let c in lo..hi + 1) {
+      let gid = g.char_index(c);
+      if (gid != 0) {
+        out.push((c, gid));
+      }
+    }
+  }
+  // Segments may come unsorted or overlap; FT_Get_Next_Char visits codes in
+  // ascending order, once each.
+  var sorted = true;
+  for (let i in 1..out.len()) {
+    if (out[i].0 <= out[i - 1].0) {
+      sorted = false;
+      break;
+    }
+  }
+  if (!sorted) {
+    for (let i in 1..out.len()) {
+      var j = i;
+      while (j > 0 && out[j].0 < out[j - 1].0) {
+        out.swap(j, j - 1);
+        j -= 1;
+      }
+    }
+    var w = 0usize;
+    for (let i in 0..out.len()) {
+      if (w == 0 || out[i].0 != out[w - 1].0) {
+        out[w] = out[i];
+        w += 1;
+      }
+    }
+    while (out.len() > w) {
+      out.pop();
+    }
+  }
+}
+
+fn compute_style_coverage(var g&: FaceGlobals) {
+  for (let i in 0..g.glyph_count) {
+    g.glyph_styles.push(kStyleUnassigned as u16);
+  }
+  if (g.unicode) {
+    let mapped = mapped_ranges(g.shaper.face.data(), g.shaper.face.cmap);
+    var codes: List<(u32, u32)> = List();
+    var dflt: u32 = 0xFFFF;
+    for (let ss in 0..kStyleCount as u32) {
+      if (style_coverage(ss) == kCoverageDefault) {
+        let script = style_script(ss);
+        if (script == kScriptLatn) {
+          dflt = ss;
+        }
+        for (let (first, last) in script_ranges(script, false)) {
+          range_codes(g, mapped, first, last, codes);
+          for (let (_, gid) in codes) {
+            if (gid < g.glyph_count && (g.glyph_styles[gid as usize] as u32 & kStyleMask) == kStyleUnassigned) {
+              g.glyph_styles[gid as usize] = (ss | kHasCmapEntry) as u16;
+            }
+          }
+        }
+        for (let (first, last) in script_ranges(script, true)) {
+          range_codes(g, mapped, first, last, codes);
+          for (let (_, gid) in codes) {
+            if (gid < g.glyph_count && (g.glyph_styles[gid as usize] as u32 & kStyleMask) == ss) {
+              g.glyph_styles[gid as usize] = (g.glyph_styles[gid as usize] as u32 | kNonbase) as u16;
+            }
+          }
+        }
+      } else {
+        shaper_coverage(g, ss, false);
+      }
+    }
+    for (let ss in 0..kStyleCount as u32) {
+      if (style_coverage(ss) == kCoverageDefault) {
+        shaper_coverage(g, ss, false);
+      }
+    }
+    shaper_coverage(g, dflt, true);
+    for (let c in 0x30u32..0x3A) {
+      let gid = g.char_index(c);
+      if (gid != 0 && gid < g.glyph_count) {
+        g.glyph_styles[gid as usize] = (g.glyph_styles[gid as usize] as u32 | kDigit) as u16;
+      }
+    }
+  }
+  for (var s& in g.glyph_styles) {
+    if ((s as u32 & kStyleMask) == kStyleUnassigned) {
+      s = ((s as u32 & ~kStyleMask) | kStyleHaniDflt) as u16;
+    }
+  }
+}
+
+fn FaceGlobals::create(face&: Face): FaceGlobals {
+  var g = FaceGlobals { shaper: AfShaper::create(face), glyph_count: face.num_glyphs };
+  g.unicode = g.shaper.face.cmap.unicode != none && !g.shaper.face.cmap.symbol;
+  parse_gsub(g, face);
+  for (let i in 0..kStyleCount) {
+    g.metrics.push(none);
+  }
+  compute_style_coverage(g);
+  return g;
+}
+
+fn FaceGlobals::get_metrics(var self&, var face&: Face, gid: u32): u32 ! FontError {
+  if (gid >= self.glyph_count) {
+    return fail FontError::InvalidArgument;
+  }
+  var style = self.glyph_styles[gid as usize] as u32 & kStyleUnassigned;
+  while (true) {
+    if (self.metrics[style as usize] != none) {
+      return style;
+    }
+    let ws = style_writing_system(style);
+    var m = StyleMetrics { style, writing_system: ws };
+    if (ws == kWritingSystemLatin) {
+      let unicode = self.unicode;
+      if (let lm = LatinMetrics::init(face, self.shaper, style, unicode)) {
+        m.latin = lm;
+        m.latin.top_to_bottom = script_top_to_bottom(style_script(style));
+        m.digits_same_width = m.latin.digits_same_width;
+        m.reverse_charmap = reverse_character_map(self, face, style);
+      } else {
+        // No blue zones: hinting is off for the style's glyphs.
+        for (var s& in self.glyph_styles) {
+          if ((s as u32 & kStyleMask) == style) {
+            s = kStyleNoneDflt as u16;
+          }
+        }
+        style = self.glyph_styles[gid as usize] as u32 & kStyleUnassigned;
+        continue;
+      }
+    } else if (ws == kWritingSystemCjk) {
+      m.cjk = CjkMetrics::init(face, self.shaper, style, self.unicode);
+      m.digits_same_width = m.cjk.digits_same_width;
+    } else if (ws == kWritingSystemIndic) {
+      return fail FontError::UnimplementedFeature;
+    }
+    self.metrics[style as usize] = m;
+    return style;
+  }
+  return style;
+}

@@ -1,0 +1,93 @@
+// The autohinter's style, script and blue-string classes (afstyles.h,
+// afscript.h, afblue.c) read from the generated tables, and what the
+// writing systems' metrics initializers share: finding a script's standard
+// glyph and loading design-unit outlines (FT_Load_Glyph with
+// FT_LOAD_NO_SCALE).
+
+module ultragui::font::autofit::style;
+
+import {List} from akikit::containers::list;
+import {Face} from ultragui::font::face;
+import {Outline} from ultragui::font::outline;
+import {load_tt_design} from ultragui::font::tt_glyph;
+import {AfShaper, clusters} from ultragui::font::autofit::shaper;
+import {
+  kBlueSets, kBlueStringMax, kBlueStrings, kCoverageDefault, kCoverageTags, kRanges, kScriptRanges, kScripts, kStandardChars, kStyles,
+} from ultragui::font::autofit::tables;
+
+pub fn style_writing_system(style: u32): u32 => kStyles[style as usize * 4];
+pub fn style_script(style: u32): u32 => kStyles[style as usize * 4 + 1];
+pub fn style_blue_set(style: u32): u32 => kStyles[style as usize * 4 + 2];
+pub fn style_coverage(style: u32): u32 => kStyles[style as usize * 4 + 3];
+// The OpenType feature of the style's coverage (0 for the default coverage).
+pub fn style_feature(style: u32): u32 {
+  let c = style_coverage(style);
+  return c == kCoverageDefault ? 0 : kCoverageTags[c as usize];
+}
+
+pub fn script_top_to_bottom(script: u32): bool => kScripts[script as usize * 6 + 1] != 0;
+// The OpenType script tags hb_ot_tags_from_script_and_language gives.
+pub fn script_ot_tags(script: u32): [u32; 3] =>
+  [kScripts[script as usize * 6 + 2], kScripts[script as usize * 6 + 3], kScripts[script as usize * 6 + 4]];
+// The (first, last) code point ranges of a script, base or non-base.
+pub fn script_ranges(script: u32, nonbase: bool): List<(u32, u32)> {
+  var out: List<(u32, u32)> = List();
+  let at = script as usize * 4 + (nonbase ? 2 : 0);
+  for (let i in kScriptRanges[at]..kScriptRanges[at + 1]) {
+    out.push((kRanges[i as usize * 2], kRanges[i as usize * 2 + 1]));
+  }
+  return out;
+}
+
+fn nul_terminated(s: &[u8], at: usize): &[u8] {
+  var end = at;
+  while (end < #s && s[end] != 0) {
+    end += 1;
+  }
+  return s[at..end];
+}
+
+pub fn script_standard_chars(script: u32): &[u8] => nul_terminated(kStandardChars[..], kScripts[script as usize * 6 + 5] as usize);
+
+// A blue string of a style's set: (characters, properties).
+pub struct BlueString : Copy {
+  pub let chars: &'static [u8]
+  pub let properties: u32
+}
+
+pub fn style_blue_strings(style: u32): List<BlueString> {
+  var out: List<BlueString> = List();
+  var i = style_blue_set(style) as usize;
+  while (kBlueSets[i * 2] != kBlueStringMax) {
+    out.push(BlueString { chars: nul_terminated(kBlueStrings[..], kBlueSets[i * 2] as usize), properties: kBlueSets[i * 2 + 1] });
+    i += 1;
+  }
+  return out;
+}
+
+// The standard character loop of af_latin_metrics_init_widths and
+// af_cjk_metrics_init_widths: the first cluster that shapes to a single
+// non-zero glyph (0: none).
+pub fn standard_glyph(var shaper&: AfShaper, script: u32, feature: u32): u32 {
+  let s = script_standard_chars(script);
+  for (let (a, b) in clusters(s)) {
+    let glyphs = shaper.get_cluster(s[a..b], feature);
+    if (glyphs.len() > 1) {
+      continue;
+    }
+    let gid = glyphs.len() == 1 ? glyphs[0].glyph_id : 0;
+    if (gid != 0) {
+      return gid;
+    }
+  }
+  return 0;
+}
+
+// FT_Load_Glyph(face, gid, FT_LOAD_NO_SCALE): the outline in font units, or
+// none when the load fails.
+pub fn design_outline(var face&: Face, gid: u32): Outline? {
+  if (let g = load_tt_design(face, gid)) {
+    return g.outline;
+  }
+  return none;
+}
