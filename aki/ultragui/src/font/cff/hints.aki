@@ -73,29 +73,29 @@ fn Hints::Hints(priv&: PrivateDict, scale: i32, enabled: bool, origin: i32): Hin
     (priv.blues.len() == 4 && priv.blues[0] < -120 * 65536 && priv.blues[1] < -120 * 65536 &&
       priv.blues[2] > 880 * 65536 && priv.blues[3] > 880 * 65536));
   var max_height = 0i32;
-  for (let values in [priv.blues.as_slice(), priv.other_blues.as_slice()]) {
+  for (let group in 0..2usize) {
+    let values = group == 0 ? priv.blues.as_slice() : priv.other_blues.as_slice();
     for (let i in 0..#values / 2) {
       let low = values[i * 2]; let high = values[i * 2 + 1];
       if (high < low) { continue; }
       if (high - low > max_height) { max_height = high - low; }
-      let bottom = i == 0 || @ptr(values) == @ptr(priv.other_blues.as_slice());
+      let bottom = i == 0 || group == 1;
       out.zones.push(Zone { low, high, flat: bottom ? high : low, bottom });
     }
   }
   let threshold = div_fix(65536, scale);
   for (var z& in out.zones) {
-    var best = 2147483647i32;
+    var best = 2147483647i32; let original = z.flat;
     if (z.bottom) {
       for (let i in 0..priv.family_other_blues.len() / 2) {
-        let v = priv.family_other_blues[i * 2 + 1]; let d = @abs(z.flat - v);
+        let v = priv.family_other_blues[i * 2 + 1]; let d = @abs(original - v);
         if (d < best && d < threshold) { z.flat = v; best = d; }
       }
       if (priv.family_blues.len() >= 2) {
-        let v = priv.family_blues[1]; let d = @abs(z.flat - v);
+        let v = priv.family_blues[1]; let d = @abs(original - v);
         if (d < best && d < threshold) { z.flat = v; }
       }
     } else {
-      let original = z.flat;
       for (let i in 1..priv.family_blues.len() / 2) {
         let v = priv.family_blues[i * 2]; let d = @abs(original - v);
         if (d < best && d < threshold) { z.flat = v; best = d; }

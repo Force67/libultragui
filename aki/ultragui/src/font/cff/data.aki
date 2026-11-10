@@ -69,11 +69,12 @@ fn Index::parse(data&: [u8], p: usize, cff2: bool): Index ! CffError {
 pub struct DictEntry {
   pub var op: u16
   pub var args: List<i64> = List()
+  pub var scaled_real: i64 = 0
 }
 
 // Values are 16.16 in i64 so offsets and unsigned values retain their range.
 // Decimal reals are converted as rational integers, without float fusion.
-fn real(var r&: Reader): i64 ! CffError {
+fn real(var r&: Reader, scale: i64 = 1): i64 ! CffError {
   var mantissa = 0i64; var fractional = 0i32; var exponent = 0i32;
   var negative = false; var dot = false; var exp = false; var exp_neg = false;
   var digits = 0u32;
@@ -89,6 +90,7 @@ fn real(var r&: Reader): i64 ! CffError {
         if (power < -18) { return 0; }
         var den = 1i64;
         while (power < 0) { den *= 10; power += 1; }
+        if (scale != 1 && v <= 9223372036854775807i64 / scale) { v *= scale; }
         v = (v + den / 2) / den;
         return negative ? -v : v;
       }
@@ -106,20 +108,39 @@ fn real(var r&: Reader): i64 ! CffError {
   }
 }
 
-pub fn dict(data&: [u8], span: Span): List<DictEntry> ! CffError {
+pub fn dict(data&: [u8], span: Span, weights: (&[List<i32>])? = none): List<DictEntry> ! CffError {
   if (span.start > #data || span.size > #data - span.start) { return fail CffError::InvalidTable; }
   var r = Reader { data: data[span.start..span.limit()] };
-  var out = List::<DictEntry>(); var args = List::<i64>();
+  var out = List::<DictEntry>(); var args = List::<i64>(); var scaled_real = 0i64; var vsindex = 0usize;
   while (r.pos < #r.data) {
     let b = try r.byte();
-    if (b <= 21 && b != 28) {
+    if (b <= 27) {
       let op = b == 12 ? 0x100u16 + try r.byte() as u16 : b as u16;
-      out.push(DictEntry { op, args }); args = List(); continue;
+      if (let rows = weights) {
+        if (op == 22 && args.len() > 0 && args[0] >= 0) { vsindex = (args[0] >> 16) as usize; }
+        if (op == 23) {
+          let raw = args.pop() else { return fail CffError::InvalidTable; };
+          if (raw < 0 || vsindex >= #rows) { return fail CffError::InvalidTable; }
+          let row& = rows[vsindex]; let count = (raw >> 16) as usize;
+          if (count > args.len() / (row.len() + 1)) { return fail CffError::InvalidTable; }
+          let first = args.len() - count * (row.len() + 1);
+          for (let i in 0..count) {
+            var v = args[first + i];
+            for (let j in 0..row.len()) { v += args[first + count + i * row.len() + j] * row[j] as i64 / 65536; }
+            args[first + i] = v;
+          }
+          args.truncate(first + count); continue;
+        }
+      }
+      out.push(DictEntry { op, args, scaled_real }); args = List(); scaled_real = 0; continue;
     }
     var v = 0i64;
     if (b == 28) { v = try r.uint(2) as i16 as i64 * 65536; }
     else if (b == 29) { v = try r.uint(4) as i32 as i64 * 65536; }
-    else if (b == 30) { v = try real(r); }
+    else if (b == 30) {
+      var precise = Reader { data: r.data, pos: r.pos };
+      scaled_real = try real(precise, 1000); v = try real(r);
+    }
     else if (b >= 32 && b <= 246) { v = (b as i64 - 139) * 65536; }
     else if (b >= 247 && b <= 250) { v = ((b as i64 - 247) * 256 + try r.byte() as i64 + 108) * 65536; }
     else if (b >= 251 && b <= 254) { v = (-(b as i64 - 251) * 256 - try r.byte() as i64 - 108) * 65536; }
@@ -143,11 +164,12 @@ pub struct PrivateDict {
   pub var blue_fuzz: i32 = 1
   pub var language_group: i32 = 0
   pub var vsindex: usize = 0
+  pub var initial_random_seed: u32 = 987654321
 }
 
-pub fn private_dict(data&: [u8], span: Span, cff2: bool): PrivateDict ! CffError {
+pub fn private_dict(data&: [u8], span: Span, cff2: bool, weights: (&[List<i32>])? = none): PrivateDict ! CffError {
   var out = PrivateDict {};
-  let entries = try dict(data, span);
+  let entries = try dict(data, span, weights);
   for (let e in entries) {
     if (e.args.len() == 0) { continue; }
     let v = (e.args[0] >> 16) as i32;
@@ -156,10 +178,11 @@ pub fn private_dict(data&: [u8], span: Span, cff2: bool): PrivateDict ! CffError
       out.local_subrs = try Index::parse(data, span.start + v as usize, cff2);
     } else if (e.op == 20) { out.default_width = v; }
     else if (e.op == 21) { out.nominal_width = v; }
-    else if (e.op == 0x109) { out.blue_scale = (e.args[0] * 1000) as i32; }
+    else if (e.op == 0x109) { out.blue_scale = e.scaled_real != 0 ? e.scaled_real as i32 : (e.args[0] * 1000) as i32; }
     else if (e.op == 0x10a) { out.blue_shift = v; }
     else if (e.op == 0x10b) { out.blue_fuzz = v; }
     else if (e.op == 0x111) { out.language_group = v; }
+    else if (e.op == 0x113) { out.initial_random_seed = v == 0 ? 987654321u32 : @abs(v as i64) as u32; }
     else if (e.op == 22) { out.vsindex = v < 0 ? 0usize : v as usize; }
     else if (e.op >= 6 && e.op <= 9) {
       var values = List::<i32>(); var sum = 0i32;
