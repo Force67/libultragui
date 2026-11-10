@@ -112,7 +112,7 @@ pub struct ShapePlan {
 }
 
 
-// The plan for a script and direction: hb_ot_shape_plan_t::init0.
+// The plan for script, direction and canonical language: hb_ot_shape_plan_t::init0.
 pub fn create_plan(face&: ShapeFace, script: u32, direction: u32, language: str = default_language()): ShapePlan {
   let gsub = MapTable { t: face.gsub_t(), gg: face.gsub, variations_index: face.gsub_variations };
   let gpos = MapTable { t: face.gpos_t(), gg: face.gpos, variations_index: face.gpos_variations };
@@ -199,7 +199,7 @@ pub fn create_plan(face&: ShapeFace, script: u32, direction: u32, language: str 
   return plan;
 }
 
-// The cached plan of a face for a script and direction (built on first use).
+// The cached plan of a face for script, direction and language (built on first use).
 pub fn plan_index(var face&: ShapeFace, script: u32, direction: u32, language: str = default_language()): usize {
   for (let i in 0..face.plans.len()) {
     if (face.plans[i].script == script && face.plans[i].direction == direction && face.plans[i].language.as_str() == language) {

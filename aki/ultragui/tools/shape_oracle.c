@@ -7,13 +7,19 @@
  * clang and compares the aki shaper's output with it.
  *
  *   clang -O2 tools/shape_oracle.c $(pkg-config --cflags --libs freetype2 harfbuzz) -o shape_oracle
- *   shape_oracle FONT STRINGS SIZE...
+ *   SHAPE_LOCALE=tr_TR.UTF-8 shape_oracle FONT STRINGS SIZE...
+ *   shape_oracle --languages CASES
+ *
+ * SHAPE_LOCALE sets LC_CTYPE before the first HarfBuzz language read. If
+ * unavailable, its string is used as an explicit buffer language instead.
+ * Without it, the oracle keeps the initial C locale.
  *
  * STRINGS has one string per line, hex encoded (any bytes, invalid UTF-8
  * included). Output, per size and string in that order:
  *   "S <size> <x_scale> <y_scale>" once per size, then per string
  *   "<n> <gid> <cluster> <x_advance> <y_advance> <x_offset> <y_offset> ..."
- * and first a line "F <num_glyphs> <shaper> <gsub> <gpos> <gdef>" (the shaper
+ * preceded by "L <locale-setlocale-succeeded> <canonical-language>",
+ * then a line "F <num_glyphs> <shaper> <gsub> <gpos> <gdef>" (the shaper
  * HarfBuzz picked for the first string, e.g. "ot" or "graphite2", and whether
  * HarfBuzz kept GSUB and GPOS and has GDEF glyph classes, after its sanitizer).
  */
