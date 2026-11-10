@@ -27,6 +27,9 @@ aki/
     tests/data/svg/      the SVG corpus (@embed'ed by tests/support/svg_corpus.aki)
     tools/yoga_fuzz.cc   the layout engine's oracle: random trees through third_party/yoga, traced;
                          tests/yoga_fuzz_test.aki builds it, runs it and replays the traces bit for bit
+    tools/shape_oracle.c the shaper's oracle (FreeType + HarfBuzz as text_engine uses them); tests/shape_test.aki
+    tools/gen_shape_tables.{cc,py}, gen_shape_machines.py  generate src/shape/{ucd_tables.aki,data/ucd.bin,machines.aki}
+                         from HarfBuzz 13.2.1's source (see "The shaper")
   ultragui_audio/        miniaudio AudioBackend (csrc/ugui_ma.c shim)
   ultragui_lottie/       rlottie from third_party via c_sources; tools/gen_reference.cc + gen_tables.py
   ultragui_video/        pl_mpeg via [build.implement]; tools/{gen_reference,recording_rhi}.cc + gen_tables.py
@@ -192,7 +195,7 @@ in the table, and none is unported.
 | ui_context.{h,cc}: OverlayEntry, overlays_, ShowOverlay, HideOverlay | ultragui::widgets::overlays (`Overlays`) | ported; UIContext holds one, see below |
 | layout/layout.{h,cc}, layout_tree.{h,cc} | ultragui::layout::{layout,layout_tree} | ported (test_layout_retained.cc ported) |
 | (yoga, third_party/yoga) | ultragui::layout::{flex_style,flex_tree} | replaced: an aki flexbox engine with yoga's results bit for bit for every style layout.cc can write (tests/yoga_fuzz_test.aki; "The layout engine" below) |
-| (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,cmap,normalize,fallback,buffer,props,ucd,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | new, not yet wired in: an aki OpenType shaper with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below); text_engine still calls HarfBuzz until the integration step |
+| (HarfBuzz: hb_buffer_add_utf8 + guess_segment_properties + hb_shape on an hb_ft font) | ultragui::shape::{shape,face,plan,map,layout,otl,sanitize,cmap,normalize,fallback,buffer,props,ucd,font_funcs,shapers,shaper_*,syllabic} (+ generated ucd_tables, machines, data/ucd.bin) | new, not yet wired in: an aki OpenType shaper with HarfBuzz 13.2.1's output bit for bit (tests/shape_test.aki; "The shaper" below); text_engine still calls HarfBuzz until the integration step |
 | idl/parser.{h,cc} | ultragui::idl::parser | ported (AST dumps equal the C++'s on examples/**/*.ugui and a 25-file corpus; AST type names below) |
 | idl/builder.{h,cc} | ultragui::idl::builder (UguiBuilder, MediaStyle) | ported (test_idl_components.cc ported; every example UI builds draw-data-identical to the C++, tools/golden) |
 | svg/svg_types.h, svg_parser.cc, svg_rasterizer.cc, svg.{h,cc} | ultragui::svg::{svg_types,svg_parser,svg_rasterizer,svg} (+ sys::c_text) | ported (rasterizer byte-identical to the C++ on a 62-render corpus; 3 endless C++ loops terminate, see quirks) |
@@ -830,7 +833,8 @@ Indic (all nine scripts, old and new spec), Khmer, Myanmar and the Universal
 Shaping Engine, their syllables found by HarfBuzz's own Ragel tables
 (`tools/gen_shape_machines.py` extracts them and compiles their actions).
 
-**Design.** `shape::buffer` is hb_buffer_t's in/out-buffer protocol with the
+**Design.** `shape::sanitize` checks GSUB, GPOS and GDEF as HarfBuzz does
+when the face is made and drops what it rejects. `shape::buffer` is hb_buffer_t's in/out-buffer protocol with the
 var1/var2 scratch values as named fields; `otl` reads tables in place
 (offsets into the table bytes; a zero offset or a read past the end gives
 HarfBuzz's all-zero Null object); `layout` is the apply context and every
@@ -863,7 +867,12 @@ Lohit-Devanagari, Garuda (Thai), KhmerOS, FreeSerif at 12, 16 and 24 px:
 50,274 strings, 566,112 glyphs, all equal (about 8 s). `SHAPE_SWEEP=1` runs
 every font of /usr/share/fonts at 9, 12, 16, 24 and 37 px with 400 generated
 strings per font (`SHAPE_GENERATED`, `SHAPE_SEED`, `SHAPE_FONTS=a:b` change
-it): SWEEP_RESULTS.
+it): 304 fonts (297 compared, the 7 Graphite fonts skipped), 3,269,970
+strings, 34,293,165 glyphs, all equal (about 2.5 minutes); again with
+`SHAPE_SEED=7 SHAPE_GENERATED=1500`: 4,903,470 strings, 45,266,635 glyphs,
+all equal. The oracle also reports which of GSUB, GPOS and GDEF HarfBuzz kept
+after its sanitizer, and the test checks the aki face keeps the same ones
+(it does on every font; chandas1-2's GPOS is one HarfBuzz drops).
 
 **Known gaps.** HarfBuzz is built with graphite2 here and shapes fonts with a
 `Silf` table (Padauk, Abyssinica SIL, Annapurna SIL) with it; the aki shaper
@@ -878,8 +887,10 @@ the Unicode charmap FreeType synthesizes for fonts without one, variation
 coordinates other than the default instance, the Windows-1256 Arabic
 fallback (Windows builds of HarfBuzz only), the Myanmar Zawgyi shaper
 (script Qaag never comes from guessing). HarfBuzz's sanitizer, which neuters
-offsets of malformed subtables, is approximated by reading out-of-range
-data as zeros.
+offsets of malformed subtables, is not needed: HarfBuzz 13 drops a whole
+table its sanitizer rejects, and `shape::sanitize` ports those checks for
+GSUB, GPOS and GDEF (bounds, HarfBuzz's operation budget, the subtable limit;
+the 24-bit formats are accepted unchecked); the kern table is not sanitized.
 
 ### Paint and the widget tree
 
