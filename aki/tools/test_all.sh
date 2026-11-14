@@ -52,7 +52,9 @@ for d in "${pkgs[@]}"; do
     (cd "$d" && akiko test >"$log.test.log" 2>&1); rc=$?
     # akiko test prints "N passed, M failed"
     sum=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "$log.test.log" | tail -1)
-    skipped=$(grep -ci 'skipped' "$log.test.log")
+    # a test that cannot run prints "..., skipped", "...: skipped" or
+    # "..., skipping" (not "skipped: 0", a statistic)
+    skipped=$(grep -ciE '(, |: )skip(ped|ping)\b' "$log.test.log")
     [ "$skipped" -gt 0 ] && skipped=", $skipped skipped" || skipped=""
     if [ $rc -eq 0 ]; then tst="ok (${sum:-?}$skipped)"; else tst="FAIL (${sum:-no summary}; $log.test.log)"; fi
   else
