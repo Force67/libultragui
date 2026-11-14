@@ -78,6 +78,12 @@ run_case() { # name secs fixed_time cpp_cmd... -- aki_cmd...
   if aki/tools/xshot_fixed.sh "$shots/$name.cpp.png" "$secs" "$fixed" "${c[@]}" >"$shots/$name.cpp.log" 2>&1 &&
      aki/tools/xshot_fixed.sh "$shots/$name.aki.png" "$secs" "$fixed" "${a[@]}" >"$shots/$name.aki.log" 2>&1 &&
      out=$(aki/tools/compare_shots.sh "$shots/$name.aki.png" "$shots/$name.cpp.png" "$shots/$name.diff.png" 2>&1); then
+    # `expect=LINE run_case ...`: the aki run must have printed LINE (the
+    # showcase takes an unknown scene name for a font path and shows the
+    # default scene, so a wrong name would compare the wrong scene).
+    if [ -n "${expect:-}" ] && ! grep -qxF "$expect" "$shots/$name.aki.log"; then
+      echo "FAIL $name (no \"$expect\" in $shots/$name.aki.log)"; fail=$((fail + 1)); failed+=("$name"); return
+    fi
     echo "PASS $name"; pass=$((pass + 1))
   else
     echo "FAIL $name ${out:-capture failed, see $shots/$name.*.log}"; fail=$((fail + 1)); failed+=("$name")
@@ -103,14 +109,14 @@ ex=aki/examples
 run_case demo 15 1.5 "$(cpp "$ref_ex" ultragui_demo)" -- $ex/demo/build/ultragui_demo
 run_case anim_demo 15 1.3 "$(cpp "$ref_ex" ultragui_anim_demo)" "$dejavu" -- $ex/anim_demo/build/ultragui_anim_demo "$dejavu"
 run_case lottie_demo 15 1.3 "$(cpp "$ref_ex" ultragui_lottie_demo)" "$dejavu" -- $ex/lottie_demo/build/ultragui_lottie_demo "$dejavu"
-for scene in dashboard neon glass terminal nerv cosmos rpg_menu meridian; do
-  run_case "showcase_${scene}" 15 2.0 "$(cpp "$ref_ex" ultragui_showcase)" "$scene" "$dejavu" -- \
+for scene in dashboard neon glass terminal nerv cosmos rpg meridian; do
+  expect="Scene: $scene" run_case "showcase_${scene}" 15 2.0 "$(cpp "$ref_ex" ultragui_showcase)" "$scene" "$dejavu" -- \
     $ex/showcase/build/ultragui_showcase "$scene" "$dejavu"
 done
 for f in "${fonts[@]}"; do
   key=${f%%=*}; path=${f#*=}
-  for scene in dashboard rpg_menu terminal; do
-    run_case "showcase_${scene}_${key}" 15 2.0 "$(cpp "$ref_ex" ultragui_showcase)" "$scene" "$path" -- \
+  for scene in dashboard rpg terminal; do
+    expect="Scene: $scene" run_case "showcase_${scene}_${key}" 15 2.0 "$(cpp "$ref_ex" ultragui_showcase)" "$scene" "$path" -- \
       $ex/showcase/build/ultragui_showcase "$scene" "$path"
   done
   run_case "game_overlay_${key}" 15 2.0 "$(cpp "$ref_ex" ultragui_game_overlay)" "$path" -- \
