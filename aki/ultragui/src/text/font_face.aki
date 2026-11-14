@@ -24,7 +24,7 @@ import {Face, SizeMetrics} from ultragui::font::face;
 import {GlyphFormat, Outline, kPixelModeGray} from ultragui::font::outline;
 import {Outline as RasterOutline, OutlinePoint} from ultragui::font::raster::outline;
 import {render_outline} from ultragui::font::raster::rasterizer;
-import {FontError, tag, u16_at} from ultragui::font::sfnt;
+import {FontError, tag} from ultragui::font::sfnt;
 import {hb_extents, hb_h_advance} from ultragui::font::unhinted;
 import {ShapeFace} from ultragui::shape::face;
 import {GlyphExtents, ShapeFontFuncs} from ultragui::shape::font_funcs;
