@@ -1,0 +1,110 @@
+// GlRenderer (ugui_impl_opengl3) on a host-owned GL 3.3 core context: the draw
+// data of aki/ultragui_scenes/src/draw_data_scene.aki rendered into the window's framebuffer.
+// Its screenshot is compared with the C++ backend's (tools/draw_data_scene.cc):
+//   aki/tools/compare_shots.sh /tmp/aki.png /tmp/cpp.png
+// UGUI_SCENE_SECS keeps the window open and redrawing that long. Without a
+// display it says so and passes.
+
+module gl_draw_data_test;
+
+import {println} from akikit::logging;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {from_str} from akikit::strings::string;
+import {kNullTextureId} from ultragui::render::draw_data;
+import {DynTextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {WindowConfig} from ultragui::platform::platform;
+import {TextEngine} from ultragui::text::text_engine;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {glfw_get_proc_address, glfw_make_context_current, glfw_swap_buffers} from ultragui_glfw::sys::glfw;
+import {GlApi, kGlColorBufferBit, kGlFramebufferSrgb} from ultragui_opengl::sys::gl;
+import {GlRenderer, InitInfo} from ultragui_opengl::ugui_impl_opengl3;
+import {Expect} from ultragui_testing::expect;
+import {big_pixels, build_frame, checker_pixels, ramp_pixels} from ultragui_scenes::draw_data_scene;
+import {kFontPath, kSceneHeight, kSceneWidth} from ultragui_scenes::scene;
+
+fn hold_seconds(): f64 {
+  let v = get_environment_variable("UGUI_SCENE_SECS") else { return 0.0; };
+  var secs = 0.0;
+  for (let c in v.as_str()) {
+    if (c >= '0' && c <= '9') {
+      secs = secs * 10.0 + (c as u32 - '0' as u32) as f64;
+    }
+  }
+  return secs;
+}
+
+fn host_loader(name: *const c_char): *var u8 => unsafe glfw_get_proc_address(name);
+
+pub fn main(): i32 {
+  var t = Expect();
+  var platform = GlfwPlatform();
+  let wc = WindowConfig { width: kSceneWidth, height: kSceneHeight, title: from_str("gl_draw_data_test"), resizable: false,
+    opengl: true };
+  if (!platform.init(wc)) {
+    println("gl_draw_data_test: no display or no OpenGL 3.3 core context, skipped");
+    return 0;
+  }
+  unsafe glfw_make_context_current(platform.window());
+  // The host's own GL, as an application would have it.
+  let host = GlApi::load(host_loader) else {
+    println("gl_draw_data_test: the host could not load GL");
+    return 1;
+  };
+  host.enable(kGlFramebufferSrgb);
+
+  var gl = GlRenderer();
+  t.that(!gl.init(InitInfo {}), "init without a loader fails");
+  t.that(gl.init(InitInfo { get_proc_address: @c_fn(glfw_get_proc_address) }), "GlRenderer init");
+
+  var te = TextEngine();
+  t.that(te.init(), "text engine init");
+  let font = te.load_font(kFontPath);
+
+  let checker = checker_pixels();
+  let ramp = ramp_pixels();
+  let big = big_pixels();
+  let c = gl.create_texture(8, 8, RhiFormat::Rgba8Unorm, checker[..] as bytes, RhiFilter::Nearest);
+  let r = gl.create_texture(4, 4, RhiFormat::Bgra8Unorm, ramp[..] as bytes, RhiFilter::Linear);
+  let b = gl.create_texture(32, 24, RhiFormat::Rgba8Unorm, big[..] as bytes, RhiFilter::Linear);
+  t.that(c != kNullTextureId && r != kNullTextureId && b != kNullTextureId && c != r && r != b, "host textures");
+  t.that(gl.create_texture(0, 4, RhiFormat::Rgba8Unorm, ramp[..] as bytes, RhiFilter::Linear) == kNullTextureId, "empty texture");
+  t.that(gl.create_texture(4, 4, RhiFormat::Rgba8Unorm, [], RhiFilter::Linear) == kNullTextureId, "no pixels");
+  {
+    // The texture sink the UI would be handed.
+    var lent = DynTextureBackend::of(gl);
+    let extra = lent.create_texture(4, 4, RhiFormat::Bgra8Unorm, ramp[..] as bytes, RhiFilter::Nearest);
+    t.that(extra != kNullTextureId, "created through the sink");
+    lent.update_texture(extra, ramp[..] as bytes);
+    lent.destroy_texture(extra);
+  }
+
+  var frames: i32 = 0;
+  let start = platform.time();
+  let hold = hold_seconds();
+  while (true) {
+    platform.poll_events();
+    te.begin_frame();
+    let frame = build_frame(te, font, c, r, b);
+    let atlas = te.atlas_pixels();
+    let size = te.atlas_size();
+    t.that(gl.update_font_atlas(atlas as bytes, size.x as u32, size.y as u32), "update_font_atlas");
+    gl.new_frame();
+    host.clear_color(0.07, 0.08, 0.12, 1.0);
+    host.clear(kGlColorBufferBit);
+    gl.render_draw_data(frame.data());
+    unsafe glfw_swap_buffers(platform.window());
+    frames += 1;
+    if (frames >= 3 && platform.time() - start >= hold) {
+      break;
+    }
+    if (platform.should_close()) {
+      break;
+    }
+  }
+
+  gl.shutdown();
+  te.shutdown();
+  platform.shutdown();
+  return t.finish();
+}

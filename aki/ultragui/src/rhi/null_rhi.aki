@@ -1,0 +1,39 @@
+// ugui/rhi/null/null_rhi.cc (module rhi::null_rhi: `null` is a keyword): an RHI with no device, for hosts that only run
+// ultragui in draw-data mode (UIConfig::draw_data) and render through a
+// backend of their own. UIContext never initialises the RHI in that mode, but
+// it is still generic over one; this one needs nothing to link against. It is
+// UIContext's default Rhi.
+
+module ultragui::rhi::null_rhi;
+
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D} from ultragui::render::vertex;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+
+pub struct NullRhi : Rhi {
+  pub fn NullRhi(): NullRhi => NullRhi {};
+
+  pub fn init(var self&, config&: RhiConfig): bool => false;
+  pub fn shutdown(var self&) {}
+  pub fn begin_frame(var self&, clear_color: Color): bool => false;
+  pub fn end_frame(var self&) {}
+  pub fn set_scissor(var self&, rect: Rect) {}
+  pub fn reset_scissor(var self&) {}
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {}
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {}
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle =>
+    kInvalidTexture;
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {}
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {}
+  pub fn acquire_frame(var self&): bool => false;
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle => kInvalidTexture;
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {}
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool => false;
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {}
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {}
+  pub fn display_size(self&): Vec2 => Vec2 { x: 0.0, y: 0.0 };
+  pub fn dpi_scale(self&): f32 => 1.0;
+}

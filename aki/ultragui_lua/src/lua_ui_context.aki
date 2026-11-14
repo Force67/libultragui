@@ -1,0 +1,89 @@
+// The C++ UIContext's `#if ULTRAGUI_LUA` wiring (ugui/ui_context.cc, Init):
+// UIContext with the Lua runtime and the bindings Init registers right after
+// script_.Init().
+//
+//   var ui = lua_ui_context(GlfwPlatform(), VulkanRhi(), LuaBindings {});
+//   var u& = ui.get_var();
+//   add_lottie_lua(u);            // ultragui_lua_lottie, if wanted (ULTRAGUI_LOTTIE)
+//   add_video_lua(u);             // ultragui_lua_video, if wanted (ULTRAGUI_VIDEO)
+//   u.init(UIConfig { ... });     // script init, then RegisterAudioLua, RegisterAnimLua, ...
+//
+// The hooks are the C++ `[this]` lambdas. They reach UIContext through the
+// ScriptHost the running call lends (`call.ctx.host`: LoadAnim,
+// FindWidgetEntity, the texture sink, the Rhi), not through a pointer to it,
+// except the audio natives, which the C++ binds to `*audio_` at Init:
+// RegisterAudioLua gets the address of UIContext's AudioBackendBox, so the
+// context is boxed (`Box<UIContext<..>>`) and must stay in its box while the
+// Lua state is open. (A set_audio after init replaces what that box holds,
+// so the scripts reach the new backend; the C++ scripts keep the old one.)
+//
+// The C++ registers audio, lottie, anim, video in that order; here the
+// lottie and video bindings come from their packages' add_*_lua, registered
+// after anim. The order is not observable: each binding sets its own ugui.*
+// names.
+
+module ultragui_lua::lua_ui_context;
+
+import {Box} from akikit::memory::box;
+import {String} from akikit::strings::string;
+import {VectorAnimation} from ultragui::anim::vector_animation;
+import {AudioBackendBox} from ultragui::audio::audio_backend;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Platform} from ultragui::platform::platform;
+import {Rhi} from ultragui::rhi::rhi;
+import {UIContext} from ultragui::ui_context;
+import {LuaCall} from ultragui_lua::lua_call;
+import {AnimLoader, FindWidget, register_anim_lua} from ultragui_lua::lua_anim;
+import {register_audio_lua} from ultragui_lua::lua_audio;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+
+// UIContext over the Lua runtime.
+pub type LuaUIContext<P: Platform, R: Rhi> = UIContext<P, R, LuaRuntime>;
+
+// Which of the C++ build's optional bindings to register (the CMake
+// options; Lottie and video are their packages' add_*_lua).
+pub struct LuaBindings : Copy {
+  pub var audio: bool = true  // ULTRAGUI_AUDIO: ugui.play_sound & co.
+}
+
+// FindWidgetEntity through the running call's script host.
+pub fn host_find_widget(): FindWidget => own fn(call: &var LuaCall, name: String): WidgetId {
+  if (var h& = call.ctx.host) {
+    return h.find_widget(call.world, name.as_str());
+  }
+  return kNullWidget;
+};
+
+// LoadAnim through the running call's script host.
+pub fn host_anim_loader(): AnimLoader => own fn(call: &var LuaCall, path: String, w: u32, h: u32): *var VectorAnimation {
+  var host& = call.ctx.host else {
+    return null;
+  };
+  let id = host.load_anim(path.as_str(), w, h) else {
+    return null;
+  };
+  return host.anim_ptr(id);
+};
+
+// A boxed UIContext over the Lua runtime whose init registers the C++
+// Init's Lua bindings (audio if asked, anim) right after the runtime's init.
+pub fn lua_ui_context<P: Platform, R: Rhi>(platform: P, rhi: R, bindings: LuaBindings): Box<UIContext<P, R, LuaRuntime>> {
+  var ui = Box(UIContext::<P, R, LuaRuntime>(platform, rhi, LuaRuntime()));
+  add_core_lua(ui.get_var(), bindings);
+  return ui;
+}
+
+// Register the audio (if asked) and anim bindings for `ui`'s init. The
+// audio natives keep the address of `ui.audio`: `ui` must not move while
+// its Lua state is open (lua_ui_context boxes it).
+pub fn add_core_lua<P: Platform, R: Rhi>(var ui&: UIContext<P, R, LuaRuntime>, bindings: LuaBindings) {
+  if (bindings.audio) {
+    let audio = unsafe (&raw var ui.audio);
+    ui.add_script_init(own fn(rt: &var LuaRuntime) {
+      unsafe register_audio_lua::<AudioBackendBox>(rt, audio);
+    });
+  }
+  ui.add_script_init(own fn(rt: &var LuaRuntime) {
+    register_anim_lua(rt, host_anim_loader(), host_find_widget());
+  });
+}

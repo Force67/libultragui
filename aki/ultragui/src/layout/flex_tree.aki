@@ -1,0 +1,1937 @@
+// No C++ counterpart: the flexbox engine that replaced yoga in the aki port.
+// layout::layout drives it the way ugui/layout/layout.cc drives yoga (one
+// retained tree per root, styles written through comparing setters, a measure
+// "function" that reports the node's intrinsic size, MarkDirty when that size
+// changes, CalculateLayout, then the layout results read back).
+//
+// It is yoga 8c5ea16d (third_party/yoga) cut down to what libultragui sets:
+// see layout::flex_style for the style space. Yoga's results are the contract,
+// bit for bit, so this follows yoga's algorithm step for step instead of
+// redesigning it, keeping the state that leaks into results across passes:
+// the dirty flags, the layout cache and the eight measurement cache entries
+// (with their tolerant comparisons), the computed flex basis that only a dirty
+// node forgets, each child's line index (read again by baseline alignment even
+// for children no longer on any line), the pixel-grid rounding of the whole
+// tree after a pass that laid the root out (rounding already-rounded
+// positions of cached subtrees again), and yoga's own quirks (gap counted for
+// absolute and display-none children, multi-line flex-start alignment adding
+// the child's inset rather than its margin, NaN positions for display-none
+// children of a wrap-reverse container). The comments name the yoga function
+// each part ports (algorithm/CalculateLayout.cpp unless said otherwise).
+//
+// Nodes live in one arena; a node is its index. Everything runs LTR: yoga
+// resolves an inherited direction to LTR and libultragui never sets another.
+// Positions are never static (libultragui maps sticky to relative), so every
+// node is a containing block, display is flex or none, nothing has a baseline
+// function or auto margins, and the config is yoga's default (point scale
+// factor 1, no errata, no experimental features).
+
+module ultragui::layout::flex_tree;
+
+import {List} from akikit::containers::list;
+import {
+  FlexAlign, FlexDir, FlexDisplay, FlexJustify, FlexOverflow, FlexPositionType, FlexStyle, FlexWrapMode, SizingMode,
+  StyleLength, Unit, cross_direction, dimension_of, flex_end_edge, flex_start_edge, inexact_equals, inexact_equals_f64,
+  inline_end_edge, inline_start_edge, is_column, is_defined, is_row, is_undefined, kBorder, kBottom, kHeight, kLeft,
+  kRight, kTop, kUndefined, kWidth, max_or_defined, min_or_defined, needs_trailing_position, optional_equals,
+} from ultragui::layout::flex_style;
+
+// No node: the root's owner.
+pub comptime let kNoFlexNode: u32 = 0xFFFF_FFFF;
+
+// LayoutResults::MaxCachedMeasurements.
+comptime let kMaxCachedMeasurements: u32 = 8;
+
+// FLT_MAX.
+fn flt_max(): f32 => @bit_cast(f32, 0x7F7F_FFFFu32);
+
+// node/CachedMeasurement.h.
+struct CachedMeasurement : Copy {
+  pub var available_width: f32 = -1.0
+  pub var available_height: f32 = -1.0
+  pub var width_mode: SizingMode = SizingMode::MaxContent
+  pub var height_mode: SizingMode = SizingMode::MaxContent
+  pub var computed_width: f32 = -1.0
+  pub var computed_height: f32 = -1.0
+}
+
+// node/LayoutResults.h, without what nothing reads: the direction (always
+// LTR once set; `owner_direction_set` stands for lastOwnerDirection, which is
+// Inherit until the first visit and after a zero-out), the borders (always
+// +0.0), the raw dimensions and the config version.
+struct LayoutResults : Copy {
+  pub var computed_flex_basis: f32 = kUndefined
+  pub var generation: u32 = 0
+  pub var owner_direction_set: bool = false
+  pub var next_cached_measurement: u32 = 0
+  pub var cached_measurements: [CachedMeasurement; 8] = [CachedMeasurement {}; 8]
+  pub var cached_layout: CachedMeasurement = CachedMeasurement {}
+  pub var had_overflow: bool = false
+  pub var dimensions: [f32; 2] = [kUndefined; 2]
+  pub var measured: [f32; 2] = [kUndefined; 2]
+  pub var position: [f32; 4] = [0.0; 4]
+  pub var margin: [f32; 4] = [0.0; 4]
+  pub var padding: [f32; 4] = [0.0; 4]
+}
+
+// node/Node.h. `has_measure` is a node with a measure function (yoga's
+// NodeType::Text, which also rounds differently); libultragui's measure
+// function ignores the constraints and reports the node's intrinsic size.
+struct FlexNode {
+  pub var style: FlexStyle = FlexStyle()
+  pub var layout: LayoutResults = LayoutResults {}
+  pub var children: List<u32> = List()
+  pub var owner: u32 = kNoFlexNode
+  pub var line_index: usize = 0
+  pub var dirty: bool = true
+  pub var has_measure: bool = false
+  pub var intrinsic_width: f32 = 0.0
+  pub var intrinsic_height: f32 = 0.0
+  pub var processed: [StyleLength; 2] = [StyleLength {}; 2]
+
+  // processDimensions: a max equal (within 0.0001) to the min is the size.
+  pub fn process_dimensions(var self&);
+
+  // hasDefiniteLength.
+  pub fn has_definite_length(self&, dim: usize, owner_size: f32): bool {
+    let used = self.processed[dim].resolve(owner_size);
+    return used == used && used >= 0.0;
+  }
+
+  // getResolvedDimension (border-box).
+  pub fn resolved_dimension(self&, dim: usize, reference: f32): f32 => self.processed[dim].resolve(reference);
+
+  // resolveFlexBasis: processFlexBasis (no `flex` shorthand is ever set, so
+  // an auto or undefined basis stays auto), resolved, border-box.
+  pub fn resolve_flex_basis(self&, reference: f32): f32 {
+    let basis = self.style.flex_basis();
+    return basis.is_defined() && !basis.is_auto() ? basis.resolve(reference) : kUndefined;
+  }
+
+  // resolveFlexGrow / resolveFlexShrink: 0 at the root and when unset.
+  pub fn resolve_flex_grow(self&): f32 {
+    self.owner == kNoFlexNode ? return 0.0;
+    let g = self.style.flex_grow();
+    return g == g ? g : 0.0;
+  }
+  pub fn resolve_flex_shrink(self&): f32 {
+    self.owner == kNoFlexNode ? return 0.0;
+    let s = self.style.flex_shrink();
+    return s == s ? s : 0.0;
+  }
+
+  // isNodeFlexible.
+  pub fn is_flexible(self&): bool =>
+    self.style.position_type != FlexPositionType::Absolute && (self.resolve_flex_grow() != 0.0 || self.resolve_flex_shrink() != 0.0);
+
+  // dimensionWithMargin.
+  pub fn dimension_with_margin(self&, axis: FlexDir, width_size: f32): f32 =>
+    self.layout.measured[dimension_of(axis)] + self.style.margin_for_axis(axis, width_size);
+
+  // isLayoutDimensionDefined.
+  pub fn is_layout_dimension_defined(self&, axis: FlexDir): bool {
+    let v = self.layout.measured[dimension_of(axis)];
+    return v == v && v >= 0.0;
+  }
+
+  // relativePosition: the start inset, else minus the end inset.
+  pub fn relative_position(self&, axis: FlexDir, axis_size: f32): f32 {
+    if (self.style.is_inline_start_position_defined(axis) && !self.style.is_inline_start_position_auto(axis)) {
+      return self.style.inline_start_position(axis, axis_size);
+    }
+    return -1.0 * self.style.inline_end_position(axis, axis_size);
+  }
+
+  // setPosition: margins plus relative offsets on all four edges, along the
+  // node's own main and cross axes.
+  pub fn set_position(var self&, owner_width: f32, owner_height: f32);
+}
+
+fn FlexNode::process_dimensions(var self&) {
+  for (let dim in 0usize..2) {
+    let max = self.style.max_dimension(dim);
+    if (max.is_defined() && max.inexact_same(self.style.min_dimension(dim))) {
+      self.processed[dim] = max;
+    } else {
+      self.processed[dim] = self.style.dimension(dim);
+    }
+  }
+}
+
+fn FlexNode::set_position(var self&, owner_width: f32, owner_height: f32) {
+  let main_axis = self.style.flex_direction;
+  let cross_axis = cross_direction(main_axis);
+  let relative_position_main = self.relative_position(main_axis, is_row(main_axis) ? owner_width : owner_height);
+  let relative_position_cross = self.relative_position(cross_axis, is_row(main_axis) ? owner_height : owner_width);
+  let start_main = self.style.inline_start_margin(main_axis, owner_width) + relative_position_main;
+  let end_main = self.style.inline_end_margin(main_axis, owner_width) + relative_position_main;
+  let start_cross = self.style.inline_start_margin(cross_axis, owner_width) + relative_position_cross;
+  let end_cross = self.style.inline_end_margin(cross_axis, owner_width) + relative_position_cross;
+  self.layout.position[inline_start_edge(main_axis)] = start_main;
+  self.layout.position[inline_end_edge(main_axis)] = end_main;
+  self.layout.position[inline_start_edge(cross_axis)] = start_cross;
+  self.layout.position[inline_end_edge(cross_axis)] = end_cross;
+}
+
+// algorithm/FlexLine.h.
+struct FlexLine {
+  pub var items: List<u32> = List()
+  pub var size_consumed: f32 = 0.0
+  pub var total_flex_grow_factors: f32 = 0.0
+  pub var total_flex_shrink_scaled_factors: f32 = 0.0
+  pub var remaining_free_space: f32 = 0.0
+  pub var main_dim: f32 = 0.0
+  pub var cross_dim: f32 = 0.0
+}
+
+// A retained tree of flex nodes: yoga's node API over an arena.
+pub struct FlexTree {
+  var nodes: List<FlexNode> = List()
+  // gCurrentGenerationCount. Yoga's is global; a counter per tree tells the
+  // same nodes apart, since a node only compares it with what it stored.
+  var generation: u32 = 0
+
+  pub fn FlexTree(): FlexTree => FlexTree {};
+
+  pub fn len(self&): usize => self.nodes.len();
+
+  // YGNodeNewWithConfig.
+  pub fn add_node(var self&): u32 {
+    self.nodes.push(FlexNode {});
+    return (self.nodes.len() - 1) as u32;
+  }
+
+  // YGNodeInsertChild.
+  pub fn insert_child(var self&, owner: u32, child: u32, index: usize);
+
+  pub fn child_count(self&, n: u32): usize => self.nodes[n].children.len();
+  pub fn child(self&, n: u32, i: usize): u32 => self.nodes[n].children[i];
+
+  // YGNodeSetMeasureFunc: the node measures itself, reporting its intrinsic
+  // size whatever the constraints (libultragui's measure function).
+  pub fn set_measured(var self&, n: u32) {
+    self.nodes[n].has_measure = true;
+  }
+
+  // What the measure function reports from now on. Like the LayoutNode the
+  // C++ measure function reads through the context, it does not dirty the
+  // node: mark_dirty does.
+  pub fn set_intrinsic(var self&, n: u32, width: f32, height: f32) {
+    self.nodes[n].intrinsic_width = width;
+    self.nodes[n].intrinsic_height = height;
+  }
+
+  // YGNodeMarkDirty (only for measured nodes in yoga).
+  pub fn mark_dirty(var self&, n: u32) {
+    self.mark_dirty_and_propagate(n);
+  }
+
+  // --- Style setters: YGNodeStyleSet*, which dirty the node only on change ---
+  pub fn set_flex_direction(var self&, n: u32, v: FlexDir) {
+    if (self.nodes[n].style.flex_direction != v) {
+      self.nodes[n].style.flex_direction = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_justify_content(var self&, n: u32, v: FlexJustify) {
+    if (self.nodes[n].style.justify_content != v) {
+      self.nodes[n].style.justify_content = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_align_items(var self&, n: u32, v: FlexAlign) {
+    if (self.nodes[n].style.align_items != v) {
+      self.nodes[n].style.align_items = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_align_self(var self&, n: u32, v: FlexAlign) {
+    if (self.nodes[n].style.align_self != v) {
+      self.nodes[n].style.align_self = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_align_content(var self&, n: u32, v: FlexAlign) {
+    if (self.nodes[n].style.align_content != v) {
+      self.nodes[n].style.align_content = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_flex_wrap(var self&, n: u32, v: FlexWrapMode) {
+    if (self.nodes[n].style.flex_wrap != v) {
+      self.nodes[n].style.flex_wrap = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_overflow(var self&, n: u32, v: FlexOverflow) {
+    if (self.nodes[n].style.overflow != v) {
+      self.nodes[n].style.overflow = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_position_type(var self&, n: u32, v: FlexPositionType) {
+    if (self.nodes[n].style.position_type != v) {
+      self.nodes[n].style.position_type = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_display(var self&, n: u32, v: FlexDisplay) {
+    if (self.nodes[n].style.display != v) {
+      self.nodes[n].style.display = v;
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_flex_grow(var self&, n: u32, v: f32) {
+    if (self.nodes[n].style.set_flex_grow(v)) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_flex_shrink(var self&, n: u32, v: f32) {
+    if (self.nodes[n].style.set_flex_shrink(v)) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_aspect_ratio(var self&, n: u32, v: f32) {
+    if (self.nodes[n].style.set_aspect_ratio(v)) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_flex_basis(var self&, n: u32, l: StyleLength) {
+    if (self.nodes[n].style.set_flex_basis(l)) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  // Width (kWidth) or height (kHeight).
+  pub fn set_dimension(var self&, n: u32, dim: usize, l: StyleLength) {
+    if (self.nodes[n].style.set_dimension(dim, l)) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_min_dimension(var self&, n: u32, dim: usize, l: StyleLength) {
+    if (self.nodes[n].style.set_min_dimension(dim, l)) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_max_dimension(var self&, n: u32, dim: usize, l: StyleLength) {
+    if (self.nodes[n].style.set_max_dimension(dim, l)) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  // Insets, margins and padding in points on a physical edge (kLeft..kBottom).
+  pub fn set_position(var self&, n: u32, edge: usize, points: f32) {
+    if (self.nodes[n].style.set_position(edge, StyleLength::points(points))) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_margin(var self&, n: u32, edge: usize, points: f32) {
+    if (self.nodes[n].style.set_margin(edge, StyleLength::points(points))) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  pub fn set_padding(var self&, n: u32, edge: usize, points: f32) {
+    if (self.nodes[n].style.set_padding(edge, StyleLength::points(points))) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+  // A gap in points for kGutterColumn, kGutterRow or kGutterAll.
+  pub fn set_gap(var self&, n: u32, gutter: usize, points: f32) {
+    if (self.nodes[n].style.set_gap(gutter, StyleLength::points(points))) {
+      self.mark_dirty_and_propagate(n);
+    }
+  }
+
+  // YGNodeCalculateLayout(root, owner_width, owner_height, YGDirectionLTR).
+  pub fn calculate_layout(var self&, root: u32, owner_width: f32, owner_height: f32) {
+    self.calculate_root_layout(root, owner_width, owner_height);
+  }
+
+  // --- Results: YGNodeLayoutGet* ---
+  pub fn layout_left(self&, n: u32): f32 => self.nodes[n].layout.position[kLeft];
+  pub fn layout_top(self&, n: u32): f32 => self.nodes[n].layout.position[kTop];
+  pub fn layout_width(self&, n: u32): f32 => self.nodes[n].layout.dimensions[kWidth];
+  pub fn layout_height(self&, n: u32): f32 => self.nodes[n].layout.dimensions[kHeight];
+  pub fn layout_margin(self&, n: u32, edge: usize): f32 => self.nodes[n].layout.margin[edge];
+  pub fn layout_padding(self&, n: u32, edge: usize): f32 => self.nodes[n].layout.padding[edge];
+
+  // Node::markDirtyAndPropagate: stops at the first node that is already
+  // dirty, as yoga's does.
+  fn mark_dirty_and_propagate(var self&, n: u32);
+}
+
+fn FlexTree::insert_child(var self&, owner: u32, child: u32, index: usize) {
+  self.nodes[owner].children.insert(index, child);
+  self.nodes[child].owner = owner;
+  self.mark_dirty_and_propagate(owner);
+}
+
+fn FlexTree::mark_dirty_and_propagate(var self&, n: u32) {
+  var i = n;
+  while (i != kNoFlexNode) {
+    var node& = self.nodes[i];
+    if (node.dirty) {
+      return;
+    }
+    node.dirty = true;
+    node.layout.computed_flex_basis = kUndefined;
+    i = node.owner;
+  }
+}
+
+// --- Helpers (BoundAxis.h, Align.h, TrailingPosition.h, Baseline.cpp) ---------
+
+// boundAxisWithinMinAndMax.
+fn bound_axis_within_min_and_max(node&: FlexNode, axis: FlexDir, value: f32, axis_size: f32, width_size: f32): f32 {
+  let dim = dimension_of(axis);
+  let min = node.style.resolved_min_dimension(dim, axis_size);
+  let max = node.style.resolved_max_dimension(dim, axis_size);
+  if ((max > 0.0 || optional_equals(max, 0.0)) && value > max) {
+    return max;
+  }
+  if ((min > 0.0 || optional_equals(min, 0.0)) && value < min) {
+    return min;
+  }
+  return value;
+}
+
+// boundAxis: also never below the padding and border.
+fn bound_axis(node&: FlexNode, axis: FlexDir, value: f32, axis_size: f32, width_size: f32): f32 =>
+  max_or_defined(bound_axis_within_min_and_max(node, axis, value, axis_size, width_size), node.style.padding_and_border_for_axis(axis, width_size));
+
+// resolveChildAlignment.
+fn resolve_child_alignment(node&: FlexNode, child&: FlexNode): FlexAlign {
+  let align = child.style.align_self == FlexAlign::Auto ? node.style.align_items : child.style.align_self;
+  if (node.style.display == FlexDisplay::Flex && align == FlexAlign::Baseline && is_column(node.style.flex_direction)) {
+    return FlexAlign::FlexStart;
+  }
+  return align;
+}
+
+fn FlexTree::child_alignment(self&, node: u32, child: u32): FlexAlign => resolve_child_alignment(self.nodes[node], self.nodes[child]);
+
+// fallbackAlignment(Align).
+fn fallback_align(a: FlexAlign): FlexAlign => match (a) {
+  FlexAlign::SpaceBetween | FlexAlign::Stretch | FlexAlign::SpaceAround | FlexAlign::SpaceEvenly => FlexAlign::FlexStart,
+  _ => a,
+};
+
+// fallbackAlignment(Justify).
+fn fallback_justify(j: FlexJustify): FlexJustify => match (j) {
+  FlexJustify::SpaceBetween | FlexJustify::SpaceAround | FlexJustify::SpaceEvenly => FlexJustify::FlexStart,
+  _ => j,
+};
+
+// getPositionOfOppositeEdge.
+fn position_of_opposite_edge(position: f32, axis: FlexDir, containing&: FlexNode, node&: FlexNode): f32 {
+  let dim = dimension_of(axis);
+  return containing.layout.measured[dim] - node.layout.measured[dim] - position;
+}
+
+// setChildTrailingPosition.
+fn FlexTree::set_child_trailing_position(var self&, node: u32, child: u32, axis: FlexDir) {
+  let p = position_of_opposite_edge(self.nodes[child].layout.position[flex_start_edge(axis)], axis, self.nodes[node], self.nodes[child]);
+  self.nodes[child].layout.position[flex_end_edge(axis)] = p;
+}
+
+// constrainMaxSizeForMode.
+fn constrain_max_size_for_mode(node&: FlexNode, axis: FlexDir, owner_axis_size: f32, owner_width: f32, var mode&: SizingMode, var size&: f32) {
+  let max_size = node.style.resolved_max_dimension(dimension_of(axis), owner_axis_size) + node.style.margin_for_axis(axis, owner_width);
+  match (mode) {
+    SizingMode::StretchFit | SizingMode::FitContent => {
+      size = (is_undefined(max_size) || size < max_size) ? size : max_size;
+    },
+    SizingMode::MaxContent => {
+      if (is_defined(max_size)) {
+        mode = SizingMode::FitContent;
+        size = max_size;
+      }
+    },
+  };
+}
+
+// calculateBaseline (Baseline.cpp), without baseline functions.
+fn FlexTree::calculate_baseline(self&, n: u32): f32 {
+  var baseline_child = kNoFlexNode;
+  let count = self.nodes[n].children.len();
+  for (let i in 0..count) {
+    let c = self.nodes[n].children[i];
+    if (self.nodes[c].line_index > 0) {
+      break;
+    }
+    if (self.nodes[c].style.position_type == FlexPositionType::Absolute) {
+      continue;
+    }
+    if (self.child_alignment(n, c) == FlexAlign::Baseline) {
+      baseline_child = c;
+      break;
+    }
+    if (baseline_child == kNoFlexNode) {
+      baseline_child = c;
+    }
+  }
+  if (baseline_child == kNoFlexNode) {
+    return self.nodes[n].layout.measured[kHeight];
+  }
+  let baseline = self.calculate_baseline(baseline_child);
+  return baseline + self.nodes[baseline_child].layout.position[kTop];
+}
+
+// isBaselineLayout (Baseline.cpp).
+fn FlexTree::is_baseline_layout(self&, n: u32): bool {
+  is_column(self.nodes[n].style.flex_direction) ? return false;
+  self.nodes[n].style.align_items == FlexAlign::Baseline ? return true;
+  for (let i in 0..self.nodes[n].children.len()) {
+    let c = self.nodes[n].children[i];
+    if (self.nodes[c].style.position_type != FlexPositionType::Absolute && self.nodes[c].style.align_self == FlexAlign::Baseline) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// --- Pixel grid (PixelGrid.cpp), in doubles as yoga computes it --------------
+
+fn round_value_to_pixel_grid(value: f64, point_scale_factor: f64, force_ceil: bool, force_floor: bool): f32 {
+  var scaled_value = value * point_scale_factor;
+  // fmod: scaled_value - fractial is floor(scaled_value)
+  var fractial = scaled_value % 1.0;
+  if (fractial < 0.0) {
+    fractial += 1.0;
+  }
+  if (inexact_equals_f64(fractial, 0.0)) {
+    scaled_value = scaled_value - fractial;
+  } else if (inexact_equals_f64(fractial, 1.0)) {
+    scaled_value = scaled_value - fractial + 1.0;
+  } else if (force_ceil) {
+    scaled_value = scaled_value - fractial + 1.0;
+  } else if (force_floor) {
+    scaled_value = scaled_value - fractial;
+  } else {
+    let up = fractial == fractial && (fractial > 0.5 || inexact_equals_f64(fractial, 0.5));
+    scaled_value = scaled_value - fractial + (up ? 1.0 : 0.0);
+  }
+  if (scaled_value != scaled_value || point_scale_factor != point_scale_factor) {
+    return kUndefined;
+  }
+  return (scaled_value / point_scale_factor) as f32;
+}
+
+// roundLayoutResultsToPixelGrid. Measured nodes (text) never round their size
+// down.
+fn FlexTree::round_layout_results_to_pixel_grid(var self&, n: u32, absolute_left: f64, absolute_top: f64) {
+  let point_scale_factor: f64 = 1.0;
+  let node_left = self.nodes[n].layout.position[kLeft] as f64;
+  let node_top = self.nodes[n].layout.position[kTop] as f64;
+  let node_width = self.nodes[n].layout.dimensions[kWidth] as f64;
+  let node_height = self.nodes[n].layout.dimensions[kHeight] as f64;
+
+  let absolute_node_left = absolute_left + node_left;
+  let absolute_node_top = absolute_top + node_top;
+  let absolute_node_right = absolute_node_left + node_width;
+  let absolute_node_bottom = absolute_node_top + node_height;
+
+  let text_rounding = self.nodes[n].has_measure;
+  let left = round_value_to_pixel_grid(node_left, point_scale_factor, false, text_rounding);
+  let top = round_value_to_pixel_grid(node_top, point_scale_factor, false, text_rounding);
+
+  let scaled_node_width = node_width * point_scale_factor;
+  let has_fractional_width = !inexact_equals_f64(@round(scaled_node_width), scaled_node_width);
+  let scaled_node_height = node_height * point_scale_factor;
+  let has_fractional_height = !inexact_equals_f64(@round(scaled_node_height), scaled_node_height);
+
+  let width =
+    round_value_to_pixel_grid(absolute_node_right, point_scale_factor, text_rounding && has_fractional_width, text_rounding && !has_fractional_width) -
+    round_value_to_pixel_grid(absolute_node_left, point_scale_factor, false, text_rounding);
+  let height =
+    round_value_to_pixel_grid(absolute_node_bottom, point_scale_factor, text_rounding && has_fractional_height, text_rounding && !has_fractional_height) -
+    round_value_to_pixel_grid(absolute_node_top, point_scale_factor, false, text_rounding);
+  self.nodes[n].layout.position[kLeft] = left;
+  self.nodes[n].layout.position[kTop] = top;
+  self.nodes[n].layout.dimensions = [width, height];
+
+  let count = self.nodes[n].children.len();
+  for (let i in 0..count) {
+    let c = self.nodes[n].children[i];
+    self.round_layout_results_to_pixel_grid(c, absolute_node_left, absolute_node_top);
+  }
+}
+
+// --- Layout cache (Cache.cpp) ----------------------------------------------------
+
+fn size_is_exact_and_matches_old_measured_size(mode: SizingMode, size: f32, last_computed_size: f32): bool =>
+  mode == SizingMode::StretchFit && inexact_equals(size, last_computed_size);
+
+fn old_size_is_max_content_and_still_fits(mode: SizingMode, size: f32, last_mode: SizingMode, last_computed_size: f32): bool =>
+  mode == SizingMode::FitContent && last_mode == SizingMode::MaxContent &&
+    (size >= last_computed_size || inexact_equals(size, last_computed_size));
+
+fn new_size_is_stricter_and_still_valid(mode: SizingMode, size: f32, last_mode: SizingMode, last_size: f32, last_computed_size: f32): bool =>
+  last_mode == SizingMode::FitContent && mode == SizingMode::FitContent && is_defined(last_size) && is_defined(size) &&
+    is_defined(last_computed_size) && last_size > size &&
+    (last_computed_size <= size || inexact_equals(size, last_computed_size));
+
+// canUseCachedMeasurement, with the point scale factor 1 that makes it
+// compare available sizes rounded to the pixel grid.
+fn can_use_cached_measurement(width_mode: SizingMode, available_width: f32, height_mode: SizingMode, available_height: f32,
+                              last&: CachedMeasurement, margin_row: f32, margin_column: f32): bool {
+  if ((is_defined(last.computed_height) && last.computed_height < 0.0) || (is_defined(last.computed_width) && last.computed_width < 0.0)) {
+    return false;
+  }
+  let effective_width = round_value_to_pixel_grid(available_width as f64, 1.0, false, false);
+  let effective_height = round_value_to_pixel_grid(available_height as f64, 1.0, false, false);
+  let effective_last_width = round_value_to_pixel_grid(last.available_width as f64, 1.0, false, false);
+  let effective_last_height = round_value_to_pixel_grid(last.available_height as f64, 1.0, false, false);
+
+  let has_same_width_spec = last.width_mode == width_mode && inexact_equals(effective_last_width, effective_width);
+  let has_same_height_spec = last.height_mode == height_mode && inexact_equals(effective_last_height, effective_height);
+
+  let width_is_compatible = has_same_width_spec ||
+    size_is_exact_and_matches_old_measured_size(width_mode, available_width - margin_row, last.computed_width) ||
+    old_size_is_max_content_and_still_fits(width_mode, available_width - margin_row, last.width_mode, last.computed_width) ||
+    new_size_is_stricter_and_still_valid(width_mode, available_width - margin_row, last.width_mode, last.available_width, last.computed_width);
+  let height_is_compatible = has_same_height_spec ||
+    size_is_exact_and_matches_old_measured_size(height_mode, available_height - margin_column, last.computed_height) ||
+    old_size_is_max_content_and_still_fits(height_mode, available_height - margin_column, last.height_mode, last.computed_height) ||
+    new_size_is_stricter_and_still_valid(height_mode, available_height - margin_column, last.height_mode, last.available_height, last.computed_height);
+  return width_is_compatible && height_is_compatible;
+}
+
+// --- Leaves ------------------------------------------------------------------------
+
+// Node::measure through libultragui's measure function: the intrinsic size,
+// with yoga's clamp of an invalid answer.
+fn measure(node&: FlexNode): (f32, f32) {
+  let w = node.intrinsic_width;
+  let h = node.intrinsic_height;
+  if (is_undefined(h) || h < 0.0 || is_undefined(w) || w < 0.0) {
+    return (max_or_defined(0.0, w), max_or_defined(0.0, h));
+  }
+  return (w, h);
+}
+
+// measureNodeWithMeasureFunc.
+fn FlexTree::measure_node_with_measure_func(var self&, n: u32, available_width_in: f32, available_height_in: f32, width_mode: SizingMode,
+                                  height_mode: SizingMode, owner_width: f32, owner_height: f32) {
+  var available_width = available_width_in;
+  var available_height = available_height_in;
+  if (width_mode == SizingMode::MaxContent) {
+    available_width = kUndefined;
+  }
+  if (height_mode == SizingMode::MaxContent) {
+    available_height = kUndefined;
+  }
+  let pad = self.nodes[n].layout.padding;
+  let padding_and_border_axis_row = pad[kLeft] + pad[kRight] + kBorder + kBorder;
+  let padding_and_border_axis_column = pad[kTop] + pad[kBottom] + kBorder + kBorder;
+
+  if (width_mode == SizingMode::StretchFit && height_mode == SizingMode::StretchFit) {
+    let w = bound_axis(self.nodes[n], FlexDir::Row, available_width, owner_width, owner_width);
+    let h = bound_axis(self.nodes[n], FlexDir::Column, available_height, owner_height, owner_width);
+    self.nodes[n].layout.measured = [w, h];
+  } else {
+    let (measured_width, measured_height) = measure(self.nodes[n]);
+    let width_in = (width_mode == SizingMode::MaxContent || width_mode == SizingMode::FitContent) ?
+      measured_width + padding_and_border_axis_row : available_width;
+    let height_in = (height_mode == SizingMode::MaxContent || height_mode == SizingMode::FitContent) ?
+      measured_height + padding_and_border_axis_column : available_height;
+    let w = bound_axis(self.nodes[n], FlexDir::Row, width_in, owner_width, owner_width);
+    let h = bound_axis(self.nodes[n], FlexDir::Column, height_in, owner_height, owner_width);
+    self.nodes[n].layout.measured = [w, h];
+  }
+}
+
+// measureNodeWithoutChildren.
+fn FlexTree::measure_node_without_children(var self&, n: u32, available_width: f32, available_height: f32, width_mode: SizingMode,
+                                 height_mode: SizingMode, owner_width: f32, owner_height: f32) {
+  let pad = self.nodes[n].layout.padding;
+  var width = available_width;
+  if (width_mode == SizingMode::MaxContent || width_mode == SizingMode::FitContent) {
+    width = pad[kLeft] + pad[kRight] + kBorder + kBorder;
+  }
+  var height = available_height;
+  if (height_mode == SizingMode::MaxContent || height_mode == SizingMode::FitContent) {
+    height = pad[kTop] + pad[kBottom] + kBorder + kBorder;
+  }
+  let w = bound_axis(self.nodes[n], FlexDir::Row, width, owner_width, owner_width);
+  let h = bound_axis(self.nodes[n], FlexDir::Column, height, owner_height, owner_width);
+  self.nodes[n].layout.measured = [w, h];
+}
+
+// isFixedSize.
+fn is_fixed_size(dim: f32, mode: SizingMode): bool =>
+  mode == SizingMode::StretchFit || (is_defined(dim) && mode == SizingMode::FitContent && dim <= 0.0);
+
+// measureNodeWithFixedSize.
+fn FlexTree::measure_node_with_fixed_size(var self&, n: u32, available_width: f32, available_height: f32, width_mode: SizingMode,
+                                height_mode: SizingMode, owner_width: f32, owner_height: f32): bool {
+  if (!(is_fixed_size(available_width, width_mode) && is_fixed_size(available_height, height_mode))) {
+    return false;
+  }
+  let width_in = is_undefined(available_width) || (width_mode == SizingMode::FitContent && available_width < 0.0) ? 0.0 : available_width;
+  let height_in = is_undefined(available_height) || (height_mode == SizingMode::FitContent && available_height < 0.0) ? 0.0 : available_height;
+  let w = bound_axis(self.nodes[n], FlexDir::Row, width_in, owner_width, owner_width);
+  let h = bound_axis(self.nodes[n], FlexDir::Column, height_in, owner_height, owner_width);
+  self.nodes[n].layout.measured = [w, h];
+  return true;
+}
+
+// zeroOutLayoutRecursively: fresh layout results (caches, flex basis and
+// owner direction included), sizes 0. Dirty flags, line indices and the
+// processed dimensions stay.
+fn FlexTree::zero_out_layout_recursively(var self&, n: u32) {
+  self.nodes[n].layout = LayoutResults {};
+  self.nodes[n].layout.dimensions = [0.0, 0.0];
+  let count = self.nodes[n].children.len();
+  for (let i in 0..count) {
+    let c = self.nodes[n].children[i];
+    self.zero_out_layout_recursively(c);
+  }
+}
+
+// calculateAvailableInnerDimension.
+fn calculate_available_inner_dimension(node&: FlexNode, dim: usize, available_dim: f32, padding_and_border: f32, owner_dim: f32): f32 {
+  var available_inner_dim = available_dim - padding_and_border;
+  if (is_defined(available_inner_dim)) {
+    let min_dimension = node.style.resolved_min_dimension(dim, owner_dim);
+    let min_inner_dim = is_undefined(min_dimension) ? 0.0 : min_dimension - padding_and_border;
+    let max_dimension = node.style.resolved_max_dimension(dim, owner_dim);
+    let max_inner_dim = is_undefined(max_dimension) ? flt_max() : max_dimension - padding_and_border;
+    available_inner_dim = max_or_defined(min_or_defined(available_inner_dim, max_inner_dim), min_inner_dim);
+  }
+  return available_inner_dim;
+}
+
+// --- Flex basis ----------------------------------------------------------------------
+
+// computeFlexBasisForChild.
+fn FlexTree::compute_flex_basis_for_child(var self&, node: u32, child: u32, width: f32, width_mode: SizingMode, height: f32, owner_width: f32,
+                                owner_height: f32, height_mode: SizingMode, depth: u32, generation: u32) {
+  let main_axis = self.nodes[node].style.flex_direction;
+  let is_main_axis_row = is_row(main_axis);
+  let main_axis_size = is_main_axis_row ? width : height;
+  let main_axis_owner_size = is_main_axis_row ? owner_width : owner_height;
+
+  var child_width = kUndefined;
+  var child_height = kUndefined;
+  var child_width_mode = SizingMode::MaxContent;
+  var child_height_mode = SizingMode::MaxContent;
+
+  let resolved_flex_basis = self.nodes[child].resolve_flex_basis(main_axis_owner_size);
+  let is_row_style_dim_defined = self.nodes[child].has_definite_length(kWidth, owner_width);
+  let is_column_style_dim_defined = self.nodes[child].has_definite_length(kHeight, owner_height);
+
+  if (is_defined(resolved_flex_basis) && is_defined(main_axis_size)) {
+    // Kept from an earlier pass until the child is marked dirty.
+    if (is_undefined(self.nodes[child].layout.computed_flex_basis)) {
+      let padding_and_border = self.nodes[child].style.padding_and_border_for_axis(main_axis, owner_width);
+      self.nodes[child].layout.computed_flex_basis = max_or_defined(resolved_flex_basis, padding_and_border);
+    }
+  } else if (is_main_axis_row && is_row_style_dim_defined) {
+    let padding_and_border = self.nodes[child].style.padding_and_border_for_axis(FlexDir::Row, owner_width);
+    self.nodes[child].layout.computed_flex_basis = max_or_defined(self.nodes[child].resolved_dimension(kWidth, owner_width), padding_and_border);
+  } else if (!is_main_axis_row && is_column_style_dim_defined) {
+    let padding_and_border = self.nodes[child].style.padding_and_border_for_axis(FlexDir::Column, owner_width);
+    self.nodes[child].layout.computed_flex_basis = max_or_defined(self.nodes[child].resolved_dimension(kHeight, owner_height), padding_and_border);
+  } else {
+    // The flex basis and hypothetical main size: measure the child.
+    let margin_row = self.nodes[child].style.margin_for_axis(FlexDir::Row, owner_width);
+    let margin_column = self.nodes[child].style.margin_for_axis(FlexDir::Column, owner_width);
+
+    if (is_row_style_dim_defined) {
+      child_width = self.nodes[child].resolved_dimension(kWidth, owner_width) + margin_row;
+      child_width_mode = SizingMode::StretchFit;
+    }
+    if (is_column_style_dim_defined) {
+      child_height = self.nodes[child].resolved_dimension(kHeight, owner_height) + margin_column;
+      child_height_mode = SizingMode::StretchFit;
+    }
+
+    let parent_overflow = self.nodes[node].style.overflow;
+    if ((!is_main_axis_row && parent_overflow == FlexOverflow::Scroll) || parent_overflow != FlexOverflow::Scroll) {
+      if (is_undefined(child_width) && is_defined(width)) {
+        child_width = width;
+        child_width_mode = SizingMode::FitContent;
+      }
+    }
+    let apply_height_fit_content = is_main_axis_row || parent_overflow != FlexOverflow::Scroll;
+    if (apply_height_fit_content && is_undefined(child_height) && is_defined(height)) {
+      child_height = height;
+      child_height_mode = SizingMode::FitContent;
+    }
+
+    let aspect_ratio = self.nodes[child].style.aspect_ratio();
+    if (is_defined(aspect_ratio)) {
+      if (!is_main_axis_row && child_width_mode == SizingMode::StretchFit) {
+        child_height = margin_column + (child_width - margin_row) / aspect_ratio;
+        child_height_mode = SizingMode::StretchFit;
+      } else if (is_main_axis_row && child_height_mode == SizingMode::StretchFit) {
+        child_width = margin_row + (child_height - margin_column) * aspect_ratio;
+        child_width_mode = SizingMode::StretchFit;
+      }
+    }
+
+    // A child without a cross size that stretches is measured exactly at the
+    // available inner cross size.
+    let has_exact_width = is_defined(width) && width_mode == SizingMode::StretchFit;
+    let child_width_stretch = self.child_alignment(node, child) == FlexAlign::Stretch && child_width_mode != SizingMode::StretchFit;
+    if (!is_main_axis_row && !is_row_style_dim_defined && has_exact_width && child_width_stretch) {
+      child_width = width;
+      child_width_mode = SizingMode::StretchFit;
+      if (is_defined(aspect_ratio)) {
+        child_height = (child_width - margin_row) / aspect_ratio;
+        child_height_mode = SizingMode::StretchFit;
+      }
+    }
+
+    let has_exact_height = is_defined(height) && height_mode == SizingMode::StretchFit;
+    let child_height_stretch = self.child_alignment(node, child) == FlexAlign::Stretch && child_height_mode != SizingMode::StretchFit;
+    if (is_main_axis_row && !is_column_style_dim_defined && has_exact_height && child_height_stretch) {
+      child_height = height;
+      child_height_mode = SizingMode::StretchFit;
+      if (is_defined(aspect_ratio)) {
+        child_width = (child_height - margin_column) * aspect_ratio;
+        child_width_mode = SizingMode::StretchFit;
+      }
+    }
+
+    constrain_max_size_for_mode(self.nodes[child], FlexDir::Row, owner_width, owner_width, child_width_mode, child_width);
+    constrain_max_size_for_mode(self.nodes[child], FlexDir::Column, owner_height, owner_width, child_height_mode, child_height);
+
+    self.calculate_layout_internal(child, child_width, child_height, child_width_mode, child_height_mode, owner_width, owner_height, false, depth,
+                              generation);
+
+    let basis = max_or_defined(self.nodes[child].layout.measured[dimension_of(main_axis)],
+                               self.nodes[child].style.padding_and_border_for_axis(main_axis, owner_width));
+    self.nodes[child].layout.computed_flex_basis = basis;
+  }
+}
+
+// computeFlexBasisForChildren: the sum of the children's outer flex bases.
+fn FlexTree::compute_flex_basis_for_children(var self&, node: u32, available_inner_width: f32, available_inner_height: f32, owner_width: f32,
+                                   owner_height: f32, width_mode: SizingMode, height_mode: SizingMode, main_axis: FlexDir,
+                                   perform_layout: bool, depth: u32, generation: u32): f32 {
+  var total_outer_flex_basis: f32 = 0.0;
+  var single_flex_child = kNoFlexNode;
+  let count = self.nodes[node].children.len();
+  let sizing_mode_main_dim = is_row(main_axis) ? width_mode : height_mode;
+  // A lone child that can both grow and shrink gets a basis of 0 instead of
+  // being measured and then flexed to fill the line.
+  if (sizing_mode_main_dim == SizingMode::StretchFit) {
+    for (let i in 0..count) {
+      let c = self.nodes[node].children[i];
+      if (self.nodes[c].is_flexible()) {
+        if (single_flex_child != kNoFlexNode || inexact_equals(self.nodes[c].resolve_flex_grow(), 0.0) ||
+            inexact_equals(self.nodes[c].resolve_flex_shrink(), 0.0)) {
+          single_flex_child = kNoFlexNode;
+          break;
+        }
+        single_flex_child = c;
+      }
+    }
+  }
+
+  for (let i in 0..count) {
+    let c = self.nodes[node].children[i];
+    self.nodes[c].process_dimensions();
+    if (self.nodes[c].style.display == FlexDisplay::None) {
+      self.zero_out_layout_recursively(c);
+      self.nodes[c].dirty = false;
+      continue;
+    }
+    if (perform_layout) {
+      // The initial position, relative to the owner.
+      self.nodes[c].set_position(available_inner_width, available_inner_height);
+    }
+    if (self.nodes[c].style.position_type == FlexPositionType::Absolute) {
+      continue;
+    }
+    if (c == single_flex_child) {
+      self.nodes[c].layout.computed_flex_basis = 0.0;
+    } else {
+      self.compute_flex_basis_for_child(node, c, available_inner_width, width_mode, available_inner_height, owner_width, owner_height, height_mode,
+                                   depth, generation);
+    }
+    total_outer_flex_basis += (self.nodes[c].layout.computed_flex_basis + self.nodes[c].style.margin_for_axis(main_axis, available_inner_width));
+  }
+  return total_outer_flex_basis;
+}
+
+// --- Flex lines (FlexLine.cpp) -----------------------------------------------------
+
+// calculateFlexLine: the next line from `start`, which is left at the first
+// child of the line after it.
+fn FlexTree::calculate_flex_line(var self&, node: u32, owner_width: f32, main_axis_owner_size: f32, available_inner_width: f32,
+                       available_inner_main_dim: f32, var start&: usize, line_count: usize): FlexLine {
+  var line = FlexLine {};
+  var size_consumed: f32 = 0.0;
+  var total_flex_grow_factors: f32 = 0.0;
+  var total_flex_shrink_scaled_factors: f32 = 0.0;
+  var first_element_in_line = kNoFlexNode;
+  var size_consumed_including_min_constraint: f32 = 0.0;
+
+  let main_axis = self.nodes[node].style.flex_direction;
+  let is_node_flex_wrap = self.nodes[node].style.flex_wrap != FlexWrapMode::NoWrap;
+  let gap = self.nodes[node].style.gap_for_axis(main_axis, available_inner_main_dim);
+  let count = self.nodes[node].children.len();
+
+  while (start < count) {
+    let c = self.nodes[node].children[start];
+    if (self.nodes[c].style.display == FlexDisplay::None || self.nodes[c].style.position_type == FlexPositionType::Absolute) {
+      start += 1;
+      continue;
+    }
+    if (first_element_in_line == kNoFlexNode) {
+      first_element_in_line = c;
+    }
+    self.nodes[c].line_index = line_count;
+    let child_margin_main_axis = self.nodes[c].style.margin_for_axis(main_axis, available_inner_width);
+    let child_leading_gap_main_axis = c == first_element_in_line ? 0.0 : gap;
+    let flex_basis_with_min_and_max_constraints =
+      bound_axis_within_min_and_max(self.nodes[c], main_axis, self.nodes[c].layout.computed_flex_basis, main_axis_owner_size, owner_width);
+
+    // This item would overflow a multi-line container: the line ends here.
+    if (size_consumed_including_min_constraint + flex_basis_with_min_and_max_constraints + child_margin_main_axis + child_leading_gap_main_axis >
+          available_inner_main_dim &&
+        is_node_flex_wrap && line.items.len() != 0) {
+      break;
+    }
+
+    size_consumed_including_min_constraint += flex_basis_with_min_and_max_constraints + child_margin_main_axis + child_leading_gap_main_axis;
+    size_consumed += flex_basis_with_min_and_max_constraints + child_margin_main_axis + child_leading_gap_main_axis;
+
+    if (self.nodes[c].is_flexible()) {
+      total_flex_grow_factors += self.nodes[c].resolve_flex_grow();
+      // The shrink factor is scaled by the child's basis.
+      total_flex_shrink_scaled_factors += -self.nodes[c].resolve_flex_shrink() * self.nodes[c].layout.computed_flex_basis;
+    }
+    line.items.push(c);
+    start += 1;
+  }
+
+  // Both totals are floored to 1.
+  if (total_flex_grow_factors > 0.0 && total_flex_grow_factors < 1.0) {
+    total_flex_grow_factors = 1.0;
+  }
+  if (total_flex_shrink_scaled_factors > 0.0 && total_flex_shrink_scaled_factors < 1.0) {
+    total_flex_shrink_scaled_factors = 1.0;
+  }
+  line.size_consumed = size_consumed;
+  line.total_flex_grow_factors = total_flex_grow_factors;
+  line.total_flex_shrink_scaled_factors = total_flex_shrink_scaled_factors;
+  return line;
+}
+
+// --- Resolving flexible lengths --------------------------------------------------
+
+// distributeFreeSpaceSecondPass: sizes and lays out (or measures) each item;
+// returns the space it handed out.
+fn FlexTree::distribute_free_space_second_pass(var self&, var line&: FlexLine, node: u32, main_axis: FlexDir, cross_axis: FlexDir,
+                                     owner_width: f32, main_axis_owner_size: f32, available_inner_main_dim: f32,
+                                     available_inner_cross_dim: f32, available_inner_width: f32, available_inner_height: f32,
+                                     main_axis_overflows: bool, sizing_mode_cross_dim: SizingMode, perform_layout: bool, depth: u32,
+                                     generation: u32): f32 {
+  var child_flex_basis: f32 = 0.0;
+  var flex_shrink_scaled_factor: f32 = 0.0;
+  var flex_grow_factor: f32 = 0.0;
+  var delta_free_space: f32 = 0.0;
+  let is_main_axis_row = is_row(main_axis);
+  let is_node_flex_wrap = self.nodes[node].style.flex_wrap != FlexWrapMode::NoWrap;
+
+  for (let k in 0..line.items.len()) {
+    let c = line.items[k];
+    child_flex_basis =
+      bound_axis_within_min_and_max(self.nodes[c], main_axis, self.nodes[c].layout.computed_flex_basis, main_axis_owner_size, owner_width);
+    var updated_main_size = child_flex_basis;
+
+    let remaining_free_space = line.remaining_free_space;
+    if (is_defined(remaining_free_space) && remaining_free_space < 0.0) {
+      flex_shrink_scaled_factor = -self.nodes[c].resolve_flex_shrink() * child_flex_basis;
+      // Is this child able to shrink?
+      if (flex_shrink_scaled_factor != 0.0) {
+        var child_size = kUndefined;
+        let total = line.total_flex_shrink_scaled_factors;
+        if (is_defined(total) && total == 0.0) {
+          child_size = child_flex_basis + flex_shrink_scaled_factor;
+        } else {
+          child_size = child_flex_basis + (remaining_free_space / total) * flex_shrink_scaled_factor;
+        }
+        updated_main_size = bound_axis(self.nodes[c], main_axis, child_size, available_inner_main_dim, available_inner_width);
+      }
+    } else if (is_defined(remaining_free_space) && remaining_free_space > 0.0) {
+      flex_grow_factor = self.nodes[c].resolve_flex_grow();
+      // Is this child able to grow?
+      if (flex_grow_factor == flex_grow_factor && flex_grow_factor != 0.0) {
+        let total = line.total_flex_grow_factors;
+        updated_main_size =
+          bound_axis(self.nodes[c], main_axis, child_flex_basis + remaining_free_space / total * flex_grow_factor, available_inner_main_dim,
+                     available_inner_width);
+      }
+    }
+
+    delta_free_space += updated_main_size - child_flex_basis;
+
+    let margin_main = self.nodes[c].style.margin_for_axis(main_axis, available_inner_width);
+    let margin_cross = self.nodes[c].style.margin_for_axis(cross_axis, available_inner_width);
+
+    var child_cross_size = kUndefined;
+    var child_main_size = updated_main_size + margin_main;
+    var child_cross_mode = SizingMode::MaxContent;
+    var child_main_mode = SizingMode::StretchFit;
+    let cross_dim = dimension_of(cross_axis);
+    let aspect_ratio = self.nodes[c].style.aspect_ratio();
+    if (is_defined(aspect_ratio)) {
+      child_cross_size =
+        is_main_axis_row ? (child_main_size - margin_main) / aspect_ratio : (child_main_size - margin_main) * aspect_ratio;
+      child_cross_mode = SizingMode::StretchFit;
+      child_cross_size += margin_cross;
+    } else if (available_inner_cross_dim == available_inner_cross_dim &&
+               !self.nodes[c].has_definite_length(cross_dim, available_inner_cross_dim) &&
+               sizing_mode_cross_dim == SizingMode::StretchFit && !(is_node_flex_wrap && main_axis_overflows) &&
+               self.child_alignment(node, c) == FlexAlign::Stretch) {
+      child_cross_size = available_inner_cross_dim;
+      child_cross_mode = SizingMode::StretchFit;
+    } else if (!self.nodes[c].has_definite_length(cross_dim, available_inner_cross_dim)) {
+      child_cross_size = available_inner_cross_dim;
+      child_cross_mode = is_undefined(child_cross_size) ? SizingMode::MaxContent : SizingMode::FitContent;
+    } else {
+      child_cross_size = self.nodes[c].resolved_dimension(cross_dim, available_inner_cross_dim) + margin_cross;
+      let is_loose_percentage_measurement =
+        self.nodes[c].processed[cross_dim].unit == Unit::Percent && sizing_mode_cross_dim != SizingMode::StretchFit;
+      child_cross_mode = is_undefined(child_cross_size) || is_loose_percentage_measurement ? SizingMode::MaxContent : SizingMode::StretchFit;
+    }
+
+    constrain_max_size_for_mode(self.nodes[c], main_axis, available_inner_main_dim, available_inner_width, child_main_mode, child_main_size);
+    constrain_max_size_for_mode(self.nodes[c], cross_axis, available_inner_cross_dim, available_inner_width, child_cross_mode, child_cross_size);
+
+    let requires_stretch_layout =
+      !self.nodes[c].has_definite_length(cross_dim, available_inner_cross_dim) && self.child_alignment(node, c) == FlexAlign::Stretch;
+
+    let child_width = is_main_axis_row ? child_main_size : child_cross_size;
+    let child_height = !is_main_axis_row ? child_main_size : child_cross_size;
+    let child_width_mode = is_main_axis_row ? child_main_mode : child_cross_mode;
+    let child_height_mode = !is_main_axis_row ? child_main_mode : child_cross_mode;
+
+    let is_layout_pass = perform_layout && !requires_stretch_layout;
+    // Lay the child out (or measure it) at its new main size.
+    self.calculate_layout_internal(c, child_width, child_height, child_width_mode, child_height_mode, available_inner_width,
+                              available_inner_height, is_layout_pass, depth, generation);
+    let overflowed = self.nodes[node].layout.had_overflow || self.nodes[c].layout.had_overflow;
+    self.nodes[node].layout.had_overflow = overflowed;
+  }
+  return delta_free_space;
+}
+
+// distributeFreeSpaceFirstPass: items whose min/max constraints trigger are
+// frozen at those sizes and taken out of the space to distribute.
+fn FlexTree::distribute_free_space_first_pass(self&, var line&: FlexLine, main_axis: FlexDir, owner_width: f32, main_axis_owner_size: f32,
+                                    available_inner_main_dim: f32, available_inner_width: f32) {
+  var flex_shrink_scaled_factor: f32 = 0.0;
+  var flex_grow_factor: f32 = 0.0;
+  var base_main_size: f32 = 0.0;
+  var bound_main_size: f32 = 0.0;
+  var delta_free_space: f32 = 0.0;
+
+  for (let k in 0..line.items.len()) {
+    let c = line.items[k];
+    let child& = self.nodes[c];
+    let child_flex_basis =
+      bound_axis_within_min_and_max(child, main_axis, child.layout.computed_flex_basis, main_axis_owner_size, owner_width);
+
+    if (line.remaining_free_space < 0.0) {
+      flex_shrink_scaled_factor = -child.resolve_flex_shrink() * child_flex_basis;
+      // Is this child able to shrink?
+      if (is_defined(flex_shrink_scaled_factor) && flex_shrink_scaled_factor != 0.0) {
+        base_main_size = child_flex_basis + line.remaining_free_space / line.total_flex_shrink_scaled_factors * flex_shrink_scaled_factor;
+        bound_main_size = bound_axis(child, main_axis, base_main_size, available_inner_main_dim, available_inner_width);
+        if (is_defined(base_main_size) && is_defined(bound_main_size) && base_main_size != bound_main_size) {
+          delta_free_space += bound_main_size - child_flex_basis;
+          line.total_flex_shrink_scaled_factors -= (-child.resolve_flex_shrink() * child.layout.computed_flex_basis);
+        }
+      }
+    } else if (is_defined(line.remaining_free_space) && line.remaining_free_space > 0.0) {
+      flex_grow_factor = child.resolve_flex_grow();
+      // Is this child able to grow?
+      if (is_defined(flex_grow_factor) && flex_grow_factor != 0.0) {
+        base_main_size = child_flex_basis + line.remaining_free_space / line.total_flex_grow_factors * flex_grow_factor;
+        bound_main_size = bound_axis(child, main_axis, base_main_size, available_inner_main_dim, available_inner_width);
+        if (is_defined(base_main_size) && is_defined(bound_main_size) && base_main_size != bound_main_size) {
+          delta_free_space += bound_main_size - child_flex_basis;
+          line.total_flex_grow_factors -= flex_grow_factor;
+        }
+      }
+    }
+  }
+  line.remaining_free_space -= delta_free_space;
+}
+
+// resolveFlexibleLength: yoga's two passes over the items (not the spec's
+// loop until nothing is frozen).
+fn FlexTree::resolve_flexible_length(var self&, node: u32, var line&: FlexLine, main_axis: FlexDir, cross_axis: FlexDir, owner_width: f32,
+                           main_axis_owner_size: f32, available_inner_main_dim: f32, available_inner_cross_dim: f32,
+                           available_inner_width: f32, available_inner_height: f32, main_axis_overflows: bool,
+                           sizing_mode_cross_dim: SizingMode, perform_layout: bool, depth: u32, generation: u32) {
+  let original_free_space = line.remaining_free_space;
+  self.distribute_free_space_first_pass(line, main_axis, owner_width, main_axis_owner_size, available_inner_main_dim, available_inner_width);
+  let distributed_free_space =
+    self.distribute_free_space_second_pass(line, node, main_axis, cross_axis, owner_width, main_axis_owner_size, available_inner_main_dim,
+                                      available_inner_cross_dim, available_inner_width, available_inner_height, main_axis_overflows,
+                                      sizing_mode_cross_dim, perform_layout, depth, generation);
+  line.remaining_free_space = original_free_space - distributed_free_space;
+}
+
+// justifyMainAxis: main-axis positions and the line's main and cross size.
+fn FlexTree::justify_main_axis(var self&, var line&: FlexLine, node: u32, main_axis: FlexDir, cross_axis: FlexDir, sizing_mode_main_dim: SizingMode,
+                     sizing_mode_cross_dim: SizingMode, main_axis_owner_size: f32, owner_width: f32, available_inner_main_dim: f32,
+                     available_inner_cross_dim: f32, available_inner_width: f32, perform_layout: bool) {
+  let leading_padding_and_border_main = self.nodes[node].style.flex_start_padding_and_border(main_axis, owner_width);
+  let trailing_padding_and_border_main = self.nodes[node].style.flex_end_padding_and_border(main_axis, owner_width);
+  let gap = self.nodes[node].style.gap_for_axis(main_axis, available_inner_main_dim);
+  let main_dim = dimension_of(main_axis);
+
+  // "At most" in the main axis: no free space unless a min size asks for it.
+  if (sizing_mode_main_dim == SizingMode::FitContent && line.remaining_free_space > 0.0) {
+    let min_main = self.nodes[node].style.resolved_min_dimension(main_dim, main_axis_owner_size);
+    if (self.nodes[node].style.min_dimension(main_dim).is_defined() && is_defined(min_main)) {
+      let min_available_main_dim = min_main - leading_padding_and_border_main - trailing_padding_and_border_main;
+      let occupied_space_by_child_nodes = available_inner_main_dim - line.remaining_free_space;
+      line.remaining_free_space = max_or_defined(0.0, min_available_main_dim - occupied_space_by_child_nodes);
+    } else {
+      line.remaining_free_space = 0.0;
+    }
+  }
+
+  var leading_main_dim: f32 = 0.0;
+  var between_main_dim = gap;
+  let justify_content =
+    line.remaining_free_space >= 0.0 ? self.nodes[node].style.justify_content : fallback_justify(self.nodes[node].style.justify_content);
+  let item_count = line.items.len();
+  match (justify_content) {
+    FlexJustify::FlexStart => {},
+    FlexJustify::Center => {
+      leading_main_dim = line.remaining_free_space / 2.0;
+    },
+    FlexJustify::FlexEnd => {
+      leading_main_dim = line.remaining_free_space;
+    },
+    FlexJustify::SpaceBetween => {
+      if (item_count > 1) {
+        between_main_dim += line.remaining_free_space / ((item_count - 1) as f32);
+      }
+    },
+    FlexJustify::SpaceEvenly => {
+      leading_main_dim = line.remaining_free_space / ((item_count + 1) as f32);
+      between_main_dim += leading_main_dim;
+    },
+    FlexJustify::SpaceAround => {
+      leading_main_dim = 0.5 * line.remaining_free_space / (item_count as f32);
+      between_main_dim += leading_main_dim * 2.0;
+    },
+  };
+
+  line.main_dim = leading_padding_and_border_main + leading_main_dim;
+  line.cross_dim = 0.0;
+
+  var max_ascent_for_current_line: f32 = 0.0;
+  var max_descent_for_current_line: f32 = 0.0;
+  let is_node_baseline_layout = self.is_baseline_layout(node);
+  for (let k in 0..item_count) {
+    let c = line.items[k];
+    if (perform_layout) {
+      let edge = flex_start_edge(main_axis);
+      let p = self.nodes[c].layout.position[edge] + line.main_dim;
+      self.nodes[c].layout.position[edge] = p;
+    }
+    if (k != item_count - 1) {
+      line.main_dim += between_main_dim;
+    }
+    let can_skip_flex = !perform_layout && sizing_mode_cross_dim == SizingMode::StretchFit;
+    if (can_skip_flex) {
+      // The flex step was skipped, so the measured sizes are not there: the
+      // basis within min and max stands in.
+      let child& = self.nodes[c];
+      line.main_dim += child.style.margin_for_axis(main_axis, available_inner_width) +
+        bound_axis_within_min_and_max(child, main_axis, child.layout.computed_flex_basis, main_axis_owner_size, owner_width);
+      line.cross_dim = available_inner_cross_dim;
+    } else {
+      line.main_dim += self.nodes[c].dimension_with_margin(main_axis, available_inner_width);
+      if (is_node_baseline_layout) {
+        // The cross size is the largest ascent plus the largest descent.
+        let ascent = self.calculate_baseline(c) + self.nodes[c].style.flex_start_margin(FlexDir::Column, available_inner_width);
+        let descent = self.nodes[c].layout.measured[kHeight] + self.nodes[c].style.margin_for_axis(FlexDir::Column, available_inner_width) - ascent;
+        max_ascent_for_current_line = max_or_defined(max_ascent_for_current_line, ascent);
+        max_descent_for_current_line = max_or_defined(max_descent_for_current_line, descent);
+      } else {
+        line.cross_dim = max_or_defined(line.cross_dim, self.nodes[c].dimension_with_margin(cross_axis, available_inner_width));
+      }
+    }
+  }
+  line.main_dim += trailing_padding_and_border_main;
+  if (is_node_baseline_layout) {
+    line.cross_dim = max_ascent_for_current_line + max_descent_for_current_line;
+  }
+}
+
+// --- Absolute children (AbsoluteLayout.cpp) -----------------------------------------
+
+fn FlexTree::set_flex_start_layout_position(var self&, parent: u32, child: u32, axis: FlexDir, containing_block_width: f32) {
+  let edge = flex_start_edge(axis);
+  var position = self.nodes[child].style.flex_start_margin(axis, containing_block_width) + kBorder;
+  position += self.nodes[parent].layout.padding[edge];
+  self.nodes[child].layout.position[edge] = position;
+}
+
+fn FlexTree::set_flex_end_layout_position(var self&, parent: u32, child: u32, axis: FlexDir, containing_block_width: f32) {
+  var flex_end_position = kBorder + self.nodes[child].style.flex_end_margin(axis, containing_block_width);
+  flex_end_position += self.nodes[parent].layout.padding[flex_end_edge(axis)];
+  let p = position_of_opposite_edge(flex_end_position, axis, self.nodes[parent], self.nodes[child]);
+  self.nodes[child].layout.position[flex_start_edge(axis)] = p;
+}
+
+fn FlexTree::set_center_layout_position(var self&, parent: u32, child: u32, axis: FlexDir, containing_block_width: f32) {
+  let dim = dimension_of(axis);
+  var parent_content_box_size = self.nodes[parent].layout.measured[dim] - kBorder - kBorder;
+  parent_content_box_size -= self.nodes[parent].layout.padding[flex_start_edge(axis)];
+  parent_content_box_size -= self.nodes[parent].layout.padding[flex_end_edge(axis)];
+  let child_outer_size = self.nodes[child].layout.measured[dim] + self.nodes[child].style.margin_for_axis(axis, containing_block_width);
+  var position = (parent_content_box_size - child_outer_size) / 2.0 + kBorder + self.nodes[child].style.flex_start_margin(axis, containing_block_width);
+  position += self.nodes[parent].layout.padding[flex_start_edge(axis)];
+  self.nodes[child].layout.position[flex_start_edge(axis)] = position;
+}
+
+// justifyAbsoluteChild.
+fn FlexTree::justify_absolute_child(var self&, parent: u32, child: u32, main_axis: FlexDir, containing_block_width: f32) {
+  match (self.nodes[parent].style.justify_content) {
+    FlexJustify::FlexStart | FlexJustify::SpaceBetween => self.set_flex_start_layout_position(parent, child, main_axis, containing_block_width),
+    FlexJustify::FlexEnd => self.set_flex_end_layout_position(parent, child, main_axis, containing_block_width),
+    FlexJustify::Center | FlexJustify::SpaceAround | FlexJustify::SpaceEvenly =>
+      self.set_center_layout_position(parent, child, main_axis, containing_block_width),
+  };
+}
+
+// alignAbsoluteChild.
+fn FlexTree::align_absolute_child(var self&, parent: u32, child: u32, cross_axis: FlexDir, containing_block_width: f32) {
+  var item_align = self.child_alignment(parent, child);
+  if (self.nodes[parent].style.flex_wrap == FlexWrapMode::WrapReverse) {
+    if (item_align == FlexAlign::FlexEnd) {
+      item_align = FlexAlign::FlexStart;
+    } else if (item_align != FlexAlign::Center) {
+      item_align = FlexAlign::FlexEnd;
+    }
+  }
+  match (item_align) {
+    FlexAlign::FlexEnd => self.set_flex_end_layout_position(parent, child, cross_axis, containing_block_width),
+    FlexAlign::Center => self.set_center_layout_position(parent, child, cross_axis, containing_block_width),
+    _ => self.set_flex_start_layout_position(parent, child, cross_axis, containing_block_width),
+  };
+}
+
+// positionAbsoluteChild: from an inset if one is set, else by alignment.
+fn FlexTree::position_absolute_child(var self&, containing: u32, parent: u32, child: u32, axis: FlexDir, is_main_axis: bool,
+                           containing_block_width: f32, containing_block_height: f32) {
+  let containing_block_size = is_row(axis) ? containing_block_width : containing_block_height;
+  let differs = inline_start_edge(axis) != flex_start_edge(axis);
+  if (self.nodes[child].style.is_inline_start_position_defined(axis) && !self.nodes[child].style.is_inline_start_position_auto(axis)) {
+    let position_relative_to_inline_start = self.nodes[child].style.inline_start_position(axis, containing_block_size) + kBorder +
+      self.nodes[child].style.inline_start_margin(axis, containing_block_size);
+    let position_relative_to_flex_start = differs ?
+      position_of_opposite_edge(position_relative_to_inline_start, axis, self.nodes[containing], self.nodes[child]) :
+      position_relative_to_inline_start;
+    self.nodes[child].layout.position[flex_start_edge(axis)] = position_relative_to_flex_start;
+  } else if (self.nodes[child].style.is_inline_end_position_defined(axis) && !self.nodes[child].style.is_inline_end_position_auto(axis)) {
+    let dim = dimension_of(axis);
+    let position_relative_to_inline_start = self.nodes[containing].layout.measured[dim] - self.nodes[child].layout.measured[dim] - kBorder -
+      self.nodes[child].style.inline_end_margin(axis, containing_block_size) - self.nodes[child].style.inline_end_position(axis, containing_block_size);
+    let position_relative_to_flex_start = differs ?
+      position_of_opposite_edge(position_relative_to_inline_start, axis, self.nodes[containing], self.nodes[child]) :
+      position_relative_to_inline_start;
+    self.nodes[child].layout.position[flex_start_edge(axis)] = position_relative_to_flex_start;
+  } else if (is_main_axis) {
+    self.justify_absolute_child(parent, child, axis, containing_block_width);
+  } else {
+    self.align_absolute_child(parent, child, axis, containing_block_width);
+  }
+}
+
+// layoutAbsoluteChild.
+fn FlexTree::layout_absolute_child(var self&, containing: u32, node: u32, child: u32, containing_block_width: f32, containing_block_height: f32,
+                         width_mode: SizingMode, depth: u32, generation: u32) {
+  let main_axis = self.nodes[node].style.flex_direction;
+  let cross_axis = cross_direction(main_axis);
+  let is_main_axis_row = is_row(main_axis);
+
+  var child_width = kUndefined;
+  var child_height = kUndefined;
+  var child_width_mode = SizingMode::MaxContent;
+  var child_height_mode = SizingMode::MaxContent;
+
+  let margin_row = self.nodes[child].style.margin_for_axis(FlexDir::Row, containing_block_width);
+  let margin_column = self.nodes[child].style.margin_for_axis(FlexDir::Column, containing_block_width);
+
+  if (self.nodes[child].has_definite_length(kWidth, containing_block_width)) {
+    child_width = self.nodes[child].resolved_dimension(kWidth, containing_block_width) + margin_row;
+  } else {
+    // No width: take it from the left and right insets when both are set.
+    let s& = self.nodes[child].style;
+    if (s.is_flex_start_position_defined(FlexDir::Row) && s.is_flex_end_position_defined(FlexDir::Row) &&
+        !s.is_flex_start_position_auto(FlexDir::Row) && !s.is_flex_end_position_auto(FlexDir::Row)) {
+      let w = self.nodes[containing].layout.measured[kWidth] - (kBorder + kBorder) -
+        (s.flex_start_position(FlexDir::Row, containing_block_width) + s.flex_end_position(FlexDir::Row, containing_block_width));
+      child_width = bound_axis(self.nodes[child], FlexDir::Row, w, containing_block_width, containing_block_width);
+    }
+  }
+
+  if (self.nodes[child].has_definite_length(kHeight, containing_block_height)) {
+    child_height = self.nodes[child].resolved_dimension(kHeight, containing_block_height) + margin_column;
+  } else {
+    // No height: take it from the top and bottom insets when both are set.
+    let s& = self.nodes[child].style;
+    if (s.is_flex_start_position_defined(FlexDir::Column) && s.is_flex_end_position_defined(FlexDir::Column) &&
+        !s.is_flex_start_position_auto(FlexDir::Column) && !s.is_flex_end_position_auto(FlexDir::Column)) {
+      let h = self.nodes[containing].layout.measured[kHeight] - (kBorder + kBorder) -
+        (s.flex_start_position(FlexDir::Column, containing_block_height) + s.flex_end_position(FlexDir::Column, containing_block_height));
+      child_height = bound_axis(self.nodes[child], FlexDir::Column, h, containing_block_height, containing_block_width);
+    }
+  }
+
+  // With exactly one size known, the aspect ratio gives the other.
+  let aspect_ratio = self.nodes[child].style.aspect_ratio();
+  if (is_undefined(child_width) != is_undefined(child_height)) {
+    if (is_defined(aspect_ratio)) {
+      if (is_undefined(child_width)) {
+        child_width = margin_row + (child_height - margin_column) * aspect_ratio;
+      } else if (is_undefined(child_height)) {
+        child_height = margin_column + (child_width - margin_row) / aspect_ratio;
+      }
+    }
+  }
+
+  // Still missing one: measure the content.
+  if (is_undefined(child_width) || is_undefined(child_height)) {
+    child_width_mode = is_undefined(child_width) ? SizingMode::MaxContent : SizingMode::StretchFit;
+    child_height_mode = is_undefined(child_height) ? SizingMode::MaxContent : SizingMode::StretchFit;
+
+    // A definite containing block width bounds the child, so its text can
+    // wrap to it.
+    if (!is_main_axis_row && is_undefined(child_width) && width_mode != SizingMode::MaxContent && is_defined(containing_block_width) &&
+        containing_block_width > 0.0) {
+      child_width = containing_block_width;
+      child_width_mode = SizingMode::FitContent;
+    }
+
+    self.calculate_layout_internal(child, child_width, child_height, child_width_mode, child_height_mode, containing_block_width,
+                              containing_block_height, false, depth, generation);
+    child_width = self.nodes[child].layout.measured[kWidth] + self.nodes[child].style.margin_for_axis(FlexDir::Row, containing_block_width);
+    child_height = self.nodes[child].layout.measured[kHeight] + self.nodes[child].style.margin_for_axis(FlexDir::Column, containing_block_width);
+  }
+
+  self.calculate_layout_internal(child, child_width, child_height, SizingMode::StretchFit, SizingMode::StretchFit, containing_block_width,
+                            containing_block_height, true, depth, generation);
+
+  self.position_absolute_child(containing, node, child, main_axis, true, containing_block_width, containing_block_height);
+  self.position_absolute_child(containing, node, child, cross_axis, false, containing_block_width, containing_block_height);
+}
+
+// layoutAbsoluteDescendants. Every node here is a containing block (no
+// position is static), so only the node's own absolute children are laid
+// out, and their offsets from the containing block are 0.
+fn FlexTree::layout_absolute_descendants(var self&, containing: u32, current: u32, width_mode: SizingMode, depth: u32, generation: u32,
+                               current_left_offset: f32, current_top_offset: f32) {
+  let count = self.nodes[current].children.len();
+  for (let i in 0..count) {
+    let c = self.nodes[current].children[i];
+    if (self.nodes[c].style.display == FlexDisplay::None) {
+      continue;
+    }
+    if (self.nodes[c].style.position_type != FlexPositionType::Absolute) {
+      continue;
+    }
+    let containing_block_width = self.nodes[containing].layout.measured[kWidth] - self.nodes[containing].style.border_for_axis();
+    let containing_block_height = self.nodes[containing].layout.measured[kHeight] - self.nodes[containing].style.border_for_axis();
+    self.layout_absolute_child(containing, current, c, containing_block_width, containing_block_height, width_mode, depth, generation);
+
+    // The child is placed on the parent's flex-start edges; set the trailing
+    // ones of a reversed axis.
+    let parent_main_axis = self.nodes[current].style.flex_direction;
+    let parent_cross_axis = cross_direction(parent_main_axis);
+    if (needs_trailing_position(parent_main_axis)) {
+      let main_insets_defined =
+        is_row(parent_main_axis) ? self.nodes[c].style.horizontal_insets_defined() : self.nodes[c].style.vertical_insets_defined();
+      self.set_child_trailing_position(main_insets_defined ? containing : current, c, parent_main_axis);
+    }
+    if (needs_trailing_position(parent_cross_axis)) {
+      let cross_insets_defined =
+        is_row(parent_cross_axis) ? self.nodes[c].style.horizontal_insets_defined() : self.nodes[c].style.vertical_insets_defined();
+      self.set_child_trailing_position(cross_insets_defined ? containing : current, c, parent_cross_axis);
+    }
+
+    let child_left_position = self.nodes[c].layout.position[kLeft];
+    let child_top_position = self.nodes[c].layout.position[kTop];
+    let child_left_offset_from_parent =
+      self.nodes[c].style.horizontal_insets_defined() ? (child_left_position - current_left_offset) : child_left_position;
+    let child_top_offset_from_parent =
+      self.nodes[c].style.vertical_insets_defined() ? (child_top_position - current_top_offset) : child_top_position;
+    self.nodes[c].layout.position[kLeft] = child_left_offset_from_parent;
+    self.nodes[c].layout.position[kTop] = child_top_offset_from_parent;
+  }
+}
+
+// --- The algorithm ---------------------------------------------------------------------
+
+// calculateLayoutImpl: sizes `n` and, with perform_layout, positions its
+// subtree. An undefined available size comes with MaxContent.
+fn FlexTree::calculate_layout_impl(var self&, n: u32, available_width: f32, available_height: f32, width_mode: SizingMode, height_mode: SizingMode,
+                         owner_width: f32, owner_height: f32, perform_layout: bool, depth: u32, generation: u32) {
+  // Margins and padding, resolved against the owner's width.
+  let margin_row_leading = self.nodes[n].style.inline_start_margin(FlexDir::Row, owner_width);
+  let margin_row_trailing = self.nodes[n].style.inline_end_margin(FlexDir::Row, owner_width);
+  let margin_column_leading = self.nodes[n].style.inline_start_margin(FlexDir::Column, owner_width);
+  let margin_column_trailing = self.nodes[n].style.inline_end_margin(FlexDir::Column, owner_width);
+  self.nodes[n].layout.margin = [margin_row_leading, margin_column_leading, margin_row_trailing, margin_column_trailing];
+  let margin_axis_row = margin_row_leading + margin_row_trailing;
+  let margin_axis_column = margin_column_leading + margin_column_trailing;
+
+  let padding_left = self.nodes[n].style.inline_start_padding(FlexDir::Row, owner_width);
+  let padding_right = self.nodes[n].style.inline_end_padding(FlexDir::Row, owner_width);
+  let padding_top = self.nodes[n].style.inline_start_padding(FlexDir::Column, owner_width);
+  let padding_bottom = self.nodes[n].style.inline_end_padding(FlexDir::Column, owner_width);
+  self.nodes[n].layout.padding = [padding_left, padding_top, padding_right, padding_bottom];
+
+  if (self.nodes[n].has_measure) {
+    self.measure_node_with_measure_func(n, available_width - margin_axis_row, available_height - margin_axis_column, width_mode, height_mode,
+                                   owner_width, owner_height);
+    return;
+  }
+
+  let child_count = self.nodes[n].children.len();
+  if (child_count == 0) {
+    self.measure_node_without_children(n, available_width - margin_axis_row, available_height - margin_axis_column, width_mode, height_mode,
+                                  owner_width, owner_height);
+    return;
+  }
+
+  // Only the size is wanted and it is already known.
+  if (!perform_layout &&
+      self.measure_node_with_fixed_size(n, available_width - margin_axis_row, available_height - margin_axis_column, width_mode, height_mode,
+                                   owner_width, owner_height)) {
+    return;
+  }
+
+  self.nodes[n].layout.had_overflow = false;
+
+  // STEP 1: CALCULATE VALUES FOR REMAINDER OF ALGORITHM
+  let main_axis = self.nodes[n].style.flex_direction;
+  let cross_axis = cross_direction(main_axis);
+  let is_main_axis_row = is_row(main_axis);
+  let is_node_flex_wrap = self.nodes[n].style.flex_wrap != FlexWrapMode::NoWrap;
+  let main_dim = dimension_of(main_axis);
+  let cross_dim = dimension_of(cross_axis);
+
+  let main_axis_owner_size = is_main_axis_row ? owner_width : owner_height;
+  let cross_axis_owner_size = is_main_axis_row ? owner_height : owner_width;
+
+  let padding_and_border_axis_main = self.nodes[n].style.padding_and_border_for_axis(main_axis, owner_width);
+  let padding_and_border_axis_cross = self.nodes[n].style.padding_and_border_for_axis(cross_axis, owner_width);
+  let leading_padding_and_border_cross = self.nodes[n].style.flex_start_padding_and_border(cross_axis, owner_width);
+
+  var sizing_mode_main_dim = is_main_axis_row ? width_mode : height_mode;
+  let sizing_mode_cross_dim = is_main_axis_row ? height_mode : width_mode;
+
+  let padding_and_border_axis_row = is_main_axis_row ? padding_and_border_axis_main : padding_and_border_axis_cross;
+  let padding_and_border_axis_column = is_main_axis_row ? padding_and_border_axis_cross : padding_and_border_axis_main;
+
+  // STEP 2: DETERMINE AVAILABLE SIZE IN MAIN AND CROSS DIRECTIONS
+  let available_inner_width =
+    calculate_available_inner_dimension(self.nodes[n], kWidth, available_width - margin_axis_row, padding_and_border_axis_row, owner_width);
+  let available_inner_height =
+    calculate_available_inner_dimension(self.nodes[n], kHeight, available_height - margin_axis_column, padding_and_border_axis_column,
+                                        owner_height);
+
+  var available_inner_main_dim = is_main_axis_row ? available_inner_width : available_inner_height;
+  let available_inner_cross_dim = is_main_axis_row ? available_inner_height : available_inner_width;
+
+  // STEP 3: DETERMINE FLEX BASIS FOR EACH ITEM (computed basis + margins + gap)
+  var total_main_dim: f32 = 0.0;
+  total_main_dim += self.compute_flex_basis_for_children(n, available_inner_width, available_inner_height, available_inner_width,
+                                                    available_inner_height, width_mode, height_mode, main_axis, perform_layout, depth,
+                                                    generation);
+  if (child_count > 1) {
+    // Every child counts, absolute and display: none ones too.
+    total_main_dim += self.nodes[n].style.gap_for_axis(main_axis, available_inner_main_dim) * ((child_count - 1) as f32);
+  }
+
+  let main_axis_overflows = sizing_mode_main_dim != SizingMode::MaxContent && total_main_dim > available_inner_main_dim;
+  if (is_node_flex_wrap && main_axis_overflows && sizing_mode_main_dim == SizingMode::FitContent) {
+    sizing_mode_main_dim = SizingMode::StretchFit;
+  }
+
+  // STEP 4: COLLECT FLEX ITEMS INTO FLEX LINES
+  var start_of_line: usize = 0;
+  var line_count: usize = 0;
+  // The cross sizes of the lines so far.
+  var total_line_cross_dim: f32 = 0.0;
+  let cross_axis_gap = self.nodes[n].style.gap_for_axis(cross_axis, available_inner_cross_dim);
+  // The largest main size of all the lines.
+  var max_line_main_dim: f32 = 0.0;
+  while (start_of_line != child_count) {
+    var line = self.calculate_flex_line(n, owner_width, main_axis_owner_size, available_inner_width, available_inner_main_dim, start_of_line,
+                                   line_count);
+
+    // Without a cross size to measure, the flex step can be skipped.
+    let can_skip_flex = !perform_layout && sizing_mode_cross_dim == SizingMode::StretchFit;
+
+    // STEP 5: RESOLVING FLEXIBLE LENGTHS ON MAIN AXIS
+    var size_based_on_content = false;
+    // Not exact in the main axis: keep within min and max.
+    if (sizing_mode_main_dim != SizingMode::StretchFit) {
+      let s& = self.nodes[n].style;
+      let min_inner_width = s.resolved_min_dimension(kWidth, owner_width) - padding_and_border_axis_row;
+      let max_inner_width = s.resolved_max_dimension(kWidth, owner_width) - padding_and_border_axis_row;
+      let min_inner_height = s.resolved_min_dimension(kHeight, owner_height) - padding_and_border_axis_column;
+      let max_inner_height = s.resolved_max_dimension(kHeight, owner_height) - padding_and_border_axis_column;
+      let min_inner_main_dim = is_main_axis_row ? min_inner_width : min_inner_height;
+      let max_inner_main_dim = is_main_axis_row ? max_inner_width : max_inner_height;
+
+      if (is_defined(min_inner_main_dim) && line.size_consumed < min_inner_main_dim) {
+        available_inner_main_dim = min_inner_main_dim;
+      } else if (is_defined(max_inner_main_dim) && line.size_consumed > max_inner_main_dim) {
+        available_inner_main_dim = max_inner_main_dim;
+      } else {
+        // Nothing to flex, or the node itself cannot flex: the space used is
+        // all the space needed.
+        let grow = self.nodes[n].resolve_flex_grow();
+        if ((is_defined(line.total_flex_grow_factors) && line.total_flex_grow_factors == 0.0) || (is_defined(grow) && grow == 0.0)) {
+          available_inner_main_dim = line.size_consumed;
+        }
+        size_based_on_content = true;
+      }
+    }
+
+    if (!size_based_on_content && is_defined(available_inner_main_dim)) {
+      line.remaining_free_space = available_inner_main_dim - line.size_consumed;
+    } else if (line.size_consumed < 0.0) {
+      // Sized by content that takes negative space: the node allocates 0.
+      line.remaining_free_space = -line.size_consumed;
+    }
+
+    if (!can_skip_flex) {
+      self.resolve_flexible_length(n, line, main_axis, cross_axis, owner_width, main_axis_owner_size, available_inner_main_dim,
+                              available_inner_cross_dim, available_inner_width, available_inner_height, main_axis_overflows,
+                              sizing_mode_cross_dim, perform_layout, depth, generation);
+    }
+
+    let overflowed = self.nodes[n].layout.had_overflow || (line.remaining_free_space < 0.0);
+    self.nodes[n].layout.had_overflow = overflowed;
+
+    // STEP 6: MAIN-AXIS JUSTIFICATION & CROSS-AXIS SIZE DETERMINATION
+    self.justify_main_axis(line, n, main_axis, cross_axis, sizing_mode_main_dim, sizing_mode_cross_dim, main_axis_owner_size, owner_width,
+                      available_inner_main_dim, available_inner_cross_dim, available_inner_width, perform_layout);
+
+    var container_cross_axis = available_inner_cross_dim;
+    if (sizing_mode_cross_dim == SizingMode::MaxContent || sizing_mode_cross_dim == SizingMode::FitContent) {
+      // The cross size is the largest cross size of the children.
+      container_cross_axis =
+        bound_axis(self.nodes[n], cross_axis, line.cross_dim + padding_and_border_axis_cross, cross_axis_owner_size, owner_width) -
+        padding_and_border_axis_cross;
+    }
+
+    // Without wrapping, the container defines the cross size.
+    if (!is_node_flex_wrap && sizing_mode_cross_dim == SizingMode::StretchFit) {
+      line.cross_dim = available_inner_cross_dim;
+    }
+
+    // A single-line container's line is bound to min/max before alignment.
+    if (!is_node_flex_wrap) {
+      line.cross_dim = bound_axis(self.nodes[n], cross_axis, line.cross_dim + padding_and_border_axis_cross, cross_axis_owner_size, owner_width) -
+        padding_and_border_axis_cross;
+    }
+
+    // STEP 7: CROSS-AXIS ALIGNMENT (only when laying out)
+    if (perform_layout) {
+      for (let k in 0..line.items.len()) {
+        let c = line.items[k];
+        var leading_cross_dim = leading_padding_and_border_cross;
+        // align-items of the owner or align-self of the child.
+        let align_item = self.child_alignment(n, c);
+
+        if (align_item == FlexAlign::Stretch) {
+          // A stretched child without a definite cross size is laid out once
+          // more at the line's cross size.
+          if (!self.nodes[c].has_definite_length(cross_dim, available_inner_cross_dim)) {
+            var child_main_size = self.nodes[c].layout.measured[main_dim];
+            let aspect_ratio = self.nodes[c].style.aspect_ratio();
+            var child_cross_size = line.cross_dim;
+            if (is_defined(aspect_ratio)) {
+              // margin + (a conditional): not a product to fuse, in yoga either.
+              let sized = is_main_axis_row ? child_main_size / aspect_ratio : child_main_size * aspect_ratio;
+              child_cross_size = self.nodes[c].style.margin_for_axis(cross_axis, available_inner_width) + sized;
+            }
+            child_main_size += self.nodes[c].style.margin_for_axis(main_axis, available_inner_width);
+
+            var child_main_mode = SizingMode::StretchFit;
+            var child_cross_mode = SizingMode::StretchFit;
+            constrain_max_size_for_mode(self.nodes[c], main_axis, available_inner_main_dim, available_inner_width, child_main_mode, child_main_size);
+            constrain_max_size_for_mode(self.nodes[c], cross_axis, available_inner_cross_dim, available_inner_width, child_cross_mode,
+                                        child_cross_size);
+
+            let child_width = is_main_axis_row ? child_main_size : child_cross_size;
+            let child_height = !is_main_axis_row ? child_main_size : child_cross_size;
+
+            let cross_axis_does_not_grow = self.nodes[n].style.align_content != FlexAlign::Stretch && is_node_flex_wrap;
+            let child_width_mode =
+              is_undefined(child_width) || (!is_main_axis_row && cross_axis_does_not_grow) ? SizingMode::MaxContent : SizingMode::StretchFit;
+            let child_height_mode =
+              is_undefined(child_height) || (is_main_axis_row && cross_axis_does_not_grow) ? SizingMode::MaxContent : SizingMode::StretchFit;
+
+            self.calculate_layout_internal(c, child_width, child_height, child_width_mode, child_height_mode, available_inner_width,
+                                      available_inner_height, true, depth, generation);
+          }
+        } else {
+          let remaining_cross_dim = container_cross_axis - self.nodes[c].dimension_with_margin(cross_axis, available_inner_width);
+          if (align_item == FlexAlign::FlexStart) {
+            // nothing
+          } else if (align_item == FlexAlign::Center) {
+            leading_cross_dim += remaining_cross_dim / 2.0;
+          } else {
+            leading_cross_dim += remaining_cross_dim;
+          }
+        }
+        let edge = flex_start_edge(cross_axis);
+        let p = self.nodes[c].layout.position[edge] + total_line_cross_dim + leading_cross_dim;
+        self.nodes[c].layout.position[edge] = p;
+      }
+    }
+
+    let applied_cross_gap = line_count != 0 ? cross_axis_gap : 0.0;
+    total_line_cross_dim += line.cross_dim + applied_cross_gap;
+    max_line_main_dim = max_or_defined(max_line_main_dim, line.main_dim);
+    line_count += 1;
+  }
+
+  // STEP 8: MULTI-LINE CONTENT ALIGNMENT
+  if (perform_layout && (is_node_flex_wrap || self.is_baseline_layout(n))) {
+    var lead_per_line: f32 = 0.0;
+    var current_lead = leading_padding_and_border_cross;
+    var extra_space_per_line: f32 = 0.0;
+
+    var unclamped_cross_dim = total_line_cross_dim + padding_and_border_axis_cross;
+    if (sizing_mode_cross_dim == SizingMode::StretchFit) {
+      unclamped_cross_dim = available_inner_cross_dim + padding_and_border_axis_cross;
+    } else if (self.nodes[n].has_definite_length(cross_dim, cross_axis_owner_size)) {
+      unclamped_cross_dim = self.nodes[n].resolved_dimension(cross_dim, cross_axis_owner_size);
+    }
+    let inner_cross_dim =
+      bound_axis(self.nodes[n], cross_axis, unclamped_cross_dim, cross_axis_owner_size, owner_width) - padding_and_border_axis_cross;
+    let remaining_align_content_dim = inner_cross_dim - total_line_cross_dim;
+
+    let align_content =
+      remaining_align_content_dim >= 0.0 ? self.nodes[n].style.align_content : fallback_align(self.nodes[n].style.align_content);
+    match (align_content) {
+      FlexAlign::FlexEnd => {
+        current_lead += remaining_align_content_dim;
+      },
+      FlexAlign::Center => {
+        current_lead += remaining_align_content_dim / 2.0;
+      },
+      FlexAlign::Stretch => {
+        extra_space_per_line = remaining_align_content_dim / (line_count as f32);
+      },
+      FlexAlign::SpaceAround => {
+        current_lead += remaining_align_content_dim / (2.0 * (line_count as f32));
+        lead_per_line = remaining_align_content_dim / (line_count as f32);
+      },
+      FlexAlign::SpaceEvenly => {
+        current_lead += remaining_align_content_dim / ((line_count + 1) as f32);
+        lead_per_line = remaining_align_content_dim / ((line_count + 1) as f32);
+      },
+      FlexAlign::SpaceBetween => {
+        if (line_count > 1) {
+          lead_per_line = remaining_align_content_dim / ((line_count - 1) as f32);
+        }
+      },
+      _ => {},
+    };
+
+    var end_index: usize = 0;
+    for (let i in 0..line_count) {
+      let start_index = end_index;
+      var index = start_index;
+
+      // The line's height, and where it ends.
+      var line_height: f32 = 0.0;
+      var max_ascent_for_current_line: f32 = 0.0;
+      var max_descent_for_current_line: f32 = 0.0;
+      while (index < child_count) {
+        let c = self.nodes[n].children[index];
+        if (self.nodes[c].style.display == FlexDisplay::None) {
+          index += 1;
+          continue;
+        }
+        if (self.nodes[c].style.position_type != FlexPositionType::Absolute) {
+          if (self.nodes[c].line_index != i) {
+            break;
+          }
+          if (self.nodes[c].is_layout_dimension_defined(cross_axis)) {
+            line_height = max_or_defined(line_height, self.nodes[c].layout.measured[cross_dim] +
+                                                      self.nodes[c].style.margin_for_axis(cross_axis, available_inner_width));
+          }
+          if (self.child_alignment(n, c) == FlexAlign::Baseline) {
+            let ascent = self.calculate_baseline(c) + self.nodes[c].style.flex_start_margin(FlexDir::Column, available_inner_width);
+            let descent = self.nodes[c].layout.measured[kHeight] + self.nodes[c].style.margin_for_axis(FlexDir::Column, available_inner_width) - ascent;
+            max_ascent_for_current_line = max_or_defined(max_ascent_for_current_line, ascent);
+            max_descent_for_current_line = max_or_defined(max_descent_for_current_line, descent);
+            line_height = max_or_defined(line_height, max_ascent_for_current_line + max_descent_for_current_line);
+          }
+        }
+        index += 1;
+      }
+      end_index = index;
+      current_lead += i != 0 ? cross_axis_gap : 0.0;
+      line_height += extra_space_per_line;
+
+      for (let j in start_index..end_index) {
+        let c = self.nodes[n].children[j];
+        if (self.nodes[c].style.display == FlexDisplay::None) {
+          continue;
+        }
+        if (self.nodes[c].style.position_type == FlexPositionType::Absolute) {
+          continue;
+        }
+        let edge = flex_start_edge(cross_axis);
+        match (self.child_alignment(n, c)) {
+          FlexAlign::FlexStart => {
+            // The inset, not the margin: yoga's.
+            let p = current_lead + self.nodes[c].style.flex_start_position(cross_axis, available_inner_width);
+            self.nodes[c].layout.position[edge] = p;
+          },
+          FlexAlign::FlexEnd => {
+            let p = current_lead + line_height - self.nodes[c].style.flex_end_margin(cross_axis, available_inner_width) -
+              self.nodes[c].layout.measured[cross_dim];
+            self.nodes[c].layout.position[edge] = p;
+          },
+          FlexAlign::Center => {
+            let child_height = self.nodes[c].layout.measured[cross_dim];
+            let p = current_lead + (line_height - child_height) / 2.0;
+            self.nodes[c].layout.position[edge] = p;
+          },
+          FlexAlign::Stretch => {
+            let p = current_lead + self.nodes[c].style.flex_start_margin(cross_axis, available_inner_width);
+            self.nodes[c].layout.position[edge] = p;
+            // Measured against the owner's height so far: again at the line's.
+            if (!self.nodes[c].has_definite_length(cross_dim, available_inner_cross_dim)) {
+              let child_width = is_main_axis_row ?
+                (self.nodes[c].layout.measured[kWidth] + self.nodes[c].style.margin_for_axis(main_axis, available_inner_width)) :
+                lead_per_line + line_height;
+              let child_height = !is_main_axis_row ?
+                (self.nodes[c].layout.measured[kHeight] + self.nodes[c].style.margin_for_axis(cross_axis, available_inner_width)) :
+                lead_per_line + line_height;
+              if (!(inexact_equals(child_width, self.nodes[c].layout.measured[kWidth]) &&
+                    inexact_equals(child_height, self.nodes[c].layout.measured[kHeight]))) {
+                self.calculate_layout_internal(c, child_width, child_height, SizingMode::StretchFit, SizingMode::StretchFit, available_inner_width,
+                                          available_inner_height, true, depth, generation);
+              }
+            }
+          },
+          FlexAlign::Baseline => {
+            let p = current_lead + max_ascent_for_current_line - self.calculate_baseline(c) +
+              self.nodes[c].style.flex_start_position(FlexDir::Column, available_inner_cross_dim);
+            self.nodes[c].layout.position[kTop] = p;
+          },
+          _ => {},
+        };
+      }
+      current_lead = current_lead + lead_per_line + line_height;
+    }
+  }
+
+  // STEP 9: COMPUTING FINAL DIMENSIONS
+  let measured_width = bound_axis(self.nodes[n], FlexDir::Row, available_width - margin_axis_row, owner_width, owner_width);
+  let measured_height = bound_axis(self.nodes[n], FlexDir::Column, available_height - margin_axis_column, owner_height, owner_width);
+  self.nodes[n].layout.measured = [measured_width, measured_height];
+
+  let overflow = self.nodes[n].style.overflow;
+  // No size given: the children decide, within min/max and the padding.
+  if (sizing_mode_main_dim == SizingMode::MaxContent || (overflow != FlexOverflow::Scroll && sizing_mode_main_dim == SizingMode::FitContent)) {
+    let v = bound_axis(self.nodes[n], main_axis, max_line_main_dim, main_axis_owner_size, owner_width);
+    self.nodes[n].layout.measured[main_dim] = v;
+  } else if (sizing_mode_main_dim == SizingMode::FitContent && overflow == FlexOverflow::Scroll) {
+    let bounded = bound_axis_within_min_and_max(self.nodes[n], main_axis, max_line_main_dim, main_axis_owner_size, owner_width);
+    let v = max_or_defined(min_or_defined(available_inner_main_dim + padding_and_border_axis_main, bounded), padding_and_border_axis_main);
+    self.nodes[n].layout.measured[main_dim] = v;
+  }
+
+  if (sizing_mode_cross_dim == SizingMode::MaxContent || (overflow != FlexOverflow::Scroll && sizing_mode_cross_dim == SizingMode::FitContent)) {
+    let v = bound_axis(self.nodes[n], cross_axis, total_line_cross_dim + padding_and_border_axis_cross, cross_axis_owner_size, owner_width);
+    self.nodes[n].layout.measured[cross_dim] = v;
+  } else if (sizing_mode_cross_dim == SizingMode::FitContent && overflow == FlexOverflow::Scroll) {
+    let bounded = bound_axis_within_min_and_max(self.nodes[n], cross_axis, total_line_cross_dim + padding_and_border_axis_cross,
+                                                cross_axis_owner_size, owner_width);
+    let v = max_or_defined(min_or_defined(available_inner_cross_dim + padding_and_border_axis_cross, bounded), padding_and_border_axis_cross);
+    self.nodes[n].layout.measured[cross_dim] = v;
+  }
+
+  // Lines were wrapped in the normal direction: mirror them for wrap-reverse
+  // (display: none children too, whose measured size is NaN).
+  if (perform_layout && self.nodes[n].style.flex_wrap == FlexWrapMode::WrapReverse) {
+    let edge = flex_start_edge(cross_axis);
+    for (let i in 0..child_count) {
+      let c = self.nodes[n].children[i];
+      if (self.nodes[c].style.position_type != FlexPositionType::Absolute) {
+        let p = self.nodes[n].layout.measured[cross_dim] - self.nodes[c].layout.position[edge] - self.nodes[c].layout.measured[cross_dim];
+        self.nodes[c].layout.position[edge] = p;
+      }
+    }
+  }
+
+  if (perform_layout) {
+    // STEP 10: SETTING TRAILING POSITIONS FOR CHILDREN
+    let needs_main_trailing_pos = needs_trailing_position(main_axis);
+    let needs_cross_trailing_pos = needs_trailing_position(cross_axis);
+    if (needs_main_trailing_pos || needs_cross_trailing_pos) {
+      for (let i in 0..child_count) {
+        let c = self.nodes[n].children[i];
+        // Absolute children are their containing block's business.
+        if (self.nodes[c].style.display == FlexDisplay::None || self.nodes[c].style.position_type == FlexPositionType::Absolute) {
+          continue;
+        }
+        if (needs_main_trailing_pos) {
+          self.set_child_trailing_position(n, c, main_axis);
+        }
+        if (needs_cross_trailing_pos) {
+          self.set_child_trailing_position(n, c, cross_axis);
+        }
+      }
+    }
+
+    // STEP 11: SIZING AND POSITIONING ABSOLUTE CHILDREN
+    self.layout_absolute_descendants(n, n, is_main_axis_row ? sizing_mode_main_dim : sizing_mode_cross_dim, depth, generation, 0.0, 0.0);
+  }
+}
+
+// calculateLayoutInternal: calculateLayoutImpl unless the node is clean and a
+// cache entry fits. True when it laid out or measured for real.
+fn FlexTree::calculate_layout_internal(var self&, n: u32, available_width: f32, available_height: f32, width_mode: SizingMode,
+                             height_mode: SizingMode, owner_width: f32, owner_height: f32, perform_layout: bool, depth_in: u32,
+                             generation: u32): bool {
+  let depth = depth_in + 1;
+  let need_to_visit_node =
+    (self.nodes[n].dirty && self.nodes[n].layout.generation != generation) || !self.nodes[n].layout.owner_direction_set;
+  if (need_to_visit_node) {
+    // Invalidate the cached results.
+    self.nodes[n].layout.next_cached_measurement = 0;
+    self.nodes[n].layout.cached_layout = CachedMeasurement {};
+  }
+
+  // -1: none; -2: the layout entry; else a measurement entry.
+  var cached: i32 = -1;
+  if (self.nodes[n].has_measure) {
+    // Measured nodes are the expensive ones: any compatible entry will do.
+    let margin_axis_row = self.nodes[n].style.margin_for_axis(FlexDir::Row, owner_width);
+    let margin_axis_column = self.nodes[n].style.margin_for_axis(FlexDir::Column, owner_width);
+    if (can_use_cached_measurement(width_mode, available_width, height_mode, available_height, self.nodes[n].layout.cached_layout, margin_axis_row,
+                                   margin_axis_column)) {
+      cached = -2;
+    } else {
+      for (let i in 0..self.nodes[n].layout.next_cached_measurement) {
+        if (can_use_cached_measurement(width_mode, available_width, height_mode, available_height,
+                                       self.nodes[n].layout.cached_measurements[i], margin_axis_row, margin_axis_column)) {
+          cached = i as i32;
+          break;
+        }
+      }
+    }
+  } else if (perform_layout) {
+    let e& = self.nodes[n].layout.cached_layout;
+    if (inexact_equals(e.available_width, available_width) && inexact_equals(e.available_height, available_height) &&
+        e.width_mode == width_mode && e.height_mode == height_mode) {
+      cached = -2;
+    }
+  } else {
+    for (let i in 0..self.nodes[n].layout.next_cached_measurement) {
+      let e& = self.nodes[n].layout.cached_measurements[i];
+      if (inexact_equals(e.available_width, available_width) && inexact_equals(e.available_height, available_height) &&
+          e.width_mode == width_mode && e.height_mode == height_mode) {
+        cached = i as i32;
+        break;
+      }
+    }
+  }
+
+  if (!need_to_visit_node && cached != -1) {
+    let e = cached == -2 ? self.nodes[n].layout.cached_layout : self.nodes[n].layout.cached_measurements[cached as usize];
+    self.nodes[n].layout.measured = [e.computed_width, e.computed_height];
+  } else {
+    self.calculate_layout_impl(n, available_width, available_height, width_mode, height_mode, owner_width, owner_height, perform_layout, depth,
+                          generation);
+    self.nodes[n].layout.owner_direction_set = true;
+
+    if (cached == -1) {
+      var layout& = self.nodes[n].layout;
+      if (layout.next_cached_measurement == kMaxCachedMeasurements) {
+        layout.next_cached_measurement = 0;
+      }
+      let entry = CachedMeasurement {
+        available_width,
+        available_height,
+        width_mode,
+        height_mode,
+        computed_width: layout.measured[kWidth],
+        computed_height: layout.measured[kHeight],
+      };
+      if (perform_layout) {
+        // The single layout entry.
+        layout.cached_layout = entry;
+      } else {
+        // A new measurement entry.
+        layout.cached_measurements[layout.next_cached_measurement] = entry;
+        layout.next_cached_measurement += 1;
+      }
+    }
+  }
+
+  if (perform_layout) {
+    self.nodes[n].layout.dimensions = self.nodes[n].layout.measured;
+    self.nodes[n].dirty = false;
+  }
+  self.nodes[n].layout.generation = generation;
+  return need_to_visit_node || cached == -1;
+}
+
+// calculateLayout: lays the tree out in the owner's size, then rounds it to
+// the pixel grid, unless the root came out of its layout cache.
+fn FlexTree::calculate_root_layout(var self&, root: u32, owner_width: f32, owner_height: f32) {
+  self.generation = self.generation +% 1;
+  let generation = self.generation;
+  self.nodes[root].process_dimensions();
+
+  var width = kUndefined;
+  var width_mode = SizingMode::MaxContent;
+  let max_width = self.nodes[root].style.resolved_max_dimension(kWidth, owner_width);
+  if (self.nodes[root].has_definite_length(kWidth, owner_width)) {
+    width = self.nodes[root].resolved_dimension(kWidth, owner_width) + self.nodes[root].style.margin_for_axis(FlexDir::Row, owner_width);
+    width_mode = SizingMode::StretchFit;
+  } else if (is_defined(max_width)) {
+    width = max_width;
+    width_mode = SizingMode::FitContent;
+  } else {
+    width = owner_width;
+    width_mode = is_undefined(width) ? SizingMode::MaxContent : SizingMode::StretchFit;
+  }
+
+  var height = kUndefined;
+  var height_mode = SizingMode::MaxContent;
+  let max_height = self.nodes[root].style.resolved_max_dimension(kHeight, owner_height);
+  if (self.nodes[root].has_definite_length(kHeight, owner_height)) {
+    height = self.nodes[root].resolved_dimension(kHeight, owner_height) + self.nodes[root].style.margin_for_axis(FlexDir::Column, owner_width);
+    height_mode = SizingMode::StretchFit;
+  } else if (is_defined(max_height)) {
+    height = max_height;
+    height_mode = SizingMode::FitContent;
+  } else {
+    height = owner_height;
+    height_mode = is_undefined(height) ? SizingMode::MaxContent : SizingMode::StretchFit;
+  }
+
+  if (self.calculate_layout_internal(root, width, height, width_mode, height_mode, owner_width, owner_height, true, 0, generation)) {
+    self.nodes[root].set_position(owner_width, owner_height);
+    self.round_layout_results_to_pixel_grid(root, 0.0, 0.0);
+  }
+}

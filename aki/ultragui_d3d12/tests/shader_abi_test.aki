@@ -1,0 +1,25 @@
+// No display/device required: exercise WINAPI and the returned COM blob.
+// On Linux x86-64 both must cross from the platform C ABI to ms_abi.
+module shader_abi_test;
+
+import {Expect} from ultragui_testing::expect;
+import {ID3D10Blob, RootSignatureDesc, blob_get_buffer_pointer, blob_get_buffer_size,
+  com_release, d3d12_serialize_root_signature, failed, kRootSignatureVersion1} from ultragui_d3d12::sys::d3d12;
+
+pub fn main(): i32 {
+  var t = Expect();
+  let desc = RootSignatureDesc {};
+  var blob: *var ID3D10Blob = null;
+  var errors: *var ID3D10Blob = null;
+  let hr = unsafe d3d12_serialize_root_signature(&raw desc, kRootSignatureVersion1, &raw var blob, &raw var errors);
+  t.that(!failed(hr) && blob != null, "serialize an empty root signature through the ABI bridge");
+  if (blob != null) {
+    t.that(unsafe blob_get_buffer_size(blob) > 0, "COM blob has serialized bytes");
+    t.that(unsafe blob_get_buffer_pointer(blob) != null, "COM blob data is accessible");
+    t.eq_u32(unsafe com_release(blob), 0, "release the last COM reference");
+  }
+  if (errors != null) {
+    unsafe com_release(errors);
+  }
+  return t.finish();
+}

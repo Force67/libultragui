@@ -1,0 +1,14 @@
+component no_root {
+  prop a: 1;
+}
+component two_roots {
+  panel a { }
+  panel b { }
+  panel c { }
+}
+component {
+  panel x { }
+}
+class {
+}
+panel ok { v: 1; }

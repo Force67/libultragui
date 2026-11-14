@@ -1,0 +1,14 @@
+# examples/anim_demo in aki: four .uganim vector animations on Image widgets
+# through UIContext over GLFW and Vulkan, as examples/anim_demo/main.cc.
+[package]
+name = "ultragui_anim_demo"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_vulkan = { path = "../../ultragui_vulkan" }
+
+[build]
+opt = 2

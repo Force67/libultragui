@@ -1,0 +1,340 @@
+// No C++ counterpart: the style half of the flexbox engine that replaced yoga
+// in the aki port (layout::flex_tree is the algorithm; PORTING.md, "The layout
+// engine", has the scope and how it is checked against yoga).
+//
+// Only what libultragui writes is here: physical edges in points, gaps in
+// points, sizes in points, percent or auto, flex basis in points, percent or
+// auto, LTR only, no borders, no margin auto, border-box sizing. Each value is
+// stored and read back the way yoga's StyleValuePool does it, because that is
+// observable: an integral value from -2047 to 2047 is packed into the handle
+// and comes back as `(float)(int)v`, so -0.0 reads back as +0.0, unless the
+// slot has held a non-integral value before (it then lives in the pool's
+// buffer and keeps its exact bits from then on). Setters compare first and
+// report whether they changed anything, as yoga's do before marking a node
+// dirty.
+//
+// Floats follow yoga's arithmetic expression for expression: akiko fuses a
+// product into the add that takes it exactly where clang's default
+// -ffp-contract=on does (inside one expression), so the same expression shape
+// gives the same bits. `x + kBorder` adds yoga's +0.0 border where yoga adds
+// it: it turns a -0.0 padding into +0.0.
+
+module ultragui::layout::flex_style;
+
+// YGUndefined: the quiet NaN yoga uses for "no value".
+pub comptime let kUndefined: f32 = 0.0 / 0.0;
+
+// Every border is unset: computeFlexStartBorder and friends give
+// maxOrDefined(undefined, 0) = +0.0.
+pub comptime let kBorder: f32 = 0.0;
+
+pub fn is_undefined(v: f32): bool => v != v;
+pub fn is_defined(v: f32): bool => v == v;
+
+// yoga::maxOrDefined: std::max when both are defined, else the defined one.
+pub fn max_or_defined(a: f32, b: f32): f32 {
+  if (a == a && b == b) {
+    return a < b ? b : a;
+  }
+  return a != a ? b : a;
+}
+
+// yoga::minOrDefined: std::min when both are defined, else the defined one.
+pub fn min_or_defined(a: f32, b: f32): f32 {
+  if (a == a && b == b) {
+    return b < a ? b : a;
+  }
+  return a != a ? b : a;
+}
+
+// yoga::inexactEquals(float, float).
+pub fn inexact_equals(a: f32, b: f32): bool {
+  if (a == a && b == b) {
+    return @abs(a - b) < 0.0001;
+  }
+  return a != a && b != b;
+}
+
+// yoga::inexactEquals(double, double).
+pub fn inexact_equals_f64(a: f64, b: f64): bool {
+  if (a == a && b == b) {
+    return @abs(a - b) < 0.0001;
+  }
+  return a != a && b != b;
+}
+
+// FloatOptional's ==: equal floats, or both undefined.
+pub fn optional_equals(a: f32, b: f32): bool => a == b || (a != a && b != b);
+
+// --- Enums (yoga's numbering is irrelevant: nothing crosses a C boundary) ----
+
+pub enum FlexDir as u8 { Column, ColumnReverse, Row, RowReverse }
+pub enum FlexJustify as u8 { FlexStart, Center, FlexEnd, SpaceBetween, SpaceAround, SpaceEvenly }
+pub enum FlexAlign as u8 { Auto, FlexStart, Center, FlexEnd, Stretch, Baseline, SpaceBetween, SpaceAround, SpaceEvenly }
+pub enum FlexWrapMode as u8 { NoWrap, Wrap, WrapReverse }
+pub enum FlexOverflow as u8 { Visible, Hidden, Scroll }
+pub enum FlexPositionType as u8 { Relative, Absolute }
+pub enum FlexDisplay as u8 { Flex, None }
+
+// yoga's SizingMode (StretchFit = exactly, MaxContent = undefined, FitContent
+// = at most).
+pub enum SizingMode as u8 { StretchFit, MaxContent, FitContent }
+
+// PhysicalEdge, as an index into the four-element edge arrays.
+pub comptime let kLeft: usize = 0;
+pub comptime let kTop: usize = 1;
+pub comptime let kRight: usize = 2;
+pub comptime let kBottom: usize = 3;
+
+// Dimension.
+pub comptime let kWidth: usize = 0;
+pub comptime let kHeight: usize = 1;
+
+// Gutter.
+pub comptime let kGutterColumn: usize = 0;
+pub comptime let kGutterRow: usize = 1;
+pub comptime let kGutterAll: usize = 2;
+
+pub fn is_row(d: FlexDir): bool => d == FlexDir::Row || d == FlexDir::RowReverse;
+pub fn is_column(d: FlexDir): bool => d == FlexDir::Column || d == FlexDir::ColumnReverse;
+
+// resolveCrossDirection under LTR.
+pub fn cross_direction(d: FlexDir): FlexDir => is_column(d) ? FlexDir::Row : FlexDir::Column;
+
+pub fn flex_start_edge(d: FlexDir): usize => match (d) {
+  FlexDir::Column => kTop,
+  FlexDir::ColumnReverse => kBottom,
+  FlexDir::Row => kLeft,
+  FlexDir::RowReverse => kRight,
+};
+
+pub fn flex_end_edge(d: FlexDir): usize => match (d) {
+  FlexDir::Column => kBottom,
+  FlexDir::ColumnReverse => kTop,
+  FlexDir::Row => kRight,
+  FlexDir::RowReverse => kLeft,
+};
+
+// inlineStartEdge / inlineEndEdge under LTR.
+pub fn inline_start_edge(d: FlexDir): usize => is_row(d) ? kLeft : kTop;
+pub fn inline_end_edge(d: FlexDir): usize => is_row(d) ? kRight : kBottom;
+
+pub fn dimension_of(d: FlexDir): usize => is_row(d) ? kWidth : kHeight;
+
+pub fn needs_trailing_position(d: FlexDir): bool => d == FlexDir::RowReverse || d == FlexDir::ColumnReverse;
+
+// --- Lengths -----------------------------------------------------------------
+
+pub enum Unit as u8 { Undefined, Point, Percent, Auto }
+
+// StyleLength / StyleSizeLength over the units libultragui sets.
+pub struct StyleLength : Copy {
+  pub var unit: Unit = Unit::Undefined
+  pub var value: f32 = kUndefined
+
+  // NaN and infinities are undefined, as yoga's factories make them.
+  pub fn points(v: f32): StyleLength => is_storable(v) ? StyleLength { unit: Unit::Point, value: v } : StyleLength {};
+  pub fn percent(v: f32): StyleLength => is_storable(v) ? StyleLength { unit: Unit::Percent, value: v } : StyleLength {};
+  pub fn of_auto(): StyleLength => StyleLength { unit: Unit::Auto };
+
+  pub fn is_defined(self&): bool => self.unit != Unit::Undefined;
+  pub fn is_auto(self&): bool => self.unit == Unit::Auto;
+
+  // resolve(referenceLength): a point value as is, a percentage of the
+  // reference ((v * ref) * 0.01, as yoga multiplies), anything else undefined.
+  pub fn resolve(self&, reference: f32): f32 => match (self.unit) {
+    Unit::Point => self.value,
+    Unit::Percent => self.value * reference * 0.01,
+    _ => kUndefined,
+  };
+
+  // operator==: same unit and FloatOptional-equal values.
+  pub fn same(self&, other&: StyleLength): bool => self.unit == other.unit && optional_equals(self.value, other.value);
+
+  // inexactEquals(StyleSizeLength, StyleSizeLength).
+  pub fn inexact_same(self&, other&: StyleLength): bool => self.unit == other.unit && inexact_equals(self.value, other.value);
+}
+
+fn is_storable(v: f32): bool => v == v && v - v == v - v;
+fn is_infinite(v: f32): bool => v == v && v - v != v - v;
+
+// One StyleValueHandle with its pool slot. `indexed` is the handle's sticky
+// "value lives in the buffer" bit: once set, every later value is stored with
+// its exact bits.
+struct Slot : Copy {
+  pub var unit: Unit = Unit::Undefined
+  pub var value: f32 = kUndefined
+  pub var indexed: bool = false
+
+  pub fn auto_slot(): Slot => Slot { unit: Unit::Auto };
+
+  pub fn get(self&): StyleLength => match (self.unit) {
+    Unit::Undefined => StyleLength {},
+    Unit::Auto => StyleLength::of_auto(),
+    _ => StyleLength { unit: self.unit, value: self.value },
+  };
+
+  // A number (flex grow/shrink, aspect ratio): its value, or undefined.
+  pub fn number(self&): f32 => self.unit == Unit::Undefined ? kUndefined : self.value;
+
+  pub fn store(var self&, l: StyleLength);
+}
+
+// isIntegerPackable: static_cast<int32_t>(v) round-trips and fits 11 bits.
+fn is_integer_packable(v: f32): bool => v >= -2047.0 && v <= 2047.0 && @trunc(v) == v;
+
+fn Slot::store(var self&, l: StyleLength) {
+  self.unit = l.unit;
+  if (l.unit == Unit::Undefined || l.unit == Unit::Auto) {
+    return;  // setType only: the value and the indexed bit stay
+  }
+  if (self.indexed) {
+    self.value = l.value;
+  } else if (is_integer_packable(l.value)) {
+    // (float)(int)v: exact for these integers, except that -0.0 becomes +0.0.
+    self.value = l.value == 0.0 ? 0.0 : l.value;
+  } else {
+    self.value = l.value;
+    self.indexed = true;
+  }
+}
+
+// --- Style -------------------------------------------------------------------
+
+// yoga's Style, defaults included (column, flex-start, stretch, relative,
+// border-box; flex basis and sizes auto, everything else undefined).
+pub struct FlexStyle : Copy {
+  pub var flex_direction: FlexDir = FlexDir::Column
+  pub var justify_content: FlexJustify = FlexJustify::FlexStart
+  pub var align_content: FlexAlign = FlexAlign::FlexStart
+  pub var align_items: FlexAlign = FlexAlign::Stretch
+  pub var align_self: FlexAlign = FlexAlign::Auto
+  pub var position_type: FlexPositionType = FlexPositionType::Relative
+  pub var flex_wrap: FlexWrapMode = FlexWrapMode::NoWrap
+  pub var overflow: FlexOverflow = FlexOverflow::Visible
+  pub var display: FlexDisplay = FlexDisplay::Flex
+
+  var flex_grow_slot: Slot = Slot {}
+  var flex_shrink_slot: Slot = Slot {}
+  var flex_basis_slot: Slot = Slot::auto_slot()
+  var margin_slots: [Slot; 4] = [Slot {}; 4]
+  var position_slots: [Slot; 4] = [Slot {}; 4]
+  var padding_slots: [Slot; 4] = [Slot {}; 4]
+  var gap_slots: [Slot; 3] = [Slot {}; 3]
+  var dimension_slots: [Slot; 2] = [Slot::auto_slot(); 2]
+  var min_slots: [Slot; 2] = [Slot {}; 2]
+  var max_slots: [Slot; 2] = [Slot {}; 2]
+  var aspect_ratio_slot: Slot = Slot {}
+
+  pub fn FlexStyle(): FlexStyle => FlexStyle {};
+
+  // --- Reads ---
+  pub fn flex_grow(self&): f32 => self.flex_grow_slot.number();
+  pub fn flex_shrink(self&): f32 => self.flex_shrink_slot.number();
+  pub fn aspect_ratio(self&): f32 => self.aspect_ratio_slot.number();
+  pub fn flex_basis(self&): StyleLength => self.flex_basis_slot.get();
+  pub fn dimension(self&, dim: usize): StyleLength => self.dimension_slots[dim].get();
+  pub fn min_dimension(self&, dim: usize): StyleLength => self.min_slots[dim].get();
+  pub fn max_dimension(self&, dim: usize): StyleLength => self.max_slots[dim].get();
+  pub fn position(self&, edge: usize): StyleLength => self.position_slots[edge].get();
+  pub fn margin(self&, edge: usize): StyleLength => self.margin_slots[edge].get();
+  pub fn padding(self&, edge: usize): StyleLength => self.padding_slots[edge].get();
+
+  // --- Writes: true when the value changed (yoga's updateStyle) ---
+  pub fn set_flex_grow(var self&, v: f32): bool => store_number(self.flex_grow_slot, v, v);
+  pub fn set_flex_shrink(var self&, v: f32): bool => store_number(self.flex_shrink_slot, v, v);
+  // setAspectRatio stores 0 and infinities as undefined, but updateStyle
+  // compares against the value as passed.
+  pub fn set_aspect_ratio(var self&, v: f32): bool => store_number(self.aspect_ratio_slot, v, (v == 0.0 || is_infinite(v)) ? kUndefined : v);
+  pub fn set_flex_basis(var self&, l: StyleLength): bool => store_length(self.flex_basis_slot, l);
+  pub fn set_dimension(var self&, dim: usize, l: StyleLength): bool => store_length(self.dimension_slots[dim], l);
+  pub fn set_min_dimension(var self&, dim: usize, l: StyleLength): bool => store_length(self.min_slots[dim], l);
+  pub fn set_max_dimension(var self&, dim: usize, l: StyleLength): bool => store_length(self.max_slots[dim], l);
+  pub fn set_position(var self&, edge: usize, l: StyleLength): bool => store_length(self.position_slots[edge], l);
+  pub fn set_margin(var self&, edge: usize, l: StyleLength): bool => store_length(self.margin_slots[edge], l);
+  pub fn set_padding(var self&, edge: usize, l: StyleLength): bool => store_length(self.padding_slots[edge], l);
+  pub fn set_gap(var self&, gutter: usize, l: StyleLength): bool => store_length(self.gap_slots[gutter], l);
+
+  // --- Resolution (Style's compute* helpers, LTR, border-box) ---
+
+  // computeFlexStartMargin / computeFlexEndMargin.
+  pub fn flex_start_margin(self&, axis: FlexDir, width_size: f32): f32 => unwrap_or_zero(self.margin(flex_start_edge(axis)).resolve(width_size));
+  pub fn flex_end_margin(self&, axis: FlexDir, width_size: f32): f32 => unwrap_or_zero(self.margin(flex_end_edge(axis)).resolve(width_size));
+  // computeInlineStartMargin / computeInlineEndMargin.
+  pub fn inline_start_margin(self&, axis: FlexDir, width_size: f32): f32 => unwrap_or_zero(self.margin(inline_start_edge(axis)).resolve(width_size));
+  pub fn inline_end_margin(self&, axis: FlexDir, width_size: f32): f32 => unwrap_or_zero(self.margin(inline_end_edge(axis)).resolve(width_size));
+  // computeMarginForAxis.
+  pub fn margin_for_axis(self&, axis: FlexDir, width_size: f32): f32 => self.inline_start_margin(axis, width_size) + self.inline_end_margin(axis, width_size);
+
+  // computeFlexStartPadding and friends: negative and undefined clamp to 0.
+  pub fn flex_start_padding(self&, axis: FlexDir, width_size: f32): f32 => max_or_defined(self.padding(flex_start_edge(axis)).resolve(width_size), 0.0);
+  pub fn flex_end_padding(self&, axis: FlexDir, width_size: f32): f32 => max_or_defined(self.padding(flex_end_edge(axis)).resolve(width_size), 0.0);
+  pub fn inline_start_padding(self&, axis: FlexDir, width_size: f32): f32 => max_or_defined(self.padding(inline_start_edge(axis)).resolve(width_size), 0.0);
+  pub fn inline_end_padding(self&, axis: FlexDir, width_size: f32): f32 => max_or_defined(self.padding(inline_end_edge(axis)).resolve(width_size), 0.0);
+
+  // compute{FlexStart,FlexEnd,InlineStart,InlineEnd}PaddingAndBorder.
+  pub fn flex_start_padding_and_border(self&, axis: FlexDir, width_size: f32): f32 => self.flex_start_padding(axis, width_size) + kBorder;
+  pub fn flex_end_padding_and_border(self&, axis: FlexDir, width_size: f32): f32 => self.flex_end_padding(axis, width_size) + kBorder;
+  pub fn inline_start_padding_and_border(self&, axis: FlexDir, width_size: f32): f32 => self.inline_start_padding(axis, width_size) + kBorder;
+  pub fn inline_end_padding_and_border(self&, axis: FlexDir, width_size: f32): f32 => self.inline_end_padding(axis, width_size) + kBorder;
+
+  // paddingAndBorderForAxis (BoundAxis.h).
+  pub fn padding_and_border_for_axis(self&, axis: FlexDir, width_size: f32): f32 => self.inline_start_padding_and_border(axis, width_size) + self.inline_end_padding_and_border(axis, width_size);
+
+  // computeBorderForAxis: both borders, +0.0 + +0.0.
+  pub fn border_for_axis(self&): f32 => kBorder + kBorder;
+
+  // Positions (insets).
+  pub fn is_flex_start_position_defined(self&, axis: FlexDir): bool => self.position(flex_start_edge(axis)).is_defined();
+  pub fn is_flex_end_position_defined(self&, axis: FlexDir): bool => self.position(flex_end_edge(axis)).is_defined();
+  pub fn is_flex_start_position_auto(self&, axis: FlexDir): bool => self.position(flex_start_edge(axis)).is_auto();
+  pub fn is_flex_end_position_auto(self&, axis: FlexDir): bool => self.position(flex_end_edge(axis)).is_auto();
+  pub fn is_inline_start_position_defined(self&, axis: FlexDir): bool => self.position(inline_start_edge(axis)).is_defined();
+  pub fn is_inline_end_position_defined(self&, axis: FlexDir): bool => self.position(inline_end_edge(axis)).is_defined();
+  pub fn is_inline_start_position_auto(self&, axis: FlexDir): bool => self.position(inline_start_edge(axis)).is_auto();
+  pub fn is_inline_end_position_auto(self&, axis: FlexDir): bool => self.position(inline_end_edge(axis)).is_auto();
+  pub fn flex_start_position(self&, axis: FlexDir, axis_size: f32): f32 => unwrap_or_zero(self.position(flex_start_edge(axis)).resolve(axis_size));
+  pub fn flex_end_position(self&, axis: FlexDir, axis_size: f32): f32 => unwrap_or_zero(self.position(flex_end_edge(axis)).resolve(axis_size));
+  pub fn inline_start_position(self&, axis: FlexDir, axis_size: f32): f32 => unwrap_or_zero(self.position(inline_start_edge(axis)).resolve(axis_size));
+  pub fn inline_end_position(self&, axis: FlexDir, axis_size: f32): f32 => unwrap_or_zero(self.position(inline_end_edge(axis)).resolve(axis_size));
+  pub fn horizontal_insets_defined(self&): bool => self.position_slots[kLeft].unit != Unit::Undefined || self.position_slots[kRight].unit != Unit::Undefined;
+  pub fn vertical_insets_defined(self&): bool => self.position_slots[kTop].unit != Unit::Undefined || self.position_slots[kBottom].unit != Unit::Undefined;
+
+  // computeGapForAxis: the column gap along a row, the row gap along a column,
+  // each falling back to the all-gutters gap; negative and undefined are 0.
+  pub fn gap_for_axis(self&, axis: FlexDir, owner_size: f32): f32;
+
+  // resolvedMinDimension / resolvedMaxDimension (border-box: no padding added).
+  pub fn resolved_min_dimension(self&, dim: usize, reference: f32): f32 => self.min_dimension(dim).resolve(reference);
+  pub fn resolved_max_dimension(self&, dim: usize, reference: f32): f32 => self.max_dimension(dim).resolve(reference);
+}
+
+fn unwrap_or_zero(v: f32): f32 => v != v ? 0.0 : v;
+
+// updateStyle for a length: compare, store, report.
+fn store_length(var slot&: Slot, l: StyleLength): bool {
+  if (slot.get().same(l)) {
+    return false;
+  }
+  slot.store(l);
+  return true;
+}
+
+// updateStyle for a number.
+fn store_number(var slot&: Slot, compare: f32, stored: f32): bool {
+  if (optional_equals(slot.number(), compare)) {
+    return false;
+  }
+  if (stored != stored) {
+    slot.store(StyleLength {});
+  } else {
+    slot.store(StyleLength { unit: Unit::Point, value: stored });
+  }
+  return true;
+}
+
+fn FlexStyle::gap_for_axis(self&, axis: FlexDir, owner_size: f32): f32 {
+  let gutter = is_row(axis) ? kGutterColumn : kGutterRow;
+  let gap = self.gap_slots[gutter].unit != Unit::Undefined ? self.gap_slots[gutter].get() : self.gap_slots[kGutterAll].get();
+  return max_or_defined(gap.resolve(owner_size), 0.0);
+}

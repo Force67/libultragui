@@ -1,0 +1,83 @@
+// ugui/scripting/lua_lottie.cc: ultragui_lua/tests/data/lottie.lua against
+// api.ugui with the Lottie bindings, step for step as
+// ultragui_lua/tools/gen_lua_reference.cc's RunLottie runs it on the C++
+// (LottieAnimation loaded without a texture backend: the C++'s nullptr);
+// the output must equal its tests/data/expected/lottie.txt byte for byte.
+
+module lua_lottie_test;
+
+import {List} from akikit::containers::list;
+import {Box} from akikit::memory::box;
+import {String} from akikit::strings::string;
+import {WidgetId} from ultragui::core::handle;
+import {UguiBuilder} from ultragui::idl::builder;
+import {ParseError, UguiDocument, parse_ugui_file} from ultragui::idl::parser;
+import {register_widget_tree} from ultragui::scripting::lua_widgets;
+import {destroy_widget} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {LottieAnimation} from ultragui_lottie::lottie;
+import {LuaCall} from ultragui_lua::lua_call;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {register_lottie_lua} from ultragui_lua_lottie::lua_lottie;
+import {b01, collect_named, dump_line, outln, run_captured, setup} from ultragui_lua::test_harness;
+
+fn run_lottie() {
+  var world = World();
+  var ctx = WidgetContext::detached();
+  var doc = UguiDocument {};
+  var errors: List<ParseError> = List();
+  if (!parse_ugui_file("../ultragui_lua/tests/data/api.ugui", doc, errors)) {
+    outln("parse failed");
+    return;
+  }
+  var builder = UguiBuilder();
+  let root = builder.build(world, ctx, doc);
+  var rt = LuaRuntime();
+  outln(f"init {b01(rt.init())}");
+  var anims: List<Box<LottieAnimation>> = List();
+  let anims_ptr = unsafe (&raw var anims);
+  let rt_ptr = unsafe (&raw var rt);
+  register_lottie_lua(rt,
+    own fn(call: &var LuaCall, path: String, w: u32, h: u32): *var LottieAnimation {
+      outln(f"loader {path} {w} {h}");
+      var a = Box(LottieAnimation());
+      if (!a.get_var().load(none, path, w, h)) {
+        return null;
+      }
+      let p = unsafe (a.as_ptr() as *var LottieAnimation);
+      unsafe (*anims_ptr).push(a);
+      return p;
+    },
+    own fn(call: &var LuaCall, name: String): WidgetId {
+      outln(f"find_widget {name}");
+      return unsafe (*rt_ptr).find_registered_widget(name);
+    },
+    own fn(call: &var LuaCall, a: *var LottieAnimation) {
+      unsafe (*a).stop(none);
+    },
+    own fn(call: &var LuaCall, a: *var LottieAnimation, progress: f32) {
+      unsafe (*a).seek(progress, none);
+    });
+  register_widget_tree(rt, world, root);
+  rt.exec(world, ctx, "LOTTIE_PATH = '../../examples/lottie_demo/anims/spinner.json'", "setup");
+  outln(f"exec {b01(rt.exec_file(world, ctx, "../ultragui_lua/tests/data/lottie.lua"))}");
+  var named: List<WidgetId> = List();
+  collect_named(world, root, named);
+  for (let w in named.iter()) {
+    outln(f"  {dump_line(world, w)}");
+  }
+  rt.shutdown();
+  destroy_widget(world, root);
+  for (var a& in anims) {
+    a.get_var().unload(none);
+  }
+}
+
+pub fn main(): i32 {
+  setup();
+  let ok = run_captured("lottie", "../ultragui_lua/tests/data/expected/lottie.txt", fn() {
+    run_lottie();
+  });
+  return ok ? 0 : 1;
+}

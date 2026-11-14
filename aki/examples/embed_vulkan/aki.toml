@@ -1,0 +1,16 @@
+# examples/embed_vulkan in aki: the host owns the Vulkan instance, device,
+# swapchain and render pass; UIContext runs in draw-data mode and
+# VulkanBackend (ugui_impl_vulkan) records its draw list into the host's
+# command buffer, as examples/embed_vulkan/main.cc.
+[package]
+name = "ultragui_embed_vulkan"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_vulkan = { path = "../../ultragui_vulkan" }
+
+[build]
+opt = 2

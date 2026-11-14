@@ -1,0 +1,64 @@
+// No C++ counterpart: C's `const char*` text and the libc number readers the
+// SVG parser leans on (strtof, strtod/atof, fmodf), so numbers come out of the
+// same libc routines as in the C++ (hex floats, "inf", "nan(...)", leading
+// white space, double rounding in atof) without a reimplementation.
+//
+// CText is a NUL-terminated copy of a string that ends at its first NUL, the
+// way a C++ `c_str()` reads. Positions are byte offsets, the C++ `const char*
+// p` as `p - start`; `at(i)` is 0 from the end on, as `*p` is at the NUL.
+
+module ultragui::sys::c_text;
+
+import {String, from_str} from akikit::strings::string;
+
+extern fn strtof(s: *const c8, end: *var *var c8): f32;
+extern fn strtod(s: *const c8, end: *var *var c8): f64;
+extern fn fmodf(x: f32, y: f32): f32;
+
+pub struct CText {
+  var bytes: String
+
+  pub fn CText(s: str): CText => CText::from_parts(s);
+  pub fn len(self&): usize => self.bytes.len() - 1;
+  pub fn as_str(self&): str => self.bytes.as_str()[..self.bytes.len() - 1];
+  // `*(start + i)`: the byte at i, 0 at and past the end.
+  pub fn at(self&, i: usize): u8 => i < self.bytes.len() - 1 ? self.bytes.as_str()[i] as u8 : 0;
+  pub fn strtof_at(self&, pos: usize): (f32, usize);
+  pub fn strtod_at(self&, pos: usize): (f64, usize);
+}
+
+fn CText::from_parts(s: str): CText {
+  var n: usize = 0;
+  while (n < #s && s[n] != '\0') {
+    n += 1;
+  }
+  var bytes = from_str(s[..n]);
+  bytes.push_c8('\0');
+  return CText { bytes };
+}
+
+// strtof(p, &end) at byte `pos`: the value and the offset `end` points to
+// (`pos` itself when nothing converts). At or past the end converts nothing,
+// as at(pos) returns NUL; never pass an out-of-bounds pointer to libc.
+fn CText::strtof_at(self&, pos: usize): (f32, usize) {
+  if (pos >= self.len()) {
+    return (0.0, pos);
+  }
+  let base = @ptr(self.bytes.as_str());
+  var end: *var c8 = null;
+  let v = unsafe strtof(base + pos, &raw var end);
+  return (v, unsafe (end as usize) - (base as usize));
+}
+
+fn CText::strtod_at(self&, pos: usize): (f64, usize) {
+  if (pos >= self.len()) {
+    return (0.0, pos);
+  }
+  let base = @ptr(self.bytes.as_str());
+  var end: *var c8 = null;
+  let v = unsafe strtod(base + pos, &raw var end);
+  return (v, unsafe (end as usize) - (base as usize));
+}
+
+// fmodf: the C library's, which has no intrinsic.
+pub fn fmod_f32(x: f32, y: f32): f32 => unsafe fmodf(x, y);

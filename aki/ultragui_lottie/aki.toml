@@ -1,0 +1,41 @@
+# libultragui's Lottie player in aki (ugui/lottie/lottie.{h,cc}) over rlottie's
+# C API. rlottie is compiled from the third_party/rlottie submodule through
+# c_sources (the file list is third_party/rlottie's CMake, as the C++ build
+# configures it: LOTTIE_MODULE off, thread and cache support on), so the
+# package builds wherever akiko has a C++ compiler, Windows included, and
+# needs nothing from the dev shell. See ../PORTING.md.
+[package]
+name = "ultragui_lottie"
+kind = "lib"
+version = "0.1.0"
+description = "libultragui's Lottie animation player in aki, over rlottie"
+
+[dependencies]
+ultragui = { path = "../ultragui" }
+
+[dev-dependencies]
+ultragui_testing = { path = "../ultragui_testing" }
+
+[build]
+# The reference build is -O3 (CMake Release); rlottie's rasterizer is slow
+# below that, and its output must match the C++'s, so keep the level.
+opt = 3
+c_sources = ["../../third_party/rlottie/src/vector/freetype/v_ft_math.cpp", "../../third_party/rlottie/src/vector/freetype/v_ft_raster.cpp", "../../third_party/rlottie/src/vector/freetype/v_ft_stroker.cpp", "../../third_party/rlottie/src/vector/stb/stb_image.cpp", "../../third_party/rlottie/src/vector/vrect.cpp", "../../third_party/rlottie/src/vector/vdasher.cpp", "../../third_party/rlottie/src/vector/vbrush.cpp", "../../third_party/rlottie/src/vector/vbitmap.cpp", "../../third_party/rlottie/src/vector/vpainter.cpp", "../../third_party/rlottie/src/vector/vdrawhelper_common.cpp", "../../third_party/rlottie/src/vector/vdrawhelper.cpp", "../../third_party/rlottie/src/vector/vdrawhelper_sse2.cpp", "../../third_party/rlottie/src/vector/vdrawhelper_neon.cpp", "../../third_party/rlottie/src/vector/vrle.cpp", "../../third_party/rlottie/src/vector/vpath.cpp", "../../third_party/rlottie/src/vector/vpathmesure.cpp", "../../third_party/rlottie/src/vector/vmatrix.cpp", "../../third_party/rlottie/src/vector/velapsedtimer.cpp", "../../third_party/rlottie/src/vector/vdebug.cpp", "../../third_party/rlottie/src/vector/vinterpolator.cpp", "../../third_party/rlottie/src/vector/vbezier.cpp", "../../third_party/rlottie/src/vector/vraster.cpp", "../../third_party/rlottie/src/vector/vdrawable.cpp", "../../third_party/rlottie/src/vector/vimageloader.cpp", "../../third_party/rlottie/src/vector/varenaalloc.cpp", "../../third_party/rlottie/src/lottie/zip/zip.cpp", "../../third_party/rlottie/src/lottie/lottieitem.cpp", "../../third_party/rlottie/src/lottie/lottieitem_capi.cpp", "../../third_party/rlottie/src/lottie/lottieloader.cpp", "../../third_party/rlottie/src/lottie/lottiemodel.cpp", "../../third_party/rlottie/src/lottie/lottieproxymodel.cpp", "../../third_party/rlottie/src/lottie/lottieparser.cpp", "../../third_party/rlottie/src/lottie/lottieanimation.cpp", "../../third_party/rlottie/src/lottie/lottiekeypath.cpp", "../../third_party/rlottie/src/binding/c/lottieanimation_capi.cpp"]
+# csrc/config.h is rlottie's cmake/config.h.in as the C++ build generates it.
+c_flags = ["-std=c++14", "-fno-exceptions", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-fno-rtti", "-Wno-unused-parameter", "-Wno-#warnings", "-Icsrc", "-I../../third_party/rlottie/inc", "-I../../third_party/rlottie/src/vector/freetype", "-I../../third_party/rlottie/src/vector/pixman", "-I../../third_party/rlottie/src/vector", "-I../../third_party/rlottie/src/lottie/zip", "-I../../third_party/rlottie/src/lottie", "-I../../third_party/rlottie/src/binding/c"]
+link = ["-lstdc++", "-lm"]
+
+[build.os.linux]
+link = ["-lpthread"]
+
+[build.os.android]
+link = ["-lpthread"]
+
+[build.os.freebsd]
+link = ["-lpthread"]
+
+[build.os.windows]
+# rlottie is built static: RLOTTIE_BUILD=0 turns its dllexport/dllimport off
+# (third_party/rlottie/CMakeLists.txt); zip.cpp uses Shlwapi.
+c_flags = ["-DRLOTTIE_BUILD=0"]
+link = ["-lshlwapi"]

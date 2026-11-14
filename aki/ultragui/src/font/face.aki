@@ -1,0 +1,1331 @@
+// A font face and its one size, as FreeType 2.14.3 opens and sizes it for
+// libultragui: FT_Open_Face(face index) through the sfnt module
+// (sfnt/sfobjs.c sfnt_init_face/sfnt_load_face; sfnt/ttload.c, ttmtx.c),
+// the TrueType driver (truetype/ttobjs.c tt_face_init, tt_size_reset,
+// tt_size_run_fpgm/prep; ttpload.c loca, cvt, fpgm, prep, hdmx;
+// ttdriver.c tt_size_request) and base/ftobjs.c (FT_Request_Size,
+// FT_Request_Metrics, FT_Select_Metrics, FT_Set_Pixel_Sizes).
+//
+// The face owns the file's bytes. CFF-flavored OpenType ('OTTO') faces open
+// here too (directory, metrics, sizes); their glyphs come from the CFF
+// loader in font/cff, which reads `cff_table()`.
+//
+// Like FreeType's FT_Size, the size keeps state between loads that changes
+// what later loads produce: the font program runs once, at the first hinted
+// load; the CVT program runs again after every size change; the twilight
+// zone keeps what glyph programs leave in it. Load glyphs in the order the
+// C++ library does to get its bits.
+
+module ultragui::font::face;
+
+import {List} from akikit::containers::list;
+import {read_bytes} from akikit::filesystem::file_util;
+import {GraphicsState, Interp, kRangeCvt, kRangeFont, kRangeGlyph} from ultragui::font::tt_interp;
+import {div_fix, mul_div, mul_fix, pix_ceil, pix_floor, pix_round} from ultragui::font::fixed;
+import {
+  Directory, FontError, fits, i16_at, kTagCbdt, kTagCblc, kTagCff, kTagCff2, kTagCvt, kTagEblc,
+  kTagFpgm, kTagFvar, kTagGlyf, kTagHdmx, kTagHead, kTagHhea, kTagHmtx, kTagLoca, kTagMaxp, kTagName, kTagOs2, kTagOtto,
+  kTagPost, kTagPrep, kTagSbix, kTagTrue, kTagVhea, kTagVmtx, kTagBloc, open_directory, u16_at, u32_at,
+} from ultragui::font::sfnt;
+import {StrikeTable, load_strikes} from ultragui::font::sbit;
+import {LoadedGlyph, Vec26} from ultragui::font::outline;
+import {Loader, load_sbit_glyph, load_tt} from ultragui::font::tt_glyph;
+import {FaceGlobals} from ultragui::font::autofit::globals;
+import {load_autohinted} from ultragui::font::autofit::loader;
+
+// FT_FACE_FLAG_*.
+pub comptime let kFaceFlagScalable: u32 = 0x1;
+pub comptime let kFaceFlagFixedSizes: u32 = 0x2;
+pub comptime let kFaceFlagFixedWidth: u32 = 0x4;
+pub comptime let kFaceFlagSfnt: u32 = 0x8;
+pub comptime let kFaceFlagHorizontal: u32 = 0x10;
+pub comptime let kFaceFlagVertical: u32 = 0x20;
+pub comptime let kFaceFlagMultipleMasters: u32 = 0x100;
+pub comptime let kFaceFlagGlyphNames: u32 = 0x200;
+pub comptime let kFaceFlagHinter: u32 = 0x800;
+pub comptime let kFaceFlagTricky: u32 = 0x2000;
+pub comptime let kFaceFlagColor: u32 = 0x4000;
+pub comptime let kFaceFlagSbix: u32 = 0x20000;
+
+// The flags this engine computes the way FreeType does (it does not compute
+// KERNING, which needs 'kern'/'GPOS' parsing, nor VARIATION/SVG).
+pub comptime let kFaceFlagsComputed: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x100 | 0x200 | 0x800 | 0x2000 | 0x20000;
+
+// FT_Size_Metrics.
+pub struct SizeMetrics : Copy, Equal {
+  pub var x_ppem: u16 = 0
+  pub var y_ppem: u16 = 0
+  pub var x_scale: i64 = 0
+  pub var y_scale: i64 = 0
+  pub var ascender: i64 = 0
+  pub var descender: i64 = 0
+  pub var height: i64 = 0
+  pub var max_advance: i64 = 0
+}
+
+// The 'head' fields FreeType uses.
+pub struct Head : Copy {
+  pub var flags: u16 = 0
+  pub var units_per_em: u16 = 0
+  pub var x_min: i16 = 0
+  pub var y_min: i16 = 0
+  pub var x_max: i16 = 0
+  pub var y_max: i16 = 0
+  pub var mac_style: u16 = 0
+  pub var index_to_loc_format: i16 = 0
+}
+
+// 'hhea'/'vhea' (TT_HoriHeader) and where its metrics table is.
+pub struct MetricsHeader : Copy {
+  pub var ascender: i16 = 0
+  pub var descender: i16 = 0
+  pub var line_gap: i16 = 0
+  pub var advance_max: u16 = 0
+  pub var number_of_metrics: u16 = 0
+  pub var mtx_offset: u32 = 0
+  pub var mtx_size: u32 = 0
+}
+
+// The 'OS/2' fields used; version 0xFFFF when the table is missing or short.
+pub struct Os2 : Copy {
+  pub var version: u16 = 0xFFFF
+  pub var avg_char_width: i16 = 0
+  pub var fs_selection: u16 = 0
+  pub var typo_ascender: i16 = 0
+  pub var typo_descender: i16 = 0
+  pub var typo_line_gap: i16 = 0
+  pub var win_ascent: u16 = 0
+  pub var win_descent: u16 = 0
+}
+
+pub struct Maxp : Copy {
+  pub var version: u32 = 0
+  pub var num_glyphs: u16 = 0
+  pub var max_twilight_points: u16 = 0
+  pub var max_storage: u16 = 0
+  pub var max_function_defs: u16 = 0
+  pub var max_instruction_defs: u16 = 0
+  pub var max_stack_elements: u16 = 0
+}
+
+// The size: FT_Size_Metrics (what face->size->metrics shows), the TrueType
+// hinting metrics beside them, and the bytecode state FreeType keeps per size.
+pub struct Size {
+  pub var metrics: SizeMetrics = SizeMetrics {}
+  pub var hinted: SizeMetrics = SizeMetrics {}
+  pub var ppem: i64 = 0
+  pub var scale: i64 = 0
+  pub var x_ratio: i64 = 0
+  pub var y_ratio: i64 = 0
+  pub var point_size: i64 = 0
+  pub var strike_index: u32 = 0xFFFF_FFFF
+  // Offset in the file of the hdmx widths at this ppem (size->widthp).
+  pub var widthp: usize? = none
+  // -1 not run yet, 0 ran fine, 1 failed (with the error beside it).
+  pub var bytecode_ready: i32 = -1
+  pub var bytecode_error: FontError = FontError::InvalidArgument
+  pub var cvt_ready: i32 = -1
+  pub var cvt_error: FontError = FontError::InvalidArgument
+  pub var gs: GraphicsState = GraphicsState {}
+  pub var exec: Interp? = none
+}
+
+pub struct Face {
+  pub var data: List<u8> = List()
+  pub var dir: Directory = Directory {}
+  pub var face_index: u32 = 0
+  pub var face_flags: u32 = 0
+  pub var num_glyphs: u32 = 0
+  pub var units_per_em: u16 = 0
+  // FT_FaceRec's design metrics (FT_Short).
+  pub var ascender: i16 = 0
+  pub var descender: i16 = 0
+  pub var height: i16 = 0
+  pub var max_advance_width: i16 = 0
+  pub var max_advance_height: i16 = 0
+  pub var head: Head = Head {}
+  pub var hhea: MetricsHeader = MetricsHeader {}
+  pub var vhea: MetricsHeader = MetricsHeader {}
+  pub var vertical_info: bool = false
+  pub var os2: Os2 = Os2 {}
+  pub var post_format: u32 = 0
+  pub var is_fixed_pitch: bool = false
+  pub var maxp: Maxp = Maxp {}
+  pub var family_name: List<u8> = List()
+  pub var glyf_offset: u32 = 0
+  pub var glyf_len: u32 = 0
+  pub var loca_offset: u32 = 0
+  pub var num_locations: u32 = 0
+  pub var cvt: List<i64> = List()
+  pub var fpgm_offset: u32 = 0
+  pub var fpgm_len: u32 = 0
+  pub var prep_offset: u32 = 0
+  pub var prep_len: u32 = 0
+  // hdmx records sorted by ppem: (ppem, offset of the record).
+  pub var hdmx: List<(u8, u32)> = List()
+  pub var strikes: StrikeTable = StrikeTable {}
+  pub var size: Size = Size {}
+  // The glyph loader's buffers, kept between loads.
+  pub var scratch: Loader = Loader {}
+  // The autohinter's state (face->autohint.data), made by the first
+  // autohinted load.
+  pub var autofit: FaceGlobals? = none
+
+  // FT_Open_Face(face index) on the bytes of a TrueType, OpenType or
+  // collection file.
+  pub fn open(data: List<u8>, index: u32): Face ! FontError;
+  // FT_Open_Face on a file path (FT_OPEN_PATHNAME); a missing or unreadable
+  // file is FreeType's cannot-open-resource (UnknownFileFormat here).
+  pub fn open_file(path: str, index: u32): Face ! FontError;
+
+  pub fn is_tricky(self&): bool => (self.face_flags & kFaceFlagTricky) != 0;
+  pub fn is_scalable(self&): bool => (self.face_flags & kFaceFlagScalable) != 0;
+  pub fn is_cff(self&): bool => self.dir.format_tag == kTagOtto;
+  pub fn has_fixed_sizes(self&): bool => (self.face_flags & kFaceFlagFixedSizes) != 0;
+  pub fn num_faces(self&): u32 => self.dir.num_faces;
+
+  // The 'CFF ' (or 'CFF2') table of an OTTO face, for the CFF loader.
+  pub fn cff_table(self&): &[u8];
+
+  // FT_Set_Pixel_Sizes(face, 0, px). On failure the size stays as it was.
+  pub fn set_pixel_size(var self&, px: u32): () ! FontError;
+
+  // face->size->metrics.
+  pub fn size_metrics(self&): SizeMetrics => self.size.metrics;
+
+  // Whether a default load hints with the bytecode (the TrueType driver's
+  // own hinter) rather than FreeType's autohinter: what FT_Load_Glyph
+  // decides from the face alone (no fpgm and a prep of at most 7 bytes means
+  // the autohinter, unless the face is tricky).
+  pub fn uses_autohinter(self&): bool;
+
+  // FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT): the hinted outline (or an
+  // embedded bitmap at a strike size) and the slot metrics: by the bytecode,
+  // or by the autohinter (font/autofit) on faces that `uses_autohinter`.
+  // Fails with CffNotLoaded on CFF faces (font/cff).
+  pub fn load_glyph(var self&, gid: u32): LoadedGlyph ! FontError;
+  // FT_Load_Glyph(face, gid, FT_LOAD_FORCE_AUTOHINT) on a TrueType face
+  // that is not tricky: a strike's bitmap, else the autohinter's outline
+  // (what load_glyph does for faces that `uses_autohinter`).
+  pub fn load_glyph_autohinted(var self&, gid: u32): LoadedGlyph ! FontError;
+  // FT_Load_Glyph(face, gid, FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING), what
+  // hb_ft loads for glyph extents and contour points.
+  pub fn load_glyph_unhinted(var self&, gid: u32): LoadedGlyph ! FontError;
+
+  // tt_face_get_location: (offset in 'glyf', length).
+  pub fn glyph_location(self&, gindex: u32): (u32, u32);
+  // TT_Load_Context.
+  pub fn load_context(var self&);
+  // The bytecode part of tt_loader_init (see below).
+  pub fn prepare_hinting(var self&): bool ! FontError;
+}
+
+// --- Opening --------------------------------------------------------------------------
+
+fn s16(x: i64): i16 => x as i16;
+
+fn Face::open(data: List<u8>, index: u32): Face ! FontError {
+  var face = Face {};
+  face.data = data;
+  face.face_index = index;
+  let dir = try open_directory(face.data.as_slice(), index);
+  face.dir = dir;
+  if (face.dir.format_tag != kTagOtto) {
+    // tt_face_init only takes TrueType formats; an OTTO face goes to the CFF
+    // driver, whose sfnt part is the same.
+    let t = face.dir.format_tag;
+    if (t != 0x0001_0000 && t != 0x0002_0000 && t != kTagTrue && t != 0xA56B_6264 && t != 0xA56C_7374) {
+      return fail FontError::UnknownFileFormat;
+    }
+  }
+  try face.load_sfnt();
+  face.load_family_name();
+  if (!face.is_cff()) {
+    face.face_flags = face.face_flags | kFaceFlagHinter;
+    if (face.check_tricky()) {
+      face.face_flags = face.face_flags | kFaceFlagTricky;
+    }
+    face.load_hdmx();
+    if (face.is_scalable() || (face.face_flags & kFaceFlagSbix) != 0) {
+      try face.load_loca();
+      face.load_programs();
+      if (face.has_fixed_sizes() && face.single_notdef()) {
+        face.face_flags = face.face_flags & ~kFaceFlagScalable;
+      }
+    }
+  }
+  // FT_Open_Face's last checks.
+  if (face.is_scalable()) {
+    if (face.height < 0) {
+      face.height = (0 - face.height as i32) as i16;
+    }
+    if ((face.face_flags & kFaceFlagVertical) == 0) {
+      face.max_advance_height = face.height;
+    }
+  }
+  // An OTTO face keeps sfnt_load_face's flags; cff_face_init adds
+  // GLYPH_NAMES when the CFF is not CID-keyed (the CFF loader knows).
+  return face;
+}
+
+fn Face::open_file(path: str, index: u32): Face ! FontError {
+  let bytes = read_bytes(path) else {
+    return fail FontError::UnknownFileFormat;
+  };
+  var data: List<u8> = List();
+  data.reserve(bytes.len());
+  for (let b in bytes) {
+    data.push(b as u8);
+  }
+  return Face::open(data, index);
+}
+
+// sfnt_load_face.
+fn Face::load_sfnt(var self&): () ! FontError {
+  let d = self.data.as_slice();
+  var has_outline = self.dir.has(kTagGlyf) || self.dir.has(kTagCff) || self.dir.has(kTagCff2);
+  let has_cblc = self.dir.has(kTagCblc);
+  let has_cbdt = self.dir.has(kTagCbdt);
+  let has_eblc = self.dir.has(kTagEblc);
+  let has_bloc = self.dir.has(kTagBloc);
+  let has_sbix = self.dir.has(kTagSbix);
+  // Apple 'bhed' bitmap-only fonts are not supported (none in the corpus).
+  let head_rec = self.dir.find(kTagHead) else {
+    return fail FontError::TableMissing;
+  };
+  let h = head_rec.offset as usize;
+  if (!fits(d, h as u64, 54)) {
+    return fail FontError::InvalidStreamOperation;
+  }
+  self.head = Head {
+    flags: u16_at(d, h + 16),
+    units_per_em: u16_at(d, h + 18),
+    x_min: i16_at(d, h + 36),
+    y_min: i16_at(d, h + 38),
+    x_max: i16_at(d, h + 40),
+    y_max: i16_at(d, h + 42),
+    mac_style: u16_at(d, h + 44),
+    index_to_loc_format: i16_at(d, h + 50),
+  };
+  if (has_cblc || has_cbdt) {
+    has_outline = false;
+  }
+  if (self.head.units_per_em < 16 || self.head.units_per_em > 16384) {
+    return fail FontError::InvalidTable;
+  }
+  // maxp (its error does not stop sfnt_load_face).
+  if (let m = self.dir.find(kTagMaxp)) {
+    let o = m.offset as usize;
+    if (fits(d, o as u64, 6)) {
+      self.maxp.version = u32_at(d, o);
+      self.maxp.num_glyphs = u16_at(d, o + 4);
+      if ((self.maxp.version as i32) >= 0x10000 && fits(d, (o + 6) as u64, 26)) {
+        // (FT_FRAME_LONG: a signed version)
+        self.maxp.max_twilight_points = u16_at(d, o + 16);
+        self.maxp.max_storage = u16_at(d, o + 18);
+        self.maxp.max_function_defs = u16_at(d, o + 20);
+        self.maxp.max_instruction_defs = u16_at(d, o + 22);
+        self.maxp.max_stack_elements = u16_at(d, o + 24);
+        if (self.maxp.max_function_defs < 64) {
+          self.maxp.max_function_defs = 64;
+        }
+        if (self.maxp.max_twilight_points > 0xFFFF - 4) {
+          self.maxp.max_twilight_points = 0xFFFF - 4;
+        }
+      }
+    }
+  }
+  // post
+  var post_ok = false;
+  if (let p = self.dir.find(kTagPost)) {
+    let o = p.offset as usize;
+    if (fits(d, o as u64, 32)) {
+      self.post_format = u32_at(d, o);
+      self.is_fixed_pitch = u32_at(d, o + 12) != 0;
+      let f = self.post_format;
+      post_ok = f == 0x0003_0000 || f == 0x0002_5000 || f == 0x0002_0000 || f == 0x0001_0000;
+    }
+  }
+  // hhea + hmtx
+  if (let hh = self.dir.find(kTagHhea)) {
+    self.hhea = try read_metrics_header(d, hh.offset as usize);
+    let mtx = self.dir.find(kTagHmtx) else {
+      return fail FontError::HmtxTableMissing;
+    };
+    self.hhea.mtx_offset = mtx.offset;
+    self.hhea.mtx_size = mtx.length;
+  } else if (self.dir.format_tag == kTagTrue) {
+    has_outline = false;
+  } else {
+    return fail FontError::HorizHeaderMissing;
+  }
+  if (let vh = self.dir.find(kTagVhea)) {
+    if (let vhea = read_metrics_header(d, vh.offset as usize)) {
+      self.vhea = vhea;
+      if (let mtx = self.dir.find(kTagVmtx)) {
+        self.vhea.mtx_offset = mtx.offset;
+        self.vhea.mtx_size = mtx.length;
+        self.vertical_info = true;
+      }
+    }
+  }
+  // OS/2
+  if (let os = self.dir.find(kTagOs2)) {
+    let o = os.offset as usize;
+    if (fits(d, o as u64, 78)) {
+      let version = u16_at(d, o);
+      var ok = true;
+      if (version >= 1 && !fits(d, (o + 78) as u64, 8)) {
+        ok = false;
+      }
+      if (version >= 2 && !fits(d, (o + 86) as u64, 10)) {
+        ok = false;
+      }
+      if (version >= 5 && !fits(d, (o + 96) as u64, 4)) {
+        ok = false;
+      }
+      if (ok) {
+        self.os2 = Os2 {
+          version,
+          avg_char_width: i16_at(d, o + 2),
+          fs_selection: u16_at(d, o + 62),
+          typo_ascender: i16_at(d, o + 68),
+          typo_descender: i16_at(d, o + 70),
+          typo_line_gap: i16_at(d, o + 72),
+          win_ascent: u16_at(d, o + 74),
+          win_descent: u16_at(d, o + 76),
+        };
+      }
+    }
+  }
+  // Embedded bitmap strikes.
+  if (has_cblc || has_eblc || has_bloc || has_sbix) {
+    self.strikes = load_strikes(d, self.dir, self.head.units_per_em, self.os2.avg_char_width, self.os2.version != 0xFFFF);
+  }
+  self.num_glyphs = self.maxp.num_glyphs as u32;
+  // Face flags.
+  var flags: u32 = 0;
+  if (has_outline) {
+    if (has_sbix) {
+      flags = flags | kFaceFlagSbix;
+    } else {
+      flags = flags | kFaceFlagScalable;
+    }
+  }
+  flags = flags | kFaceFlagSfnt | kFaceFlagHorizontal;
+  if (post_ok && self.post_format != 0x0003_0000) {
+    flags = flags | 0x200;
+  }
+  if (self.is_fixed_pitch) {
+    flags = flags | kFaceFlagFixedWidth;
+  }
+  if (self.vertical_info) {
+    flags = flags | kFaceFlagVertical;
+  }
+  if (self.has_valid_fvar()) {
+    flags = flags | kFaceFlagMultipleMasters;
+  }
+  if (self.strikes.num_strikes() > 0) {
+    flags = flags | kFaceFlagFixedSizes;
+  }
+  if ((flags & kFaceFlagFixedSizes) == 0 && (flags & kFaceFlagScalable) == 0) {
+    flags = flags | kFaceFlagScalable;
+  }
+  self.face_flags = flags;
+  if ((flags & kFaceFlagScalable) != 0 || (flags & kFaceFlagSbix) != 0) {
+    self.units_per_em = self.head.units_per_em;
+    let os2 = self.os2;
+    if (os2.version != 0xFFFF && (os2.fs_selection & 128) != 0) {
+      self.ascender = os2.typo_ascender;
+      self.descender = os2.typo_descender;
+      self.height = s16(self.ascender as i64 - self.descender as i64 + os2.typo_line_gap as i64);
+    } else {
+      self.ascender = self.hhea.ascender;
+      self.descender = self.hhea.descender;
+      self.height = s16(self.ascender as i64 - self.descender as i64 + self.hhea.line_gap as i64);
+      if (self.ascender == 0 && self.descender == 0 && os2.version != 0xFFFF) {
+        if (os2.typo_ascender != 0 || os2.typo_descender != 0) {
+          self.ascender = os2.typo_ascender;
+          self.descender = os2.typo_descender;
+          self.height = s16(self.ascender as i64 - self.descender as i64 + os2.typo_line_gap as i64);
+        } else {
+          self.ascender = os2.win_ascent as i16;
+          self.descender = 0 - (os2.win_descent as i16);
+          self.height = s16(self.ascender as i64 - self.descender as i64);
+        }
+      }
+    }
+    self.max_advance_width = self.hhea.advance_max as i16;
+    self.max_advance_height = self.vertical_info ? self.vhea.advance_max as i16 : self.height;
+  }
+}
+
+// tt_face_load_hhea's 36-byte frame.
+fn read_metrics_header(d&: [u8], o: usize): MetricsHeader ! FontError {
+  if (!fits(d, o as u64, 36)) {
+    return fail FontError::InvalidStreamOperation;
+  }
+  return MetricsHeader {
+    ascender: i16_at(d, o + 4),
+    descender: i16_at(d, o + 6),
+    line_gap: i16_at(d, o + 8),
+    advance_max: u16_at(d, o + 10),
+    number_of_metrics: u16_at(d, o + 34),
+  };
+}
+
+// The fvar checks of sfnt_init_face (TT_FACE_FLAG_VAR_FVAR).
+fn Face::has_valid_fvar(self&): bool {
+  let d = self.data.as_slice();
+  let f = self.dir.find(kTagFvar) else {
+    return false;
+  };
+  let o = f.offset as usize;
+  if (f.length < 20 || !fits(d, o as u64, 16)) {
+    return false;
+  }
+  let version = u32_at(d, o);
+  let offset = u16_at(d, o + 4) as u64;
+  let num_axes = u16_at(d, o + 8) as u64;
+  let axis_size = u16_at(d, o + 10) as u64;
+  let num_instances = u16_at(d, o + 12) as u64;
+  let instance_size = u16_at(d, o + 14) as u64;
+  if (version != 0x0001_0000 || axis_size != 20 || num_axes == 0 || num_axes > 0x3FFE ||
+      !(instance_size == 4 + 4 * num_axes || instance_size == 6 + 4 * num_axes) || num_instances > 0x7EFF ||
+      offset + axis_size * num_axes + instance_size * num_instances > f.length as u64) {
+    return false;
+  }
+  return true;
+}
+
+// tt_face_get_name(TT_NAME_ID_FONT_FAMILY) as sfnt_load_face picks the
+// family name, in FreeType's ASCII conversion; only the tricky-font check
+// reads it. (FreeType prefers the typographic family when fsSelection bit 8
+// is set and the WWS family otherwise; both fall back to the font family.)
+fn Face::load_family_name(var self&) {
+  var ids: List<u16> = List();
+  if (self.os2.version != 0xFFFF && (self.os2.fs_selection & 256) != 0) {
+    ids.push(16);
+    ids.push(1);
+  } else {
+    ids.push(21);
+    ids.push(16);
+    ids.push(1);
+  }
+  for (let id in ids) {
+    if (let n = self.get_name(id)) {
+      self.family_name = n;
+      return;
+    }
+  }
+}
+
+// tt_face_get_name for one name ID; none when no record converts.
+fn Face::get_name(self&, nameid: u16): List<u8>? {
+  let d = self.data.as_slice();
+  let t = self.dir.find(kTagName) else {
+    return none;
+  };
+  let pos = t.offset as u64;
+  if (!fits(d, pos, 6)) {
+    return none;
+  }
+  let format = u16_at(d, pos as usize);
+  let count = u16_at(d, (pos + 2) as usize) as u64;
+  let storage = u16_at(d, (pos + 4) as usize) as u64;
+  let storage_start0 = pos + 6 + 12 * count;
+  let storage_limit = pos + t.length as u64;
+  if (storage_start0 > storage_limit) {
+    return none;
+  }
+  var storage_start = storage_start0;
+  var num_lang_tags: u64 = 0;
+  var lang_tags_ok: List<bool> = List();
+  if (format == 1) {
+    if (!fits(d, storage_start0, 2)) {
+      return none;
+    }
+    num_lang_tags = u16_at(d, storage_start0 as usize) as u64;
+    storage_start += 2 + 4 * num_lang_tags;
+    for (let k in 0..num_lang_tags) {
+      let e = storage_start0 + 2 + 4 * k;
+      var ok = false;
+      if (fits(d, e, 4)) {
+        let len = u16_at(d, e as usize) as u64;
+        let off = u16_at(d, (e + 2) as usize) as u64 + pos + storage;
+        ok = len != 0 && !(off < storage_start || off + len > storage_limit);
+      }
+      lang_tags_ok.push(ok);
+    }
+  }
+  if (!fits(d, pos + 6, 12 * count)) {
+    return none;
+  }
+  var found_apple_roman: i64 = -1;
+  var found_apple_english: i64 = -1;
+  var found_win: i64 = -1;
+  var found_unicode: i64 = -1;
+  var is_english = false;
+  // (offset, length, platform, encoding) of each valid record, in order.
+  var recs: List<(u64, u64, u16, u16)> = List();
+  for (let k in 0..count) {
+    let e = (pos + 6 + 12 * k) as usize;
+    let platform = u16_at(d, e);
+    let encoding = u16_at(d, e + 2);
+    let language = u16_at(d, e + 4);
+    let id = u16_at(d, e + 6);
+    let len = u16_at(d, e + 8) as u64;
+    let off = u16_at(d, e + 10) as u64 + pos + storage;
+    if (len == 0) {
+      continue;
+    }
+    if (off < storage_start || off + len > storage_limit) {
+      continue;
+    }
+    if (format == 1 && language >= 0x8000) {
+      let li = (language - 0x8000) as u64;
+      if (li >= num_lang_tags || !lang_tags_ok[li as usize]) {
+        continue;
+      }
+    }
+    let n = recs.len() as i64;
+    recs.push((off, len, platform, encoding));
+    if (id != nameid) {
+      continue;
+    }
+    switch (platform) {
+      case 0, 2: {
+        found_unicode = n;
+      }
+      case 1: {
+        if (language == 0) {
+          found_apple_english = n;
+        } else if (encoding == 0) {
+          found_apple_roman = n;
+        }
+      }
+      case 3: {
+        if (found_win == -1 || (language & 0x3FF) == 0x009) {
+          if (encoding == 0 || encoding == 1 || encoding == 10) {
+            is_english = (language & 0x3FF) == 0x009;
+            found_win = n;
+          }
+        }
+      }
+      default: {}
+    }
+  }
+  var found_apple = found_apple_roman;
+  if (found_apple_english >= 0) {
+    found_apple = found_apple_english;
+  }
+  var pick: i64 = -1;
+  var utf16 = false;
+  if (found_win >= 0 && !(found_apple >= 0 && !is_english)) {
+    pick = found_win;
+    utf16 = true;
+  } else if (found_apple >= 0) {
+    pick = found_apple;
+  } else if (found_unicode >= 0) {
+    pick = found_unicode;
+    utf16 = true;
+  }
+  if (pick < 0) {
+    return none;
+  }
+  let (off, len, _, _) = recs[pick as usize];
+  var out: List<u8> = List();
+  if (utf16) {
+    for (let n in 0..len / 2) {
+      var code = u16_at(d, (off + 2 * n) as usize);
+      if (code == 0) {
+        break;
+      }
+      if (code < 32 || code > 127) {
+        code = 63;
+      }
+      out.push(code as u8);
+    }
+  } else {
+    for (let n in 0..len) {
+      var code = d[(off + n) as usize];
+      if (code == 0) {
+        break;
+      }
+      if (code < 32 || code > 127) {
+        code = 63;
+      }
+      out.push(code);
+    }
+  }
+  return out;
+}
+
+// tt_check_trickyness_family's names.
+static let kTrickNames: [str; 20] = [
+  "cpop", "DFGirl-W6-WIN-BF", "DFGothic-EB", "DFGyoSho-Lt", "DFHei", "DFHSGothic-W5", "DFHSMincho-W3",
+  "DFHSMincho-W7", "DFKaiSho-SB", "DFKaiShu", "DFKai-SB", "DFMing", "DLC", "HuaTianKaiTi?", "HuaTianSongTi?",
+  "Ming(for ISO10646)", "MingLiU", "MingMedium", "PMingLiU", "MingLi43",
+];
+
+// tt_check_trickyness_sfnt_ids: (checksum, length) of cvt, fpgm, prep.
+static let kTrickIds: [[u32; 6]; 31] = [
+  [0x05BCF058, 0x2E4, 0x28233BF1, 0x87C4, 0xA344A1EA, 0x1E1],
+  [0x05BCF058, 0x2E4, 0x28233BF1, 0x87C4, 0xA344A1EB, 0x1E1],
+  [0x12C3EBB2, 0x350, 0xB680EE64, 0x87A7, 0xCE939563, 0x758],
+  [0x11E5EAD4, 0x350, 0xCE5956E9, 0xBC85, 0x8272F416, 0x45],
+  [0x1257EB46, 0x350, 0xF699D160, 0x715F, 0xD222F568, 0x3BC],
+  [0x1262EB4E, 0x350, 0xE86A5D64, 0x7940, 0x7850F729, 0x5FF],
+  [0x122DEB0A, 0x350, 0x3D16328A, 0x859B, 0xA93FC33B, 0x2CB],
+  [0x125FEB26, 0x350, 0xA5ACC982, 0x7EE1, 0x90999196, 0x41F],
+  [0x11E5EAD4, 0x350, 0x5A30CA3B, 0x9063, 0x13A42602, 0x7E],
+  [0x11E5EAD4, 0x350, 0xA6E78C01, 0x8998, 0x13A42602, 0x7E],
+  [0x11E5EAD4, 0x360, 0x9DB282B2, 0xC06E, 0x53E6D7CA, 0x82],
+  [0x1243EB18, 0x350, 0xBA0A8C30, 0x74AD, 0xF3D83409, 0x37B],
+  [0x07DCF546, 0x308, 0x40FE7C90, 0x8E2A, 0x608174B5, 0x7A],
+  [0xEB891238, 0x308, 0xD2E4DCD4, 0x676F, 0x8EA5F293, 0x3B8],
+  [0xFFFBFFFC, 0x8, 0x9C9E48B8, 0xBEA2, 0x70020112, 0x8],
+  [0xFFFBFFFC, 0x8, 0x0A5A0483, 0x17C39, 0x70020112, 0x8],
+  [0, 0, 0x40C92555, 0xE5, 0xA39B58E3, 0x117C],
+  [0, 0, 0x33C41652, 0xE5, 0x26D6C52A, 0xF6A],
+  [0, 0, 0x6DB1651D, 0x19D, 0x6C6E4B03, 0x2492],
+  [0, 0, 0x40C92555, 0xE5, 0xDE51FAD0, 0x117C],
+  [0, 0, 0x85E47664, 0xE5, 0xA6C62831, 0x1CAA],
+  [0, 0, 0x2D891CFD, 0x19D, 0xA0604633, 0x1DE8],
+  [0, 0, 0x40AA774C, 0x1CB, 0x9B5CAA96, 0x1F9A],
+  [0, 0, 0x0D3DE9CB, 0x141, 0xD4127766, 0x2280],
+  [0, 0, 0x4A692698, 0x1F0, 0x340D4346, 0x1FCA],
+  [0, 0, 0xCD34C604, 0x166, 0x6CF31046, 0x22B0],
+  [0, 0, 0x5DA75315, 0x19D, 0x40745A5F, 0x22E0],
+  [0, 0, 0xF055FC48, 0x1C2, 0x3900DED3, 0x1E18],
+  [0x00170003, 0x60, 0xDBB4306E, 0x58AA, 0xD643482A, 0x35],
+  [0x1269EB58, 0x350, 0x5CD5957A, 0x6A4E, 0xF758323A, 0x380],
+  [0x122FEB0B, 0x350, 0x7F10919A, 0x70A9, 0x7CD7E7B7, 0x25C],
+];
+
+fn is_upper(c: u8): bool => c >= 65 && c <= 90;
+
+// strstr: whether `needle` occurs in `hay`.
+fn contains(hay&: [u8], needle&: [u8]): bool {
+  if (#needle > #hay) {
+    return false;
+  }
+  for (let i in 0..#hay - #needle + 1) {
+    var same = true;
+    for (let j in 0..#needle) {
+      if (hay[i + j] != needle[j]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// tt_check_trickyness.
+fn Face::check_tricky(self&): bool {
+  let name = self.family_name.as_slice();
+  if (#name > 0) {
+    var start: usize = 0;
+    if (#name >= 8 && is_upper(name[0]) && is_upper(name[1]) && is_upper(name[2]) && is_upper(name[3]) &&
+        is_upper(name[4]) && is_upper(name[5]) && name[6] == 43) {
+      start = 7;
+    }
+    for (let k in 0..20) {
+      if (contains(name[start..], kTrickNames[k] as &[u8])) {
+        return true;
+      }
+    }
+  }
+  return self.check_tricky_ids();
+}
+
+fn Face::check_tricky_ids(self&): bool {
+  let d = self.data.as_slice();
+  var matched = [0u32; 31];
+  var has = [false, false, false];
+  for (let t in self.dir.tables) {
+    var k: usize = 0;
+    if (t.tag == kTagCvt) {
+      k = 0;
+    } else if (t.tag == kTagFpgm) {
+      k = 1;
+    } else if (t.tag == kTagPrep) {
+      k = 2;
+    } else {
+      continue;
+    }
+    has[k] = true;
+    var checksum: u32 = 0;
+    for (let j in 0usize..31) {
+      if (t.length == kTrickIds[j][2 * k + 1]) {
+        if (checksum == 0) {
+          checksum = t.checksum;
+          if (checksum == 0 && fits(d, t.offset as u64, t.length as u64)) {
+            // tt_synth_sfnt_checksum
+            var p = t.offset as usize;
+            var len = t.length;
+            while (len > 3) {
+              checksum = checksum +% u32_at(d, p);
+              p += 4;
+              len -= 4;
+            }
+            var shift: u32 = 24;
+            while (len > 0) {
+              checksum = checksum +% ((d[p] as u32) << shift);
+              p += 1;
+              len -= 1;
+              shift -%= 8;
+            }
+          }
+        }
+        if (kTrickIds[j][2 * k] == checksum) {
+          matched[j] += 1;
+        }
+        if (matched[j] == 3) {
+          return true;
+        }
+      }
+    }
+  }
+  for (let j in 0usize..31) {
+    for (let k in 0usize..3) {
+      if (!has[k] && kTrickIds[j][2 * k + 1] == 0) {
+        matched[j] += 1;
+      }
+    }
+    if (matched[j] == 3) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// tt_face_load_hdmx.
+fn Face::load_hdmx(var self&) {
+  let d = self.data.as_slice();
+  let t = self.dir.find(kTagHdmx) else {
+    return;
+  };
+  if (t.length < 8 || !fits(d, t.offset as u64, t.length as u64)) {
+    return;
+  }
+  let p = t.offset as u64;
+  let limit = p + t.length as u64;
+  let num_records = u16_at(d, (p + 2) as usize) as u32;
+  var record_size = u32_at(d, (p + 4) as usize);
+  if (record_size >= 0xFFFF_0000) {
+    record_size = record_size & 0xFFFF;
+  }
+  if (num_records > 255 || num_records == 0) {
+    return;
+  }
+  if (record_size as u64 != ((self.num_glyphs as u64 + 2 + 3) & ~3u64)) {
+    return;
+  }
+  var q = p + 8;
+  for (let nn in 0..num_records) {
+    if (q + record_size as u64 > limit) {
+      break;
+    }
+    self.hdmx.push((d[q as usize], q as u32));
+    q += record_size as u64;
+  }
+  // ft_qsort by ppem (stable here; records with equal ppem are not expected).
+  var i: usize = 1;
+  while (i < self.hdmx.len()) {
+    var j = i;
+    while (j > 0 && self.hdmx[j - 1].0 > self.hdmx[j].0) {
+      self.hdmx.swap(j - 1, j);
+      j -= 1;
+    }
+    i += 1;
+  }
+}
+
+// tt_face_get_device_metrics: the hdmx widths at ppem.
+fn Face::device_metrics(self&, ppem: u32): usize? {
+  var lo: usize = 0;
+  var hi = self.hdmx.len();
+  while (lo < hi) {
+    let mid = (lo + hi) >> 1;
+    let p = self.hdmx[mid].0 as u32;
+    if (p > ppem) {
+      hi = mid;
+    } else if (p < ppem) {
+      lo = mid + 1;
+    } else {
+      return (self.hdmx[mid].1 + 2) as usize;
+    }
+  }
+  return none;
+}
+
+// tt_face_load_loca.
+fn Face::load_loca(var self&): () ! FontError {
+  let d = self.data.as_slice();
+  if (let g = self.dir.find(kTagGlyf)) {
+    self.glyf_len = g.length;
+    self.glyf_offset = g.offset;
+  } else {
+    self.glyf_len = 0;
+    self.glyf_offset = 0;
+  }
+  let l = self.dir.find(kTagLoca) else {
+    if (self.glyf_len == 0) {
+      return fail FontError::UnknownFileFormat;
+    }
+    return fail FontError::LocationsMissing;
+  };
+  let shift: u64 = self.head.index_to_loc_format != 0 ? 2 : 1;
+  var table_len = l.length as u64;
+  if (table_len > (0x10000u64 << shift)) {
+    table_len = 0x10000u64 << shift;
+  }
+  self.num_locations = (table_len >> shift) as u32;
+  if (self.num_locations as u64 != self.num_glyphs as u64 + 1) {
+    if ((self.num_locations as u64) < self.num_glyphs as u64 + 1) {
+      let new_len = (self.num_glyphs as u64 + 1) << shift;
+      let pos = l.offset as i64;
+      var dist: i64 = 0x7FFF_FFFF;
+      var found = false;
+      for (let e in self.dir.tables) {
+        let diff = e.offset as i64 - pos;
+        if (diff > 0 && diff < dist) {
+          dist = diff;
+          found = true;
+        }
+      }
+      if (!found) {
+        dist = #d as i64 - pos;
+      }
+      if (new_len <= dist as u64) {
+        self.num_locations = self.num_glyphs + 1;
+        table_len = new_len;
+      } else {
+        self.num_glyphs = self.num_locations > 0 ? self.num_locations - 1 : 0;
+      }
+    }
+  }
+  if (!fits(d, l.offset as u64, table_len)) {
+    return fail FontError::InvalidStreamOperation;
+  }
+  self.loca_offset = l.offset;
+}
+
+// tt_face_get_location: (offset in glyf, length).
+fn Face::glyph_location(self&, gindex: u32): (u32, u32) {
+  let d = self.data.as_slice();
+  var pos1: u64 = 0;
+  var pos2: u64 = 0;
+  if (gindex < self.num_locations) {
+    let base = self.loca_offset as usize;
+    if (self.head.index_to_loc_format != 0) {
+      pos1 = u32_at(d, base + 4 * gindex as usize) as u64;
+      pos2 = pos1;
+      if (gindex + 1 < self.num_locations) {
+        pos2 = u32_at(d, base + 4 * (gindex + 1) as usize) as u64;
+      }
+    } else {
+      pos1 = u16_at(d, base + 2 * gindex as usize) as u64;
+      pos2 = pos1;
+      if (gindex + 1 < self.num_locations) {
+        pos2 = u16_at(d, base + 2 * (gindex + 1) as usize) as u64;
+      }
+      pos1 = pos1 << 1;
+      pos2 = pos2 << 1;
+    }
+  }
+  let glyf_len = self.glyf_len as u64;
+  if (pos1 > glyf_len) {
+    return (0, 0);
+  }
+  if (pos2 > glyf_len) {
+    if (gindex + 2 == self.num_locations) {
+      pos2 = glyf_len;
+    } else {
+      return (0, 0);
+    }
+  }
+  if (pos2 >= pos1) {
+    return (pos1 as u32, (pos2 - pos1) as u32);
+  }
+  return (pos1 as u32, (glyf_len - pos1) as u32);
+}
+
+// tt_face_load_cvt, tt_face_load_fpgm, tt_face_load_prep.
+fn Face::load_programs(var self&) {
+  let d = self.data.as_slice();
+  if (let c = self.dir.find(kTagCvt)) {
+    let n = c.length / 2;
+    if (fits(d, c.offset as u64, 2 * n as u64)) {
+      for (let i in 0..n) {
+        self.cvt.push((i16_at(d, (c.offset + 2 * i) as usize) as i64) * 64);
+      }
+    }
+  }
+  if (let f = self.dir.find(kTagFpgm)) {
+    if (fits(d, f.offset as u64, f.length as u64)) {
+      self.fpgm_offset = f.offset;
+      self.fpgm_len = f.length;
+    }
+  }
+  if (let p = self.dir.find(kTagPrep)) {
+    if (fits(d, p.offset as u64, p.length as u64)) {
+      self.prep_offset = p.offset;
+      self.prep_len = p.length;
+    }
+  }
+}
+
+// tt_check_single_notdef: a font with strikes whose only outline is .notdef
+// is not scalable. (FreeType also accepts a lone outline named ".notdef" at
+// another index; that needs 'post' names and is not read here.)
+fn Face::single_notdef(self&): bool {
+  var count: i32 = 0;
+  var glyph_index: u32 = 0;
+  for (let i in 0..self.num_locations) {
+    let (_, size) = self.glyph_location(i);
+    if (size > 0) {
+      count += 1;
+      if (count > 1) {
+        break;
+      }
+      glyph_index = i;
+    }
+  }
+  return count == 1 && glyph_index == 0;
+}
+
+fn Face::uses_autohinter(self&): bool {
+  if (self.is_cff() || self.is_tricky() || !self.is_scalable()) {
+    return false;
+  }
+  return self.num_locations != 0 && self.fpgm_len == 0 && self.prep_len <= 7;
+}
+
+fn Face::cff_table(self&): &[u8] {
+  if (let c = self.dir.find(kTagCff)) {
+    if (fits(self.data.as_slice(), c.offset as u64, c.length as u64)) {
+      return self.data.as_slice()[c.offset as usize..(c.offset + c.length) as usize];
+    }
+  }
+  if (let c = self.dir.find(kTagCff2)) {
+    if (fits(self.data.as_slice(), c.offset as u64, c.length as u64)) {
+      return self.data.as_slice()[c.offset as usize..(c.offset + c.length) as usize];
+    }
+  }
+  return [];
+}
+
+// --- Sizes ----------------------------------------------------------------------------
+
+// ft_recompute_scaled_metrics (GRID_FIT_METRICS).
+fn Face::recompute_scaled_metrics(self&, var m&: SizeMetrics) {
+  m.ascender = pix_ceil(mul_fix(self.ascender as i64, m.y_scale));
+  m.descender = pix_floor(mul_fix(self.descender as i64, m.y_scale));
+  m.height = pix_round(mul_fix(self.height as i64, m.y_scale));
+  m.max_advance = pix_round(mul_fix(self.max_advance_width as i64, m.x_scale));
+}
+
+fn Face::set_pixel_size(var self&, px0: u32): () ! FontError {
+  var px = px0;
+  if (px < 1) {
+    px = 1;
+  }
+  if (px >= 0xFFFF) {
+    px = 0xFFFF;
+  }
+  let w = (px as i64) << 6;
+  // tt_size_request / cff_size_request: an exact strike first. Without one,
+  // a bitmap-only face keeps the error (with zeroed metrics, scale 1.0).
+  var no_strike = false;
+  if (self.has_fixed_sizes()) {
+    if (let strike = self.strikes.match_size(w, w)) {
+      return self.select_strike(strike);
+    }
+    self.size.strike_index = 0xFFFF_FFFF;
+    no_strike = true;
+  }
+  // FT_Request_Metrics (nominal).
+  var m = self.size.metrics;
+  if (self.is_scalable()) {
+    let upem = self.units_per_em as i64;
+    m.y_scale = div_fix(w, upem);
+    m.x_scale = div_fix(w, upem);
+    let scaled = (w + 32) >> 6;
+    if (scaled > 0xFFFF) {
+      return fail FontError::InvalidPixelSize;
+    }
+    m.x_ppem = scaled as u16;
+    m.y_ppem = scaled as u16;
+    self.recompute_scaled_metrics(m);
+  } else {
+    m = SizeMetrics { x_scale: 0x10000, y_scale: 0x10000 };
+  }
+  self.size.metrics = m;
+  if (self.is_scalable() && !self.is_cff()) {
+    try self.tt_size_reset();
+    // tt_size_request: the point size MPS reports (72 dpi).
+    self.size.point_size = mul_div(self.size.ppem, 64 * 72, 72);
+  } else if (no_strike) {
+    return fail FontError::InvalidPixelSize;
+  }
+}
+
+// tt_size_select / cff_size_select for an exact strike.
+fn Face::select_strike(var self&, strike: u32): () ! FontError {
+  self.size.strike_index = strike;
+  if (self.is_scalable()) {
+    // FT_Select_Metrics
+    let (x_ppem26, y_ppem26) = self.strikes.bsize_ppem(strike);
+    var m = self.size.metrics;
+    m.x_ppem = ((x_ppem26 + 32) >> 6) as u16;
+    m.y_ppem = ((y_ppem26 + 32) >> 6) as u16;
+    m.x_scale = div_fix(x_ppem26, self.units_per_em as i64);
+    m.y_scale = div_fix(y_ppem26, self.units_per_em as i64);
+    self.recompute_scaled_metrics(m);
+    self.size.metrics = m;
+    if (!self.is_cff()) {
+      let _ = self.tt_size_reset();
+    }
+  } else {
+    let r = self.strikes.strike_metrics(self.data.as_slice(), strike) else {
+      self.size.strike_index = 0xFFFF_FFFF;
+      return fail FontError::InvalidPixelSize;
+    };
+    self.size.metrics = SizeMetrics {
+      x_ppem: r.x_ppem, y_ppem: r.y_ppem, x_scale: r.x_scale, y_scale: r.y_scale, ascender: r.ascender,
+      descender: r.descender, height: r.height, max_advance: r.max_advance,
+    };
+  }
+}
+
+// tt_size_reset (+ tt_size_reset_height).
+fn Face::tt_size_reset(var self&): () ! FontError {
+  self.size.ppem = 0;
+  if (self.size.metrics.x_ppem == 0 || self.size.metrics.y_ppem == 0) {
+    return fail FontError::InvalidPpem;
+  }
+  var h = self.size.metrics;
+  if ((self.head.flags & 8) != 0) {
+    h.ascender = pix_round(mul_fix(self.ascender as i64, h.y_scale));
+    h.descender = pix_round(mul_fix(self.descender as i64, h.y_scale));
+    h.height = pix_round(mul_fix(self.height as i64, h.y_scale));
+    h.x_scale = div_fix((h.x_ppem as i64) << 6, self.units_per_em as i64);
+    h.y_scale = div_fix((h.y_ppem as i64) << 6, self.units_per_em as i64);
+    h.max_advance = pix_round(mul_fix(self.max_advance_width as i64, h.x_scale));
+  }
+  if (h.x_ppem >= h.y_ppem) {
+    self.size.scale = h.x_scale;
+    self.size.ppem = h.x_ppem as i64;
+    self.size.x_ratio = 0x10000;
+    self.size.y_ratio = div_fix(h.y_ppem as i64, h.x_ppem as i64);
+  } else {
+    self.size.scale = h.y_scale;
+    self.size.ppem = h.y_ppem as i64;
+    self.size.x_ratio = div_fix(h.x_ppem as i64, h.y_ppem as i64);
+    self.size.y_ratio = 0x10000;
+  }
+  self.size.hinted = h;
+  self.size.widthp = self.device_metrics(h.x_ppem as u32);
+  self.size.cvt_ready = -1;
+}
+
+// --- Bytecode -------------------------------------------------------------------------
+
+// TT_Load_Context: the interpreter sees this size (hinted metrics) afresh.
+fn Face::load_context(var self&) {
+  let h = self.size.hinted;
+  let ppem = self.size.ppem;
+  let scale = self.size.scale;
+  let xr = self.size.x_ratio;
+  let yr = self.size.y_ratio;
+  let ps = self.size.point_size;
+  if (var e& = self.size.exec) {
+    e.metrics.x_ppem = h.x_ppem;
+    e.metrics.y_ppem = h.y_ppem;
+    e.metrics.x_scale = h.x_scale;
+    e.metrics.y_scale = h.y_scale;
+    e.metrics.ppem = ppem;
+    e.metrics.scale = scale;
+    e.metrics.x_ratio = xr;
+    e.metrics.y_ratio = yr;
+    e.metrics.point_size = ps;
+    e.use_glyf_cvt = false;
+    e.use_glyf_storage = false;
+    e.zones[0].n_points = e.twilight_points;
+  }
+}
+
+// tt_size_init_bytecode + tt_size_run_fpgm.
+fn Face::init_bytecode(var self&): FontError? {
+  var e = Interp::create(
+    self.maxp.max_function_defs as u32, self.maxp.max_instruction_defs as u32, self.maxp.max_stack_elements as u32,
+    self.maxp.max_storage as u32, self.cvt.len(), self.maxp.max_twilight_points as u32, self.num_glyphs as u64,
+  );
+  self.size.exec = e;
+  self.size.gs = GraphicsState {};
+  self.size.cvt_ready = -1;
+  self.load_context();
+  var err: FontError? = none;
+  let gs = self.size.gs;
+  let fpgm_off = self.fpgm_offset as usize;
+  let fpgm_len = self.fpgm_len as i64;
+  let d = self.data.as_slice();
+  if (var x& = self.size.exec) {
+    x.clear_code_range(kRangeCvt);
+    x.clear_code_range(kRangeGlyph);
+    if (fpgm_len > 0) {
+      x.set_code_range(kRangeFont, fpgm_off, fpgm_len);
+      x.zones[1].n_points = 0;
+      x.zones[1].n_contours = 0;
+      err = x.run(d, gs);
+    }
+    if (let e1 = err) {
+    } else {
+      save_context(x, self.size.gs);
+    }
+  }
+  if (let e2 = err) {
+    self.size.bytecode_ready = 1;
+    self.size.bytecode_error = e2;
+    return e2;
+  }
+  self.size.bytecode_ready = 0;
+  return none;
+}
+
+// TT_Save_Context: the graphics-state fields fpgm and prep may set.
+fn save_context(x&: Interp, var gs&: GraphicsState) {
+  gs.minimum_distance = x.gs.minimum_distance;
+  gs.control_value_cutin = x.gs.control_value_cutin;
+  gs.single_width_cutin = x.gs.single_width_cutin;
+  gs.single_width_value = x.gs.single_width_value;
+  gs.delta_base = x.gs.delta_base;
+  gs.delta_shift = x.gs.delta_shift;
+  gs.auto_flip = x.gs.auto_flip;
+  gs.instruct_control = x.gs.instruct_control;
+  gs.scan_control = x.gs.scan_control;
+  gs.scan_type = x.gs.scan_type;
+}
+
+// tt_size_run_prep.
+fn Face::run_prep(var self&): FontError? {
+  self.size.gs = GraphicsState {};
+  let scale = self.size.scale;
+  if (var x& = self.size.exec) {
+    for (let i in 0..x.twilight_points as usize) {
+      x.zones[0].org[i] = Vec26 { x: 0, y: 0 };
+      x.zones[0].cur[i] = Vec26 { x: 0, y: 0 };
+    }
+  }
+  self.load_context();
+  var err: FontError? = none;
+  let gs = self.size.gs;
+  let prep_off = self.prep_offset as usize;
+  let prep_len = self.prep_len as i64;
+  let d = self.data.as_slice();
+  let cvt& = self.cvt;
+  if (var x& = self.size.exec) {
+    for (let i in 0..x.storage.len()) {
+      x.storage[i] = 0;
+    }
+    for (let i in 0..x.cvt.len()) {
+      x.cvt[i] = mul_fix(cvt[i] / 64, scale);
+    }
+    x.clear_code_range(kRangeGlyph);
+    if (prep_len > 0) {
+      x.set_code_range(kRangeCvt, prep_off, prep_len);
+      x.zones[1].n_points = 0;
+      x.zones[1].n_contours = 0;
+      err = x.run(d, gs);
+    }
+    if (let e1 = err) {
+    } else {
+      save_context(x, self.size.gs);
+    }
+  }
+  if (let e2 = err) {
+    self.size.cvt_ready = 1;
+    self.size.cvt_error = e2;
+    return e2;
+  }
+  self.size.cvt_ready = 0;
+  return none;
+}
+
+// The bytecode part of tt_loader_init for a hinted load: runs the font
+// program the first time and the CVT program after a size change, then
+// loads the context. Returns whether the glyph is still to be hinted
+// (instruct_control bit 0 turns hinting off) or the error that fails the load.
+fn Face::prepare_hinting(var self&): bool ! FontError {
+  if (self.size.bytecode_ready > 0) {
+    return fail self.size.bytecode_error;
+  }
+  if (self.size.bytecode_ready < 0) {
+    if (let e = self.init_bytecode()) {
+      return fail e;
+    }
+  }
+  if (var x& = self.size.exec) {
+    x.backward_compatibility = 0;
+  }
+  if (self.size.cvt_ready > 0) {
+    return fail self.size.cvt_error;
+  }
+  if (self.size.cvt_ready < 0) {
+    if (let e = self.run_prep()) {
+      return fail e;
+    }
+  }
+  self.load_context();
+  let hinted = (self.size.gs.instruct_control & 1) == 0;
+  if ((self.size.gs.instruct_control & 2) != 0) {
+    self.size.gs = GraphicsState {};
+  }
+  let tricky = self.is_tricky();
+  let ic = self.size.gs.instruct_control;
+  if (var x& = self.size.exec) {
+    if (!tricky) {
+      x.backward_compatibility = ((ic & 4) ^ 4) as u32;
+    }
+  }
+  return hinted;
+}
+
+// --- Glyphs ---------------------------------------------------------------------------
+
+fn Face::load_glyph(var self&, gid: u32): LoadedGlyph ! FontError {
+  if (self.is_cff()) {
+    return fail FontError::CffNotLoaded;
+  }
+  if (self.uses_autohinter()) {
+    return self.load_glyph_autohinted(gid);
+  }
+  return load_tt(self, gid, true);
+}
+
+fn Face::load_glyph_autohinted(var self&, gid: u32): LoadedGlyph ! FontError {
+  if (self.is_cff() || self.is_tricky() || !self.is_scalable()) {
+    return fail FontError::UnimplementedFeature;
+  }
+  // FT_Load_Glyph tries the strike's bitmap (FT_LOAD_SBITS_ONLY) before the
+  // autohinter.
+  if (self.has_fixed_sizes() && self.size.strike_index != 0xFFFF_FFFF) {
+    if (let b = load_sbit_glyph(self, gid)) {
+      return b;
+    }
+  }
+  return load_autohinted(self, gid);
+}
+
+fn Face::load_glyph_unhinted(var self&, gid: u32): LoadedGlyph ! FontError {
+  if (self.is_cff()) {
+    return fail FontError::CffNotLoaded;
+  }
+  return load_tt(self, gid, false);
+}

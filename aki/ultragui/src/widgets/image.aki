@@ -1,0 +1,85 @@
+// ugui/widgets/image.{h,cc}: an image widget (WidgetKind::Image), a generic
+// widget entity carrying an ImageContent; its behaviour is the Image arms in
+// widgets::widget_vtable (draw + measure).
+//
+// Shape difference: the World comes first.
+
+module ultragui::widgets::image;
+
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {TextureId, kNullTextureId} from ultragui::render::draw_data;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {Style} from ultragui::style::style;
+import {WidgetKind, computed_style, kTransform, kWidgetNode, mark_dirty, ui_scale} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// Texture shown by an image widget.
+pub struct ImageContent : Copy, Equal {
+  pub var texture: TextureId = kNullTextureId
+  pub var natural_w: f32 = 0.0
+  pub var natural_h: f32 = 0.0
+}
+
+pub static let kImageContent: ComponentKey<ImageContent> = ComponentKey();
+
+fn image_radii(s&: Style): u32 {
+  if (s.corner_radius_tl > 0.0 || s.corner_radius_tr > 0.0 || s.corner_radius_br > 0.0 || s.corner_radius_bl > 0.0) {
+    return pack_radii(s.corner_radius_tl, s.corner_radius_tr, s.corner_radius_br, s.corner_radius_bl);
+  }
+  return pack_radii_uniform(s.corner_radius);
+}
+
+// ImageMeasure: the natural size, 0x0 without content.
+pub fn image_measure(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  if (let c& = world.get(kImageContent, e)) {
+    return (c.natural_w, c.natural_h);
+  }
+  return (0.0, 0.0);
+}
+
+// ImageDraw
+pub fn image_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  let c& = world.get(kImageContent, e) else {
+    return;
+  };
+  let texture = c.texture;
+  if (texture == kNullTextureId) {
+    return;
+  }
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+  renderer.draw_textured_rect(world.get(kTransform, e)!.rect, texture, Color::white().with_alpha(s.opacity), image_radii(s));
+}
+
+// CreateImage: a widget tagged Image with an empty ImageContent.
+pub fn create_image(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::Image;
+  world.add(kImageContent, e, ImageContent {});
+  return e;
+}
+
+// SetImageTexture: set (or replace) the texture an image shows. No-op if
+// `e` is not an image.
+pub fn set_image_texture(var world&: World, e: WidgetId, texture: TextureId, width: f32, height: f32) {
+  let n& = world.get(kWidgetNode, e) else {
+    return;
+  };
+  if (n.kind != WidgetKind::Image) {
+    return;
+  }
+  var c& = world.get_or_add(kImageContent, e, ImageContent {});
+  // Hosts rebind the same texture every frame while a panel is up; only a
+  // real change is worth a relayout.
+  if (c.texture == texture && c.natural_w == width && c.natural_h == height) {
+    return;
+  }
+  c.texture = texture;
+  c.natural_w = width;
+  c.natural_h = height;
+  mark_dirty(world, e);
+}

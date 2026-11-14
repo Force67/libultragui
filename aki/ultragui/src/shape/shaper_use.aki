@@ -1,0 +1,494 @@
+// The Universal Shaping Engine (hb-ot-shaper-use.cc) and the Myanmar shaper
+// (hb-ot-shaper-myanmar.cc), over HarfBuzz's syllable machines.
+
+module ultragui::shape::shaper_use;
+
+import {List} from akikit::containers::list;
+import {Buffer, GlyphInfo} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {lig_comp} from ultragui::shape::layout;
+import {MapBuilder, OtMap, kFManualZwj, kFPerSyllable} from ultragui::shape::map;
+import {
+  kMyanmarActStart, kMyanmarActionStart, kMyanmarEofTrans, kMyanmarFromStateActions, kMyanmarIndexOffsets, kMyanmarIndicies, kMyanmarKeySpans,
+  kMyanmarOps, kMyanmarStart, kMyanmarToStateActions, kMyanmarTransActions, kMyanmarTransKeys, kMyanmarTransTargs, kUseActStart, kUseActionStart,
+  kUseEofTrans, kUseFromStateActions, kUseIndexOffsets, kUseIndicies, kUseKeySpans, kUseOps, kUseStart, kUseToStateActions, kUseTransActions,
+  kUseTransKeys, kUseTransTargs,
+} from ultragui::shape::machines;
+import {is_unicode_mark} from ultragui::shape::props;
+import {ArabicPlan, plan_arabic, setup_masks_arabic} from ultragui::shape::shaper_arabic;
+import {Machine, find_syllables, insert_dotted_circles, preprocess_vowel_constraints} from ultragui::shape::syllabic;
+import {compose, gc_is_mark, general_category, indic_categories, tag, use_category} from ultragui::shape::ucd;
+
+pub comptime let kPauseUseSetupSyllables: u32 = 30;
+pub comptime let kPauseUseRecordRphf: u32 = 31;
+pub comptime let kPauseUseRecordPref: u32 = 32;
+pub comptime let kPauseUseReorder: u32 = 33;
+pub comptime let kPauseMyanmarSetupSyllables: u32 = 34;
+pub comptime let kPauseMyanmarReorder: u32 = 35;
+
+// USE categories (use_syllable_machine_ex_*).
+comptime let kUseB: u32 = 1;
+comptime let kUseCgj: u32 = 6;
+comptime let kUseH: u32 = 12;
+comptime let kUseHvm: u32 = 53;
+comptime let kUseIs: u32 = 44;
+comptime let kUseR: u32 = 18;
+comptime let kUseVPre: u32 = 22;
+comptime let kUseVmPre: u32 = 23;
+comptime let kUseZwnj: u32 = 14;
+
+fn flag64(c: u32): u64 => c < 64 ? 1u64 << c as u64 : 0;
+
+pub struct UsePlan {
+  pub var rphf_mask: u32 = 0
+  pub var has_arabic: bool = false
+  pub var arabic: ArabicPlan = ArabicPlan {}
+}
+
+static let kJoiningScripts: [str; 13] = ["Adlm", "Arab", "Chrs", "Rohg", "Mand", "Mani", "Mong", "Nkoo", "Ougr", "Phag", "Phlp", "Sogd", "Syrc"];
+
+fn has_arabic_joining(script: u32): bool {
+  for (let s in kJoiningScripts) {
+    if (tag(s) == script) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static let kUseBasic: [str; 7] = ["rkrf", "abvf", "blwf", "half", "pstf", "vatu", "cjct"];
+static let kUseTopo: [str; 4] = ["isol", "init", "medi", "fina"];
+static let kUseOther: [str; 5] = ["abvs", "blws", "haln", "pres", "psts"];
+
+// collect_features_use
+pub fn collect_features_use(var b&: MapBuilder) {
+  b.add_gsub_pause(kPauseUseSetupSyllables);
+  b.enable_feature(tag("locl"), kFPerSyllable);
+  b.enable_feature(tag("ccmp"), kFPerSyllable);
+  b.enable_feature(tag("nukt"), kFPerSyllable);
+  b.enable_feature(tag("akhn"), kFManualZwj | kFPerSyllable);
+  b.add_gsub_pause(1);  // _hb_clear_substitution_flags
+  b.add_feature(tag("rphf"), kFManualZwj | kFPerSyllable);
+  b.add_gsub_pause(kPauseUseRecordRphf);
+  b.add_gsub_pause(1);
+  b.enable_feature(tag("pref"), kFManualZwj | kFPerSyllable);
+  b.add_gsub_pause(kPauseUseRecordPref);
+  for (let f in kUseBasic) {
+    b.enable_feature(tag(f), kFManualZwj | kFPerSyllable);
+  }
+  b.add_gsub_pause(kPauseUseReorder);
+  b.add_gsub_pause(0);  // hb_syllabic_clear_var
+  for (let f in kUseTopo) {
+    b.add_feature(tag(f));
+  }
+  b.add_gsub_pause(0);
+  for (let f in kUseOther) {
+    b.enable_feature(tag(f), kFManualZwj);
+  }
+}
+
+pub fn plan_use(map&: OtMap, face&: ShapeFace, script: u32): UsePlan {
+  var p = UsePlan {};
+  p.rphf_mask = map.get_1_mask(tag("rphf"));
+  if (has_arabic_joining(script)) {
+    p.has_arabic = true;
+    p.arabic = plan_arabic(map, face, script);
+  }
+  return p;
+}
+
+// setup_masks_use
+pub fn setup_masks_use(up&: UsePlan, var buf&: Buffer, script: u32) {
+  if (up.has_arabic) {
+    setup_masks_arabic(up.arabic, buf, script);
+  }
+  for (var g& in buf.info) {
+    g.category = use_category(g.codepoint);
+  }
+}
+
+fn use_machine(): Machine<'static> => Machine {
+  start: kUseStart, trans_keys: kUseTransKeys[..], key_spans: kUseKeySpans[..], index_offsets: kUseIndexOffsets[..],
+  indicies: kUseIndicies[..], trans_targs: kUseTransTargs[..], trans_actions: kUseTransActions[..], to_state_actions: kUseToStateActions[..],
+  from_state_actions: kUseFromStateActions[..], eof_trans: kUseEofTrans[..], ops: kUseOps[..], action_start: kUseActionStart[..],
+  act_start: kUseActStart[..],
+};
+
+fn myanmar_machine(): Machine<'static> => Machine {
+  start: kMyanmarStart, trans_keys: kMyanmarTransKeys[..], key_spans: kMyanmarKeySpans[..], index_offsets: kMyanmarIndexOffsets[..],
+  indicies: kMyanmarIndicies[..], trans_targs: kMyanmarTransTargs[..], trans_actions: kMyanmarTransActions[..],
+  to_state_actions: kMyanmarToStateActions[..], from_state_actions: kMyanmarFromStateActions[..], eof_trans: kMyanmarEofTrans[..],
+  ops: kMyanmarOps[..], action_start: kMyanmarActionStart[..], act_start: kMyanmarActStart[..],
+};
+
+// find_syllables_use: the machine over the buffer without CGJs, and without
+// ZWNJs that a mark follows.
+fn find_syllables_use(var buf&: Buffer) {
+  var cats: List<u8> = List();
+  var orig: List<usize> = List();
+  let n = buf.len();
+  for (let i in 0..n) {
+    let c = buf.info[i].category;
+    if (c == kUseCgj) {
+      continue;
+    }
+    if (c == kUseZwnj) {
+      var keep = true;
+      for (let k in i + 1..n) {
+        if (buf.info[k].category != kUseCgj) {
+          keep = !is_unicode_mark(buf.info[k]);
+          break;
+        }
+      }
+      if (!keep) {
+        continue;
+      }
+    }
+    cats.push(c as u8);
+    orig.push(i);
+  }
+  find_syllables(use_machine(), cats, orig, buf);
+}
+
+fn setup_rphf_mask(up&: UsePlan, var buf&: Buffer) {
+  let mask = up.rphf_mask;
+  if (mask == 0) {
+    return;
+  }
+  var start = 0usize;
+  let n = buf.len();
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    let limit = buf.info[start].category == kUseR ? 1usize : (3 < end - start ? 3 : end - start);
+    for (let i in start..start + limit) {
+      buf.info[i].mask |= mask;
+    }
+    start = end;
+  }
+}
+
+fn setup_topographical_masks(plan_map&: OtMap, up&: UsePlan, var buf&: Buffer) {
+  if (up.has_arabic) {
+    return;
+  }
+  var masks = [0u32; 4];
+  var all_masks = 0u32;
+  for (let i in 0..4) {
+    masks[i] = plan_map.get_1_mask(tag(kUseTopo[i]));
+    if (masks[i] == plan_map.global_mask) {
+      masks[i] = 0;
+    }
+    all_masks |= masks[i];
+  }
+  if (all_masks == 0) {
+    return;
+  }
+  let other_masks = ~all_masks;
+  var last_start = 0usize;
+  var last_form = 4u32;  // _JOINING_FORM_NONE
+  var start = 0usize;
+  let n = buf.len();
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    let t = buf.info[start].syllable & 0x0F;
+    if (t == 6 || t == 8) {
+      last_form = 4;
+    } else {
+      let join = last_form == 3 || last_form == 0;
+      if (join) {
+        last_form = last_form == 3 ? 2u32 : 1;
+        for (let i in last_start..start) {
+          buf.info[i].mask = (buf.info[i].mask & other_masks) | masks[last_form as usize];
+        }
+      }
+      last_form = join ? 3u32 : 0;
+      for (let i in start..end) {
+        buf.info[i].mask = (buf.info[i].mask & other_masks) | masks[last_form as usize];
+      }
+    }
+    last_start = start;
+    start = end;
+  }
+}
+
+pub fn setup_syllables_use(plan_map&: OtMap, up&: UsePlan, var buf&: Buffer) {
+  find_syllables_use(buf);
+  setup_rphf_mask(up, buf);
+  setup_topographical_masks(plan_map, up, buf);
+}
+
+pub fn record_rphf_use(up&: UsePlan, var buf&: Buffer) {
+  let mask = up.rphf_mask;
+  if (mask == 0) {
+    return;
+  }
+  var start = 0usize;
+  let n = buf.len();
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    var i = start;
+    while (i < end && (buf.info[i].mask & mask) != 0) {
+      if ((buf.info[i].glyph_props & 0x10) != 0) {
+        buf.info[i].category = kUseR;
+        break;
+      }
+      i += 1;
+    }
+    start = end;
+  }
+}
+
+pub fn record_pref_use(var buf&: Buffer) {
+  var start = 0usize;
+  let n = buf.len();
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    for (let i in start..end) {
+      if ((buf.info[i].glyph_props & 0x10) != 0) {
+        buf.info[i].category = kUseVPre;
+        break;
+      }
+    }
+    start = end;
+  }
+}
+
+fn is_halant_use(g&: GlyphInfo): bool =>
+  (g.category == kUseH || g.category == kUseHvm || g.category == kUseIs) && (g.glyph_props & 0x20) == 0;
+
+// FAbv FBlw FPst FMAbv FMBlw FMPst MAbv MBlw MPst MPre VAbv VBlw VPst VPre VMAbv VMBlw VMPst VMPre
+fn post_base_flags(): u64 =>
+  flag64(24) | flag64(25) | flag64(26) | flag64(45) | flag64(46) | flag64(47) | flag64(27) | flag64(28) | flag64(29) | flag64(30) | flag64(33) |
+  flag64(34) | flag64(35) | flag64(22) | flag64(37) | flag64(38) | flag64(39) | flag64(23);
+
+fn reorder_syllable_use(var buf&: Buffer, start: usize, end: usize) {
+  let t = buf.info[start].syllable & 0x0F;
+  // virama terminated, sakot terminated, standard, symbol, broken
+  if (!(t == 0 || t == 1 || t == 2 || t == 5 || t == 7)) {
+    return;
+  }
+  if (buf.info[start].category == kUseR && end - start > 1) {
+    for (let i0 in start + 1..end) {
+      let is_post_base = (flag64(buf.info[i0].category) & post_base_flags()) != 0 || is_halant_use(buf.info[i0]);
+      if (is_post_base || i0 == end - 1) {
+        var i = i0;
+        if (is_post_base) {
+          i -= 1;
+        }
+        buf.merge_clusters(start, i + 1);
+        let tmp = buf.info[start];
+        for (let k in start..i) {
+          buf.info[k] = buf.info[k + 1];
+        }
+        buf.info[i] = tmp;
+        break;
+      }
+    }
+  }
+  var j = start;
+  for (let i in start..end) {
+    let fl = flag64(buf.info[i].category);
+    if (is_halant_use(buf.info[i])) {
+      j = i + 1;
+    } else if ((fl & (flag64(kUseVPre) | flag64(kUseVmPre))) != 0 && lig_comp(buf.info[i]) == 0 && j < i) {
+      buf.merge_clusters(j, i + 1);
+      let tmp = buf.info[i];
+      var k = i;
+      while (k > j) {
+        buf.info[k] = buf.info[k - 1];
+        k -= 1;
+      }
+      buf.info[j] = tmp;
+    }
+  }
+}
+
+pub fn reorder_use(face&: ShapeFace, var buf&: Buffer): bool {
+  let ret = insert_dotted_circles(face, buf, 7, kUseB, kUseR as i32, -1);
+  var start = 0usize;
+  let n = buf.len();
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    reorder_syllable_use(buf, start, end);
+    start = end;
+  }
+  return ret;
+}
+
+pub fn preprocess_text_use(var buf&: Buffer, script: u32) {
+  preprocess_vowel_constraints(buf, script);
+}
+
+pub fn compose_use(a: u32, b: u32): u32? {
+  if (gc_is_mark(general_category(a))) {
+    return none;
+  }
+  return compose(a, b);
+}
+
+// --- Myanmar --------------------------------------------------------------------------------------
+
+// Myanmar categories (myanmar_syllable_machine_ex_*).
+comptime let kMyA: u32 = 9;
+comptime let kMyAs: u32 = 32;
+comptime let kMyC: u32 = 1;
+comptime let kMyCs: u32 = 18;
+comptime let kMyDottedCircle: u32 = 11;
+comptime let kMyGb: u32 = 10;
+comptime let kMyH: u32 = 4;
+comptime let kMyIv: u32 = 2;
+comptime let kMyMr: u32 = 36;
+comptime let kMyRa: u32 = 15;
+comptime let kMyVBlw: u32 = 21;
+comptime let kMyVPre: u32 = 22;
+comptime let kMyVs: u32 = 40;
+
+static let kMyanmarBasic: [str; 4] = ["rphf", "pref", "blwf", "pstf"];
+static let kMyanmarOther: [str; 4] = ["pres", "abvs", "blws", "psts"];
+
+pub fn collect_features_myanmar(var b&: MapBuilder) {
+  b.add_gsub_pause(kPauseMyanmarSetupSyllables);
+  b.enable_feature(tag("locl"), kFPerSyllable);
+  b.enable_feature(tag("ccmp"), kFPerSyllable);
+  b.add_gsub_pause(kPauseMyanmarReorder);
+  for (let f in kMyanmarBasic) {
+    b.enable_feature(tag(f), kFManualZwj | kFPerSyllable);
+    b.add_gsub_pause(0);
+  }
+  b.add_gsub_pause(0);  // hb_syllabic_clear_var
+  for (let f in kMyanmarOther) {
+    b.enable_feature(tag(f), kFManualZwj);
+  }
+}
+
+pub fn setup_masks_myanmar(var buf&: Buffer) {
+  for (var g& in buf.info) {
+    g.category = indic_categories(g.codepoint) & 0xFF;
+  }
+}
+
+pub fn setup_syllables_myanmar(var buf&: Buffer) {
+  var cats: List<u8> = List();
+  var orig: List<usize> = List();
+  for (let i in 0..buf.len()) {
+    cats.push(buf.info[i].category as u8);
+    orig.push(i);
+  }
+  find_syllables(myanmar_machine(), cats, orig, buf);
+}
+
+fn is_consonant_myanmar(g&: GlyphInfo): bool {
+  if ((g.glyph_props & 0x20) != 0) {
+    return false;
+  }
+  let c = g.category;
+  return c == kMyC || c == kMyCs || c == kMyRa || c == kMyIv || c == kMyGb || c == kMyDottedCircle;
+}
+
+fn pos_less(a&: GlyphInfo, b&: GlyphInfo): bool => a.aux < b.aux;
+
+fn reorder_consonant_syllable_myanmar(var buf&: Buffer, start: usize, end: usize) {
+  // POS_* values
+  let pos_pre_m = 2u32;
+  let pos_pre_c = 3u32;
+  let pos_base_c = 4u32;
+  let pos_after_main = 5u32;
+  let pos_before_sub = 7u32;
+  let pos_below_c = 8u32;
+  let pos_after_sub = 9u32;
+  var base = end;
+  var has_reph = false;
+  {
+    var limit = start;
+    if (start + 3 <= end && buf.info[start].category == kMyRa && buf.info[start + 1].category == kMyAs && buf.info[start + 2].category == kMyH) {
+      limit += 3;
+      base = start;
+      has_reph = true;
+    }
+    if (!has_reph) {
+      base = limit;
+    }
+    for (let i in limit..end) {
+      if (is_consonant_myanmar(buf.info[i])) {
+        base = i;
+        break;
+      }
+    }
+  }
+  {
+    var i = start;
+    let reph_end = start + (has_reph ? 3usize : 0);
+    while (i < reph_end) {
+      buf.info[i].aux = pos_after_main;
+      i += 1;
+    }
+    while (i < base) {
+      buf.info[i].aux = pos_pre_c;
+      i += 1;
+    }
+    if (i < end) {
+      buf.info[i].aux = pos_base_c;
+      i += 1;
+    }
+    var pos = pos_after_main;
+    while (i < end) {
+      let c = buf.info[i].category;
+      if (c == kMyMr) {
+        buf.info[i].aux = pos_pre_c;
+      } else if (c == kMyVPre) {
+        buf.info[i].aux = pos_pre_m;
+      } else if (c == kMyVs) {
+        buf.info[i].aux = buf.info[i - 1].aux;
+      } else if (pos == pos_after_main && c == kMyVBlw) {
+        pos = pos_below_c;
+        buf.info[i].aux = pos;
+      } else if (pos == pos_below_c && c == kMyA) {
+        buf.info[i].aux = pos_before_sub;
+      } else if (pos == pos_below_c && c == kMyVBlw) {
+        buf.info[i].aux = pos;
+      } else if (pos == pos_below_c && c != kMyA) {
+        pos = pos_after_sub;
+        buf.info[i].aux = pos;
+      } else {
+        buf.info[i].aux = pos;
+      }
+      i += 1;
+    }
+  }
+  buf.sort(start, end, pos_less);
+  var first_left_matra = end;
+  var last_left_matra = end;
+  for (let i in start..end) {
+    if (buf.info[i].aux == pos_pre_m) {
+      if (first_left_matra == end) {
+        first_left_matra = i;
+      }
+      last_left_matra = i;
+    }
+  }
+  if (first_left_matra < last_left_matra) {
+    buf.reverse_range(first_left_matra, last_left_matra + 1);
+    var i = first_left_matra;
+    for (let j in first_left_matra..last_left_matra + 1) {
+      if (buf.info[j].category == kMyVPre) {
+        buf.reverse_range(i, j + 1);
+        i = j + 1;
+      }
+    }
+  }
+}
+
+pub fn reorder_myanmar(face&: ShapeFace, var buf&: Buffer): bool {
+  let ret = insert_dotted_circles(face, buf, 1, kMyDottedCircle, -1, -1);
+  var start = 0usize;
+  let n = buf.len();
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    let t = buf.info[start].syllable & 0x0F;
+    if (t == 0 || t == 1) {
+      reorder_consonant_syllable_myanmar(buf, start, end);
+    }
+    start = end;
+  }
+  return ret;
+}

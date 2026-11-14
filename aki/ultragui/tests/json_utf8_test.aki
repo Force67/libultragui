@@ -1,0 +1,20 @@
+// ugui/anim/json.cc accepts unknown escapes by copying the byte after the
+// backslash, then the rest of the string. These results were checked against
+// ParseJson in the C++: c3a9, f09f98800ac3a9227a, and key c3a9/value f09f9880.
+module json_utf8_test;
+
+import {JsonValue, parse_json} from ultragui::anim::json;
+import {Expect} from ultragui_testing::expect;
+
+pub fn main(): i32 {
+  var t = Expect();
+  var v = JsonValue {};
+  t.that(parse_json("\"\\é\"", v), "escaped UTF-8 parses");
+  t.that(v.as_string() == "é", "escaped UTF-8 is copied whole");
+  t.that(parse_json("\"\\😀\\n\\é\\\"z\"", v), "mixed escapes parse");
+  t.that(v.as_string() == "😀\né\"z", "UTF-8 and ASCII escapes compose");
+  t.that(parse_json("{\"\\é\":\"\\😀\"}", v), "escaped UTF-8 object parses");
+  let value = v.get("é");
+  t.that(value != none && value!.as_string() == "😀", "UTF-8 keys and values survive escapes");
+  return t.finish();
+}

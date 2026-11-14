@@ -1,0 +1,6 @@
+import "main.ugui";
+import "lib_b.ugui";
+class card { from: lib_a; }
+class a_only { x: 1; }
+component box { panel root { from: lib_a; } }
+panel ignored_root { }

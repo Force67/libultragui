@@ -1,0 +1,227 @@
+// The script shapers' hooks (hb_ot_shaper_t's function pointers) as
+// functions that dispatch on the shaper: collect_features,
+// override_features, data_create, preprocess_text, decompose, compose,
+// setup_masks, reorder_marks, postprocess_glyphs, and the pause functions the
+// shapers put between GSUB stages.
+
+module ultragui::shape::shapers;
+
+import {Buffer} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {MapBuilder, MapTable, OtMap} from ultragui::shape::map;
+import {ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {
+  ShapePlan, kShaperArabic, kShaperHangul, kShaperHebrew, kShaperIndic, kShaperKhmer, kShaperMyanmar, kShaperThai, kShaperUse,
+} from ultragui::shape::plan;
+import {
+  IndicPlan, KhmerPlan, collect_features_indic, collect_features_khmer, compose_indic, compose_khmer, decompose_indic, decompose_khmer,
+  final_reordering_indic, initial_reordering_indic, kPauseIndicFinalReordering, kPauseIndicInitialReordering, kPauseIndicSetupSyllables,
+  kPauseKhmerReorder, kPauseKhmerSetupSyllables, override_features_indic, override_features_khmer, plan_indic, plan_khmer,
+  preprocess_text_indic, reorder_khmer, setup_masks_indic, setup_masks_khmer, setup_syllables_indic, setup_syllables_khmer,
+} from ultragui::shape::shaper_indic;
+import {
+  UsePlan, collect_features_myanmar, collect_features_use, compose_use, kPauseMyanmarReorder, kPauseMyanmarSetupSyllables, kPauseUseRecordPref,
+  kPauseUseRecordRphf, kPauseUseReorder, kPauseUseSetupSyllables, plan_use, preprocess_text_use, record_pref_use, record_rphf_use,
+  reorder_myanmar, reorder_use, setup_masks_myanmar, setup_masks_use, setup_syllables_myanmar, setup_syllables_use,
+} from ultragui::shape::shaper_use;
+import {
+  ArabicPlan, apply_stch, arabic_fallback_shape, collect_features_arabic, kPauseArabicFallback, kPauseRecordStch, plan_arabic,
+  record_stch, reorder_marks_arabic, setup_masks_arabic,
+} from ultragui::shape::shaper_arabic;
+import {
+  collect_features_hangul, compose_hebrew, override_features_hangul, preprocess_text_hangul, preprocess_text_thai, reorder_marks_hebrew,
+  setup_masks_hangul,
+} from ultragui::shape::shaper_simple;
+
+// Pause functions (hb_ot_map_t::pause_func_t).
+pub comptime let kPauseNone: u32 = 0;
+pub comptime let kPauseClearSubstitutionFlags: u32 = 1;  // _hb_clear_substitution_flags
+
+// What a shaper keeps in its plan (data_create).
+pub struct ShaperData {
+  pub var arabic: ArabicPlan = ArabicPlan {}
+  pub var indic: IndicPlan = IndicPlan {}
+  pub var khmer: KhmerPlan = KhmerPlan {}
+  pub var use_: UsePlan = UsePlan {}
+}
+
+// collect_features: whether the shaper has one (it makes the map not simple).
+pub fn collect_features(shaper: u32, var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable, script: u32): bool {
+  if (shaper == kShaperHangul) {
+    collect_features_hangul(b);
+    return true;
+  }
+  if (shaper == kShaperArabic) {
+    collect_features_arabic(b, gsub, gpos, script);
+    return true;
+  }
+  if (shaper == kShaperIndic) {
+    collect_features_indic(b);
+    return true;
+  }
+  if (shaper == kShaperKhmer) {
+    collect_features_khmer(b);
+    return true;
+  }
+  if (shaper == kShaperMyanmar) {
+    collect_features_myanmar(b);
+    return true;
+  }
+  if (shaper == kShaperUse) {
+    collect_features_use(b);
+    return true;
+  }
+  return false;
+}
+
+pub fn override_features(shaper: u32, var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable) {
+  if (shaper == kShaperHangul) {
+    override_features_hangul(b);
+  } else if (shaper == kShaperIndic) {
+    override_features_indic(b);
+  } else if (shaper == kShaperKhmer) {
+    override_features_khmer(b);
+  }
+}
+
+pub fn plan_data(shaper: u32, map&: OtMap, face&: ShapeFace, script: u32): ShaperData {
+  var d = ShaperData {};
+  if (shaper == kShaperArabic) {
+    d.arabic = plan_arabic(map, face, script);
+  } else if (shaper == kShaperIndic) {
+    d.indic = plan_indic(map, face, script);
+  } else if (shaper == kShaperKhmer) {
+    d.khmer = plan_khmer(map);
+  } else if (shaper == kShaperUse) {
+    d.use_ = plan_use(map, face, script);
+  }
+  return d;
+}
+
+pub fn preprocess_text<F: ShapeFontFuncs>(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace, var funcs&: F) {
+  if (plan.shaper == kShaperThai) {
+    preprocess_text_thai(plan, buf, face);
+  } else if (plan.shaper == kShaperHangul) {
+    preprocess_text_hangul(buf, face, funcs);
+  } else if (plan.shaper == kShaperIndic) {
+    preprocess_text_indic(buf, plan.script);
+  } else if (plan.shaper == kShaperUse) {
+    preprocess_text_use(buf, plan.script);
+  }
+}
+
+// decompose: none when the shaper has no hook (the Unicode decomposition applies).
+pub fn decompose(plan&: ShapePlan, face&: ShapeFace, ab: u32): ((u32, u32)?)? {
+  if (plan.shaper == kShaperIndic) {
+    return decompose_indic(ab);
+  }
+  if (plan.shaper == kShaperKhmer) {
+    return decompose_khmer(ab);
+  }
+  return none;
+}
+
+pub fn compose(plan&: ShapePlan, a: u32, b: u32): (u32?)? {
+  if (plan.shaper == kShaperHebrew) {
+    return compose_hebrew(plan, a, b);
+  }
+  if (plan.shaper == kShaperIndic) {
+    return compose_indic(a, b);
+  }
+  if (plan.shaper == kShaperKhmer) {
+    return compose_khmer(a, b);
+  }
+  if (plan.shaper == kShaperUse) {
+    return compose_use(a, b);
+  }
+  return none;
+}
+
+pub fn setup_masks(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace) {
+  if (plan.shaper == kShaperHangul) {
+    setup_masks_hangul(plan, buf);
+  } else if (plan.shaper == kShaperArabic) {
+    setup_masks_arabic(plan.data.arabic, buf, plan.script);
+  } else if (plan.shaper == kShaperIndic) {
+    setup_masks_indic(buf);
+  } else if (plan.shaper == kShaperKhmer) {
+    setup_masks_khmer(buf);
+  } else if (plan.shaper == kShaperMyanmar) {
+    setup_masks_myanmar(buf);
+  } else if (plan.shaper == kShaperUse) {
+    setup_masks_use(plan.data.use_, buf, plan.script);
+  }
+}
+
+pub fn reorder_marks(plan&: ShapePlan, var buf&: Buffer, start: usize, end: usize) {
+  if (plan.shaper == kShaperHebrew) {
+    reorder_marks_hebrew(buf, start, end);
+  } else if (plan.shaper == kShaperArabic) {
+    reorder_marks_arabic(buf, start, end);
+  }
+}
+
+pub fn postprocess_glyphs<F: ShapeFontFuncs>(plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace, var funcs&: F, x_scale: i32) {
+  if (plan.shaper == kShaperArabic) {
+    apply_stch(buf, funcs, x_scale);
+  }
+}
+
+// A pause function; true when it may have added glyphs.
+pub fn run_pause(pause: u32, plan&: ShapePlan, var buf&: Buffer, face&: ShapeFace): bool {
+  if (pause == kPauseClearSubstitutionFlags) {
+    for (var g& in buf.info) {
+      g.glyph_props &= ~0x10u32;
+    }
+    return false;
+  }
+  if (pause == kPauseRecordStch) {
+    record_stch(plan.data.arabic, buf);
+    return false;
+  }
+  if (pause == kPauseArabicFallback) {
+    arabic_fallback_shape(plan.data.arabic, face, buf);
+    return true;
+  }
+  if (pause == kPauseIndicSetupSyllables) {
+    setup_syllables_indic(buf);
+    return false;
+  }
+  if (pause == kPauseIndicInitialReordering) {
+    return initial_reordering_indic(plan.data.indic, face, plan.script, buf);
+  }
+  if (pause == kPauseIndicFinalReordering) {
+    final_reordering_indic(plan.data.indic, plan.script, buf);
+    return false;
+  }
+  if (pause == kPauseKhmerSetupSyllables) {
+    setup_syllables_khmer(buf);
+    return false;
+  }
+  if (pause == kPauseKhmerReorder) {
+    return reorder_khmer(plan.data.khmer, face, buf);
+  }
+  if (pause == kPauseMyanmarSetupSyllables) {
+    setup_syllables_myanmar(buf);
+    return false;
+  }
+  if (pause == kPauseMyanmarReorder) {
+    return reorder_myanmar(face, buf);
+  }
+  if (pause == kPauseUseSetupSyllables) {
+    setup_syllables_use(plan.map, plan.data.use_, buf);
+    return false;
+  }
+  if (pause == kPauseUseRecordRphf) {
+    record_rphf_use(plan.data.use_, buf);
+    return false;
+  }
+  if (pause == kPauseUseRecordPref) {
+    record_pref_use(buf);
+    return false;
+  }
+  if (pause == kPauseUseReorder) {
+    return reorder_use(face, buf);
+  }
+  return false;
+}

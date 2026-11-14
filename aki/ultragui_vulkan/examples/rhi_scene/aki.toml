@@ -1,0 +1,11 @@
+# rhi_scene: GlfwPlatform + VulkanRhi + TextEngine driven directly (no
+# UIContext), the aki twin of rhi_scene.cc. See src/main.aki.
+[package]
+name = "rhi_scene"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../../ultragui" }
+ultragui_glfw = { path = "../../../ultragui_glfw" }
+ultragui_vulkan = { path = "../.." }

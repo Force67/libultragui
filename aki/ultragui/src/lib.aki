@@ -1,0 +1,9 @@
+// libultragui's core, ported from ugui/ to aki. Every C++ header/source pair
+// ugui/<dir>/<file>.{h,cc} is the module ultragui::<dir>::<file>; import from
+// those modules directly. This root module carries the version only.
+// ../PORTING.md is the map and the contract.
+
+module ultragui;
+
+// The ported library's version, as aki.toml states it.
+pub fn version(): str => @package_version();

@@ -1,0 +1,240 @@
+// ugui/widgets/widget_registry.{h,cc}: the entity-and-component World.
+//
+// A generation-checked slot map of widget entities plus one sparse-set store
+// per component type. An entity (wid) owns no object; data lives in
+// components. release() drops the entity's components and bumps the
+// generation, so stale handles resolve to dead.
+//
+// Component types are open, as in the C++: a store is found by the type's
+// ComponentKey (core::component_store), a `static let` beside the type, and
+// created on first use. Built-in components (widgets::widget,
+// widgets::components, each widget kind's content) and host components take
+// the same path:
+//
+//   pub struct Health { pub var hp: i32 }
+//   pub static let kHealth: ComponentKey<Health> = ComponentKey();
+//
+//   world.add(kHealth, e, Health { hp: 3 });
+//   if (var h& = world.get_var(kHealth, e)) { h.hp -= 1; }
+//   world.release(e);   // drops Health with the rest
+//
+// A store is held erased (an ErasedBox of ComponentStore<C>) with a remove
+// thunk beside it, which is how release() drops every component of an entity
+// without knowing the types: the C++ IComponentStore. A component's own drop
+// runs when it leaves its store, so a host component that owns a resource
+// frees it on release (the release notification).
+//
+// Borrowing: a view from get/get_var/add borrows the whole World, as a C* is
+// only valid until the next structural change in the C++. Copy what you
+// need out (Transform, StyleC's state are Copy), or take two components of
+// one entity at once with get_pair_var.
+//
+// WidgetRegistry::Active() and ScopedActive (a thread-local "current
+// registry") are not ported: every function that touches entities takes the
+// World. See PORTING.md.
+
+module ultragui::widgets::widget_registry;
+
+import {List} from akikit::containers::list;
+import {ErasedBox} from ultragui::core::erased;
+import {ComponentKey, ComponentStore} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {
+  Hierarchy, StyleC, Transform, WidgetNode, kHierarchy, kStyleC, kTransform, kWidgetNode, next_widget_id,
+} from ultragui::widgets::widget;
+
+struct Slot : Copy {
+  pub var generation: u32 = 1  // never 0 so a live handle is always valid()
+  pub var alive: bool = false
+}
+
+fn remove_thunk<C>(p: *var u8, id: WidgetId) {
+  unsafe {
+    var store& = *(p as *var ComponentStore<C>);
+    store.remove(id);
+  }
+}
+
+// One component type's store, erased.
+struct ErasedStore {
+  pub var store: ErasedBox
+  pub let remove: static fn(*var u8, WidgetId): ()
+}
+
+// The C++ name; World is the one the port uses.
+pub type WidgetRegistry = World;
+
+pub struct World {
+  var slots: List<Slot> = List()  // slots[0] is the reserved null slot
+  var free: List<u32> = List()     // indices available for reuse
+  var stores: List<ErasedStore?> = List()  // indexed by ComponentKey::index
+
+  pub fn World(): World => World {};
+
+  // New(id): allocate a widget entity with the core components (WidgetNode,
+  // Transform, StyleC, Hierarchy). `id` is the application id (0 = auto,
+  // next_widget_id()).
+  pub fn create(var self&, id: u32 = 0): WidgetId;
+
+  // True if the handle still refers to a live entity.
+  pub fn alive(self&, id: WidgetId): bool;
+
+  // Free an entity: drop its components and bump the generation.
+  pub fn release(var self&, id: WidgetId);
+
+  // --- Components ---
+
+  // The store for C, created on first use (Store<C>()).
+  pub fn store_var<C>(var self&, key&: ComponentKey<C>): &var ComponentStore<C>;
+  // The store for C, none until something created it. For reading: the dense
+  // ids()/as_slice() of every C.
+  pub fn store<C>(self&, key&: ComponentKey<C>): (&ComponentStore<C>)?;
+
+  // Attach (or overwrite) the component for `id`. The view lives until the
+  // next structural change.
+  pub fn add<C>(var self&, key&: ComponentKey<C>, id: WidgetId, value: C): &var C => self.store_var(key).add(id, value);
+
+  // GetOrAdd: the component for `id`, attaching `fallback` (the C++ C{})
+  // when it is absent.
+  pub fn get_or_add<C>(var self&, key&: ComponentKey<C>, id: WidgetId, fallback: C): &var C;
+
+  // The component for `id`, or none if absent or the handle is stale.
+  pub fn get<C>(self&, key&: ComponentKey<C>, id: WidgetId): (&C)?;
+  pub fn get_var<C>(var self&, key&: ComponentKey<C>, id: WidgetId): (&var C)? => self.store_var(key).get_var(id);
+
+  // Two components of one entity, both writable. The keys must differ (one
+  // store cannot lend two write views); the same key twice stops.
+  pub fn get_pair_var<A, B>(var self&, ka&: ComponentKey<A>, kb&: ComponentKey<B>, id: WidgetId): ((&var A)?, (&var B)?);
+
+  pub fn has<C>(self&, key&: ComponentKey<C>, id: WidgetId): bool;
+
+  pub fn remove<C>(var self&, key&: ComponentKey<C>, id: WidgetId) {
+    self.store_var(key).remove(id);
+  }
+}
+
+fn World::create(var self&, id: u32): WidgetId {
+  if (self.slots.len() == 0) {
+    self.slots.push(Slot {});  // reserve index 0 as null
+  }
+
+  var index: u32 = 0;
+  if (let reused = self.free.pop()) {
+    index = reused;
+  } else {
+    index = self.slots.len() as u32;
+    self.slots.push(Slot {});
+  }
+
+  var s& = self.slots.at_var(index as usize);
+  s.alive = true;
+  let e = WidgetId { index, generation: s.generation };
+
+  // Attach the core components every widget entity carries.
+  self.add(kWidgetNode, e, WidgetNode { id: id == 0 ? next_widget_id() : id });
+  self.add(kTransform, e, Transform {});
+  self.add(kStyleC, e, StyleC {});
+  self.add(kHierarchy, e, Hierarchy {});
+  return e;
+}
+
+fn World::alive(self&, id: WidgetId): bool {
+  if (id.index == 0 || id.index as usize >= self.slots.len()) {
+    return false;
+  }
+  let s = self.slots[id.index as usize];
+  return s.alive && s.generation == id.generation;
+}
+
+fn World::release(var self&, id: WidgetId) {
+  if (!self.alive(id)) {
+    return;
+  }
+  for (var slot& in self.stores) {
+    if (var st& = slot) {
+      (st.remove)(st.store.ptr(), id);
+    }
+  }
+  var s& = self.slots.at_var(id.index as usize);
+  s.alive = false;
+  s.generation +%= 1;
+  if (s.generation == 0) {
+    s.generation = 1;
+  }
+  self.free.push(id.index);
+}
+
+fn World::store_var<C>(var self&, key&: ComponentKey<C>): &var ComponentStore<C> {
+  let tid = key.index() as usize;
+  while (self.stores.len() <= tid) {
+    self.stores.push(none);
+  }
+  if (self.stores[tid] == none) {
+    self.stores[tid] = ErasedStore { store: ErasedBox::of(ComponentStore::<C>()), remove: remove_thunk::<C> };
+  }
+  // The slot at the key's id holds a ComponentStore<C>: only this key's
+  // index reaches it, and the key's type is C.
+  return unsafe *(self.store_ptr(tid) as *var ComponentStore<C>);
+}
+
+fn World::ensure_store<C>(var self&, key&: ComponentKey<C>) {
+  let s& = self.store_var(key);
+}
+
+// The address of the store at `tid`, which exists.
+fn World::store_ptr(var self&, tid: usize): *var u8 {
+  if (var st& = self.stores[tid]) {
+    return st.store.ptr();
+  }
+  @stop("World: no store at this id");
+}
+
+fn World::store<C>(self&, key&: ComponentKey<C>): (&ComponentStore<C>)? {
+  let tid = key.index() as usize;
+  if (tid >= self.stores.len()) {
+    return none;
+  }
+  let st& = self.stores[tid] else {
+    return none;
+  };
+  return unsafe *(st.store.const_ptr() as *const ComponentStore<C>);
+}
+
+fn World::get_or_add<C>(var self&, key&: ComponentKey<C>, id: WidgetId, fallback: C): &var C {
+  var s& = self.store_var(key);
+  if (!s.has(id)) {
+    return s.add(id, fallback);
+  }
+  return s.get_var(id)!;
+}
+
+fn World::get<C>(self&, key&: ComponentKey<C>, id: WidgetId): (&C)? {
+  let s& = self.store(key) else {
+    return none;
+  };
+  return s.get(id);
+}
+
+fn World::has<C>(self&, key&: ComponentKey<C>, id: WidgetId): bool {
+  let s& = self.store(key) else {
+    return false;
+  };
+  return s.has(id);
+}
+
+fn World::get_pair_var<A, B>(var self&, ka&: ComponentKey<A>, kb&: ComponentKey<B>, id: WidgetId): ((&var A)?, (&var B)?) {
+  if (ka.index() == kb.index()) {
+    @stop("World::get_pair_var: both keys name one store");
+  }
+  // Create both stores first, so neither creation moves the other's slot.
+  self.ensure_store(ka);
+  self.ensure_store(kb);
+  let pa = unsafe (self.store_ptr(ka.index() as usize) as *var ComponentStore<A>);
+  let pb = unsafe (self.store_ptr(kb.index() as usize) as *var ComponentStore<B>);
+  // Two distinct heap stores: the views cannot overlap.
+  unsafe {
+    var sa& = *pa;
+    var sb& = *pb;
+    return (sa.get_var(id), sb.get_var(id));
+  }
+}

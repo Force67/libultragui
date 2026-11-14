@@ -1,0 +1,305 @@
+// HarfBuzz 13.2.1's graphite2 shaper (hb-graphite2.cc, _hb_graphite2_shape):
+// what hb_shape returns for a face graphite2 accepts. The features for the
+// buffer's language (Sill), gr_make_seg with no font (font units) over the
+// buffer's code points, then HarfBuzz's mapping of slots back to glyphs:
+// clusters grown from each slot's character association, one advance per
+// cluster, offsets from the slot origins, all scaled by x_scale / upem and
+// truncated to integers.
+//
+// The float arithmetic is the libharfbuzz.so of the dev shell's (GCC 15,
+// aarch64): its scalings are single-precision, and where GCC contracted a
+// product and an add or subtract into one fused instruction (fmadd, fmsub,
+// fnmsub) this uses @fma, elsewhere a rounded product in a local. Float to
+// integer conversions saturate as aarch64's fcvtzs/fcvtzu do.
+
+module ultragui::shape::graphite::graphite;
+
+import {List} from akikit::containers::list;
+import {GrFace} from ultragui::shape::graphite::grface;
+import {make_segment} from ultragui::shape::graphite::passes;
+import {kNone} from ultragui::shape::graphite::segment;
+import {ShapedGlyph} from ultragui::shape::shape;
+import {dir_is_backward, dir_is_horizontal, dir_is_vertical, dir_reverse, kDirInvalid, kDirRtl, kDirTtb, script_horizontal_direction} from ultragui::shape::ucd;
+
+// hb_tag_from_string(lang, len) of the part of the language before '-',
+// zero-padded as gr_face_featureval_for_lang does.
+fn language_tag(language: str): u32 {
+  let b = language as &[u8];
+  if (#b == 0 || b[0] == 0) {
+    return 0;
+  }
+  var len = 4usize;
+  for (let i in 0..#b) {
+    if (b[i] == '-' as u8) {
+      len = i;
+      break;
+    }
+  }
+  if (len == 0) {
+    return 0;  // !len
+  }
+  if (len > 4) {
+    len = 4;
+  }
+  var t: List<u32> = List();
+  var i = 0usize;
+  while (i < len && i < #b && b[i] != 0) {
+    t.push(b[i] as u32);
+    i += 1;
+  }
+  while (t.len() < 4) {
+    t.push(0x20);
+  }
+  let tag = (t[0] << 24) | (t[1] << 16) | (t[2] << 8) | t[3];
+  // zeropad
+  if (tag == 0x20202020) {
+    return 0;
+  }
+  if ((tag & 0x00FFFFFF) == 0x00202020) {
+    return tag & 0xFF000000;
+  }
+  if ((tag & 0x0000FFFF) == 0x00002020) {
+    return tag & 0xFFFF0000;
+  }
+  if ((tag & 0x000000FF) == 0x00000020) {
+    return tag & 0xFFFFFF00;
+  }
+  return tag;
+}
+
+fn to_i32(v: f32): i32 => @saturating_cast(i32, v);
+fn to_u32(v: f32): u32 => @saturating_cast(u32, v);
+
+// hb_buffer_t::reverse_clusters over the output.
+fn reverse_clusters(var out&: List<ShapedGlyph>) {
+  let n = out.len();
+  if (n == 0) {
+    return;
+  }
+  var start = 0usize;
+  for (let i in 1..n) {
+    if (out[i - 1].cluster != out[i].cluster) {
+      reverse_range(out, start, i);
+      start = i;
+    }
+  }
+  reverse_range(out, start, n);
+  reverse_range(out, 0, n);
+}
+
+fn reverse_range(var out&: List<ShapedGlyph>, start: usize, end: usize) {
+  if (end <= start) {
+    return;
+  }
+  var a = start;
+  var b = end - 1;
+  while (a < b) {
+    let t = out[a];
+    out[a] = out[b];
+    out[b] = t;
+    a += 1;
+    b -= 1;
+  }
+}
+
+// hb_graphite2_cluster_t
+struct Cluster : Copy {
+  pub var base_char: u32 = 0
+  pub var num_chars: u32 = 0
+  pub var base_glyph: u32 = 0
+  pub var num_glyphs: u32 = 0
+  pub var cluster: u32 = 0
+  pub var advance: i32 = 0
+}
+
+// _hb_graphite2_shape for the buffer of code points `chars` with `clusters`
+// (UTF-8 offsets), its script and direction as guess_segment_properties set
+// them, and its language. `upem` is the face's units per em, x_scale and
+// y_scale the font's scale.
+pub fn shape_graphite(gf&: GrFace, upem: u32, x_scale: i32, y_scale: i32, chars0&: [u32], clusters0&: [u32], script: u32, direction0: u32,
+                      language: str): List<ShapedGlyph> {
+  var out: List<ShapedGlyph> = List();
+  var chars: List<u32> = List();
+  var infos: List<ShapedGlyph> = List();
+  for (let i in 0..#chars0) {
+    chars.push(chars0[i]);
+    infos.push(ShapedGlyph { glyph_id: chars0[i], cluster: clusters0[i] });
+  }
+  let len = chars.len();
+  if (len == 0) {
+    return out;
+  }
+  let feats = gf.features.for_lang(language_tag(language));
+
+  var direction = direction0;
+  let horiz_dir = script_horizontal_direction(script);
+  if ((dir_is_horizontal(direction) && direction != horiz_dir && horiz_dir != kDirInvalid) || (dir_is_vertical(direction) && direction != kDirTtb)) {
+    reverse_clusters(infos);
+    chars.clear();
+    for (let g in infos) {
+      chars.push(g.glyph_id);
+    }
+    direction = dir_reverse(direction);
+  }
+  let backward = dir_is_backward(direction);
+
+  let seg = make_segment(gf, feats, chars.as_slice(), 2 | (direction == kDirRtl ? 1 : 0)) else {
+    // hb_shape fails: the buffer keeps its characters, with zero positions.
+    return infos;
+  };
+  let glyph_count = seg.num_glyphs as usize;
+  if (glyph_count == 0) {
+    return out;
+  }
+
+  // The slots in order, as gr_seg_first_slot / gr_slot_next_in_segment give them.
+  var slots: List<u32> = List();
+  var s = seg.first;
+  while (s != kNone) {
+    slots.push(s);
+    s = seg.slots[s as usize].next;
+  }
+
+  var clusters: List<Cluster> = List();
+  for (let i in 0..len + 1) {
+    clusters.push(Cluster {});
+  }
+  var gids: List<u32> = List();
+  clusters[0].cluster = infos[0].cluster;
+  let xscale: f32 = x_scale as f32 / upem as f32;
+  let yscale0: f32 = y_scale as f32 / upem as f32;
+  let ratio: f32 = yscale0 / xscale;
+  let yscale: f32 = ratio * yscale0;
+  let seg_adv_x = seg.advance.x;
+  var curradv = 0u32;
+  if (backward) {
+    let first_x = seg.slots[slots[0] as usize].position.x * xscale;
+    curradv = to_u32(first_x);
+    clusters[0].advance = to_i32(@fma(seg_adv_x, xscale, -(curradv as f32)));
+  } else {
+    clusters[0].advance = 0;
+  }
+  var ci = 0usize;
+  for (let ic in 0..slots.len()) {
+    let sl& = seg.slots[slots[ic] as usize];
+    let before = sl.before as u32;
+    let after = sl.after as u32;
+    gids.push(sl.glyph());
+    while (clusters[ci].base_char > before && ci != 0) {
+      let c = clusters[ci];
+      clusters[ci - 1].num_chars = clusters[ci - 1].num_chars +% c.num_chars;
+      clusters[ci - 1].num_glyphs = clusters[ci - 1].num_glyphs +% c.num_glyphs;
+      clusters[ci - 1].advance = clusters[ci - 1].advance +% c.advance;
+      ci -= 1;
+    }
+    let cur = clusters[ci];
+    if (sl.is_insert_before() && cur.num_chars != 0 && before >= cur.base_char +% cur.num_chars) {
+      var c = Cluster {};
+      c.base_char = cur.base_char +% cur.num_chars;
+      c.cluster = infos[c.base_char as usize].cluster;
+      c.num_chars = before -% c.base_char;
+      c.base_glyph = ic as u32;
+      c.num_glyphs = 0;
+      if (backward) {
+        c.advance = to_i32(@fma(-sl.position.x, xscale, curradv as f32));
+        curradv = curradv -% (c.advance as u32);
+      } else {
+        let origin_x = sl.position.x * xscale;
+        c.advance = 0;
+        let d = origin_x - curradv as f32;
+        clusters[ci].advance = to_i32(clusters[ci].advance as f32 + d);
+        curradv = to_u32(origin_x);
+      }
+      clusters[ci + 1] = c;
+      ci += 1;
+    }
+    clusters[ci].num_glyphs += 1;
+    if (clusters[ci].base_char +% clusters[ci].num_chars < after +% 1) {
+      clusters[ci].num_chars = (after +% 1) -% clusters[ci].base_char;
+    }
+  }
+  if (backward) {
+    clusters[ci].advance = (clusters[ci].advance as u32 +% curradv) as i32;
+  } else {
+    clusters[ci].advance = to_i32(clusters[ci].advance as f32 + @fma(seg_adv_x, xscale, -(curradv as f32)));
+  }
+  ci += 1;
+
+  var var1: List<i32> = List();
+  while (infos.len() < glyph_count) {
+    infos.push(ShapedGlyph {});
+  }
+  for (let i in 0..glyph_count) {
+    var1.push(0);
+  }
+  for (let i in 0..ci) {
+    let c = clusters[i];
+    for (let j in 0..c.num_glyphs) {
+      let k = (c.base_glyph + j) as usize;
+      if (k < glyph_count && k < gids.len()) {
+        infos[k].glyph_id = gids[k];
+        infos[k].cluster = c.cluster;
+        var1[k] = c.advance;
+      }
+    }
+  }
+
+  // Positioning.
+  var currclus = 0xFFFFFFFFu32;
+  var curradvy = 0i32;
+  if (!backward) {
+    var curradvx = 0i32;
+    for (let k in 0..slots.len()) {
+      if (k >= glyph_count) {
+        break;
+      }
+      let sl& = seg.slots[slots[k] as usize];
+      var g = ShapedGlyph { glyph_id: infos[k].glyph_id, cluster: infos[k].cluster };
+      g.x_offset = to_i32(@fma(sl.position.x, xscale, -(curradvx as f32)));
+      g.y_offset = to_i32(@fma(sl.position.y, yscale, -(curradvy as f32)));
+      if (g.cluster != currclus) {
+        g.x_advance = var1[k];
+        curradvx = curradvx +% g.x_advance;
+        currclus = g.cluster;
+      } else {
+        g.x_advance = 0;
+      }
+      let ya = sl.advance.y * yscale;
+      g.y_advance = to_i32(ya);
+      curradvy = curradvy +% g.y_advance;
+      out.push(g);
+    }
+  } else {
+    let total = seg_adv_x * xscale;
+    var curradvx = to_i32(total);
+    for (let k in 0..slots.len()) {
+      if (k >= glyph_count) {
+        break;
+      }
+      let sl& = seg.slots[slots[k] as usize];
+      var g = ShapedGlyph { glyph_id: infos[k].glyph_id, cluster: infos[k].cluster };
+      if (g.cluster != currclus) {
+        g.x_advance = var1[k];
+        curradvx = curradvx -% g.x_advance;
+        currclus = g.cluster;
+      } else {
+        g.x_advance = 0;
+      }
+      let ya = sl.advance.y * yscale;
+      g.y_advance = to_i32(ya);
+      curradvy = curradvy -% g.y_advance;
+      let a = @fma(sl.position.x, xscale, -(var1[k] as f32));
+      let b = a - curradvx as f32;
+      g.x_offset = to_i32(b + g.x_advance as f32);
+      g.y_offset = to_i32(@fma(sl.position.y, yscale, -(curradvy as f32)));
+      out.push(g);
+    }
+  }
+  while (out.len() < glyph_count) {
+    out.push(infos[out.len()]);
+  }
+  if (backward) {
+    reverse_clusters(out);
+  }
+  return out;
+}

@@ -1,0 +1,328 @@
+// ugui/anim/json.{h,cc}: the minimal JSON value and parser behind .uganim.
+//
+// Differences in shape: `JsonValue::type` is `kind` (`type` is a C++ field
+// name only), the accessors that returned a nullable pointer return
+// `(&JsonValue)?`, `AsString` returns a `str` view ending at the first NUL.
+// Behavior is the C++'s, quirks included: a `\u` escape keeps the `u`; no
+// check for trailing data after the top-level value; a string left open at
+// the end of the text ends there and succeeds; numbers are read by C's
+// strtod (so "-inf", "-nan" and hex floats are numbers, as in the C++).
+
+module ultragui::anim::json;
+
+import {List} from akikit::containers::list;
+import {String, with_nul} from akikit::strings::string;
+
+// A const char* argument/result ends at its first NUL, even though a JSON
+// string's backing String can hold embedded NULs.
+fn c_string_prefix(s: str): str {
+  for (let i in 0..#s) {
+    if (s[i] == '\0') {
+      return s[..i];
+    }
+  }
+  return s;
+}
+
+pub enum JsonKind as u8 { Null, Bool, Number, String, Array, Object }
+
+pub struct JsonValue {
+  pub var kind: JsonKind = JsonKind::Null
+  pub var bool_val: bool = false
+  pub var number_val: f64 = 0.0
+  pub var string_val: String = String()
+
+  // Array storage
+  pub var array_val: List<JsonValue> = List()
+
+  // Object storage: parallel arrays, keys in file order.
+  pub var object_keys: List<String> = List()
+  pub var object_vals: List<JsonValue> = List()
+
+  // The first member named `key` of an object; none for any other kind.
+  pub fn get(self&, key: str): (&JsonValue)? {
+    if (self.kind != JsonKind::Object) {
+      return none;
+    }
+    let c_key = c_string_prefix(key);
+    for (let i in 0..self.object_keys.len()) {
+      if (self.object_keys[i] == c_key) {
+        return self.object_vals[i];
+      }
+    }
+    return none;
+  }
+
+  // Element `index` of an array; none out of range or for another kind.
+  pub fn at(self&, index: usize): (&JsonValue)? {
+    if (self.kind != JsonKind::Array || index >= self.array_val.len()) {
+      return none;
+    }
+    return self.array_val[index];
+  }
+
+  pub fn as_number(self&, def: f64 = 0.0): f64 => self.kind == JsonKind::Number ? self.number_val : def;
+
+  pub fn as_float(self&, def: f32 = 0.0): f32 => self.kind == JsonKind::Number ? self.number_val as f32 : def;
+
+  pub fn as_string(self&, def: str<'static> = ""): str =>
+    c_string_prefix(self.kind == JsonKind::String ? self.string_val.as_str() : def);
+
+  pub fn as_bool(self&, def: bool = false): bool => self.kind == JsonKind::Bool ? self.bool_val : def;
+
+  pub fn size(self&): usize {
+    if (self.kind == JsonKind::Array) {
+      return self.array_val.len();
+    }
+    if (self.kind == JsonKind::Object) {
+      return self.object_keys.len();
+    }
+    return 0;
+  }
+}
+
+extern fn strtod(s: *const c_char, end: *var *const c_char): f64;
+
+// A character strtod can be in the middle of reading a number: digits, signs,
+// the point, exponent and hex letters, inf/nan words and nan's "(chars)".
+fn is_number_char(c: c8): bool =>
+  c is '0'..='9' | 'a'..='z' | 'A'..='Z' | '.' | '+' | '-' | '(' | ')' | '_';
+
+fn is_ws(c: c8): bool => c == ' ' || c == '\t' || c == '\n' || c == '\r';
+
+struct JsonParser<'a> {
+  let text: str<'a>
+  var p: usize = 0
+
+  fn of(text: str<'a>): JsonParser<'a> => JsonParser { text, p: 0 };
+
+  fn eof(self&): bool => self.p >= #self.text;
+
+  fn skip_ws(var self&) {
+    while (self.p < #self.text && is_ws(self.text[self.p])) {
+      self.p += 1;
+    }
+  }
+
+  fn parse_value(var self&, var out&: JsonValue): bool;
+  fn parse_string(var self&, var out&: JsonValue): bool;
+  fn parse_number(var self&, var out&: JsonValue): bool;
+  fn parse_bool(var self&, var out&: JsonValue): bool;
+  fn parse_null(var self&, var out&: JsonValue): bool;
+  fn parse_object(var self&, var out&: JsonValue): bool;
+  fn parse_array(var self&, var out&: JsonValue): bool;
+
+  // Whether the text at p starts with `word` (memcmp over what is left).
+  fn looking_at(self&, word: str): bool => #self.text - self.p >= #word && self.text[self.p..self.p + #word] == word;
+}
+
+fn JsonParser::parse_value(var self&, var out&: JsonValue): bool {
+  self.skip_ws();
+  if (self.eof()) {
+    return false;
+  }
+  let c = self.text[self.p];
+  if (c == '"') {
+    return self.parse_string(out);
+  }
+  if (c == '{') {
+    return self.parse_object(out);
+  }
+  if (c == '[') {
+    return self.parse_array(out);
+  }
+  if (c == 't' || c == 'f') {
+    return self.parse_bool(out);
+  }
+  if (c == 'n') {
+    return self.parse_null(out);
+  }
+  if (c == '-' || (c >= '0' && c <= '9')) {
+    return self.parse_number(out);
+  }
+  return false;
+}
+
+fn JsonParser::parse_string(var self&, var out&: JsonValue): bool {
+  out.kind = JsonKind::String;
+  out.string_val.clear();
+  self.p += 1;  // skip opening "
+  // Text between escapes is copied as runs, so multi-byte characters pass
+  // through whole; a run starts and ends next to an ASCII byte.
+  var run = self.p;
+  while (self.p < #self.text && self.text[self.p] != '"') {
+    if (self.text[self.p] == '\\') {
+      out.string_val.push_str(self.text[run..self.p]);
+      self.p += 1;
+      if (self.p >= #self.text) {
+        return false;
+      }
+      let e = self.text[self.p];
+      if (e == 'n') {
+        out.string_val.push_c8('\n');
+      } else if (e == 't') {
+        out.string_val.push_c8('\t');
+      } else if (e == 'r') {
+        out.string_val.push_c8('\r');
+      } else {
+        // '"', '\\', '/' and every other escape: the character itself
+        // (including 'u', which is not decoded). Keep it in the next run:
+        // it may begin a multi-byte UTF-8 character, not a standalone c8.
+        run = self.p;
+        self.p += 1;
+        continue;
+      }
+      self.p += 1;
+      run = self.p;
+    } else {
+      self.p += 1;
+    }
+  }
+  out.string_val.push_str(self.text[run..self.p]);
+  if (self.p < #self.text) {
+    self.p += 1;  // skip closing "
+  }
+  return true;
+}
+
+fn JsonParser::parse_number(var self&, var out&: JsonValue): bool {
+  out.kind = JsonKind::Number;
+  var q = self.p;
+  while (q < #self.text && is_number_char(self.text[q])) {
+    q += 1;
+  }
+  // strtod wants a NUL-terminated string; the run holds everything it could
+  // read, so cutting the text there changes nothing.
+  let buf = with_nul(self.text[self.p..q]);
+  var num_end: *const c_char = null;
+  var value: f64 = 0.0;
+  var used: usize = 0;
+  unsafe {
+    let start = @ptr(buf.as_str()) as *const c_char;
+    value = strtod(start, &raw var num_end);
+    used = (num_end as usize) - (start as usize);
+  }
+  if (used == 0) {
+    return false;
+  }
+  out.number_val = value;
+  self.p += used;
+  return true;
+}
+
+fn JsonParser::parse_bool(var self&, var out&: JsonValue): bool {
+  out.kind = JsonKind::Bool;
+  if (self.looking_at("true")) {
+    out.bool_val = true;
+    self.p += 4;
+    return true;
+  }
+  if (self.looking_at("false")) {
+    out.bool_val = false;
+    self.p += 5;
+    return true;
+  }
+  return false;
+}
+
+fn JsonParser::parse_null(var self&, var out&: JsonValue): bool {
+  out.kind = JsonKind::Null;
+  if (self.looking_at("null")) {
+    self.p += 4;
+    return true;
+  }
+  return false;
+}
+
+fn JsonParser::parse_object(var self&, var out&: JsonValue): bool {
+  out.kind = JsonKind::Object;
+  out.object_keys.clear();
+  out.object_vals.clear();
+  self.p += 1;  // skip '{'
+  self.skip_ws();
+  if (self.p < #self.text && self.text[self.p] == '}') {
+    self.p += 1;
+    return true;
+  }
+
+  while (self.p < #self.text) {
+    self.skip_ws();
+    if (self.p >= #self.text || self.text[self.p] != '"') {
+      return false;
+    }
+    var key = JsonValue {};
+    if (!self.parse_string(key)) {
+      return false;
+    }
+
+    self.skip_ws();
+    if (self.p >= #self.text || self.text[self.p] != ':') {
+      return false;
+    }
+    self.p += 1;
+
+    var val = JsonValue {};
+    if (!self.parse_value(val)) {
+      return false;
+    }
+    out.object_keys.push(key.string_val);
+    out.object_vals.push(val);
+
+    self.skip_ws();
+    if (self.p < #self.text && self.text[self.p] == ',') {
+      self.p += 1;
+      continue;
+    }
+    if (self.p < #self.text && self.text[self.p] == '}') {
+      self.p += 1;
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+fn JsonParser::parse_array(var self&, var out&: JsonValue): bool {
+  out.kind = JsonKind::Array;
+  out.array_val.clear();
+  self.p += 1;  // skip '['
+  self.skip_ws();
+  if (self.p < #self.text && self.text[self.p] == ']') {
+    self.p += 1;
+    return true;
+  }
+
+  while (self.p < #self.text) {
+    var val = JsonValue {};
+    if (!self.parse_value(val)) {
+      return false;
+    }
+    out.array_val.push(val);
+
+    self.skip_ws();
+    if (self.p < #self.text && self.text[self.p] == ',') {
+      self.p += 1;
+      continue;
+    }
+    if (self.p < #self.text && self.text[self.p] == ']') {
+      self.p += 1;
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+// ParseJson: parses `data` into `out`. The value is the first one in the
+// text; whatever follows it is ignored. On false `out` holds the part that
+// was read.
+pub fn parse_json(data: str, var out&: JsonValue): bool {
+  var parser = JsonParser::of(data);
+  return parser.parse_value(out);
+}
+
+// A JsonValue for the text, none where parse_json fails.
+pub fn parse_json_value(data: str): JsonValue? {
+  var out = JsonValue {};
+  return parse_json(data, out) ? out : none;
+}

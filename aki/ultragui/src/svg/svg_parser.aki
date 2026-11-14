@@ -1,0 +1,1513 @@
+// ugui/svg/svg_parser.cc: the minimal XML tokenizer, color/paint/transform/
+// path-data/style parsing, basic shapes and gradients, and ParseSvg.
+//
+// Text the C++ reads as a NUL-terminated `const char*` is a `CText` (an
+// attribute value, a style value) read by byte position; numbers come from
+// libc's strtof/strtod through it (ultragui::sys::c_text), so they are the
+// C++'s numbers. The XML itself is read from `bytes` with explicit bounds, as
+// in the C++.
+//
+// Differences in shape: `ParseSvg(data, length, out)` is `parse_svg(data)`
+// returning the document (none where the C++ returns false);
+// `ParsePathData(d, path)` is `parse_path_data(d, path)`; the C++ attribute
+// lookups returning `const char*` return `(&CText)?`.
+//
+// Three C++ loops never end on malformed input (text before the root, a
+// stray close tag at top level, a path-data or polyline `points` value that
+// stops being numbers). Each ends here at the first iteration that consumes
+// no input; everything else about them is the C++.
+//
+// Known C++ quirks kept: a gradient stop without an `offset` has an
+// uninitialized offset in the C++ (here 0); `style=` on a <stop> is parsed
+// and ignored (the comment there says it wins; it does not).
+
+module ultragui::svg::svg_parser;
+
+import {List} from akikit::containers::list;
+import {String, from_str} from akikit::strings::string;
+import {intro_sort} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {Vec2, clamp} from ultragui::core::math;
+import {CText} from ultragui::sys::c_text;
+import {Document, FillRule, Gradient, GradientStop, GradientType, Paint, PaintType, Path, Shape, SpreadMethod, Transform} from ultragui::svg::svg_types;
+
+// ============================================================================
+// Character classes (the C locale's isspace/isalpha/isalnum/tolower)
+// ============================================================================
+
+fn is_space(c: u8): bool => c == 32 || (c >= 9 && c <= 13);
+fn is_alpha(c: u8): bool => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+fn is_alnum(c: u8): bool => is_alpha(c) || (c >= 48 && c <= 57);
+fn to_lower(c: u8): u8 => (c >= 65 && c <= 90) ? c + 32 : c;
+
+// `strncmp(t + p, lit, #lit) == 0`: lit has no NUL, so this is a prefix test.
+fn starts_at(t&: CText, p: usize, lit: str): bool {
+  for (let i in 0..#lit) {
+    if (t.at(p + i) != lit[i] as u8) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// `strchr(t, c) != nullptr`.
+fn has_char(t&: CText, c: u8): bool {
+  for (let i in 0..t.len()) {
+    if (t.at(i) == c) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// atof(t) as f32: strtod, then the conversion to float.
+fn atof_f32(t&: CText): f32 => t.strtod_at(0).0 as f32;
+
+// A String of `b`'s bytes as they are (the C++ String(first, last)).
+fn string_of(b: bytes): String {
+  var out = String();
+  unsafe out.push_bytes(@ptr(b) as *const u8, #b);
+  return out;
+}
+
+// ============================================================================
+// Minimal XML tokenizer
+// ============================================================================
+
+struct XmlAttr {
+  pub var name: String
+  pub var value: CText
+}
+
+struct XmlNode {
+  pub var tag: String
+  pub var attrs: List<XmlAttr>
+  pub var children: List<XmlNode>
+
+  pub fn XmlNode(): XmlNode => XmlNode { tag: String(), attrs: List(), children: List() };
+
+  pub fn attr(self&, name: str): (&CText)? {
+    for (let a& in self.attrs) {
+      if (a.name == name) {
+        return a.value;
+      }
+    }
+    return none;
+  }
+
+  pub fn attr_f(self&, name: str, def: f32 = 0.0): f32 {
+    if (let v = self.attr(name)) {
+      return atof_f32(v);
+    }
+    return def;
+  }
+}
+
+struct XmlParser {
+  pub let data: bytes
+  pub var p: usize
+
+  pub fn eof(self&): bool => self.p >= #self.data;
+  pub fn peek(self&): u8 => self.eof() ? 0 : self.data[self.p] as u8;
+  pub fn next(var self&): u8 {
+    if (self.eof()) {
+      return 0;
+    }
+    let c = self.data[self.p] as u8;
+    self.p += 1;
+    return c;
+  }
+
+  pub fn skip_ws(var self&) {
+    while (!self.eof() && is_space(self.data[self.p] as u8)) {
+      self.p += 1;
+    }
+  }
+
+  pub fn skip_until(var self&, seq: str) {
+    let len = #seq;
+    while (!self.eof()) {
+      if (#self.data - self.p >= len && self.matches(seq)) {
+        self.p += len;
+        return;
+      }
+      self.p += 1;
+    }
+  }
+
+  // memcmp(p, seq, #seq) == 0, with the bounds checked by the caller.
+  fn matches(self&, seq: str): bool {
+    for (let i in 0..#seq) {
+      if (self.data[self.p + i] as u8 != seq[i] as u8) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  pub fn read_name(var self&): String {
+    let start = self.p;
+    while (!self.eof()) {
+      let c = self.data[self.p] as u8;
+      if (!(is_alnum(c) || c == '-' as u8 || c == '_' as u8 || c == ':' as u8 || c == '.' as u8)) {
+        break;
+      }
+      self.p += 1;
+    }
+    return string_of(self.data[start..self.p]);
+  }
+
+  pub fn read_quoted(var self&): String {
+    let q = self.next();  // consume opening quote
+    let start = self.p;
+    while (!self.eof() && self.data[self.p] as u8 != q) {
+      self.p += 1;
+    }
+    let result = string_of(self.data[start..self.p]);
+    if (!self.eof()) {
+      self.p += 1;  // consume closing quote
+    }
+    return result;
+  }
+
+  pub fn parse_node(var self&, var node&: XmlNode): bool;
+}
+
+fn XmlParser::parse_node(var self&, var node&: XmlNode): bool {
+  self.skip_ws();
+  if (self.eof() || self.peek() != '<' as u8) {
+    return false;
+  }
+  self.p += 1;  // skip '<'
+
+  // Skip comments, CDATA, processing instructions, DOCTYPE
+  if (self.peek() == '!' as u8) {
+    if (#self.data - self.p >= 2 && self.data[self.p] as u8 == '!' as u8 && self.data[self.p + 1] as u8 == '-' as u8) {
+      self.skip_until("-->");
+      return false;  // signal: skip, not a real node
+    }
+    // DOCTYPE or CDATA
+    self.skip_until(">");
+    return false;
+  }
+  if (self.peek() == '?' as u8) {
+    self.skip_until("?>");
+    return false;
+  }
+  if (self.peek() == '/' as u8) {
+    // Close tag: caller handles this
+    return false;
+  }
+
+  node.tag = self.read_name();
+  if (node.tag.is_empty()) {
+    return false;
+  }
+
+  // Parse attributes
+  while (true) {
+    self.skip_ws();
+    if (self.eof()) {
+      break;
+    }
+    if (self.peek() == '/' as u8 || self.peek() == '>' as u8) {
+      break;
+    }
+    let name = self.read_name();
+    if (name.is_empty()) {
+      self.p += 1;
+      continue;
+    }
+    var value = String();
+    self.skip_ws();
+    if (self.peek() == '=' as u8) {
+      self.p += 1;
+      self.skip_ws();
+      if (self.peek() == '"' as u8 || self.peek() == '\'' as u8) {
+        value = self.read_quoted();
+      }
+    }
+    node.attrs.push(XmlAttr { name, value: CText(value.as_str()) });
+  }
+
+  var self_closing = false;
+  if (self.peek() == '/' as u8) {
+    self_closing = true;
+    self.p += 1;
+  }
+  if (self.peek() == '>' as u8) {
+    self.p += 1;
+  }
+
+  if (self_closing) {
+    return true;
+  }
+
+  // Parse children
+  while (true) {
+    self.skip_ws();
+    if (self.eof()) {
+      break;
+    }
+    if (self.peek() == '<' as u8) {
+      if (self.p + 1 < #self.data && self.data[self.p + 1] as u8 == '/' as u8) {
+        // Close tag for current node
+        self.p += 2;
+        self.read_name();  // consume tag name
+        self.skip_ws();
+        if (self.peek() == '>' as u8) {
+          self.p += 1;
+        }
+        break;
+      }
+      var child = XmlNode();
+      if (self.parse_node(child) && !child.tag.is_empty()) {
+        node.children.push(child);
+      }
+    } else {
+      // Text content: skip for SVG
+      while (!self.eof() && self.peek() != '<' as u8) {
+        self.p += 1;
+      }
+    }
+  }
+  return true;
+}
+
+// ============================================================================
+// Color parsing
+// ============================================================================
+
+// parse_hex_digit(c, out): the digit, none for a non-hex character (the
+// caller's slot stays 0).
+fn hex_digit(c: u8): u32? {
+  if (c >= '0' as u8 && c <= '9' as u8) {
+    return (c - '0' as u8) as u32;
+  }
+  if (c >= 'a' as u8 && c <= 'f' as u8) {
+    return (c - 'a' as u8) as u32 + 10;
+  }
+  if (c >= 'A' as u8 && c <= 'F' as u8) {
+    return (c - 'A' as u8) as u32 + 10;
+  }
+  return none;
+}
+
+struct NamedColor : Copy {
+  pub let name: str
+  pub let hex: u32
+}
+
+static let kNamed: [NamedColor; 136] = [
+  NamedColor { name: "black", hex: 0x000000 },
+  NamedColor { name: "white", hex: 0xFFFFFF },
+  NamedColor { name: "red", hex: 0xFF0000 },
+  NamedColor { name: "green", hex: 0x008000 },
+  NamedColor { name: "blue", hex: 0x0000FF },
+  NamedColor { name: "yellow", hex: 0xFFFF00 },
+  NamedColor { name: "cyan", hex: 0x00FFFF },
+  NamedColor { name: "magenta", hex: 0xFF00FF },
+  NamedColor { name: "orange", hex: 0xFFA500 },
+  NamedColor { name: "purple", hex: 0x800080 },
+  NamedColor { name: "pink", hex: 0xFFC0CB },
+  NamedColor { name: "brown", hex: 0xA52A2A },
+  NamedColor { name: "gray", hex: 0x808080 },
+  NamedColor { name: "grey", hex: 0x808080 },
+  NamedColor { name: "silver", hex: 0xC0C0C0 },
+  NamedColor { name: "maroon", hex: 0x800000 },
+  NamedColor { name: "olive", hex: 0x808000 },
+  NamedColor { name: "lime", hex: 0x00FF00 },
+  NamedColor { name: "aqua", hex: 0x00FFFF },
+  NamedColor { name: "teal", hex: 0x008080 },
+  NamedColor { name: "navy", hex: 0x000080 },
+  NamedColor { name: "fuchsia", hex: 0xFF00FF },
+  NamedColor { name: "gold", hex: 0xFFD700 },
+  NamedColor { name: "coral", hex: 0xFF7F50 },
+  NamedColor { name: "tomato", hex: 0xFF6347 },
+  NamedColor { name: "salmon", hex: 0xFA8072 },
+  NamedColor { name: "crimson", hex: 0xDC143C },
+  NamedColor { name: "darkred", hex: 0x8B0000 },
+  NamedColor { name: "darkgreen", hex: 0x006400 },
+  NamedColor { name: "darkblue", hex: 0x00008B },
+  NamedColor { name: "lightgray", hex: 0xD3D3D3 },
+  NamedColor { name: "lightgrey", hex: 0xD3D3D3 },
+  NamedColor { name: "darkgray", hex: 0xA9A9A9 },
+  NamedColor { name: "darkgrey", hex: 0xA9A9A9 },
+  NamedColor { name: "dimgray", hex: 0x696969 },
+  NamedColor { name: "dimgrey", hex: 0x696969 },
+  NamedColor { name: "whitesmoke", hex: 0xF5F5F5 },
+  NamedColor { name: "ivory", hex: 0xFFFFF0 },
+  NamedColor { name: "beige", hex: 0xF5F5DC },
+  NamedColor { name: "linen", hex: 0xFAF0E6 },
+  NamedColor { name: "honeydew", hex: 0xF0FFF0 },
+  NamedColor { name: "indianred", hex: 0xCD5C5C },
+  NamedColor { name: "firebrick", hex: 0xB22222 },
+  NamedColor { name: "orangered", hex: 0xFF4500 },
+  NamedColor { name: "darkorange", hex: 0xFF8C00 },
+  NamedColor { name: "khaki", hex: 0xF0E68C },
+  NamedColor { name: "darkkhaki", hex: 0xBDB76B },
+  NamedColor { name: "plum", hex: 0xDDA0DD },
+  NamedColor { name: "violet", hex: 0xEE82EE },
+  NamedColor { name: "orchid", hex: 0xDA70D6 },
+  NamedColor { name: "mediumpurple", hex: 0x9370DB },
+  NamedColor { name: "indigo", hex: 0x4B0082 },
+  NamedColor { name: "slateblue", hex: 0x6A5ACD },
+  NamedColor { name: "chartreuse", hex: 0x7FFF00 },
+  NamedColor { name: "limegreen", hex: 0x32CD32 },
+  NamedColor { name: "springgreen", hex: 0x00FF7F },
+  NamedColor { name: "seagreen", hex: 0x2E8B57 },
+  NamedColor { name: "forestgreen", hex: 0x228B22 },
+  NamedColor { name: "olivedrab", hex: 0x6B8E23 },
+  NamedColor { name: "darkcyan", hex: 0x008B8B },
+  NamedColor { name: "lightblue", hex: 0xADD8E6 },
+  NamedColor { name: "deepskyblue", hex: 0x00BFFF },
+  NamedColor { name: "dodgerblue", hex: 0x1E90FF },
+  NamedColor { name: "royalblue", hex: 0x4169E1 },
+  NamedColor { name: "steelblue", hex: 0x4682B4 },
+  NamedColor { name: "midnightblue", hex: 0x191970 },
+  NamedColor { name: "cornflowerblue", hex: 0x6495ED },
+  NamedColor { name: "skyblue", hex: 0x87CEEB },
+  NamedColor { name: "turquoise", hex: 0x40E0D0 },
+  NamedColor { name: "chocolate", hex: 0xD2691E },
+  NamedColor { name: "sienna", hex: 0xA0522D },
+  NamedColor { name: "peru", hex: 0xCD853F },
+  NamedColor { name: "tan", hex: 0xD2B48C },
+  NamedColor { name: "rosybrown", hex: 0xBC8F8F },
+  NamedColor { name: "sandybrown", hex: 0xF4A460 },
+  NamedColor { name: "goldenrod", hex: 0xDAA520 },
+  NamedColor { name: "wheat", hex: 0xF5DEB3 },
+  NamedColor { name: "lemonchiffon", hex: 0xFFFACD },
+  NamedColor { name: "lightcoral", hex: 0xF08080 },
+  NamedColor { name: "lightsalmon", hex: 0xFFA07A },
+  NamedColor { name: "lightpink", hex: 0xFFB6C1 },
+  NamedColor { name: "hotpink", hex: 0xFF69B4 },
+  NamedColor { name: "deeppink", hex: 0xFF1493 },
+  NamedColor { name: "mistyrose", hex: 0xFFE4E1 },
+  NamedColor { name: "lavender", hex: 0xE6E6FA },
+  NamedColor { name: "thistle", hex: 0xD8BFD8 },
+  NamedColor { name: "snow", hex: 0xFFFAFA },
+  NamedColor { name: "ghostwhite", hex: 0xF8F8FF },
+  NamedColor { name: "floralwhite", hex: 0xFFFAF0 },
+  NamedColor { name: "aliceblue", hex: 0xF0F8FF },
+  NamedColor { name: "antiquewhite", hex: 0xFAEBD7 },
+  NamedColor { name: "azure", hex: 0xF0FFFF },
+  NamedColor { name: "mintcream", hex: 0xF5FFFA },
+  NamedColor { name: "oldlace", hex: 0xFDF5E6 },
+  NamedColor { name: "papayawhip", hex: 0xFFEFD5 },
+  NamedColor { name: "blanchedalmond", hex: 0xFFEBCD },
+  NamedColor { name: "bisque", hex: 0xFFE4C4 },
+  NamedColor { name: "moccasin", hex: 0xFFE4B5 },
+  NamedColor { name: "navajowhite", hex: 0xFFDEAD },
+  NamedColor { name: "peachpuff", hex: 0xFFDAB9 },
+  NamedColor { name: "seashell", hex: 0xFFF5EE },
+  NamedColor { name: "cornsilk", hex: 0xFFF8DC },
+  NamedColor { name: "lightyellow", hex: 0xFFFFE0 },
+  NamedColor { name: "lightgoldenrodyellow", hex: 0xFAFAD2 },
+  NamedColor { name: "palegreen", hex: 0x98FB98 },
+  NamedColor { name: "lightgreen", hex: 0x90EE90 },
+  NamedColor { name: "mediumseagreen", hex: 0x3CB371 },
+  NamedColor { name: "darkseagreen", hex: 0x8FBC8F },
+  NamedColor { name: "mediumaquamarine", hex: 0x66CDAA },
+  NamedColor { name: "aquamarine", hex: 0x7FFFD4 },
+  NamedColor { name: "paleturquoise", hex: 0xAFEEEE },
+  NamedColor { name: "lightcyan", hex: 0xE0FFFF },
+  NamedColor { name: "mediumturquoise", hex: 0x48D1CC },
+  NamedColor { name: "darkturquoise", hex: 0x00CED1 },
+  NamedColor { name: "cadetblue", hex: 0x5F9EA0 },
+  NamedColor { name: "powderblue", hex: 0xB0E0E6 },
+  NamedColor { name: "lightsteelblue", hex: 0xB0C4DE },
+  NamedColor { name: "slategray", hex: 0x708090 },
+  NamedColor { name: "slategrey", hex: 0x708090 },
+  NamedColor { name: "lightslategray", hex: 0x778899 },
+  NamedColor { name: "lightslategrey", hex: 0x778899 },
+  NamedColor { name: "mediumslateblue", hex: 0x7B68EE },
+  NamedColor { name: "mediumbluE", hex: 0x0000CD },
+  NamedColor { name: "darkviolet", hex: 0x9400D3 },
+  NamedColor { name: "darkorchid", hex: 0x9932CC },
+  NamedColor { name: "darkmagenta", hex: 0x8B008B },
+  NamedColor { name: "blueviolet", hex: 0x8A2BE2 },
+  NamedColor { name: "mediumvioletred", hex: 0xC71585 },
+  NamedColor { name: "palevioletred", hex: 0xDB7093 },
+  NamedColor { name: "mediumorchid", hex: 0xBA55D3 },
+  NamedColor { name: "mediumspringgreen", hex: 0x00FA9A },
+  NamedColor { name: "yellowgreen", hex: 0x9ACD32 },
+  NamedColor { name: "darkolivegreen", hex: 0x556B2F },
+  NamedColor { name: "greenyellow", hex: 0xADFF2F },
+  NamedColor { name: "lawngreen", hex: 0x7CFC00 },
+  NamedColor { name: "darksalmon", hex: 0xE9967A },
+];
+
+// Case-insensitive (ASCII) equality of s with `name`.
+fn eq_ignore_case(s&: CText, name: str): bool {
+  if (s.len() != #name) {
+    return false;
+  }
+  for (let i in 0..#name) {
+    if (to_lower(s.at(i)) != to_lower(name[i] as u8)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn parse_color(s&: CText): Color {
+  if (s.len() == 0) {
+    return Color::black();
+  }
+
+  // Named colors
+  for (let nc& in kNamed) {
+    if (eq_ignore_case(s, nc.name)) {
+      return Color::from_hex(nc.hex);
+    }
+  }
+
+  // #RGB, #RRGGBB, #RRGGBBAA
+  if (s.at(0) == '#' as u8) {
+    let len = s.len() - 1;
+    var digits: [u32; 8] = [0; 8];
+    for (let i in 0..(len < 8 ? len : 8)) {
+      if (let d = hex_digit(s.at(1 + i))) {
+        digits[i] = d;
+      }
+    }
+
+    if (len == 3) {
+      return Color::from_rgba8((digits[0] * 17) as u8, (digits[1] * 17) as u8, (digits[2] * 17) as u8);
+    }
+    if (len == 4) {
+      return Color::from_rgba8((digits[0] * 17) as u8, (digits[1] * 17) as u8, (digits[2] * 17) as u8, (digits[3] * 17) as u8);
+    }
+    if (len == 6) {
+      return Color::from_rgba8((digits[0] * 16 + digits[1]) as u8, (digits[2] * 16 + digits[3]) as u8, (digits[4] * 16 + digits[5]) as u8);
+    }
+    if (len == 8) {
+      return Color::from_rgba8((digits[0] * 16 + digits[1]) as u8, (digits[2] * 16 + digits[3]) as u8, (digits[4] * 16 + digits[5]) as u8, (digits[6] * 16 + digits[7]) as u8);
+    }
+    return Color::black();
+  }
+
+  // rgb(r, g, b) or rgba(r, g, b, a)
+  if (starts_at(s, 0, "rgb")) {
+    var p: usize = 3;
+    if (s.at(p) == 'a' as u8) {
+      p += 1;
+    }
+    if (s.at(p) == '(' as u8) {
+      p += 1;
+    }
+    var vals: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    var i: usize = 0;
+    while (i < 4 && s.at(p) != 0) {
+      while (s.at(p) != 0 && (is_space(s.at(p)) || s.at(p) == ',' as u8)) {
+        p += 1;
+      }
+      if (s.at(p) == ')' as u8) {
+        break;
+      }
+      vals[i] = s.strtod_at(p).0 as f32;
+      // Check for percentage
+      while (s.at(p) != 0 && s.at(p) != ',' as u8 && s.at(p) != ')' as u8 && !is_space(s.at(p))) {
+        if (s.at(p) == '%' as u8) {
+          vals[i] /= 100.0;
+          if (i < 3) {
+            vals[i] *= 255.0;
+          }
+        }
+        p += 1;
+      }
+      i += 1;
+    }
+    return Color::from_rgba8(
+      @saturating_cast(u8, clamp(vals[0], 0.0, 255.0)),
+      @saturating_cast(u8, clamp(vals[1], 0.0, 255.0)),
+      @saturating_cast(u8, clamp(vals[2], 0.0, 255.0)),
+      @saturating_cast(u8, clamp(vals[3] * 255.0, 0.0, 255.0)));
+  }
+
+  return Color::black();
+}
+
+// ============================================================================
+// Paint parsing
+// ============================================================================
+
+fn parse_paint(s&: CText): Paint {
+  var paint = Paint {};
+  if (s.len() == 0 || s.as_str() == "none" || s.as_str() == "transparent") {
+    paint.type_ = PaintType::None;
+    return paint;
+  }
+  // url(#id) reference
+  if (starts_at(s, 0, "url(#")) {
+    let rest = s.as_str()[5..];
+    for (let i in 0..#rest) {
+      if (rest[i] == ')') {
+        paint.type_ = PaintType::GradientRef;
+        paint.gradient_id = from_str(rest[..i]);
+        break;
+      }
+    }
+    return paint;
+  }
+  paint.type_ = PaintType::Solid;
+  paint.color = parse_color(s);
+  return paint;
+}
+
+// ============================================================================
+// Number / coordinate parsing helpers
+// ============================================================================
+
+fn skip_ws_comma(t&: CText, p_in: usize): usize {
+  var p = p_in;
+  while (t.at(p) != 0 && (is_space(t.at(p)) || t.at(p) == ',' as u8)) {
+    p += 1;
+  }
+  return p;
+}
+
+fn parse_number(t&: CText, var p&: usize): f32 {
+  p = skip_ws_comma(t, p);
+  let (val, end) = t.strtof_at(p);
+  p = end;
+  return val;
+}
+
+// strtof(s, &end): units like px, pt, em are left unread.
+fn parse_coord_value(t&: CText): f32 => t.strtof_at(0).0;
+
+// ============================================================================
+// Transform parsing
+// ============================================================================
+
+// `while (*p && *p != '(') ++p; if (*p) ++p;`
+fn skip_to_open(t&: CText, var p&: usize) {
+  while (t.at(p) != 0 && t.at(p) != '(' as u8) {
+    p += 1;
+  }
+  if (t.at(p) != 0) {
+    p += 1;
+  }
+}
+
+// `while (*p && *p != ')') ++p; if (*p) ++p;`
+fn skip_past_close(t&: CText, var p&: usize) {
+  while (t.at(p) != 0 && t.at(p) != ')' as u8) {
+    p += 1;
+  }
+  if (t.at(p) != 0) {
+    p += 1;
+  }
+}
+
+fn parse_transform(s&: CText): Transform {
+  if (s.len() == 0) {
+    return Transform::identity();
+  }
+
+  var result = Transform::identity();
+  var p: usize = 0;
+
+  while (s.at(p) != 0) {
+    while (s.at(p) != 0 && is_space(s.at(p))) {
+      p += 1;
+    }
+    if (s.at(p) == 0) {
+      break;
+    }
+
+    var t = Transform::identity();
+
+    if (starts_at(s, p, "matrix")) {
+      p += 6;
+      skip_to_open(s, p);
+      t.a = parse_number(s, p);
+      t.b = parse_number(s, p);
+      t.c = parse_number(s, p);
+      t.d = parse_number(s, p);
+      t.e = parse_number(s, p);
+      t.f = parse_number(s, p);
+      skip_past_close(s, p);
+    } else if (starts_at(s, p, "translate")) {
+      p += 9;
+      skip_to_open(s, p);
+      let tx = parse_number(s, p);
+      p = skip_ws_comma(s, p);
+      let ty = (s.at(p) != 0 && s.at(p) != ')' as u8) ? parse_number(s, p) : 0.0;
+      t = Transform::translate(tx, ty);
+      skip_past_close(s, p);
+    } else if (starts_at(s, p, "scale")) {
+      p += 5;
+      skip_to_open(s, p);
+      let sx = parse_number(s, p);
+      p = skip_ws_comma(s, p);
+      let sy = (s.at(p) != 0 && s.at(p) != ')' as u8) ? parse_number(s, p) : sx;
+      t = Transform::scale(sx, sy);
+      skip_past_close(s, p);
+    } else if (starts_at(s, p, "rotate")) {
+      p += 6;
+      skip_to_open(s, p);
+      let angle = parse_number(s, p);
+      p = skip_ws_comma(s, p);
+      if (s.at(p) != 0 && s.at(p) != ')' as u8) {
+        let cx = parse_number(s, p);
+        let cy = parse_number(s, p);
+        t = Transform::translate(cx, cy).mul(Transform::rotate(angle)).mul(Transform::translate(-cx, -cy));
+      } else {
+        t = Transform::rotate(angle);
+      }
+      skip_past_close(s, p);
+    } else if (starts_at(s, p, "skewX")) {
+      p += 5;
+      skip_to_open(s, p);
+      let angle = parse_number(s, p);
+      let rad = angle * 3.14159265358979323846 / 180.0;
+      t.c = @tan(rad);
+      skip_past_close(s, p);
+    } else if (starts_at(s, p, "skewY")) {
+      p += 5;
+      skip_to_open(s, p);
+      let angle = parse_number(s, p);
+      let rad = angle * 3.14159265358979323846 / 180.0;
+      t.b = @tan(rad);
+      skip_past_close(s, p);
+    } else {
+      p += 1;  // skip unknown
+      continue;
+    }
+
+    result = result.mul(t);
+  }
+  return result;
+}
+
+// ============================================================================
+// SVG path data parsing (d="...")
+// ============================================================================
+
+comptime let kPi: f32 = 3.14159265358979323846;
+
+// fmaxf: the non-NaN operand when one is NaN.
+fn fmax_f32(a: f32, b: f32): f32 {
+  if (b != b) {
+    return a;
+  }
+  if (a != a) {
+    return b;
+  }
+  return a < b ? b : a;
+}
+
+fn angle_between(ux: f32, uy: f32, vx: f32, vy: f32): f32 {
+  let n = @sqrt((ux * ux + uy * uy) * (vx * vx + vy * vy));
+  if (n == 0.0) {
+    return 0.0;
+  }
+  var c = (ux * vx + uy * vy) / n;
+  c = clamp(c, -1.0, 1.0);
+  var a = @acos(c);
+  if (ux * vy - uy * vx < 0.0) {
+    a = -a;
+  }
+  return a;
+}
+
+// Convert SVG arc endpoint parameterization to center + cubic beziers.
+fn arc_to_cubics(var path&: Path, from: Vec2, rx_in: f32, ry_in: f32, x_rotation: f32, large_arc: bool, sweep: bool, to: Vec2) {
+  var rx = rx_in;
+  var ry = ry_in;
+  if (rx == 0.0 || ry == 0.0) {
+    path.line_to(to);
+    return;
+  }
+
+  let phi = x_rotation * kPi / 180.0;
+  let cos_phi = @cos(phi);
+  let sin_phi = @sin(phi);
+
+  let dx = (from.x - to.x) * 0.5;
+  let dy = (from.y - to.y) * 0.5;
+  let x1p = cos_phi * dx + sin_phi * dy;
+  let y1p = -sin_phi * dx + cos_phi * dy;
+
+  rx = @abs(rx);
+  ry = @abs(ry);
+
+  // Correct radii
+  let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+  if (lambda > 1.0) {
+    let s = @sqrt(lambda);
+    rx *= s;
+    ry *= s;
+  }
+
+  let rx2 = rx * rx;
+  let ry2 = ry * ry;
+  let x1p2 = x1p * x1p;
+  let y1p2 = y1p * y1p;
+
+  let num = rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2;
+  let den = rx2 * y1p2 + ry2 * x1p2;
+  var sq: f32 = (den > 0.0) ? @sqrt(fmax_f32(0.0, num / den)) : 0.0;
+  if (large_arc == sweep) {
+    sq = -sq;
+  }
+
+  let cxp = sq * rx * y1p / ry;
+  let cyp = sq * -ry * x1p / rx;
+
+  let cx = cos_phi * cxp - sin_phi * cyp + (from.x + to.x) * 0.5;
+  let cy = sin_phi * cxp + cos_phi * cyp + (from.y + to.y) * 0.5;
+
+  let theta1 = angle_between(1.0, 0.0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  var dtheta = angle_between((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+
+  if (!sweep && dtheta > 0.0) {
+    dtheta -= 2.0 * kPi;
+  }
+  if (sweep && dtheta < 0.0) {
+    dtheta += 2.0 * kPi;
+  }
+
+  // Split into segments of at most PI/2
+  var segments = @saturating_cast(i32, @ceil(@abs(dtheta) / (kPi * 0.5)));
+  if (segments < 1) {
+    segments = 1;
+  }
+  let seg_angle = dtheta / segments as f32;
+  let alpha = 4.0 / 3.0 * @tan(seg_angle * 0.25);
+
+  var cur_angle = theta1;
+  for (let i in 0..segments) {
+    let a0 = cur_angle;
+    let a1 = cur_angle + seg_angle;
+    let cos0 = @cos(a0);
+    let sin0 = @sin(a0);
+    let cos1 = @cos(a1);
+    let sin1 = @sin(a1);
+
+    // Unit circle control points
+    let ep1x = cos0 - alpha * sin0;
+    let ep1y = sin0 + alpha * cos0;
+    let ep2x = cos1 + alpha * sin1;
+    let ep2y = sin1 - alpha * cos1;
+    let ep3x = cos1;
+    let ep3y = sin1;
+
+    path.cubic_to(
+      arc_to_world(ep1x, ep1y, rx, ry, cos_phi, sin_phi, cx, cy),
+      arc_to_world(ep2x, ep2y, rx, ry, cos_phi, sin_phi, cx, cy),
+      arc_to_world(ep3x, ep3y, rx, ry, cos_phi, sin_phi, cx, cy));
+    cur_angle = a1;
+  }
+}
+
+// Scale and rotate a unit-circle point to the ellipse.
+fn arc_to_world(ex: f32, ey: f32, rx: f32, ry: f32, cos_phi: f32, sin_phi: f32, cx: f32, cy: f32): Vec2 {
+  let x = ex * rx;
+  let y = ey * ry;
+  return Vec2 { x: cos_phi * x - sin_phi * y + cx, y: sin_phi * x + cos_phi * y + cy };
+}
+
+// next_flag: one character, '1' is true, consumed whatever it is.
+fn next_flag(t&: CText, var p&: usize): bool {
+  p = skip_ws_comma(t, p);
+  let val = t.at(p) == '1' as u8;
+  if (t.at(p) != 0) {
+    p += 1;
+  }
+  return val;
+}
+
+// ParsePathData(d, path).
+pub fn parse_path_data(text: str, var path&: Path) {
+  parse_path_text(CText(text), path);
+}
+
+fn parse_path_text(d&: CText, var path&: Path) {
+  var p: usize = 0;
+  var cmd: u8 = 0;
+  var cur = Vec2 { x: 0.0, y: 0.0 };
+  var start = Vec2 { x: 0.0, y: 0.0 };      // start of current subpath
+  var last_ctrl = Vec2 { x: 0.0, y: 0.0 };  // last control point (for S/T)
+
+  while (d.at(p) != 0) {
+    p = skip_ws_comma(d, p);
+    if (d.at(p) == 0) {
+      break;
+    }
+    let loop_start = p;
+
+    // Check for command letter
+    if (is_alpha(d.at(p))) {
+      cmd = d.at(p);
+      p += 1;
+    }
+
+    let relative = cmd >= 'a' as u8 && cmd <= 'z' as u8;
+    let base = relative ? cur : Vec2 { x: 0.0, y: 0.0 };
+
+    match (cmd | 0x20) {  // to lowercase
+      109 => {  // 'm'
+        let x = parse_number(d, p) + base.x;
+        let y = parse_number(d, p) + base.y;
+        cur = Vec2 { x, y };
+        start = cur;
+        path.move_to(cur);
+        // Subsequent coordinates are implicit LineTo
+        cmd = relative ? 'l' as u8 : 'L' as u8;
+      }
+      108 => {  // 'l'
+        let x = parse_number(d, p) + base.x;
+        let y = parse_number(d, p) + base.y;
+        cur = Vec2 { x, y };
+        path.line_to(cur);
+      }
+      104 => {  // 'h'
+        let x = parse_number(d, p) + (relative ? cur.x : 0.0);
+        cur.x = x;
+        path.line_to(cur);
+      }
+      118 => {  // 'v'
+        let y = parse_number(d, p) + (relative ? cur.y : 0.0);
+        cur.y = y;
+        path.line_to(cur);
+      }
+      99 => {  // 'c'
+        let x1 = parse_number(d, p) + base.x;
+        let y1 = parse_number(d, p) + base.y;
+        let x2 = parse_number(d, p) + base.x;
+        let y2 = parse_number(d, p) + base.y;
+        let x = parse_number(d, p) + base.x;
+        let y = parse_number(d, p) + base.y;
+        path.cubic_to(Vec2 { x: x1, y: y1 }, Vec2 { x: x2, y: y2 }, Vec2 { x, y });
+        last_ctrl = Vec2 { x: x2, y: y2 };
+        cur = Vec2 { x, y };
+      }
+      115 => {  // 's'
+        // Reflect previous control point
+        let c1 = Vec2 { x: 2.0 * cur.x - last_ctrl.x, y: 2.0 * cur.y - last_ctrl.y };
+        let x2 = parse_number(d, p) + base.x;
+        let y2 = parse_number(d, p) + base.y;
+        let x = parse_number(d, p) + base.x;
+        let y = parse_number(d, p) + base.y;
+        path.cubic_to(c1, Vec2 { x: x2, y: y2 }, Vec2 { x, y });
+        last_ctrl = Vec2 { x: x2, y: y2 };
+        cur = Vec2 { x, y };
+      }
+      113 => {  // 'q'
+        let x1 = parse_number(d, p) + base.x;
+        let y1 = parse_number(d, p) + base.y;
+        let x = parse_number(d, p) + base.x;
+        let y = parse_number(d, p) + base.y;
+        // Convert quadratic to cubic
+        let c1 = Vec2 { x: cur.x + 2.0 / 3.0 * (x1 - cur.x), y: cur.y + 2.0 / 3.0 * (y1 - cur.y) };
+        let c2 = Vec2 { x: x + 2.0 / 3.0 * (x1 - x), y: y + 2.0 / 3.0 * (y1 - y) };
+        path.cubic_to(c1, c2, Vec2 { x, y });
+        last_ctrl = Vec2 { x: x1, y: y1 };
+        cur = Vec2 { x, y };
+      }
+      116 => {  // 't'
+        let ctrl = Vec2 { x: 2.0 * cur.x - last_ctrl.x, y: 2.0 * cur.y - last_ctrl.y };
+        let x = parse_number(d, p) + base.x;
+        let y = parse_number(d, p) + base.y;
+        let c1 = Vec2 { x: cur.x + 2.0 / 3.0 * (ctrl.x - cur.x), y: cur.y + 2.0 / 3.0 * (ctrl.y - cur.y) };
+        let c2 = Vec2 { x: x + 2.0 / 3.0 * (ctrl.x - x), y: y + 2.0 / 3.0 * (ctrl.y - y) };
+        path.cubic_to(c1, c2, Vec2 { x, y });
+        last_ctrl = ctrl;
+        cur = Vec2 { x, y };
+      }
+      97 => {  // 'a'
+        let rx = parse_number(d, p);
+        let ry = parse_number(d, p);
+        let x_rot = parse_number(d, p);
+        let large = next_flag(d, p);
+        let sweep = next_flag(d, p);
+        let x = parse_number(d, p) + base.x;
+        let y = parse_number(d, p) + base.y;
+        arc_to_cubics(path, cur, rx, ry, x_rot, large, sweep, Vec2 { x, y });
+        cur = Vec2 { x, y };
+        last_ctrl = cur;
+      }
+      122 => {  // 'z'
+        path.close();
+        cur = start;
+        last_ctrl = cur;
+      }
+      _ => {
+        p += 1;  // skip unknown
+      }
+    }
+
+    if (p == loop_start) {
+      break;  // no input consumed: the C++ loops forever here
+    }
+  }
+}
+
+// ============================================================================
+// SVG basic shape -> path conversion
+// ============================================================================
+
+fn rect_to_path(x: f32, y: f32, w: f32, h: f32, rx_in: f32, ry_in: f32): Path {
+  var rx = rx_in;
+  var ry = ry_in;
+  var path = Path();
+  if (rx <= 0.0 && ry <= 0.0) {
+    path.move_to(Vec2 { x, y });
+    path.line_to(Vec2 { x: x + w, y });
+    path.line_to(Vec2 { x: x + w, y: y + h });
+    path.line_to(Vec2 { x, y: y + h });
+    path.close();
+  } else {
+    if (rx > w * 0.5) {
+      rx = w * 0.5;
+    }
+    if (ry > h * 0.5) {
+      ry = h * 0.5;
+    }
+    if (rx > 0.0 && ry <= 0.0) {
+      ry = rx;
+    }
+    if (ry > 0.0 && rx <= 0.0) {
+      rx = ry;
+    }
+    // Kappa for 90-degree circular arc approximation
+    let k: f32 = 0.5522847498;
+    let kx = rx * k;
+    let ky = ry * k;
+
+    path.move_to(Vec2 { x: x + rx, y });
+    path.line_to(Vec2 { x: x + w - rx, y });
+    path.cubic_to(Vec2 { x: x + w - rx + kx, y }, Vec2 { x: x + w, y: y + ry - ky }, Vec2 { x: x + w, y: y + ry });
+    path.line_to(Vec2 { x: x + w, y: y + h - ry });
+    path.cubic_to(Vec2 { x: x + w, y: y + h - ry + ky }, Vec2 { x: x + w - rx + kx, y: y + h }, Vec2 { x: x + w - rx, y: y + h });
+    path.line_to(Vec2 { x: x + rx, y: y + h });
+    path.cubic_to(Vec2 { x: x + rx - kx, y: y + h }, Vec2 { x, y: y + h - ry + ky }, Vec2 { x, y: y + h - ry });
+    path.line_to(Vec2 { x, y: y + ry });
+    path.cubic_to(Vec2 { x, y: y + ry - ky }, Vec2 { x: x + rx - kx, y }, Vec2 { x: x + rx, y });
+    path.close();
+  }
+  return path;
+}
+
+fn circle_to_path(cx: f32, cy: f32, r: f32): Path {
+  var path = Path();
+  let k = r * 0.5522847498;
+  path.move_to(Vec2 { x: cx + r, y: cy });
+  path.cubic_to(Vec2 { x: cx + r, y: cy + k }, Vec2 { x: cx + k, y: cy + r }, Vec2 { x: cx, y: cy + r });
+  path.cubic_to(Vec2 { x: cx - k, y: cy + r }, Vec2 { x: cx - r, y: cy + k }, Vec2 { x: cx - r, y: cy });
+  path.cubic_to(Vec2 { x: cx - r, y: cy - k }, Vec2 { x: cx - k, y: cy - r }, Vec2 { x: cx, y: cy - r });
+  path.cubic_to(Vec2 { x: cx + k, y: cy - r }, Vec2 { x: cx + r, y: cy - k }, Vec2 { x: cx + r, y: cy });
+  path.close();
+  return path;
+}
+
+fn ellipse_to_path(cx: f32, cy: f32, rx: f32, ry: f32): Path {
+  var path = Path();
+  let kx = rx * 0.5522847498;
+  let ky = ry * 0.5522847498;
+  path.move_to(Vec2 { x: cx + rx, y: cy });
+  path.cubic_to(Vec2 { x: cx + rx, y: cy + ky }, Vec2 { x: cx + kx, y: cy + ry }, Vec2 { x: cx, y: cy + ry });
+  path.cubic_to(Vec2 { x: cx - kx, y: cy + ry }, Vec2 { x: cx - rx, y: cy + ky }, Vec2 { x: cx - rx, y: cy });
+  path.cubic_to(Vec2 { x: cx - rx, y: cy - ky }, Vec2 { x: cx - kx, y: cy - ry }, Vec2 { x: cx, y: cy - ry });
+  path.cubic_to(Vec2 { x: cx + kx, y: cy - ry }, Vec2 { x: cx + rx, y: cy - ky }, Vec2 { x: cx + rx, y: cy });
+  path.close();
+  return path;
+}
+
+fn line_to_path(x1: f32, y1: f32, x2: f32, y2: f32): Path {
+  var path = Path();
+  path.move_to(Vec2 { x: x1, y: y1 });
+  path.line_to(Vec2 { x: x2, y: y2 });
+  return path;
+}
+
+fn polyline_to_path(points_str: (&CText)?, close: bool): Path {
+  var path = Path();
+  let t = points_str else {
+    return path;
+  };
+
+  var p: usize = 0;
+  var first = true;
+  while (t.at(p) != 0) {
+    p = skip_ws_comma(t, p);
+    if (t.at(p) == 0) {
+      break;
+    }
+    let before = p;
+    let x = parse_number(t, p);
+    let y = parse_number(t, p);
+    if (p == before) {
+      break;  // not a number: the C++ loops forever here
+    }
+    if (first) {
+      path.move_to(Vec2 { x, y });
+      first = false;
+    } else {
+      path.line_to(Vec2 { x, y });
+    }
+  }
+  if (close && !first) {
+    path.close();
+  }
+  return path;
+}
+
+// ============================================================================
+// Style attribute parsing ("fill:red;stroke:blue;stroke-width:2")
+// ============================================================================
+
+struct StyleAttrs {
+  pub var fill: CText? = none
+  pub var stroke: CText? = none
+  pub var stroke_width: CText? = none
+  pub var opacity: CText? = none
+  pub var fill_opacity: CText? = none
+  pub var stroke_opacity: CText? = none
+  pub var fill_rule: CText? = none
+  pub var transform: CText? = none
+}
+
+fn parse_style_attr(style: (&CText)?, var out&: StyleAttrs) {
+  let st = style else {
+    return;
+  };
+  let s = st.as_str();
+  let n = #s;
+  var p: usize = 0;
+  while (p < n) {
+    while (p < n && is_space(s[p] as u8)) {
+      p += 1;
+    }
+    let key_start = p;
+    while (p < n && s[p] != ':' && s[p] != ';') {
+      p += 1;
+    }
+    if (p >= n || s[p] != ':') {
+      if (p < n) {
+        p += 1;
+      }
+      continue;
+    }
+    let key = s[key_start..p];
+    p += 1;  // skip ':'
+    while (p < n && is_space(s[p] as u8)) {
+      p += 1;
+    }
+    let val_start = p;
+    while (p < n && s[p] != ';') {
+      p += 1;
+    }
+    // Trim trailing whitespace
+    var val_end = p;
+    while (val_end > val_start && is_space(s[val_end - 1] as u8)) {
+      val_end -= 1;
+    }
+    let val = CText(s[val_start..val_end]);
+
+    if (key == "fill") {
+      out.fill = val;
+    } else if (key == "stroke") {
+      out.stroke = val;
+    } else if (key == "stroke-width") {
+      out.stroke_width = val;
+    } else if (key == "opacity") {
+      out.opacity = val;
+    } else if (key == "fill-opacity") {
+      out.fill_opacity = val;
+    } else if (key == "stroke-opacity") {
+      out.stroke_opacity = val;
+    } else if (key == "fill-rule") {
+      out.fill_rule = val;
+    } else if (key == "transform") {
+      out.transform = val;
+    }
+
+    if (p < n) {
+      p += 1;  // skip ';'
+    }
+  }
+}
+
+// ============================================================================
+// Gradient parsing
+// ============================================================================
+
+fn parse_gradient_stops(node&: XmlNode, var grad&: Gradient) {
+  for (let child& in node.children) {
+    if (child.tag != "stop") {
+      continue;
+    }
+    var stop = GradientStop {};
+    if (let offset_str = child.attr("offset")) {
+      stop.offset = atof_f32(offset_str);
+      if (has_char(offset_str, '%' as u8)) {
+        stop.offset /= 100.0;
+      }
+    }
+    if (let color_str = child.attr("stop-color")) {
+      stop.color = parse_color(color_str);
+    } else {
+      stop.color = Color::black();
+    }
+
+    if (let opacity_str = child.attr("stop-opacity")) {
+      stop.color = stop.color.with_alpha(atof_f32(opacity_str));
+    }
+
+    // The C++ also parses the stop's style attribute here and drops the
+    // result ("style wins over attributes" is not implemented).
+
+    grad.stops.push(stop);
+  }
+  // Coincident stops (a hard color edge) are a tie whose order decides the
+  // color on each side, so this must be std::sort's exact order: IntroSort.
+  intro_sort(grad.stops.as_slice_var(), fn(a&: GradientStop, b&: GradientStop): bool => a.offset < b.offset);
+}
+
+// `grad.stops = base_grad->stops` for an href to an earlier gradient.
+fn inherit_stops(node&: XmlNode, doc&: Document, var grad&: Gradient) {
+  var href = node.attr("href");
+  if (href == none) {
+    href = node.attr("xlink:href");
+  }
+  if (let h = href) {
+    if (h.at(0) == '#' as u8) {
+      if (let base_grad = doc.gradients.get(from_str(h.as_str()[1..]))) {
+        if (grad.stops.len() == 0) {
+          grad.stops = base_grad.stops.clone();
+        }
+      }
+    }
+  }
+}
+
+fn parse_spread(node&: XmlNode): SpreadMethod {
+  var spread = SpreadMethod::Pad;
+  if (let sp = node.attr("spreadMethod")) {
+    if (sp.as_str() == "reflect") {
+      spread = SpreadMethod::Reflect;
+    } else if (sp.as_str() == "repeat") {
+      spread = SpreadMethod::Repeat;
+    }
+  }
+  return spread;
+}
+
+fn is_percent(s: (&CText)?): bool {
+  if (let t = s) {
+    return has_char(t, '%' as u8);
+  }
+  return false;
+}
+
+fn parse_linear_gradient(node&: XmlNode, var doc&: Document) {
+  var grad = Gradient {};
+  grad.type_ = GradientType::Linear;
+  let id = node.attr("id") else {
+    return;
+  };
+
+  grad.x1 = node.attr_f("x1", 0.0);
+  grad.y1 = node.attr_f("y1", 0.0);
+  grad.x2 = node.attr_f("x2", 1.0);
+  grad.y2 = node.attr_f("y2", 0.0);
+
+  // Check for percentage values (default for objectBoundingBox)
+  if (is_percent(node.attr("x1")) || is_percent(node.attr("y1")) || is_percent(node.attr("x2")) || is_percent(node.attr("y2"))) {
+    grad.x1 /= 100.0;
+    grad.y1 /= 100.0;
+    grad.x2 /= 100.0;
+    grad.y2 /= 100.0;
+  }
+
+  if (let units = node.attr("gradientUnits")) {
+    grad.user_space = units.as_str() == "userSpaceOnUse";
+  }
+
+  if (let xform = node.attr("gradientTransform")) {
+    grad.transform = parse_transform(xform);
+  }
+
+  grad.spread = parse_spread(node);
+
+  // Inherit from href/xlink:href
+  inherit_stops(node, doc, grad);
+
+  parse_gradient_stops(node, grad);
+  doc.gradients.insert(from_str(id.as_str()), grad);
+}
+
+fn parse_radial_gradient(node&: XmlNode, var doc&: Document) {
+  var grad = Gradient {};
+  grad.type_ = GradientType::Radial;
+  let id = node.attr("id") else {
+    return;
+  };
+
+  grad.cx = node.attr_f("cx", 0.5);
+  grad.cy = node.attr_f("cy", 0.5);
+  grad.r = node.attr_f("r", 0.5);
+  grad.fx = node.attr_f("fx", -1.0);
+  grad.fy = node.attr_f("fy", -1.0);
+
+  if (let units = node.attr("gradientUnits")) {
+    grad.user_space = units.as_str() == "userSpaceOnUse";
+  }
+
+  if (let xform = node.attr("gradientTransform")) {
+    grad.transform = parse_transform(xform);
+  }
+
+  grad.spread = parse_spread(node);
+
+  inherit_stops(node, doc, grad);
+
+  parse_gradient_stops(node, grad);
+  doc.gradients.insert(from_str(id.as_str()), grad);
+}
+
+// ============================================================================
+// SVG element -> Shape
+// ============================================================================
+
+struct ParseCtx : Clone {
+  pub var transform: Transform = Transform::identity()
+  pub var fill: Paint = Paint { type_: PaintType::Solid, color: Color::black(), gradient_id: String() }
+  pub var stroke: Paint = Paint { type_: PaintType::None, color: Color::black(), gradient_id: String() }
+  pub var stroke_width: f32 = 1.0
+  pub var opacity: f32 = 1.0
+  pub var fill_opacity: f32 = 1.0
+  pub var stroke_opacity: f32 = 1.0
+  pub var fill_rule: FillRule = FillRule::NonZero
+}
+
+// Resolve(attr_name, style_val): the style= value wins over the attribute.
+fn resolve<'a>(node: &'a XmlNode, attr_name: str, style_val: &'a CText?): (&'a CText)? {
+  if (let s& = style_val) {
+    return s;
+  }
+  return node.attr(attr_name);
+}
+
+fn apply_attrs(node&: XmlNode, var ctx&: ParseCtx) {
+  // First apply style= attribute (can contain any of the below)
+  var sa = StyleAttrs {};
+  parse_style_attr(node.attr("style"), sa);
+
+  // Direct attributes (style= overrides these)
+  if (let fill_str = resolve(node, "fill", sa.fill)) {
+    ctx.fill = parse_paint(fill_str);
+  }
+
+  if (let stroke_str = resolve(node, "stroke", sa.stroke)) {
+    ctx.stroke = parse_paint(stroke_str);
+  }
+
+  if (let sw = resolve(node, "stroke-width", sa.stroke_width)) {
+    ctx.stroke_width = atof_f32(sw);
+  }
+
+  if (let op = resolve(node, "opacity", sa.opacity)) {
+    ctx.opacity = atof_f32(op);
+  }
+
+  if (let fo = resolve(node, "fill-opacity", sa.fill_opacity)) {
+    ctx.fill_opacity = atof_f32(fo);
+  }
+
+  if (let so = resolve(node, "stroke-opacity", sa.stroke_opacity)) {
+    ctx.stroke_opacity = atof_f32(so);
+  }
+
+  if (let fr = resolve(node, "fill-rule", sa.fill_rule)) {
+    if (fr.as_str() == "evenodd") {
+      ctx.fill_rule = FillRule::EvenOdd;
+    } else {
+      ctx.fill_rule = FillRule::NonZero;
+    }
+  }
+
+  if (let xform = resolve(node, "transform", sa.transform)) {
+    ctx.transform = ctx.transform.mul(parse_transform(xform));
+  }
+}
+
+fn add_shape(var doc&: Document, path: Path, ctx&: ParseCtx) {
+  doc.shapes.push(Shape {
+    path,
+    fill: ctx.fill.clone(),
+    stroke: ctx.stroke.clone(),
+    stroke_width: ctx.stroke_width,
+    opacity: ctx.opacity,
+    fill_opacity: ctx.fill_opacity,
+    stroke_opacity: ctx.stroke_opacity,
+    fill_rule: ctx.fill_rule,
+    transform: ctx.transform,
+  });
+}
+
+fn parse_element(node&: XmlNode, var doc&: Document, parent_ctx&: ParseCtx) {
+  var ctx = parent_ctx.clone();
+  apply_attrs(node, ctx);
+
+  let tag = node.tag.as_str();
+  if (tag == "rect") {
+    let x = node.attr_f("x");
+    let y = node.attr_f("y");
+    let w = node.attr_f("width");
+    let h = node.attr_f("height");
+    let rx = node.attr_f("rx");
+    let ry = node.attr_f("ry");
+    if (w > 0.0 && h > 0.0) {
+      add_shape(doc, rect_to_path(x, y, w, h, rx, ry), ctx);
+    }
+  } else if (tag == "circle") {
+    let cx = node.attr_f("cx");
+    let cy = node.attr_f("cy");
+    let r = node.attr_f("r");
+    if (r > 0.0) {
+      add_shape(doc, circle_to_path(cx, cy, r), ctx);
+    }
+  } else if (tag == "ellipse") {
+    let cx = node.attr_f("cx");
+    let cy = node.attr_f("cy");
+    let rx = node.attr_f("rx");
+    let ry = node.attr_f("ry");
+    if (rx > 0.0 && ry > 0.0) {
+      add_shape(doc, ellipse_to_path(cx, cy, rx, ry), ctx);
+    }
+  } else if (tag == "line") {
+    let x1 = node.attr_f("x1");
+    let y1 = node.attr_f("y1");
+    let x2 = node.attr_f("x2");
+    let y2 = node.attr_f("y2");
+    add_shape(doc, line_to_path(x1, y1, x2, y2), ctx);
+  } else if (tag == "polyline") {
+    add_shape(doc, polyline_to_path(node.attr("points"), false), ctx);
+  } else if (tag == "polygon") {
+    add_shape(doc, polyline_to_path(node.attr("points"), true), ctx);
+  } else if (tag == "path") {
+    var path = Path();
+    if (let d = node.attr("d")) {
+      parse_path_text(d, path);
+    }
+    if (path.entries.len() != 0) {
+      add_shape(doc, path, ctx);
+    }
+  } else if (tag == "g" || tag == "svg" || tag == "symbol" || tag == "use") {
+    // Group: recurse with inherited context
+    for (let child& in node.children) {
+      parse_element(child, doc, ctx);
+    }
+    return;
+  } else if (tag == "defs") {
+    // Parse gradient definitions
+    for (let child& in node.children) {
+      if (child.tag == "linearGradient") {
+        parse_linear_gradient(child, doc);
+      } else if (child.tag == "radialGradient") {
+        parse_radial_gradient(child, doc);
+      } else if (child.tag == "g") {
+        // Nested defs or groups in defs
+        for (let gc& in child.children) {
+          if (gc.tag == "linearGradient") {
+            parse_linear_gradient(gc, doc);
+          } else if (gc.tag == "radialGradient") {
+            parse_radial_gradient(gc, doc);
+          }
+        }
+      }
+    }
+    return;
+  } else if (tag == "linearGradient") {
+    parse_linear_gradient(node, doc);
+    return;
+  } else if (tag == "radialGradient") {
+    parse_radial_gradient(node, doc);
+    return;
+  }
+
+  // Recurse children for elements that may contain shapes
+  for (let child& in node.children) {
+    parse_element(child, doc, ctx);
+  }
+}
+
+// ============================================================================
+// Top-level SVG parser
+// ============================================================================
+
+// ParseSvg(data, length, out): the document, none where the C++ is false.
+pub fn parse_svg(data: bytes): Document? {
+  var xml = XmlParser { data, p: 0 };
+
+  var root = XmlNode();
+  // Find the <svg> root
+  while (!xml.eof()) {
+    let before = xml.p;
+    var node = XmlNode();
+    if (xml.parse_node(node)) {
+      if (node.tag == "svg") {
+        root = node;
+        break;
+      }
+    }
+    if (xml.p == before) {
+      xml.p += 1;  // text or a stray close tag: the C++ loops forever here
+    }
+  }
+
+  if (root.tag != "svg") {
+    return none;
+  }
+  var out = Document();
+
+  // Parse dimensions
+  let width_str = root.attr("width");
+  let height_str = root.attr("height");
+
+  if (let viewbox = root.attr("viewBox")) {
+    var p: usize = 0;
+    out.view_x = parse_number(viewbox, p);
+    out.view_y = parse_number(viewbox, p);
+    out.view_w = parse_number(viewbox, p);
+    out.view_h = parse_number(viewbox, p);
+  }
+
+  if (let w = width_str) {
+    out.width = parse_coord_value(w);
+  }
+  if (let h = height_str) {
+    out.height = parse_coord_value(h);
+  }
+
+  // Fall back to viewBox dimensions
+  if (out.width <= 0.0 && out.view_w > 0.0) {
+    out.width = out.view_w;
+  }
+  if (out.height <= 0.0 && out.view_h > 0.0) {
+    out.height = out.view_h;
+  }
+
+  // Default if nothing specified
+  if (out.width <= 0.0) {
+    out.width = 300.0;
+  }
+  if (out.height <= 0.0) {
+    out.height = 150.0;
+  }
+
+  // Parse all children
+  var ctx = ParseCtx {};
+  apply_attrs(root, ctx);
+
+  for (let child& in root.children) {
+    parse_element(child, out, ctx);
+  }
+
+  return out;
+}

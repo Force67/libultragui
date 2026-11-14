@@ -1,0 +1,15 @@
+# examples/embed_opengl3 in aki: the host owns the window and GL context;
+# UIContext runs in draw-data mode and GlRenderer (ugui_impl_opengl3) draws
+# its draw list over the host's background, as examples/embed_opengl3/main.cc.
+[package]
+name = "ultragui_embed_opengl3"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_opengl = { path = "../../ultragui_opengl" }
+
+[build]
+opt = 2

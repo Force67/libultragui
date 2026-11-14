@@ -1,0 +1,19 @@
+# examples/preview in aki: ugui_preview, the standalone .ugui previewer: a
+# live window with hot reload, or --screenshot to render offscreen and save a
+# PNG; UIContext in draw-data mode drawn by GlRenderer (ugui_impl_opengl3),
+# with the Lua runtime, as examples/preview/main.cc.
+[package]
+name = "ugui_preview"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_opengl = { path = "../../ultragui_opengl" }
+ultragui_lua = { path = "../../ultragui_lua" }
+ultragui_lua_lottie = { path = "../../ultragui_lua_lottie" }
+ultragui_lua_video = { path = "../../ultragui_lua_video" }
+
+[build]
+opt = 2

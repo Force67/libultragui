@@ -1,0 +1,191 @@
+// CFF outlines against FreeType 2.14.3. No arguments: five representative
+// fonts, all glyphs, sizes 7,12,24,48. CFF_SIZES=default expands to
+// 6..48,64,96 (including CJK: several minutes). CFF_SWEEP=1 selects all OTTO fonts
+// at 7,9,11,12,13,14,16,18,20,24,32,48,72. Arguments select font paths.
+// CFF_SIZES=quick or an integer limits sizes for development. CFF_UNHINTED=1
+// compares only unhinted loads. Every mismatching glyph is recorded in a
+// per-font TSV report; stdout shows counts and the first twenty differences.
+module cff_differential_test;
+
+import {List} from akikit::containers::list;
+import {create_directories} from akikit::filesystem::directory;
+import {file_info, read_file, read_bytes, delete_file} from akikit::filesystem::file_util;
+import {println, eprintln} from akikit::logging;
+import {Command, exit_code} from akikit::process::child;
+import {arguments} from akikit::process::command_line;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {String, from_str, str_as_bytes} from akikit::strings::string;
+import {CffFont, CffFaceInfo, CffGlyph} from ultragui::font::cff::cff;
+import {CffError, Span, uint_at} from ultragui::font::cff::data;
+import {open, OpenMode, File} from akikit::filesystem::file;
+
+struct Words {
+  pub var file: File
+  pub var buffer: [byte; 65536] = [0 as byte; 65536]
+  pub var pos: usize = 0
+  pub var used: usize = 0
+  pub var p: u64 = 0
+  pub fn byte(var self&): u32 {
+    if (self.pos == self.used) { let n = self.file.read(self.buffer[..]) else { @stop("cannot read CFF oracle trace"); }; self.used = n; self.pos = 0; }
+    if (self.used == 0) { @stop("truncated CFF oracle trace"); }
+    let b = self.buffer[self.pos] as u32; self.pos += 1; self.p += 1; return b;
+  }
+  pub fn int(var self&): i32 {
+    let a = self.byte(); let b = self.byte(); let c = self.byte(); let d = self.byte();
+    return (a | (b << 8) | (c << 16) | (d << 24)) as i32;
+  }
+}
+
+fn table(data&: [u8], tag: u32): Span ! CffError {
+  var base = 0usize;
+  if (try uint_at(data, 0, 4) == 0x74746366) { base = try uint_at(data, 12, 4) as usize; }
+  let n = try uint_at(data, base + 4, 2) as usize;
+  for (let i in 0..n) {
+    let p = base + 12 + i * 16;
+    if (try uint_at(data, p, 4) == tag) {
+      let start = try uint_at(data, p + 8, 4) as usize; let size = try uint_at(data, p + 12, 4) as usize;
+      if (start > #data || size > #data - start) { return fail CffError::InvalidTable; }
+      return Span { start, size };
+    }
+  }
+  return fail CffError::InvalidTable;
+}
+
+fn run(var cmd&: Command): bool {
+  if (let status = cmd.status()) { return exit_code(status) == 0; } return false;
+}
+fn modified(path: str): i64 { if (let info = file_info(path)) { return info.modified_ns; } return -1; }
+fn oracle(): String? {
+  let source = f"{@package_dir()}/tools/cff_oracle.c"; let exe = f"{@package_dir()}/build/cff_oracle/oracle";
+  if (modified(exe.as_str()) > modified(source.as_str())) { return exe; }
+  var cmd = Command("bash"); cmd.arg("-c");
+  cmd.arg("clang -O2 \"$1\" $(pkg-config --cflags --libs freetype2) -o \"$2\"");
+  cmd.arg("cff-oracle-build"); cmd.arg(source.as_str()); cmd.arg(exe.as_str());
+  if (!run(cmd)) { return none; } return exe;
+}
+struct Totals {
+  pub var fonts: u64 = 0
+  pub var sizes: u64 = 0
+  pub var glyphs: u64 = 0
+  pub var points: u64 = 0
+  pub var mismatches: u64 = 0
+  pub var failures: u64 = 0
+  pub var errors: u64 = 0
+}
+fn compare(var r&: Words, have: i32, var diff&: u64) { if (r.int() != have) { diff += 1; } }
+fn field(var r&: Words, have: i32, name: str, var diff&: u64, var details&: String) {
+  let want = r.int();
+  if (want != have) { diff += 1; details.push_str(f"{name}:got={have},want={want};".as_str()); }
+}
+fn glyph(var r&: Words, g&: CffGlyph, var totals&: Totals, var details&: String): u64 {
+  var diff = 0u64;
+  field(r, g.advance_x, "advance_x", diff, details); field(r, g.linear_hori_advance, "linear_hori_advance", diff, details);
+  field(r, g.width, "width", diff, details); field(r, g.height, "height", diff, details); field(r, g.hori_bearing_x, "bearing_x", diff, details); field(r, g.hori_bearing_y, "bearing_y", diff, details); field(r, g.hori_advance, "hori_advance", diff, details);
+  field(r, g.flags, "outline_flags", diff, details); let points = r.int() as usize; let contours = r.int() as usize;
+  if (points != g.points.len()) { diff += 1; details.push_str(f"point_count:got={g.points.len()},want={points};".as_str()); }
+  if (contours != g.contours.len()) { diff += 1; details.push_str(f"contour_count:got={g.contours.len()},want={contours};".as_str()); }
+  for (let i in 0..points) {
+    let x = r.int(); let y = r.int(); let tag = r.int();
+    if (i < g.points.len() && (x != g.points[i].x || y != g.points[i].y || tag != g.tags[i] as i32)) { diff += 1; details.push_str(f"point[{i}]:got=({g.points[i].x},{g.points[i].y},{g.tags[i]}),want=({x},{y},{tag});".as_str()); }
+  }
+  for (let i in 0..contours) { let c = r.int(); if (i < g.contours.len() && c != g.contours[i] as i32) { diff += 1; details.push_str(f"contour[{i}]:got={g.contours[i]},want={c};".as_str()); } }
+  totals.points += points as u64; return diff;
+}
+fn skip_glyph(var r&: Words) {
+  for (let _ in 0..8usize) { r.int(); }
+  let points = r.int() as usize; let contours = r.int() as usize;
+  for (let _ in 0..points * 3 + contours) { r.int(); }
+}
+fn write_line(var report&: File, text: str) { if (let result = report.write(str_as_bytes(text))) {} }
+
+fn check_font(path: str, exe: str, mode: str, unhinted: bool, index: usize, var totals&: Totals): bool {
+  let trace = f"{@package_dir()}/build/cff_oracle/{index}-{mode}.bin";
+  var cmd = Command(exe); cmd.arg(path); cmd.arg(trace.as_str()); cmd.arg(mode); if (unhinted) { cmd.arg("unhinted"); }
+  if (!run(cmd)) { eprintln(f"oracle failed: {path}"); return false; }
+  let raw = read_bytes(path) else { return false; };
+  var data = List::<u8>(); data.reserve(raw.len()); for (let b in raw) { data.push(b as u8); }
+  let trace_file = open(trace.as_str(), OpenMode::Read) else { return false; };
+  var r = Words { file: trace_file };
+  if (r.int() != 0x43464631) { return false; }
+  let count = r.int() as u32;
+  var info = CffFaceInfo { units_per_em: r.int() as u32, ascender: r.int(), descender: r.int(), height: r.int(), max_advance: r.int() };
+  let sizes = r.int() as u32; let modes = r.int() as u32;
+  let hhea = table(data.as_slice(), 0x68686561) else { return false; };
+  let hm = uint_at(data.as_slice(), hhea.start + 34, 2) else { return false; }; info.horizontal_metrics = hm;
+  let hmtx = table(data.as_slice(), 0x686d7478) else { return false; };
+  var cff = Span {};
+  if (let span = table(data.as_slice(), 0x43464620)) { cff = span; }
+  else { let span = table(data.as_slice(), 0x43464632) else { return false; }; cff = span; }
+  var font = CffFont::parse(data.as_slice()[cff.start..cff.limit()], info, data.as_slice()[hmtx.start..hmtx.limit()]) else {
+    eprintln(f"CFF parse failed: {path}"); totals.failures += 1; return false;
+  };
+  if (let seed = get_environment_variable("CFF_RANDOM_SEED")) { if (seed == "0") { font.set_random_seed(0); } }
+  let report_path = f"{@package_dir()}/build/cff_oracle/{index}-{mode}.tsv";
+  var report = open(report_path.as_str(), OpenMode::Write) else { return false; };
+  write_line(report, f"# {path}\nsize\tgid\thinted\tdifferences\taki_error\toracle_error\tdetails\n".as_str());
+  let before = totals.mismatches;
+  if (font.glyph_count() != count) { eprintln(f"glyph count differs: {path}"); return false; }
+  for (let _ in 0..sizes) {
+    let px = r.int() as u32; let size_error = r.int();
+    if (size_error != 0) { return false; }
+    if (let ok = font.set_pixel_size(px)) {} else { return false; }
+    let sm = font.size_metrics(); var diff = 0u64;
+    compare(r, sm.x_ppem as i32, diff); compare(r, sm.y_ppem as i32, diff); compare(r, sm.x_scale, diff); compare(r, sm.y_scale, diff);
+    compare(r, sm.ascender, diff); compare(r, sm.descender, diff); compare(r, sm.height, diff); compare(r, sm.max_advance, diff);
+    if (diff != 0) { eprintln(f"size metrics differ: {path} px={px} differences={diff}"); totals.mismatches += 1; }
+    totals.sizes += 1;
+    for (let gid in 0..count) { for (let h in 0..modes) {
+      let error = r.int(); var d = 0u64; var aki_error = 0i32; var details = String();
+      if (error != 0) { totals.errors += 1; }
+      if (let g = font.load_glyph(gid, h != 0)) {
+        if (error != 0) { d = 1; } else { d = glyph(r, g, totals, details); }
+      } else (let e) {
+        aki_error = e as i32;
+        if (aki_error != error) { d = 1; }
+        if (error == 0) { skip_glyph(r); }
+      }
+      totals.glyphs += 1;
+      if (d != 0) {
+        totals.mismatches += 1;
+        write_line(report, f"{px}\t{gid}\t{h}\t{d}\t{aki_error}\t{error}\t{details}\n".as_str());
+        if (totals.mismatches <= 20) { eprintln(f"{path} px={px} gid={gid} hinted={h} differences={d} aki_error={aki_error}"); }
+      }
+    } }
+  }
+  let trace_info = file_info(trace.as_str()) else { return false; };
+  if (r.p != trace_info.size) { eprintln("oracle trace has trailing bytes"); return false; }
+  if (let removed = delete_file(trace.as_str())) {}
+  totals.fonts += 1; println(f"CFF {path}: {sizes} sizes, {count} glyphs, {totals.mismatches - before} mismatches ({report_path})");
+  return true;
+}
+
+pub fn main(): i32 {
+  create_directories(f"{@package_dir()}/build/cff_oracle".as_str());
+  let exe = oracle() else { return 1; };
+  let sweep = get_environment_variable("CFF_SWEEP") ?? from_str("");
+  let unhinted_env = get_environment_variable("CFF_UNHINTED") ?? from_str("");
+  var fonts = List::<String>(); let args = arguments();
+  for (let a in args) { fonts.push(from_str(a)); }
+  if (fonts.len() == 0 && sweep == "1") {
+    let manifest = f"{@package_dir()}/build/cff_oracle/fonts.txt";
+    var cmd = Command(exe.as_str()); cmd.arg("--list"); cmd.stdout_to(manifest.as_str()); if (!run(cmd)) { return 1; }
+    let text = read_file(manifest.as_str()) else { return 1; };
+    var first = 0usize;
+    for (let i in 0..#text) { if (text[i] == '\n') { if (i > first) { fonts.push(from_str(text.as_str()[first..i])); } first = i + 1; } }
+  }
+  if (fonts.len() == 0) {
+    for (let p in ["/usr/share/fonts/opentype/urw-base35/NimbusSans-Regular.otf", "/usr/share/fonts/opentype/urw-base35/P052-Roman.otf",
+      "/usr/share/fonts/opentype/cantarell/Cantarell-Regular.otf", "/usr/share/fonts/opentype/malayalam/Chilanka-Regular.otf",
+      "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]) { if (let info = file_info(p)) { fonts.push(from_str(p)); } }
+  }
+  if (args.len() == 0 && sweep != "1") {
+    for (let p in ["operators.otf", "default-cff2.otf", "private-blend-cff2.otf", "malformed.otf", "subroutines.otf", "cid.otf", "zero-peak-cff2.otf", "multi-fd-cff2.otf"]) {
+      fonts.push(f"{@package_dir()}/tests/data/cff/{p}");
+    }
+  }
+  let mode = get_environment_variable("CFF_SIZES") ?? from_str(sweep == "1" ? "broad" : "quick");
+  var totals = Totals {}; var ok = fonts.len() > 0;
+  for (let i in 0..fonts.len()) { ok = check_font(fonts[i].as_str(), exe.as_str(), mode.as_str(), unhinted_env == "1", i, totals) && ok; }
+  println(f"CFF TOTAL fonts={totals.fonts} sizes={totals.sizes} glyph-loads={totals.glyphs} points={totals.points} mismatches={totals.mismatches} failures={totals.failures} expected-errors={totals.errors}");
+  return ok && totals.mismatches == 0 && totals.failures == 0 ? 0 : 1;
+}

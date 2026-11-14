@@ -1,0 +1,304 @@
+// The Unicode properties HarfBuzz shapes with (hb_unicode_funcs_t over
+// hb-ucd-table.hh, and the inline helpers of hb-unicode.hh), read from the
+// tables tools/gen_shape_tables.cc dumped from HarfBuzz 13.2.1 itself, so the
+// Unicode version is HarfBuzz's.
+//
+// General categories, directions and scripts use HarfBuzz's numbering
+// (hb_unicode_general_category_t, hb_direction_t, hb_script_t tags).
+
+module ultragui::shape::ucd;
+
+import {
+  kScriptDirections, kScriptOtTagCounts, kScriptOtTags, kScriptTags, kModifiedCombiningClass, kUcdBlockShift,
+  kUcdBlocks, kUcdComposeCount, kUcdComposes, kUcdData, kUcdDecompCount, kUcdDecomps, kUcdIndex, kUcdMirrorCount,
+  kUcdMirrors, kUcdPuaCount, kUcdPuas, kUcdRecords,
+} from ultragui::shape::ucd_tables;
+
+// hb_unicode_general_category_t
+pub comptime let kGcControl: u32 = 0;
+pub comptime let kGcFormat: u32 = 1;
+pub comptime let kGcUnassigned: u32 = 2;
+pub comptime let kGcPrivateUse: u32 = 3;
+pub comptime let kGcSurrogate: u32 = 4;
+pub comptime let kGcLowercaseLetter: u32 = 5;
+pub comptime let kGcModifierLetter: u32 = 6;
+pub comptime let kGcOtherLetter: u32 = 7;
+pub comptime let kGcTitlecaseLetter: u32 = 8;
+pub comptime let kGcUppercaseLetter: u32 = 9;
+pub comptime let kGcSpacingMark: u32 = 10;
+pub comptime let kGcEnclosingMark: u32 = 11;
+pub comptime let kGcNonSpacingMark: u32 = 12;
+pub comptime let kGcDecimalNumber: u32 = 13;
+pub comptime let kGcLetterNumber: u32 = 14;
+pub comptime let kGcOtherNumber: u32 = 15;
+pub comptime let kGcConnectPunctuation: u32 = 16;
+pub comptime let kGcDashPunctuation: u32 = 17;
+pub comptime let kGcClosePunctuation: u32 = 18;
+pub comptime let kGcFinalPunctuation: u32 = 19;
+pub comptime let kGcInitialPunctuation: u32 = 20;
+pub comptime let kGcOtherPunctuation: u32 = 21;
+pub comptime let kGcOpenPunctuation: u32 = 22;
+pub comptime let kGcCurrencySymbol: u32 = 23;
+pub comptime let kGcModifierSymbol: u32 = 24;
+pub comptime let kGcMathSymbol: u32 = 25;
+pub comptime let kGcOtherSymbol: u32 = 26;
+pub comptime let kGcLineSeparator: u32 = 27;
+pub comptime let kGcParagraphSeparator: u32 = 28;
+pub comptime let kGcSpaceSeparator: u32 = 29;
+
+pub fn gc_is_mark(gc: u32): bool => gc == kGcSpacingMark || gc == kGcEnclosingMark || gc == kGcNonSpacingMark;
+pub fn gc_is_letter(gc: u32): bool => gc >= kGcLowercaseLetter && gc <= kGcUppercaseLetter;
+// FLAG (gc): HarfBuzz's category sets.
+pub fn gc_flag(gc: u32): u32 => 1u32 << gc;
+
+// hb_direction_t
+pub comptime let kDirInvalid: u32 = 0;
+pub comptime let kDirLtr: u32 = 4;
+pub comptime let kDirRtl: u32 = 5;
+pub comptime let kDirTtb: u32 = 6;
+pub comptime let kDirBtt: u32 = 7;
+pub fn dir_is_horizontal(d: u32): bool => (d & ~1u32) == 4;
+pub fn dir_is_vertical(d: u32): bool => (d & ~1u32) == 6;
+pub fn dir_is_forward(d: u32): bool => (d & ~2u32) == 4;
+pub fn dir_is_backward(d: u32): bool => (d & ~2u32) == 5;
+pub fn dir_is_valid(d: u32): bool => (d & ~3u32) == 4;
+pub fn dir_reverse(d: u32): u32 => d ^ 1;
+
+// An OpenType/hb tag from four characters.
+pub fn tag(s: str): u32 => (s[0] as u32 << 24) | (s[1] as u32 << 16) | (s[2] as u32 << 8) | s[3] as u32;
+
+// hb_script_t values the shaper names.
+pub comptime let kScriptInvalid: u32 = 0;
+pub comptime let kScriptCommon: u32 = tag("Zyyy");
+pub comptime let kScriptInherited: u32 = tag("Zinh");
+pub comptime let kScriptUnknown: u32 = tag("Zzzz");
+
+fn data(): &[u8] => kUcdData as &[u8];
+
+fn rd16(d: &[u8], o: usize): u32 => d[o] as u32 | (d[o + 1] as u32 << 8);
+fn rd32(d: &[u8], o: usize): u32 => d[o] as u32 | (d[o + 1] as u32 << 8) | (d[o + 2] as u32 << 16) | (d[o + 3] as u32 << 24);
+
+// The 8-byte record of a code point (out of range: U+10FFFF's neighbour, unassigned).
+fn record(u: u32): usize {
+  let d = data();
+  let cp = u <= 0x10FFFF ? u : 0x10FFFF;
+  let block = rd16(d, kUcdIndex + (cp >> kUcdBlockShift) as usize * 2);
+  let within = cp & ((1u32 << kUcdBlockShift) - 1);
+  let rid = rd16(d, kUcdBlocks + ((block << kUcdBlockShift) + within) as usize * 2);
+  return kUcdRecords + rid as usize * 8;
+}
+
+pub fn general_category(u: u32): u32 {
+  if (u > 0x10FFFF) {
+    return kGcUnassigned;
+  }
+  return data()[record(u)] as u32;
+}
+
+pub fn combining_class(u: u32): u32 => u > 0x10FFFF ? 0 : data()[record(u) + 1] as u32;
+
+fn script_index(u: u32): usize => data()[record(u) + 2] as usize;
+
+pub fn script(u: u32): u32 => u > 0x10FFFF ? kScriptUnknown : kScriptTags[script_index(u)];
+
+// hb_unicode_funcs_t::is_default_ignorable
+pub fn is_default_ignorable(u: u32): bool => u <= 0x10FFFF && (data()[record(u) + 3] & 1) != 0;
+
+// _hb_unicode_is_emoji_Extended_Pictographic
+pub fn is_extended_pictographic(u: u32): bool => u <= 0x10FFFF && (data()[record(u) + 3] & 2) != 0;
+
+// The Arabic joining type (hb-ot-shaper-arabic-table.hh joining_type).
+pub fn joining_type(u: u32): u32 => u > 0x10FFFF ? 0 : data()[record(u) + 4] as u32;
+
+// hb_use_get_category
+pub fn use_category(u: u32): u32 => u > 0x10FFFF ? 0 : data()[record(u) + 5] as u32;
+
+// hb_indic_get_categories: the category (low byte) and position (high byte).
+pub fn indic_categories(u: u32): u32 {
+  if (u > 0x10FFFF) {
+    return 0;
+  }
+  let r = record(u);
+  return data()[r + 6] as u32 | (data()[r + 7] as u32 << 8);
+}
+
+// hb_unicode_funcs_t::modified_combining_class
+pub fn modified_combining_class(u: u32): u32 {
+  if (u == 0x1A60) {
+    return 254;  // SAKOT after any tone marks
+  }
+  if (u == 0x0FC6) {
+    return 254;  // PADMA after any vowel marks
+  }
+  if (u == 0x0F39) {
+    return 127;  // TSA -PHRU before U+0F74
+  }
+  return kModifiedCombiningClass[combining_class(u)] as u32;
+}
+
+pub fn mirroring(u: u32): u32 {
+  let d = data();
+  var lo = 0usize;
+  var hi = kUcdMirrorCount;
+  while (lo < hi) {
+    let mid = (lo + hi) / 2;
+    let k = rd32(d, kUcdMirrors + mid * 8);
+    if (u < k) {
+      hi = mid;
+    } else if (u > k) {
+      lo = mid + 1;
+    } else {
+      return rd32(d, kUcdMirrors + mid * 8 + 4);
+    }
+  }
+  return u;
+}
+
+comptime let kSBase: u32 = 0xAC00;
+comptime let kLBase: u32 = 0x1100;
+comptime let kVBase: u32 = 0x1161;
+comptime let kTBase: u32 = 0x11A7;
+comptime let kLCount: u32 = 19;
+comptime let kVCount: u32 = 21;
+comptime let kTCount: u32 = 28;
+comptime let kNCount: u32 = kVCount * kTCount;
+comptime let kSCount: u32 = kLCount * kNCount;
+
+// hb_unicode_funcs_t::decompose: (a, b), b 0 for a singleton; none when ab
+// does not decompose.
+pub fn decompose(ab: u32): (u32, u32)? {
+  if (ab >= kSBase && ab - kSBase < kSCount) {
+    let si = ab - kSBase;
+    if (si % kTCount != 0) {
+      return (kSBase + (si / kTCount) * kTCount, kTBase + si % kTCount);
+    }
+    return (kLBase + si / kNCount, kVBase + (si % kNCount) / kTCount);
+  }
+  let d = data();
+  var lo = 0usize;
+  var hi = kUcdDecompCount;
+  while (lo < hi) {
+    let mid = (lo + hi) / 2;
+    let o = kUcdDecomps + mid * 12;
+    let k = rd32(d, o);
+    if (ab < k) {
+      hi = mid;
+    } else if (ab > k) {
+      lo = mid + 1;
+    } else {
+      return (rd32(d, o + 4), rd32(d, o + 8));
+    }
+  }
+  return none;
+}
+
+// hb_unicode_funcs_t::compose
+pub fn compose(a: u32, b: u32): u32? {
+  if (a >= kSBase && a < kSBase + kSCount && b > kTBase && b < kTBase + kTCount && (a - kSBase) % kTCount == 0) {
+    return a + (b - kTBase);
+  }
+  if (a >= kLBase && a < kLBase + kLCount && b >= kVBase && b < kVBase + kVCount) {
+    return kSBase + (a - kLBase) * kNCount + (b - kVBase) * kTCount;
+  }
+  let d = data();
+  var lo = 0usize;
+  var hi = kUcdComposeCount;
+  while (lo < hi) {
+    let mid = (lo + hi) / 2;
+    let o = kUcdComposes + mid * 12;
+    let ka = rd32(d, o);
+    let kb = rd32(d, o + 4);
+    if (a < ka || (a == ka && b < kb)) {
+      hi = mid;
+    } else if (a > ka || b > kb) {
+      lo = mid + 1;
+    } else {
+      return rd32(d, o + 8);
+    }
+  }
+  return none;
+}
+
+// _hb_arabic_pua_simp_map / _hb_arabic_pua_trad_map (0: none).
+pub fn arabic_pua_map(u: u32, traditional: bool): u32 {
+  if (u > 0xFFFF) {
+    return 0;
+  }
+  let d = data();
+  var lo = 0usize;
+  var hi = kUcdPuaCount;
+  while (lo < hi) {
+    let mid = (lo + hi) / 2;
+    let o = kUcdPuas + mid * 6;
+    let k = rd16(d, o);
+    if (u < k) {
+      hi = mid;
+    } else if (u > k) {
+      lo = mid + 1;
+    } else {
+      return rd16(d, o + (traditional ? 4usize : 2));
+    }
+  }
+  return 0;
+}
+
+// hb_script_get_horizontal_direction
+pub fn script_horizontal_direction(s: u32): u32 {
+  for (let i in 0..#kScriptTags) {
+    if (kScriptTags[i] == s) {
+      return kScriptDirections[i] as u32;
+    }
+  }
+  return kDirLtr;
+}
+
+// hb_ot_tags_from_script_and_language's script tags (up to 3) for the
+// language "c": the tags and their count.
+pub fn ot_script_tags(s: u32): ([u32; 3], usize) {
+  for (let i in 0..#kScriptTags) {
+    if (kScriptTags[i] == s) {
+      return ([kScriptOtTags[i * 3], kScriptOtTags[i * 3 + 1], kScriptOtTags[i * 3 + 2]], kScriptOtTagCounts[i] as usize);
+    }
+  }
+  // A script HarfBuzz does not know: hb_ot_old_tag_from_script's lowercase first letter.
+  return ([s | 0x20000000, 0, 0], 1);
+}
+
+// hb_unicode_funcs_t::is_variation_selector (the Mongolian FVSes are not).
+pub fn is_variation_selector(u: u32): bool => (u >= 0xFE00 && u <= 0xFE0F) || (u >= 0xE0100 && u <= 0xE01EF);
+
+// hb_unicode_funcs_t::space_t
+pub comptime let kNotSpace: u32 = 0;
+pub comptime let kSpaceEm: u32 = 1;
+pub comptime let kSpaceEm2: u32 = 2;
+pub comptime let kSpaceEm3: u32 = 3;
+pub comptime let kSpaceEm4: u32 = 4;
+pub comptime let kSpaceEm5: u32 = 5;
+pub comptime let kSpaceEm6: u32 = 6;
+pub comptime let kSpaceEm16: u32 = 16;
+pub comptime let kSpace4Em18: u32 = 17;
+pub comptime let kSpace: u32 = 18;
+pub comptime let kSpaceFigure: u32 = 19;
+pub comptime let kSpacePunctuation: u32 = 20;
+pub comptime let kSpaceNarrow: u32 = 21;
+
+// hb_unicode_funcs_t::space_fallback_type
+pub fn space_fallback_type(u: u32): u32 => match (u) {
+  0x0020 => kSpace,
+  0x00A0 => kSpace,
+  0x2000 => kSpaceEm2,
+  0x2001 => kSpaceEm,
+  0x2002 => kSpaceEm2,
+  0x2003 => kSpaceEm,
+  0x2004 => kSpaceEm3,
+  0x2005 => kSpaceEm4,
+  0x2006 => kSpaceEm6,
+  0x2007 => kSpaceFigure,
+  0x2008 => kSpacePunctuation,
+  0x2009 => kSpaceEm5,
+  0x200A => kSpaceEm16,
+  0x202F => kSpaceNarrow,
+  0x205F => kSpace4Em18,
+  0x3000 => kSpaceEm,
+  _ => kNotSpace,
+};

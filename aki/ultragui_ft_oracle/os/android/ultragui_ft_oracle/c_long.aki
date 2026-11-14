@@ -1,0 +1,8 @@
+// C's `long` and `unsigned long` on LP64 targets (Linux, macOS, FreeBSD,
+// Android): 64 bits. os/windows holds the Windows (LLP64) twin of this module;
+// aki.toml picks one per target OS.
+
+module ultragui_ft_oracle::c_long;
+
+pub type CLong = i64;
+pub type CULong = u64;

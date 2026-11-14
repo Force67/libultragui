@@ -1,0 +1,76 @@
+// No C++ counterpart: the slice of rlottie's C API (rlottie_capi.h) the
+// Lottie player calls, declared by hand. `Lottie_Animation` is opaque;
+// `RlottieAnimation` owns one and destroys it with the owner.
+
+module ultragui_lottie::sys::rlottie;
+
+import {with_nul} from akikit::strings::string;
+
+pub extern type LottieAnimationC;
+
+pub extern("lottie_animation_from_file") fn lottie_animation_from_file(path: *const c_char): *var LottieAnimationC;
+pub extern("lottie_animation_from_data") fn lottie_animation_from_data(data: *const c_char, key: *const c_char,
+                                                                    resource_path: *const c_char): *var LottieAnimationC;
+pub extern("lottie_animation_destroy") fn lottie_animation_destroy(animation: *var LottieAnimationC);
+pub extern("lottie_animation_get_duration") fn lottie_animation_get_duration(animation: *const LottieAnimationC): f64;
+pub extern("lottie_animation_get_totalframe") fn lottie_animation_get_totalframe(animation: *const LottieAnimationC): usize;
+pub extern("lottie_animation_get_framerate") fn lottie_animation_get_framerate(animation: *const LottieAnimationC): f64;
+pub extern("lottie_animation_get_frame_at_pos") fn lottie_animation_get_frame_at_pos(animation: *const LottieAnimationC, pos: f32): usize;
+pub extern("lottie_animation_render") fn lottie_animation_render(animation: *var LottieAnimationC, frame_num: usize, buffer: *var u32,
+                                                              width: usize, height: usize, bytes_per_line: usize);
+
+// An owned rlottie animation (`std::unique_ptr<rlottie::Animation>`).
+pub struct RlottieAnimation {
+  let handle: *var LottieAnimationC
+  fn ~RlottieAnimation();
+
+  // Loads a Lottie JSON file; none when rlottie cannot.
+  pub fn from_file(path: str): RlottieAnimation?;
+
+  // Parses Lottie JSON text under a cache `key` (resource path empty).
+  pub fn from_data(json: str, key: str): RlottieAnimation?;
+
+  pub fn total_frame(self&): usize => unsafe lottie_animation_get_totalframe(self.handle);
+  pub fn frame_rate(self&): f64 => unsafe lottie_animation_get_framerate(self.handle);
+  pub fn duration(self&): f64 => unsafe lottie_animation_get_duration(self.handle);
+
+  // rlottie's own frameAtPos for a float position (the C API narrows to f32).
+  pub fn frame_at_pos_f32(self&, pos: f32): usize => unsafe lottie_animation_get_frame_at_pos(self.handle, pos);
+
+  // renderSync: ARGB32 premultiplied pixels into `buffer` (width * height).
+  pub fn render_sync(var self&, frame_no: usize, var buffer&: [u32], width: usize, height: usize);
+}
+
+fn RlottieAnimation::from_parts(handle: *var LottieAnimationC): RlottieAnimation? {
+  if (handle == null) {
+    return none;
+  }
+  return RlottieAnimation { handle };
+}
+
+fn RlottieAnimation::~RlottieAnimation() {
+  unsafe {
+    lottie_animation_destroy(self.handle);
+  }
+}
+
+fn RlottieAnimation::from_file(path: str): RlottieAnimation? {
+  let z = with_nul(path);
+  return RlottieAnimation::from_parts(unsafe lottie_animation_from_file(@ptr(z.as_str()) as *const c_char));
+}
+
+fn RlottieAnimation::from_data(json: str, key: str): RlottieAnimation? {
+  let data = with_nul(json);
+  let k = with_nul(key);
+  return RlottieAnimation::from_parts(unsafe lottie_animation_from_data(@ptr(data.as_str()) as *const c_char,
+                                                                       @ptr(k.as_str()) as *const c_char, c""));
+}
+
+fn RlottieAnimation::render_sync(var self&, frame_no: usize, var buffer&: [u32], width: usize, height: usize) {
+  if (#buffer < width * height) {
+    @stop("rlottie render buffer too small");
+  }
+  unsafe {
+    lottie_animation_render(self.handle, frame_no, @ptr(buffer) as *var u32, width, height, width * 4);
+  }
+}

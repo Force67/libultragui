@@ -1,0 +1,428 @@
+// The core value code against the C++, bit for bit: from_chars (tricky
+// floats, ranges, grammar), IntroSort's tie order, easing curves, Style::Lerp,
+// keyframe animations and transitions, vertex packing. The tables are the
+// output of tools/gen_reference.cc (FC/FU/SORT/EASE/SPRING40/LERP/KEYF/
+// TRANS/PACK/RADII lines). Plus the hand-checked basics: color and rect math,
+// hex colors, style overrides and the animator's bookkeeping.
+
+module core_test;
+
+import {List} from akikit::containers::list;
+import {HashMap} from akikit::containers::hash_map;
+import {Animator, KeyframeAnimation, Keyframe, ScrollAnimation, StyleTransition} from ultragui::animation::animator;
+import {clamp_min_max, erase_if, index_of, intro_sort, max, min, sorted_entries} from ultragui::core::algorithm;
+import {Color, lerp_color} from ultragui::core::color;
+import {FromCharsError, from_chars_f32, from_chars_u32} from ultragui::core::from_chars;
+import {Vec2, Vec4, clamp, lerp} from ultragui::core::math;
+import {EdgeInsets, Rect} from ultragui::core::rect;
+import {parse_hex_color} from ultragui::core::string_utils;
+import {pack_color, pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {FlexDirection, WidgetState} from ultragui::style::enums;
+import {Length} from ultragui::style::property_types;
+import {GradientStop, Style, StyleMask, StyleOverride, resolve_style} from ultragui::style::style;
+import {EasingType, Transition, eval_easing, eval_transition} from ultragui::style::transition;
+import {Expect} from ultragui_testing::expect;
+
+struct FcRef {
+  pub let text: str
+  pub let ptr: usize
+  pub let ec: u8
+  pub let bits: u32
+}
+
+struct FuRef {
+  pub let text: str
+  pub let ptr: usize
+  pub let ec: u8
+  pub let value: u32
+}
+
+// from_chars_f32 from a value of 1.0f (0x3f800000).
+static let kFloats: [FcRef; 33] = [
+  FcRef { text: "0", ptr: 1, ec: 0, bits: 0x00000000 },
+  FcRef { text: "1", ptr: 1, ec: 0, bits: 0x3f800000 },
+  FcRef { text: "-1", ptr: 2, ec: 0, bits: 0xbf800000 },
+  FcRef { text: "0.1", ptr: 3, ec: 0, bits: 0x3dcccccd },
+  FcRef { text: "3.4028235e38", ptr: 12, ec: 0, bits: 0x7f7fffff },
+  FcRef { text: "3.4028236e38", ptr: 12, ec: 2, bits: 0x3f800000 },
+  FcRef { text: "1e39", ptr: 4, ec: 2, bits: 0x3f800000 },
+  FcRef { text: "1e-46", ptr: 5, ec: 2, bits: 0x3f800000 },
+  FcRef { text: "1.4e-45", ptr: 7, ec: 0, bits: 0x00000001 },
+  FcRef { text: "1.17549435e-38", ptr: 14, ec: 0, bits: 0x00800000 },
+  FcRef { text: "7.006492321624085e-46", ptr: 21, ec: 2, bits: 0x3f800000 },
+  FcRef { text: "0.30000001192092896", ptr: 19, ec: 0, bits: 0x3e99999a },
+  FcRef { text: "16777217", ptr: 8, ec: 0, bits: 0x4b800000 },
+  FcRef { text: "1.00000005960464477539", ptr: 22, ec: 0, bits: 0x3f800000 },
+  FcRef { text: "1.000000059604644775391", ptr: 23, ec: 0, bits: 0x3f800001 },
+  FcRef { text: "-0", ptr: 2, ec: 0, bits: 0x80000000 },
+  FcRef { text: "inf", ptr: 3, ec: 0, bits: 0x7f800000 },
+  FcRef { text: "-Infinity", ptr: 9, ec: 0, bits: 0xff800000 },
+  FcRef { text: "nan", ptr: 3, ec: 0, bits: 0x7fc00000 },
+  FcRef { text: "nan(123)", ptr: 8, ec: 0, bits: 0x7fc00000 },
+  FcRef { text: "1e", ptr: 1, ec: 0, bits: 0x3f800000 },
+  FcRef { text: "1e+", ptr: 1, ec: 0, bits: 0x3f800000 },
+  FcRef { text: ".5", ptr: 2, ec: 0, bits: 0x3f000000 },
+  FcRef { text: "5.", ptr: 2, ec: 0, bits: 0x40a00000 },
+  FcRef { text: ".", ptr: 0, ec: 1, bits: 0x3f800000 },
+  FcRef { text: "-.", ptr: 0, ec: 1, bits: 0x3f800000 },
+  FcRef { text: "+1", ptr: 0, ec: 1, bits: 0x3f800000 },
+  FcRef { text: " 1", ptr: 0, ec: 1, bits: 0x3f800000 },
+  FcRef { text: "0x10", ptr: 1, ec: 0, bits: 0x00000000 },
+  FcRef { text: "123abc", ptr: 3, ec: 0, bits: 0x42f60000 },
+  FcRef { text: "2.5e-3px", ptr: 6, ec: 0, bits: 0x3b23d70a },
+  FcRef { text: "000000000000000000000000000000000000000000000000000000000000001.5", ptr: 65, ec: 0, bits: 0x3fc00000 },
+  FcRef { text: "1.2345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678e2", ptr: 131, ec: 0, bits: 0x42f6e9e0 },
+];
+
+// from_chars_u32 in base 16 from a value of 7.
+static let kInts: [FuRef; 7] = [
+  FuRef { text: "0", ptr: 1, ec: 0, value: 0 },
+  FuRef { text: "ff", ptr: 2, ec: 0, value: 255 },
+  FuRef { text: "FFFFFFFF", ptr: 8, ec: 0, value: 4294967295 },
+  FuRef { text: "100000000", ptr: 9, ec: 2, value: 7 },
+  FuRef { text: "12345g", ptr: 5, ec: 0, value: 74565 },
+  FuRef { text: "", ptr: 0, ec: 1, value: 7 },
+  FuRef { text: "zz", ptr: 0, ec: 1, value: 7 },
+];
+
+static let kSort100: [u32; 100] = [1, 99, 86, 74, 69, 57, 55, 52, 22, 21, 18, 15, 12, 0, 33, 5, 51, 46, 43, 70, 39, 71, 77, 78, 81, 82, 26, 23, 19, 92, 6, 94, 59, 48, 47, 17, 63, 66, 4, 20, 73, 24, 25, 30, 72, 68, 93, 91, 13, 61, 85, 89, 58, 96, 90, 54, 14, 8, 27, 29, 40, 56, 97, 11, 95, 10, 87, 36, 42, 49, 45, 65, 41, 53, 60, 16, 9, 64, 2, 32, 67, 38, 76, 44, 3, 80, 75, 98, 7, 50, 37, 62, 28, 88, 35, 34, 84, 83, 31, 79];
+static let kSort12: [u32; 12] = [0, 3, 6, 9, 2, 5, 8, 11, 1, 4, 7, 10];
+static let kSort300: [u32; 300] = [299, 298, 297, 296, 295, 294, 293, 292, 289, 290, 291, 288, 287, 286, 285, 281, 282, 284, 283, 280, 279, 278, 277, 273, 274, 275, 276, 272, 271, 270, 269, 268, 267, 266, 265, 264, 261, 262, 263, 260, 259, 258, 257, 256, 255, 254, 253, 252, 251, 250, 249, 245, 246, 248, 247, 244, 243, 242, 241, 238, 237, 239, 240, 236, 235, 234, 233, 232, 231, 230, 229, 226, 225, 228, 227, 224, 223, 222, 221, 220, 219, 218, 217, 216, 215, 214, 213, 209, 210, 212, 211, 208, 207, 206, 205, 201, 202, 203, 204, 200, 199, 198, 197, 196, 195, 194, 193, 189, 190, 192, 191, 188, 187, 186, 185, 184, 183, 182, 181, 180, 177, 178, 179, 176, 175, 174, 173, 169, 170, 171, 172, 168, 167, 166, 165, 161, 162, 163, 164, 160, 159, 158, 157, 156, 155, 154, 153, 151, 152, 150, 149, 148, 147, 146, 145, 141, 142, 143, 144, 140, 139, 138, 137, 136, 135, 134, 133, 130, 129, 131, 132, 128, 127, 126, 125, 122, 121, 123, 124, 120, 119, 118, 117, 116, 115, 114, 113, 110, 109, 112, 111, 108, 107, 106, 105, 104, 103, 102, 101, 100, 99, 98, 97, 93, 94, 96, 95, 92, 91, 90, 89, 86, 85, 87, 88, 84, 83, 82, 81, 80, 79, 78, 77, 74, 73, 75, 76, 72, 71, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61, 57, 58, 60, 59, 56, 55, 54, 53, 49, 50, 51, 52, 48, 47, 46, 45, 44, 43, 42, 41, 37, 38, 40, 39, 36, 35, 34, 33, 29, 30, 31, 32, 28, 27, 26, 25, 24, 23, 22, 21, 20, 17, 18, 19, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 1, 2, 3, 4, 0];
+
+static let kEaseT: [f32; 9] = [-0.5, 0.0, 0.1, 0.25, 0.5, 0.7, 0.9, 1.0, 1.5];
+// EvalEasing(Transition{easing: type}, t) per EasingType, in enum order.
+static let kEase: [[u32; 9]; 6] = [
+  [0x00000000, 0x00000000, 0x3dcccccd, 0x3e800000, 0x3f000000, 0x3f333333, 0x3f666666, 0x3f800000, 0x3f800000],
+  [0x00000000, 0x00000000, 0x3a83126f, 0x3c800000, 0x3e000000, 0x3eaf9db2, 0x3f3a9fbd, 0x3f800000, 0x3f800000],
+  [0x00000000, 0x00000000, 0x3e8ac085, 0x3f140000, 0x3f600000, 0x3f791687, 0x3f7fbe77, 0x3f800000, 0x3f800000],
+  [0x00000000, 0x00000000, 0x3b83126f, 0x3d800000, 0x3f000000, 0x3f645a1c, 0x3f7ef9db, 0x3f800000, 0x3f800000],
+  [0x00000000, 0x00000000, 0x3dc223e2, 0x3ed1284c, 0x3f4d6a4f, 0x3f70d5f4, 0x3f7e8b87, 0x3f800000, 0x3f800000],
+  [0x00000000, 0x00000000, 0x3f2f88fc, 0x3f8c8dc3, 0x3f7deb32, 0x3f80243c, 0x3f7ff719, 0x3f7ffde9, 0x3f7ffde9],
+];
+// kSpring with spring_damping = 40 (the over-damped branch).
+static let kSpring40: [u32; 9] = [0x00000000, 0x00000000, 0x3f0442ac, 0x3f6e08f6, 0x3f7f9242, 0x3f7ffb55, 0x3f7fffd1, 0x3f7ffff7, 0x3f7ffff7];
+
+static let kLerpT: [f32; 3] = [0.3, 0.5, 0.77];
+// background.r, .g, .a, opacity, corner_radius, width.value, stop[2].position,
+// stop count, flex_direction, stop[1].color.b, stop[2].color.a
+static let kLerp: [[u32; 11]; 3] = [
+  [0x3ea0ba54, 0x3ea7db0f, 0x3f6147ae, 0x3ef33334, 0x40accccd, 0x43110000, 0x3ebd70a4, 3, 0, 0x3e99999a, 0x3f59999a],
+  [0x3ef67676, 0x3eececee, 0x3f4ccccd, 0x3f200000, 0x40e00000, 0x432f0000, 0x3f0ccccd, 3, 1, 0x3f000000, 0x3f400000],
+  [0x3f351a38, 0x3f2515ba, 0x3f3126ea, 0x3f53d70a, 0x41128f5c, 0x43578000, 0x3f4b020c, 3, 1, 0x3f451eb8, 0x3f1d70a4],
+];
+
+static let kKeyfT: [f64; 8] = [0.0, 0.3, 0.9, 1.6, 2.2, 3.1, 4.0, 4.3];
+// done, opacity, font_size
+static let kKeyf: [[u32; 3]; 8] = [
+  [0, 0x00000000, 0x41200000],
+  [0, 0x38da740e, 0x41200889],
+  [0, 0x3e6a58bd, 0x41693bbb],
+  [0, 0x3f2bf0a4, 0x41bb7666],
+  [0, 0x3f000520, 0x41a00334],
+  [0, 0x3f62428d, 0x41dd6998],
+  [0, 0x3c555555, 0x41242aab],
+  [1, 0x3f000000, 0x41a00000],
+];
+
+static let kTransT: [f64; 6] = [1.05, 1.2, 1.35, 1.59, 1.6, 2.0];
+static let kTrans: [[u32; 3]; 6] = [
+  [0, 0x00000000, 0x41200000],
+  [0, 0x3e972a4b, 0x417e7a6f],
+  [0, 0x3f4d6a4f, 0x41d06271],
+  [0, 0x3f7ff1da, 0x41eff728],
+  [1, 0x3f800000, 0x41f00000],
+  [1, 0x3f800000, 0x41f00000],
+];
+
+static let kPack: [u32; 4] = [0x00000000, 0xffffffff, 0x1abf4080, 0x808000ff];
+static let kRadii: [u32; 2] = [0x2cff0301, 0x08080808];
+// FromCharsError's C++ enum index: kNone, kInvalidArgument, kOutOfRange.
+fn ec_code(e: FromCharsError): u8 => match (e) {
+  FromCharsError::None => 0,
+  FromCharsError::InvalidArgument => 1,
+  FromCharsError::OutOfRange => 2,
+};
+
+fn check_from_chars(var t&: Expect) {
+  for (let r in kFloats) {
+    var v = 1.0f32;
+    let res = from_chars_f32(r.text, v);
+    t.that(res.ptr == r.ptr, f"from_chars_f32 \"{r.text}\" ptr {res.ptr}, want {r.ptr}");
+    t.that(ec_code(res.ec) == r.ec, f"from_chars_f32 \"{r.text}\" ec");
+    t.bits(v, r.bits, f"from_chars_f32 \"{r.text}\" value");
+  }
+  for (let r in kInts) {
+    var v: u32 = 7;
+    let res = from_chars_u32(r.text, v, 16);
+    t.that(res.ptr == r.ptr && ec_code(res.ec) == r.ec && v == r.value, f"from_chars_u32 \"{r.text}\"");
+  }
+}
+
+struct Item : Copy {
+  pub var key: i32
+  pub var id: u32
+}
+
+fn by_key(a&: Item, b&: Item): bool => a.key < b.key;
+
+fn check_sorted(var t&: Expect, items&: List<Item>, want&: [u32], what: str) {
+  var same = items.len() == #want;
+  for (let i in 0..items.len()) {
+    if (same && items[i].id != want[i]) {
+      same = false;
+    }
+  }
+  t.that(same, f"{what}: IntroSort leaves ties in the C++ order");
+}
+
+fn check_sort(var t&: Expect) {
+  var v: List<Item> = List();
+  var x: u32 = 12345;
+  for (let i in 0u32..100) {
+    x = x *% 1103515245 +% 12345;
+    v.push(Item { key: ((x >> 16) % 7) as i32, id: i });
+  }
+  intro_sort(v.as_slice_var(), by_key);
+  check_sorted(t, v, kSort100[..], "100 items, 7 keys");
+
+  var s: List<Item> = List();
+  for (let i in 0u32..12) {
+    s.push(Item { key: ((i * 5) % 3) as i32, id: i });
+  }
+  intro_sort(s.as_slice_var(), by_key);
+  check_sorted(t, s, kSort12[..], "12 items (insertion sort)");
+
+  var d: List<Item> = List();
+  for (let i in 0u32..300) {
+    d.push(Item { key: ((300 - i) / 4) as i32, id: i });
+  }
+  intro_sort(d.as_slice_var(), by_key);
+  check_sorted(t, d, kSort300[..], "300 descending");
+
+  // The other algorithm helpers.
+  t.that(min(3i32, 2) == 2 && max(3i32, 2) == 3 && clamp_min_max(5i32, 0, 4) == 4 && clamp_min_max(5i32, 6, 4) == 4, "min/max/clamp");
+  var xs: List<i32> = List();
+  for (let i in 0i32..10) {
+    xs.push(i);
+  }
+  erase_if(xs, fn(v&: i32): bool => v % 3 == 0);
+  t.that(xs.len() == 6 && xs[0] == 1 && xs[5] == 8, "erase_if keeps order");
+  t.that(index_of(xs.as_slice(), 4) == 2 && index_of(xs.as_slice(), 3) == none, "index_of");
+  var m: HashMap<u32, u32> = HashMap();
+  for (let k in [5u32, 1, 9, 3]) {
+    m.insert(k, k * 10);
+  }
+  let entries = sorted_entries(m);
+  t.that(entries[0].0 == 1 && entries[3].0 == 9 && entries[1].1 == 30, "sorted_entries");
+}
+
+fn check_easing(var t&: Expect) {
+  let types = [EasingType::Linear, EasingType::EaseIn, EasingType::EaseOut, EasingType::EaseInOut, EasingType::CubicBezier, EasingType::Spring];
+  for (let k in 0usize..6) {
+    let tr = Transition { easing: types[k] };
+    for (let i in 0usize..9) {
+      t.bits(eval_transition(tr, kEaseT[i]), kEase[k][i], f"ease {k} t={kEaseT[i]}");
+    }
+  }
+  let spring = Transition { easing: EasingType::Spring, spring_damping: 40.0 };
+  for (let i in 0usize..9) {
+    t.bits(eval_transition(spring, kEaseT[i]), kSpring40[i], f"spring40 t={kEaseT[i]}");
+  }
+  t.that(eval_easing(EasingType::Linear, 0.25) == 0.25, "eval_easing by type");
+}
+
+fn lerp_inputs(): (Style, Style) {
+  var a = Style {};
+  a.background = Color::from_hex(0x102030);
+  a.opacity = 0.25;
+  a.corner_radius = 3.0;
+  a.width = Length::px(100.0);
+  a.gradient_stop_count = 1;
+  a.gradient_stops[0] = GradientStop { position: 0.1, color: Color::rgba(1.0, 0.0, 0.0, 1.0) };
+  var b = Style {};
+  b.background = Color::rgba(0.9, 0.8, 0.7, 0.6);
+  b.opacity = 1.0;
+  b.corner_radius = 11.0;
+  b.width = Length::px(250.0);
+  b.gradient_stop_count = 3;
+  b.gradient_stops[0] = GradientStop { position: 0.0, color: Color::rgba(0.0, 1.0, 0.0, 1.0) };
+  b.gradient_stops[1] = GradientStop { position: 0.5, color: Color::rgba(0.0, 0.0, 1.0, 1.0) };
+  b.gradient_stops[2] = GradientStop { position: 1.0, color: Color::rgba(1.0, 1.0, 1.0, 0.5) };
+  b.flex_direction = FlexDirection::Column;
+  return (a, b);
+}
+
+fn check_lerp(var t&: Expect) {
+  let (a, b) = lerp_inputs();
+  for (let i in 0usize..3) {
+    let r = Style::lerp(a, b, kLerpT[i]);
+    let w& = kLerp[i];
+    t.bits(r.background.r, w[0], f"lerp {i} background.r");
+    t.bits(r.background.g, w[1], f"lerp {i} background.g");
+    t.bits(r.background.a, w[2], f"lerp {i} background.a");
+    t.bits(r.opacity, w[3], f"lerp {i} opacity");
+    t.bits(r.corner_radius, w[4], f"lerp {i} corner_radius");
+    t.bits(r.width.value, w[5], f"lerp {i} width");
+    t.bits(r.gradient_stops[2].position, w[6], f"lerp {i} stop 2 position");
+    t.eq_u32(r.gradient_stop_count, w[7], f"lerp {i} stop count");
+    t.eq_u32(r.flex_direction as u32, w[8], f"lerp {i} flex_direction");
+    t.bits(r.gradient_stops[1].color.b, w[9], f"lerp {i} stop 1 color.b");
+    t.bits(r.gradient_stops[2].color.a, w[10], f"lerp {i} stop 2 color.a");
+  }
+}
+
+fn check_animation(var t&: Expect) {
+  var a = Style {};
+  a.opacity = 0.0;
+  a.font_size = 10.0;
+  var b = Style {};
+  b.opacity = 1.0;
+  b.font_size = 30.0;
+  var c = Style {};
+  c.opacity = 0.5;
+  c.font_size = 20.0;
+  var anim = KeyframeAnimation {
+    widget_id: 7, duration: 2.0, delay: 0.25, easing: EasingType::EaseInOut, repeat_count: 2, alternate: true,
+  };
+  anim.keyframes.push(Keyframe { time: 0.0, style: a });
+  anim.keyframes.push(Keyframe { time: 0.6, style: b });
+  anim.keyframes.push(Keyframe { time: 1.0, style: c });
+  for (let i in 0usize..8) {
+    let (s, done) = anim.evaluate(kKeyfT[i]);
+    t.that((done ? 1u32 : 0u32) == kKeyf[i][0], f"keyframe {i} done");
+    t.bits(s.opacity, kKeyf[i][1], f"keyframe {i} opacity");
+    t.bits(s.font_size, kKeyf[i][2], f"keyframe {i} font_size");
+  }
+
+  let st = StyleTransition {
+    widget_id: 3, from: a, to: b, start_time: 1.0, active: true,
+    transition: Transition { duration: 0.5, delay: 0.1, easing: EasingType::CubicBezier },
+  };
+  for (let i in 0usize..6) {
+    let (s, done) = st.evaluate(kTransT[i]);
+    t.that((done ? 1u32 : 0u32) == kTrans[i][0], f"transition {i} done");
+    t.bits(s.opacity, kTrans[i][1], f"transition {i} opacity");
+    t.bits(s.font_size, kTrans[i][2], f"transition {i} font_size");
+  }
+
+  // The animator's bookkeeping: a transition per widget, completion, cancel.
+  var animator = Animator();
+  animator.start_transition(1, a, b, Transition { duration: 1.0 }, 0.0);
+  animator.start_transition(1, a, c, Transition { duration: 1.0 }, 0.0);  // replaces the first
+  animator.start_animation(anim, 0.0);
+  t.that(animator.is_animating(1) && animator.is_animating(7), "animating");
+  var applied: u32 = 0;
+  var finished: u32 = 0;
+  var last_font = 0.0f32;
+  let active = animator.update(0.5, fn(id: u32, s&: Style) {
+    applied += 1;
+    if (id == 1) {
+      last_font = s.font_size;
+    }
+  }, fn(id: u32) {
+    finished += 1;
+  });
+  t.that(active && applied == 2 && finished == 0, "one live transition and one animation applied");
+  t.that(last_font > 10.0 && last_font < 20.0, "the replacing transition is the one applied");
+  let _ = animator.update(1.5, fn(id: u32, s&: Style) {}, fn(id: u32) {
+    finished += 1;
+  });
+  t.that(finished == 1 && !animator.is_animating(1), "finished transition reported and removed");
+  animator.cancel(7);
+  t.that(!animator.is_animating(7), "cancel");
+
+  // Scroll-linked: halfway through the scroll range is halfway through the
+  // lerp.
+  animator.add_scroll_animation(ScrollAnimation { widget_id: 5, scroll_widget_id: 9, scroll_start: 100.0, scroll_end: 200.0, from: a, to: b });
+  var got = -1.0f32;
+  animator.evaluate_scroll_animations(9, 150.0, fn(id: u32, s&: Style) {
+    got = s.opacity;
+  });
+  t.that(got == 0.5, "scroll animation");
+}
+
+fn check_math(var t&: Expect) {
+  let c = Color::from_hex(0xFF8000, 0.5);
+  t.that(c.r == 1.0 && c.g == 128.0f32 / 255.0 && c.b == 0.0 && c.a == 0.5, "Color::from_hex");
+  t.that(Color::from_rgba8(255, 0, 51) == Color::rgba(1.0, 0.0, 0.2, 1.0), "Color::from_rgba8");
+  t.that(lerp_color(Color::black(), Color::white(), 0.5) == Color::rgba(0.5, 0.5, 0.5, 1.0), "lerp_color");
+  t.that(Color::red().with_alpha(0.25).a == 0.25, "with_alpha");
+  t.that(Vec2::new(3.0, 4.0).length() == 5.0 && Vec2::new(3.0, 4.0).normalized() == Vec2::new(0.6, 0.8), "Vec2 length");
+  t.that(Vec2::zero().normalized() == Vec2::zero(), "normalizing zero");
+  t.that(Vec2::new(1.0, 2.0) + Vec2::new(3.0, 4.0) == Vec2::new(4.0, 6.0) && Vec2::new(1.0, 2.0).dot(Vec2::new(3.0, 4.0)) == 11.0, "Vec2 ops");
+  t.that(Vec4::splat(1.0).scale(2.0) == Vec4::new(2.0, 2.0, 2.0, 2.0), "Vec4");
+  t.that(lerp(10.0, 20.0, 0.25) == 12.5 && clamp(5.0, 0.0, 1.0) == 1.0 && clamp(-1.0, 2.0, 1.0) == 2.0, "lerp/clamp");
+
+  let r = Rect::new(10.0, 20.0, 100.0, 50.0);
+  t.that(r.right() == 110.0 && r.bottom() == 70.0 && r.center() == Vec2::new(60.0, 45.0), "Rect edges");
+  t.that(r.contains(Vec2::new(110.0, 70.0)) && !r.contains(Vec2::new(110.1, 70.0)), "Rect contains is inclusive");
+  t.that(r.intersects(Rect::new(100.0, 60.0, 20.0, 20.0)) && !r.intersects(Rect::new(110.0, 20.0, 5.0, 5.0)), "Rect intersects");
+  t.that(r.intersected(Rect::new(100.0, 60.0, 20.0, 20.0)) == Rect::new(100.0, 60.0, 10.0, 10.0), "Rect intersected");
+  t.that(r.intersected(Rect::new(500.0, 0.0, 1.0, 1.0)) == Rect {}, "disjoint intersection is empty");
+  t.that(r.expanded(5.0) == Rect::new(5.0, 15.0, 110.0, 60.0) && r.shrunk(5.0) == Rect::new(15.0, 25.0, 90.0, 40.0), "expand/shrink");
+  t.that(r.translated(Vec2::new(1.0, -1.0)) == Rect::new(11.0, 19.0, 100.0, 50.0), "translated");
+  let e = EdgeInsets::new(1.0, 2.0, 3.0, 4.0);
+  t.that(e.horizontal() == 6.0 && e.vertical() == 4.0 && EdgeInsets::symmetric(5.0, 7.0).left == 7.0, "EdgeInsets");
+
+  for (let i in 0usize..4) {
+    let vals = [[0.0f32, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [0.5, 0.25, 0.75, 0.1], [0.999, 0.001, 0.5019608, 0.5]];
+    let v = vals[i];
+    t.eq_u32(pack_color(v[0], v[1], v[2], v[3]), kPack[i], f"pack_color {i}");
+  }
+  t.eq_u32(pack_radii(1.4, 2.5, 255.4, 300.0), kRadii[0], "pack_radii");
+  t.eq_u32(pack_radii_uniform(7.5), kRadii[1], "pack_radii uniform");
+}
+
+fn check_hex(var t&: Expect) {
+  t.that(parse_hex_color("#FF8000") == 0xFF8000, "#RRGGBB");
+  t.that(parse_hex_color("ff800080") == 0xFF800080, "RRGGBBAA without #");
+  t.that(parse_hex_color("") == none && parse_hex_color("#12345") == none && parse_hex_color("#1234567") == none, "wrong lengths");
+  t.that(parse_hex_color("#GG0000") == none, "no digits at all");
+  // The C++ quirk kept: a parse that stops early succeeds with what it read.
+  t.that(parse_hex_color("#12G456") == 0x12, "stops at the first non-digit");
+}
+
+fn check_style_override(var t&: Expect) {
+  var base = Style {};
+  base.background = Color::red();
+  base.opacity = 0.9;
+  base.font_size = 12.0;
+  var hover = Style {};
+  hover.background = Color::blue();
+  hover.opacity = 0.1;  // not in the mask: ignored
+  var pressed = Style {};
+  pressed.font_size = 30.0;
+  pressed.corner_radius = 4.0;
+  pressed.corner_radius_tl = 2.0;
+  var always = Style {};
+  always.border_width = 3.0;
+  let overrides = [
+    StyleOverride { state: WidgetState::Hovered, style: hover, mask: StyleMask::kBackground },
+    StyleOverride { state: WidgetState::Pressed, style: pressed, mask: StyleMask::kFontSize | StyleMask::kCornerRadius },
+    StyleOverride { state: WidgetState::None, style: always, mask: StyleMask::kBorderWidth },
+  ];
+  let idle = resolve_style(base, overrides[..], WidgetState::None);
+  t.that(idle.background == Color::red() && idle.border_width == 3.0, "state None overrides always apply");
+  let hovered = resolve_style(base, overrides[..], WidgetState::Hovered);
+  t.that(hovered.background == Color::blue() && hovered.opacity == 0.9, "only masked properties apply");
+  let both = resolve_style(base, overrides[..], WidgetState::Hovered.with(WidgetState::Pressed));
+  t.that(both.background == Color::blue() && both.font_size == 30.0 && both.corner_radius_tl == 2.0, "flags combine");
+  t.that(Length::pct(50.0).resolve(200.0, 0.0, 0.0) == 100.0 && Length::auto() == Length { value: 3.0, unit: Length::auto().unit },
+         "Length resolve and auto equality");
+  var scaled = base;
+  scaled.scale(2.0);
+  t.that(scaled.font_size == 24.0 && scaled.opacity == 0.9, "Style::scale scales pixels only");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  check_from_chars(t);
+  check_sort(t);
+  check_easing(t);
+  check_lerp(t);
+  check_animation(t);
+  check_math(t);
+  check_hex(t);
+  check_style_override(t);
+  return t.finish();
+}

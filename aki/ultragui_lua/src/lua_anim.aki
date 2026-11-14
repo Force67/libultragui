@@ -1,0 +1,129 @@
+// ugui/scripting/lua_anim.{h,cc}: the .uganim Lua bindings (ugui.load_anim,
+// ugui.anim_play, ...).
+//
+// Shape differences from the C++ (behavior is the C++'s):
+//
+// * RegisterAnimLua's `Function` parameters are `own fn` hooks that also get
+//   the LuaCall (the World and WidgetContext of the running call), so a host
+//   can look widgets up in the World it lends: `loader` is UIContext::LoadAnim,
+//   `find_widget` UIContext::FindWidgetEntity. Paths and names reach them as
+//   owned Strings (see lua_call for how Lua text becomes a String).
+// * An animation reaches Lua as a light userdata holding the address the
+//   loader returned, as in the C++: the host keeps the VectorAnimation at that
+//   address (boxed) for as long as scripts may hold it; a stale or foreign
+//   light userdata is undefined, as in the C++.
+
+module ultragui_lua::lua_anim;
+
+import {String} from akikit::strings::string;
+import {WidgetId} from ultragui::core::handle;
+import {VectorAnimation} from ultragui::anim::vector_animation;
+import {set_image_texture} from ultragui::widgets::image;
+import {LuaCall, LuaRaise} from ultragui_lua::lua_call;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+
+// Function<VectorAnimation*(const char*, unsigned, unsigned)>: a loaded
+// animation the host owns, or null.
+pub type AnimLoader = own fn(&var LuaCall, String, u32, u32): *var VectorAnimation;
+// Function<wid(const char*)>: the widget of that name, the null handle if none.
+pub type FindWidget = own fn(&var LuaCall, String): WidgetId;
+
+fn anim_at(call&: LuaCall, arg: i32): *var VectorAnimation => unsafe (call.to_userdata(arg) as *var VectorAnimation);
+
+// RegisterAnimLua
+pub fn register_anim_lua(var rt&: LuaRuntime, loader: AnimLoader, find_widget: FindWidget) {
+  rt.register_function("load_anim", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let path = try call.check_string(1);
+    let w = (try call.check_integer(2)) as u32;
+    let h = (try call.check_integer(3)) as u32;
+    let anim = loader(call, path, w, h);
+    if (anim != null) {
+      call.push_light_userdata(unsafe (anim as *var u8));
+    } else {
+      call.push_nil();
+    }
+    return 1;
+  });
+
+  rt.register_function("anim_play", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    if (a != null) {
+      unsafe (*a).play();
+    }
+    return 0;
+  });
+
+  rt.register_function("anim_pause", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    if (a != null) {
+      unsafe (*a).pause();
+    }
+    return 0;
+  });
+
+  rt.register_function("anim_stop", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    if (a != null) {
+      unsafe (*a).stop();
+    }
+    return 0;
+  });
+
+  rt.register_function("anim_loop", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    if (a != null) {
+      unsafe (*a).set_loop(call.to_boolean(2));
+    }
+    return 0;
+  });
+
+  rt.register_function("anim_speed", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    if (a != null) {
+      let s = (try call.check_number(2)) as f32;
+      unsafe (*a).set_speed(s);
+    }
+    return 0;
+  });
+
+  rt.register_function("anim_seek", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    if (a != null) {
+      let p = (try call.check_number(2)) as f32;
+      unsafe (*a).seek(p);
+    }
+    return 0;
+  });
+
+  rt.register_function("anim_playing", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    call.push_boolean(a != null && unsafe (*a).is_playing());
+    return 1;
+  });
+
+  rt.register_function("anim_progress", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    let p: f32 = a != null ? unsafe (*a).progress() : 0.0;
+    call.push_number(p as f64);
+    return 1;
+  });
+
+  rt.register_function("anim_duration", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    call.push_number(a != null ? unsafe (*a).duration() : 0.0);
+    return 1;
+  });
+
+  rt.register_function("anim_attach", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let a = anim_at(call, 1);
+    let name = try call.check_string(2);
+    if (a != null) {
+      let w = find_widget(call, name);
+      if (w.valid()) {
+        let (tex, aw, ah) = unsafe ((*a).texture(), (*a).width(), (*a).height());
+        set_image_texture(call.world, w, tex, aw as f32, ah as f32);
+      }
+    }
+    return 0;
+  });
+}

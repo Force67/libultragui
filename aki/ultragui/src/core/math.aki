@@ -1,0 +1,70 @@
+// ugui/core/math.h: Vec2, Vec4, Lerp and Clamp.
+//
+// Float expressions keep the C++ order of operations. akiko fuses a product
+// that an add or subtract takes into one fma (language ADR 0221), as clang
+// does for C++ on aarch64 under its default -ffp-contract=on, so `a + (b - a)
+// * t` rounds the same in both builds there.
+
+module ultragui::core::math;
+
+pub struct Vec2 : Copy, Equal, Add, Sub {
+  pub var x: f32 = 0.0
+  pub var y: f32 = 0.0
+
+  // Vec2(x, y) and Vec2(v) (both components v).
+  pub fn new(x: f32, y: f32): Vec2 => Vec2 { x, y };
+  pub fn splat(v: f32): Vec2 => Vec2 { x: v, y: v };
+
+  pub fn add(self&, rhs&: Vec2): Vec2 => Vec2 { x: self.x + rhs.x, y: self.y + rhs.y };
+  pub fn sub(self&, rhs&: Vec2): Vec2 => Vec2 { x: self.x - rhs.x, y: self.y - rhs.y };
+  // operator*(f32) and operator/(f32).
+  pub fn scale(self&, s: f32): Vec2 => Vec2 { x: self.x * s, y: self.y * s };
+  pub fn div_scalar(self&, s: f32): Vec2 => Vec2 { x: self.x / s, y: self.y / s };
+  // operator*(f32, Vec2): s * v, the scalar on the left.
+  pub fn scaled_by(s: f32, v: Vec2): Vec2 => Vec2 { x: s * v.x, y: s * v.y };
+
+  pub fn dot(self&, rhs&: Vec2): f32 => self.x * rhs.x + self.y * rhs.y;
+  pub fn length(self&): f32 => @sqrt(self.x * self.x + self.y * self.y);
+  pub fn length_sq(self&): f32 => self.x * self.x + self.y * self.y;
+  pub fn normalized(self&): Vec2;
+
+  pub fn eq(self&, rhs&: Vec2): bool => self.x == rhs.x && self.y == rhs.y;
+
+  pub fn zero(): Vec2 => Vec2 { x: 0.0, y: 0.0 };
+  pub fn one(): Vec2 => Vec2 { x: 1.0, y: 1.0 };
+}
+
+fn Vec2::normalized(self&): Vec2 {
+  let len = self.length();
+  return len > 0.0 ? Vec2 { x: self.x / len, y: self.y / len } : Vec2 { x: 0.0, y: 0.0 };
+}
+
+pub struct Vec4 : Copy, Equal, Add, Sub {
+  pub var x: f32 = 0.0
+  pub var y: f32 = 0.0
+  pub var z: f32 = 0.0
+  pub var w: f32 = 0.0
+
+  pub fn new(x: f32, y: f32, z: f32, w: f32): Vec4 => Vec4 { x, y, z, w };
+  pub fn splat(v: f32): Vec4 => Vec4 { x: v, y: v, z: v, w: v };
+
+  pub fn add(self&, rhs&: Vec4): Vec4 => Vec4 { x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z, w: self.w + rhs.w };
+  pub fn sub(self&, rhs&: Vec4): Vec4 => Vec4 { x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z, w: self.w - rhs.w };
+  pub fn scale(self&, s: f32): Vec4 => Vec4 { x: self.x * s, y: self.y * s, z: self.z * s, w: self.w * s };
+
+  pub fn eq(self&, rhs&: Vec4): bool => self.x == rhs.x && self.y == rhs.y && self.z == rhs.z && self.w == rhs.w;
+}
+
+// Lerp(f32, f32, f32).
+pub fn lerp(a: f32, b: f32, t: f32): f32 => a + (b - a) * t;
+
+// Lerp(Vec2, Vec2, f32).
+pub fn lerp_vec2(a: Vec2, b: Vec2, t: f32): Vec2 => Vec2 { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
+
+// Lerp(Vec4, Vec4, f32).
+pub fn lerp_vec4(a: Vec4, b: Vec4, t: f32): Vec4 =>
+  Vec4 { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t), z: lerp(a.z, b.z, t), w: lerp(a.w, b.w, t) };
+
+// Clamp(v, lo, hi): lo for v < lo even when lo > hi. Not ClampMinMax
+// (core::algorithm), which is std::clamp.
+pub fn clamp(v: f32, lo: f32, hi: f32): f32 => v < lo ? lo : (v > hi ? hi : v);

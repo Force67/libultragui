@@ -1,0 +1,2214 @@
+// ugui/rhi/vulkan/vulkan_rhi.{h,cc}: the Vulkan RHI over a GLFW window.
+//
+// Shape differences from the C++:
+// * The C++ RHI class with vulkan_rhi.cc linked in is VulkanRhi here, a type
+//   implementing the Rhi capability. RHI::Impl stays a separate heap object
+//   (VulkanRhiImpl in a Box), because the framebuffer-size callback reaches it
+//   through a static pointer (s_rhi_instance), as in the C++; the VulkanRhi
+//   value itself may move. VulkanRhi's methods forward to it, as RHI's do.
+// * RHIConfig::platform->native_handle() is RhiConfig::native_window (the
+//   GLFWwindow*), see PORTING.md.
+// * Shaders load from shader_dir as SPIR-V files, as the C++; with the
+//   package feature `embed_shaders` they come from the copies @embed-ded at
+//   build time instead (shaders/README.md says how they are produced).
+// * `pixels` shorter than the texture (the C++ nullptr, which crashes in
+//   memcpy) uploads what it holds and zeros the rest.
+// * find_memory_type stops on no suitable type, where the C++ asserts.
+// * RhiConfig::embedded is ignored, as vulkan_rhi.cc ignores it.
+
+module ultragui_vulkan::vulkan_rhi;
+
+import {List, filled} from akikit::containers::list;
+import {eprintln, println} from akikit::logging;
+import {Box} from akikit::memory::box;
+import {String, from_str} from akikit::strings::string;
+import {is_string_utf8} from akikit::text::code_point_validation;
+import {clamp_min_max, max, min} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D} from ultragui::render::vertex;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {GlfwWindow, glfw_get_framebuffer_size, glfw_get_window_size, glfw_set_framebuffer_size_callback,
+  glfw_wait_events} from ultragui_glfw::sys::glfw;
+import {color_range, vertex_attributes} from ultragui_vulkan::common;
+import {shader_code} from ultragui_vulkan::shaders;
+import * from ultragui_vulkan::sys::vulkan;
+
+extern fn memcpy(dst: *var u8, src: *const u8, n: usize): *var u8;
+extern fn memset(dst: *var u8, c: i32, n: usize): *var u8;
+extern fn strlen(s: *const c_char): usize;
+
+static var s_rhi_instance: *var VulkanRhiImpl = null;
+
+// ---------------------------------------------------------------------------
+// Debug callback
+// ---------------------------------------------------------------------------
+
+extern fn debug_callback(severity: u32, kind: u32, data: *const VkDebugUtilsMessengerCallbackDataEXT, user: *var u8): u32 {
+  if (severity >= kVkDebugUtilsMessageSeverityWarningBitExt) {
+    unsafe {
+      let m = (*data).message;
+      eprintln(f"[vulkan] {c_text(m)}");
+    }
+  }
+  return kVkFalse;
+}
+
+// A NUL-terminated C string as text; "" for null or text that is not UTF-8.
+unsafe fn c_text(p: *const c_char): str {
+  if (p == null) {
+    return "";
+  }
+  unsafe {
+    let n = strlen(p);
+    if (!is_string_utf8(@slice(p as *const byte, n))) {
+      return "";
+    }
+    return @str(p as *const c8, n);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn choose_surface_format(formats&: [VkSurfaceFormatKHR]): VkSurfaceFormatKHR {
+  // Prefer sRGB format: the GPU automatically converts linear framebuffer
+  // writes to sRGB on output, giving correct gamma-space anti-aliasing and
+  // blending.
+  for (let f in formats) {
+    if (f.format == kVkFormatB8g8r8a8Srgb && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
+      return f;
+    }
+  }
+  // Fallback to UNORM + sRGB colorspace (manual gamma)
+  for (let f in formats) {
+    if (f.format == kVkFormatB8g8r8a8Unorm && f.color_space == kVkColorSpaceSrgbNonlinearKhr) {
+      return f;
+    }
+  }
+  return formats[0];
+}
+
+fn choose_present_mode(modes&: [VkPresentModeKHR], vsync: bool): VkPresentModeKHR {
+  if (vsync) {
+    return kVkPresentModeFifoKhr;
+  }
+  for (let m in modes) {
+    if (m == kVkPresentModeMailboxKhr) {
+      return m;
+    }
+  }
+  return kVkPresentModeFifoKhr;
+}
+
+fn choose_extent(caps&: VkSurfaceCapabilitiesKHR, window: *var GlfwWindow): VkExtent2D {
+  if (caps.current_extent.width != 0xFFFF_FFFF) {
+    return caps.current_extent;
+  }
+  var w: i32 = 0;
+  var h: i32 = 0;
+  unsafe glfw_get_framebuffer_size(window, &raw var w, &raw var h);
+  var ext = VkExtent2D { width: w as u32, height: h as u32 };
+  ext.width = clamp_min_max(ext.width, caps.min_image_extent.width, caps.max_image_extent.width);
+  ext.height = clamp_min_max(ext.height, caps.min_image_extent.height, caps.max_image_extent.height);
+  return ext;
+}
+
+// The dpi scale, framebuffer pixels per window unit, as Init and the resize
+// callback compute it.
+fn window_dpi_scale(window: *var GlfwWindow): f32 {
+  var fw: i32 = 0;
+  var fh: i32 = 0;
+  var ww: i32 = 0;
+  var wh: i32 = 0;
+  unsafe {
+    glfw_get_framebuffer_size(window, &raw var fw, &raw var fh);
+    glfw_get_window_size(window, &raw var ww, &raw var wh);
+  }
+  return (ww > 0) ? fw as f32 / ww as f32 : 1.0;
+}
+
+extern fn framebuffer_size_cb(window: *var GlfwWindow, width: i32, height: i32) {
+  unsafe {
+    if (s_rhi_instance == null) {
+      return;
+    }
+    (*s_rhi_instance).framebuffer_resized_ = true;
+    (*s_rhi_instance).dpi_scale_ = window_dpi_scale((*s_rhi_instance).window_);
+  }
+}
+
+// A render target holds sRGB-encoded bytes, like every other texture the quad
+// shader samples. The attachment view takes the swapchain's own sRGB format,
+// so the hardware encodes on write and the offscreen pass stays render-pass
+// compatible with the swapchain pipelines. The sampled view takes the matching
+// UNORM format, which leaves srgb_to_linear() in the shader as the only
+// decode. Decoding twice darkens every offscreen pass.
+fn unorm_view_format(srgb: VkFormat): VkFormat {
+  if (srgb == kVkFormatB8g8r8a8Srgb) {
+    return kVkFormatB8g8r8a8Unorm;
+  }
+  if (srgb == kVkFormatR8g8b8a8Srgb) {
+    return kVkFormatR8g8b8a8Unorm;
+  }
+  return srgb;  // already a UNORM fallback; there is no encode to undo
+}
+
+// ---------------------------------------------------------------------------
+// RHI::Impl
+// ---------------------------------------------------------------------------
+
+comptime let kMaxFrames: u32 = 2;
+comptime let kMaxSwapchainImages: u32 = 8;
+comptime let kMaxTextures: u32 = 256;
+
+struct FrameData {
+  pub var cmd_pool: VkCommandPool = 0
+  pub unowned var cmd_buffer: VkCommandBuffer = null
+  pub var image_available: VkSemaphore = 0
+  pub var in_flight: VkFence = 0
+  // Quad pipeline buffers
+  pub var vertex_buffer: VkBuffer = 0
+  pub var vertex_memory: VkDeviceMemory = 0
+  pub var vertex_capacity: u32 = 0
+  pub var vertex_write_pos: u32 = 0  // append position (vertex count)
+  pub var index_buffer: VkBuffer = 0
+  pub var index_memory: VkDeviceMemory = 0
+  pub var index_capacity: u32 = 0
+  pub var index_write_pos: u32 = 0  // append position (index count)
+  // Text pipeline buffers (separate to avoid overwrite conflicts)
+  pub var text_vertex_buffer: VkBuffer = 0
+  pub var text_vertex_memory: VkDeviceMemory = 0
+  pub var text_vertex_capacity: u32 = 0
+  pub var text_vertex_write_pos: u32 = 0
+  pub var text_index_buffer: VkBuffer = 0
+  pub var text_index_memory: VkDeviceMemory = 0
+  pub var text_index_capacity: u32 = 0
+  pub var text_index_write_pos: u32 = 0
+  // Buffers a mid-frame grow replaced. The command buffer being recorded
+  // still binds them and they still hold the vertices those draws read, so
+  // they are freed once this frame's fence signals, not at the grow.
+  pub var retired_buffers: List<VkBuffer> = List()
+  pub var retired_memory: List<VkDeviceMemory> = List()
+}
+
+struct TextureSlot : Copy {
+  pub var image: VkImage = 0
+  pub var memory: VkDeviceMemory = 0
+  pub var view: VkImageView = 0  // sampled: UNORM, no hardware decode
+  // Render targets are written through an sRGB view so the hardware encodes
+  // on write, and sampled through the UNORM `view` above so the shader's own
+  // srgb_to_linear() is the only decode. Zero for ordinary textures.
+  pub var attachment_view: VkImageView = 0
+  pub var descriptor: VkDescriptorSet = 0
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var pixel_size: u32 = 0  // bytes per pixel
+  pub var in_use: bool = false
+  pub var is_render_target: bool = false
+  pub var framebuffer: VkFramebuffer = 0
+}
+
+struct VulkanRhiImpl {
+  pub unowned var window_: *var GlfwWindow = null
+  pub var shader_dir_: String = String()
+  pub var dpi_scale_: f32 = 1.0
+
+  // Instance & device
+  pub unowned var instance_: VkInstance = null
+  pub var debug_messenger_: VkDebugUtilsMessengerEXT = 0
+  pub var surface_: VkSurfaceKHR = 0
+  pub unowned var physical_device_: VkPhysicalDevice = null
+  pub unowned var device_: VkDevice = null
+  pub unowned var graphics_queue_: VkQueue = null
+  pub unowned var present_queue_: VkQueue = null
+  pub var graphics_family_: u32 = 0
+  pub var present_family_: u32 = 0
+  pub var validation_enabled_: bool = false
+
+  // Swapchain
+  pub var swapchain_: VkSwapchainKHR = 0
+  pub var swapchain_format_: VkFormat = kVkFormatUndefined
+  pub var swapchain_extent_: VkExtent2D = VkExtent2D {}
+  pub var swapchain_images_: List<VkImage> = List()
+  pub var swapchain_views_: List<VkImageView> = List()
+  pub var framebuffers_: List<VkFramebuffer> = List()
+
+  // Pipeline
+  pub var render_pass_: VkRenderPass = 0
+  pub var desc_set_layout_: VkDescriptorSetLayout = 0
+  pub var pipeline_layout_: VkPipelineLayout = 0
+  pub var pipeline_: VkPipeline = 0
+  pub var text_pipeline_: VkPipeline = 0
+
+  // Descriptors
+  pub var desc_pool_: VkDescriptorPool = 0
+
+  // Per-frame data (one per in-flight frame)
+  pub var frames_: [FrameData; 2] = [FrameData {}, FrameData {}]
+  pub var current_frame_: u32 = 0
+  pub var image_index_: u32 = 0
+  pub var framebuffer_resized_: bool = false
+
+  // Per-swapchain-image semaphores for presentation. Indexed by image_index_
+  // to avoid reuse while presentation engine holds them.
+  pub var render_finished_: [VkSemaphore; 8] = [0; 8]
+
+  // Default resources
+  pub var default_sampler_: VkSampler = 0  // LINEAR
+  pub var nearest_sampler_: VkSampler = 0  // NEAREST (for text atlases)
+
+  pub var textures_: [TextureSlot; 256] = [TextureSlot {}; 256]
+  pub var white_texture_: RhiTextureHandle = kInvalidTexture
+
+  // Offscreen rendering state
+  pub var offscreen_render_pass_: VkRenderPass = 0
+  pub var frame_acquired_: bool = false
+  pub var active_offscreen_target_: RhiTextureHandle = kInvalidTexture
+  pub var offscreen_display_size_: Vec2 = Vec2 {}
+
+  // Video pipeline (YCbCr -> RGBA conversion)
+  pub var video_desc_set_layout_: VkDescriptorSetLayout = 0
+  pub var video_desc_pool_: VkDescriptorPool = 0
+  pub var video_pipeline_layout_: VkPipelineLayout = 0
+  pub var video_pipeline_: VkPipeline = 0
+  pub var video_desc_sets_: [VkDescriptorSet; 2] = [0; 2]
+  pub var video_pipeline_ready_: bool = false
+
+  // Vertex dedup: avoid re-uploading the same data within a Renderer2D frame
+  pub unowned var last_quad_verts_: *const Vertex2D = null
+  pub var last_quad_vert_count_: u32 = 0
+  pub var last_quad_vb_offset_: u64 = 0
+  pub unowned var last_text_verts_: *const Vertex2D = null
+  pub var last_text_vert_count_: u32 = 0
+  pub var last_text_vb_offset_: u64 = 0
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::init(var self&, config&: RhiConfig): bool {
+  self.window_ = unsafe (config.native_window as *var GlfwWindow);
+  self.validation_enabled_ = config.validation;
+  self.shader_dir_ = #config.shader_dir != 0 ? from_str(config.shader_dir.as_str()) : from_str("shaders");
+
+  // Compute DPI scale: ratio of framebuffer pixels to window (screen)
+  // coordinates
+  self.dpi_scale_ = window_dpi_scale(self.window_);
+
+  // Use a static to avoid glfwSetWindowUserPointer conflict with InputRouter
+  unsafe {
+    var me& = self;
+    s_rhi_instance = &raw var me;
+    let _ = glfw_set_framebuffer_size_callback(self.window_, @c_fn(framebuffer_size_cb));
+  }
+
+  if (!self.create_instance()) {
+    return false;
+  }
+  if (!self.create_surface()) {
+    return false;
+  }
+  if (!self.pick_physical_device()) {
+    return false;
+  }
+  if (!self.create_device()) {
+    return false;
+  }
+  if (!self.create_swapchain()) {
+    return false;
+  }
+  if (!self.create_render_pass()) {
+    return false;
+  }
+  if (!self.create_descriptor_layout()) {
+    return false;
+  }
+  if (!self.create_pipeline()) {
+    return false;
+  }
+  if (!self.create_text_pipeline()) {
+    return false;
+  }
+  if (!self.create_framebuffers()) {
+    return false;
+  }
+  if (!self.create_command_resources()) {
+    return false;
+  }
+  if (!self.create_sync_objects()) {
+    return false;
+  }
+  if (!self.create_default_resources()) {
+    return false;
+  }
+  return true;
+}
+
+fn VulkanRhiImpl::create_instance(var self&): bool {
+  let app_info = VkApplicationInfo {
+    application_name: c"ultragui",
+    application_version: vk_make_version(0, 1, 0),
+    engine_name: c"ultragui",
+    engine_version: vk_make_version(0, 1, 0),
+    api_version: kVkApiVersion12,
+  };
+
+  var glfw_ext_count: u32 = 0;
+  let glfw_exts = unsafe glfw_get_required_instance_extensions(&raw var glfw_ext_count);
+  var extensions: List<*const c_char> = List();
+  for (let i in 0..glfw_ext_count as usize) {
+    extensions.push(unsafe *(glfw_exts + i));
+  }
+
+  var layers: List<*const c_char> = List();
+  if (self.validation_enabled_) {
+    layers.push(c"VK_LAYER_KHRONOS_validation");
+    extensions.push(c"VK_EXT_debug_utils");
+  }
+
+  let ci = VkInstanceCreateInfo {
+    application_info: unsafe (&raw app_info),
+    enabled_extension_count: extensions.len() as u32,
+    enabled_extension_names: @ptr(extensions.as_slice()),
+    enabled_layer_count: layers.len() as u32,
+    enabled_layer_names: @ptr(layers.as_slice()),
+  };
+
+  if (unsafe vk_create_instance(&raw ci, null, &raw var self.instance_) != kVkSuccess) {
+    eprintln("ultragui: vkCreateInstance failed");
+    return false;
+  }
+
+  if (self.validation_enabled_) {
+    let func = unsafe vk_get_instance_proc_addr(self.instance_, c"vkCreateDebugUtilsMessengerEXT");
+    if (let fp = func) {
+      var raw_fn = fp;
+      let create = unsafe @read(&raw var raw_fn as *const VkCreateDebugUtilsMessengerFn);
+      let dci = VkDebugUtilsMessengerCreateInfoEXT {
+        message_severity: kVkDebugUtilsMessageSeverityWarningBitExt | kVkDebugUtilsMessageSeverityErrorBitExt,
+        message_type: kVkDebugUtilsMessageTypeGeneralBitExt | kVkDebugUtilsMessageTypeValidationBitExt |
+          kVkDebugUtilsMessageTypePerformanceBitExt,
+        user_callback: @c_fn(debug_callback),
+      };
+      let _ = unsafe create(self.instance_, &raw dci, null, &raw var self.debug_messenger_);
+    }
+  }
+  return true;
+}
+
+fn VulkanRhiImpl::create_surface(var self&): bool =>
+  unsafe glfw_create_window_surface(self.instance_, self.window_, null, &raw var self.surface_) == kVkSuccess;
+
+fn VulkanRhiImpl::pick_physical_device(var self&): bool {
+  var count: u32 = 0;
+  let _ = unsafe vk_enumerate_physical_devices(self.instance_, &raw var count, null);
+  if (count == 0) {
+    return false;
+  }
+  var devices: List<VkPhysicalDevice> = filled(count as usize, null);
+  let _ = unsafe vk_enumerate_physical_devices(self.instance_, &raw var count, @ptr(devices.as_slice_var()));
+
+  for (let dev in devices) {
+    var qcount: u32 = 0;
+    unsafe vk_get_physical_device_queue_family_properties(dev, &raw var qcount, null);
+    var qfamilies: List<VkQueueFamilyProperties> = filled(qcount as usize, VkQueueFamilyProperties {});
+    unsafe vk_get_physical_device_queue_family_properties(dev, &raw var qcount, @ptr(qfamilies.as_slice_var()));
+
+    var found_graphics = false;
+    var found_present = false;
+    for (let i in 0..qcount) {
+      if ((qfamilies[i as usize].queue_flags & kVkQueueGraphicsBit) != 0) {
+        self.graphics_family_ = i;
+        found_graphics = true;
+      }
+      var present_support: u32 = 0;
+      let _ = unsafe vk_get_physical_device_surface_support_khr(dev, i, self.surface_, &raw var present_support);
+      if (present_support != 0) {
+        self.present_family_ = i;
+        found_present = true;
+      }
+      if (found_graphics && found_present) {
+        break;
+      }
+    }
+
+    if (found_graphics && found_present) {
+      self.physical_device_ = dev;
+      var props = VkPhysicalDeviceProperties {};
+      unsafe vk_get_physical_device_properties(dev, &raw var props);
+      let name = unsafe c_text(@ptr(props.device_name[..]));
+      println(f"ultragui: using GPU '{name}'");
+      return true;
+    }
+  }
+  return false;
+}
+
+fn VulkanRhiImpl::create_device(var self&): bool {
+  // Distinct families in ascending order.
+  let unique_families = [min(self.graphics_family_, self.present_family_), max(self.graphics_family_, self.present_family_)];
+  let family_count: u32 = self.graphics_family_ == self.present_family_ ? 1 : 2;
+  let priority: f32 = 1.0;
+  var queue_cis: List<VkDeviceQueueCreateInfo> = List();
+  for (let i in 0..family_count) {
+    let family = unique_families[i as usize];
+    queue_cis.push(VkDeviceQueueCreateInfo { queue_family_index: family, queue_count: 1, queue_priorities: unsafe (&raw priority) });
+  }
+
+  let device_extensions = [c"VK_KHR_swapchain"];
+  let features = VkPhysicalDeviceFeatures {};
+
+  let ci = VkDeviceCreateInfo {
+    queue_create_info_count: queue_cis.len() as u32,
+    queue_create_infos: @ptr(queue_cis.as_slice()),
+    enabled_extension_count: 1,
+    enabled_extension_names: @ptr(device_extensions[..]),
+    enabled_features: unsafe (&raw features),
+  };
+
+  if (unsafe vk_create_device(self.physical_device_, &raw ci, null, &raw var self.device_) != kVkSuccess) {
+    return false;
+  }
+
+  unsafe {
+    vk_get_device_queue(self.device_, self.graphics_family_, 0, &raw var self.graphics_queue_);
+    vk_get_device_queue(self.device_, self.present_family_, 0, &raw var self.present_queue_);
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Swapchain
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::create_swapchain(var self&): bool {
+  var caps = VkSurfaceCapabilitiesKHR {};
+  let _ = unsafe vk_get_physical_device_surface_capabilities_khr(self.physical_device_, self.surface_, &raw var caps);
+
+  var fmt_count: u32 = 0;
+  let _ = unsafe vk_get_physical_device_surface_formats_khr(self.physical_device_, self.surface_, &raw var fmt_count, null);
+  var formats: List<VkSurfaceFormatKHR> = filled(fmt_count as usize, VkSurfaceFormatKHR {});
+  let _ = unsafe vk_get_physical_device_surface_formats_khr(self.physical_device_, self.surface_, &raw var fmt_count,
+    @ptr(formats.as_slice_var()));
+
+  var pm_count: u32 = 0;
+  let _ = unsafe vk_get_physical_device_surface_present_modes_khr(self.physical_device_, self.surface_, &raw var pm_count, null);
+  var modes: List<VkPresentModeKHR> = filled(pm_count as usize, 0);
+  let _ = unsafe vk_get_physical_device_surface_present_modes_khr(self.physical_device_, self.surface_, &raw var pm_count,
+    @ptr(modes.as_slice_var()));
+
+  let surface_format = choose_surface_format(formats.as_slice());
+  let present_mode = choose_present_mode(modes.as_slice(), true);
+  let extent = choose_extent(caps, self.window_);
+
+  var image_count = caps.min_image_count + 1;
+  if (caps.max_image_count > 0 && image_count > caps.max_image_count) {
+    image_count = caps.max_image_count;
+  }
+
+  let queue_indices = [self.graphics_family_, self.present_family_];
+  var ci = VkSwapchainCreateInfoKHR {
+    surface: self.surface_,
+    min_image_count: image_count,
+    image_format: surface_format.format,
+    image_color_space: surface_format.color_space,
+    image_extent: extent,
+    image_array_layers: 1,
+    image_usage: kVkImageUsageColorAttachmentBit,
+  };
+  if (self.graphics_family_ != self.present_family_) {
+    ci.image_sharing_mode = kVkSharingModeConcurrent;
+    ci.queue_family_index_count = 2;
+    ci.queue_family_indices = @ptr(queue_indices[..]);
+  } else {
+    ci.image_sharing_mode = kVkSharingModeExclusive;
+  }
+  ci.pre_transform = caps.current_transform;
+  ci.composite_alpha = kVkCompositeAlphaOpaqueBitKhr;
+  ci.present_mode = present_mode;
+  ci.clipped = kVkTrue;
+  ci.old_swapchain = kVkNullHandle;
+
+  if (unsafe vk_create_swapchain_khr(self.device_, &raw ci, null, &raw var self.swapchain_) != kVkSuccess) {
+    return false;
+  }
+
+  self.swapchain_format_ = surface_format.format;
+  self.swapchain_extent_ = extent;
+
+  let _ = unsafe vk_get_swapchain_images_khr(self.device_, self.swapchain_, &raw var image_count, null);
+  self.swapchain_images_ = filled(image_count as usize, 0);
+  let _ = unsafe vk_get_swapchain_images_khr(self.device_, self.swapchain_, &raw var image_count,
+    @ptr(self.swapchain_images_.as_slice_var()));
+
+  self.swapchain_views_ = filled(image_count as usize, 0);
+  for (let i in 0..image_count as usize) {
+    let vci = VkImageViewCreateInfo {
+      image: self.swapchain_images_[i],
+      view_type: kVkImageViewType2d,
+      format: self.swapchain_format_,
+      subresource_range: color_range(),
+    };
+    var view: VkImageView = 0;
+    let r = unsafe vk_create_image_view(self.device_, &raw vci, null, &raw var view);
+    self.swapchain_views_[i] = view;
+    if (r != kVkSuccess) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn VulkanRhiImpl::cleanup_swapchain(var self&) {
+  unsafe {
+    for (let fb in self.framebuffers_) {
+      vk_destroy_framebuffer(self.device_, fb, null);
+    }
+    self.framebuffers_.clear();
+    for (let view in self.swapchain_views_) {
+      vk_destroy_image_view(self.device_, view, null);
+    }
+    self.swapchain_views_.clear();
+    vk_destroy_swapchain_khr(self.device_, self.swapchain_, null);
+  }
+  self.swapchain_ = kVkNullHandle;
+}
+
+fn VulkanRhiImpl::recreate_swapchain(var self&): bool {
+  var w: i32 = 0;
+  var h: i32 = 0;
+  unsafe glfw_get_framebuffer_size(self.window_, &raw var w, &raw var h);
+  while (w == 0 || h == 0) {
+    unsafe {
+      glfw_get_framebuffer_size(self.window_, &raw var w, &raw var h);
+      glfw_wait_events();
+    }
+  }
+  let _ = unsafe vk_device_wait_idle(self.device_);
+  self.cleanup_swapchain();
+  if (!self.create_swapchain()) {
+    return false;
+  }
+  if (!self.create_framebuffers()) {
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Render pass & pipeline
+// ---------------------------------------------------------------------------
+
+// The single-subpass colour pass both render passes are, ending in
+// `final_layout`.
+fn VulkanRhiImpl::make_color_pass(var self&, final_layout: u32, var out&: VkRenderPass): bool {
+  let color_att = VkAttachmentDescription {
+    format: self.swapchain_format_,
+    samples: kVkSampleCount1Bit,
+    load_op: kVkAttachmentLoadOpClear,
+    store_op: kVkAttachmentStoreOpStore,
+    stencil_load_op: kVkAttachmentLoadOpDontCare,
+    stencil_store_op: kVkAttachmentStoreOpDontCare,
+    initial_layout: kVkImageLayoutUndefined,
+    final_layout,
+  };
+
+  let color_ref = VkAttachmentReference { attachment: 0, layout: kVkImageLayoutColorAttachmentOptimal };
+  let subpass = VkSubpassDescription {
+    pipeline_bind_point: kVkPipelineBindPointGraphics,
+    color_attachment_count: 1,
+    color_attachments: unsafe (&raw color_ref),
+  };
+
+  let dep = VkSubpassDependency {
+    src_subpass: kVkSubpassExternal,
+    dst_subpass: 0,
+    src_stage_mask: kVkPipelineStageColorAttachmentOutputBit,
+    src_access_mask: 0,
+    dst_stage_mask: kVkPipelineStageColorAttachmentOutputBit,
+    dst_access_mask: kVkAccessColorAttachmentWriteBit,
+  };
+
+  let ci = VkRenderPassCreateInfo {
+    attachment_count: 1,
+    attachments: unsafe (&raw color_att),
+    subpass_count: 1,
+    subpasses: unsafe (&raw subpass),
+    dependency_count: 1,
+    dependencies: unsafe (&raw dep),
+  };
+
+  var pass: VkRenderPass = 0;
+  let r = unsafe vk_create_render_pass(self.device_, &raw ci, null, &raw var pass);
+  out = pass;
+  return r == kVkSuccess;
+}
+
+fn VulkanRhiImpl::create_render_pass(var self&): bool {
+  var pass: VkRenderPass = 0;
+  let ok = self.make_color_pass(kVkImageLayoutPresentSrcKhr, pass);
+  self.render_pass_ = pass;
+  return ok;
+}
+
+fn VulkanRhiImpl::create_descriptor_layout(var self&): bool {
+  let binding = VkDescriptorSetLayoutBinding {
+    binding: 0,
+    descriptor_type: kVkDescriptorTypeCombinedImageSampler,
+    descriptor_count: 1,
+    stage_flags: kVkShaderStageFragmentBit,
+  };
+
+  let ci = VkDescriptorSetLayoutCreateInfo { binding_count: 1, bindings: unsafe (&raw binding) };
+
+  if (unsafe vk_create_descriptor_set_layout(self.device_, &raw ci, null, &raw var self.desc_set_layout_) != kVkSuccess) {
+    return false;
+  }
+
+  let pool_size = VkDescriptorPoolSize { type_: kVkDescriptorTypeCombinedImageSampler, descriptor_count: kMaxTextures };
+  let pci = VkDescriptorPoolCreateInfo { pool_size_count: 1, pool_sizes: unsafe (&raw pool_size), max_sets: kMaxTextures };
+
+  return unsafe vk_create_descriptor_pool(self.device_, &raw pci, null, &raw var self.desc_pool_) == kVkSuccess;
+}
+
+fn VulkanRhiImpl::load_shader(var self&, filename: str): VkShaderModule {
+  let code = shader_code(self.shader_dir_.as_str(), filename);
+  if (code.len() == 0) {
+    eprintln(f"ultragui: failed to load shader '{self.shader_dir_}/{filename}'");
+    return kVkNullHandle;
+  }
+
+  let ci = VkShaderModuleCreateInfo { code_size: code.len(), code: unsafe (@ptr(code.as_slice()) as *const u32) };
+
+  var shader_module: VkShaderModule = 0;
+  if (unsafe vk_create_shader_module(self.device_, &raw ci, null, &raw var shader_module) != kVkSuccess) {
+    return kVkNullHandle;
+  }
+  return shader_module;
+}
+
+// The graphics pipeline both 2D pipelines are: Vertex2D input, alpha
+// blending, dynamic viewport and scissor, `layout` in `render_pass`.
+// `front_face` is set for the quad pipeline only, as in the C++ (the text
+// pipeline leaves it zero, which is the same value).
+fn make_2d_pipeline(device: VkDevice, vert_mod: VkShaderModule, frag_mod: VkShaderModule, layout: VkPipelineLayout,
+  render_pass: VkRenderPass, var out&: VkPipeline): VkResult {
+  let stages = [
+    VkPipelineShaderStageCreateInfo { stage: kVkShaderStageVertexBit, module_: vert_mod, name: c"main" },
+    VkPipelineShaderStageCreateInfo { stage: kVkShaderStageFragmentBit, module_: frag_mod, name: c"main" },
+  ];
+
+  // Vertex input: matches Vertex2D layout
+  let binding = VkVertexInputBindingDescription {
+    binding: 0,
+    stride: @size_of(Vertex2D) as u32,
+    input_rate: kVkVertexInputRateVertex,
+  };
+  let attrs = vertex_attributes();
+
+  let vertex_input = VkPipelineVertexInputStateCreateInfo {
+    vertex_binding_description_count: 1,
+    vertex_binding_descriptions: unsafe (&raw binding),
+    vertex_attribute_description_count: 9,
+    vertex_attribute_descriptions: @ptr(attrs[..]),
+  };
+
+  let input_assembly = VkPipelineInputAssemblyStateCreateInfo { topology: kVkPrimitiveTopologyTriangleList };
+
+  let viewport_state = VkPipelineViewportStateCreateInfo { viewport_count: 1, scissor_count: 1 };
+
+  let raster = VkPipelineRasterizationStateCreateInfo {
+    polygon_mode: kVkPolygonModeFill,
+    line_width: 1.0,
+    cull_mode: kVkCullModeNone,
+    front_face: kVkFrontFaceCounterClockwise,
+  };
+
+  let multisample = VkPipelineMultisampleStateCreateInfo { rasterization_samples: kVkSampleCount1Bit };
+
+  let blend_att = VkPipelineColorBlendAttachmentState {
+    blend_enable: kVkTrue,
+    src_color_blend_factor: kVkBlendFactorSrcAlpha,
+    dst_color_blend_factor: kVkBlendFactorOneMinusSrcAlpha,
+    color_blend_op: kVkBlendOpAdd,
+    src_alpha_blend_factor: kVkBlendFactorOne,
+    dst_alpha_blend_factor: kVkBlendFactorOneMinusSrcAlpha,
+    alpha_blend_op: kVkBlendOpAdd,
+    color_write_mask: kVkColorComponentRBit | kVkColorComponentGBit | kVkColorComponentBBit | kVkColorComponentABit,
+  };
+
+  let color_blend = VkPipelineColorBlendStateCreateInfo { attachment_count: 1, attachments: unsafe (&raw blend_att) };
+
+  let dyn_states: [VkDynamicState; 2] = [kVkDynamicStateViewport, kVkDynamicStateScissor];
+  let dynamic_state = VkPipelineDynamicStateCreateInfo { dynamic_state_count: 2, dynamic_states: @ptr(dyn_states[..]) };
+
+  let pi = VkGraphicsPipelineCreateInfo {
+    stage_count: 2,
+    stages: @ptr(stages[..]),
+    vertex_input_state: unsafe (&raw vertex_input),
+    input_assembly_state: unsafe (&raw input_assembly),
+    viewport_state: unsafe (&raw viewport_state),
+    rasterization_state: unsafe (&raw raster),
+    multisample_state: unsafe (&raw multisample),
+    color_blend_state: unsafe (&raw color_blend),
+    dynamic_state: unsafe (&raw dynamic_state),
+    layout,
+    render_pass,
+    subpass: 0,
+  };
+
+  var pipeline: VkPipeline = 0;
+  let result = unsafe vk_create_graphics_pipelines(device, kVkNullHandle, 1, &raw pi, null, &raw var pipeline);
+  out = pipeline;
+  return result;
+}
+
+fn VulkanRhiImpl::create_pipeline(var self&): bool {
+  let vert_mod = self.load_shader("quad.vert.spv");
+  let frag_mod = self.load_shader("quad.frag.spv");
+  if (vert_mod == 0 || frag_mod == 0) {
+    return false;
+  }
+
+  // Push constant: orthographic projection (scale + translate = 4 floats)
+  let push_range = VkPushConstantRange { stage_flags: kVkShaderStageVertexBit, offset: 0, size: (@size_of(f32) * 4) as u32 };
+
+  let layout_ci = VkPipelineLayoutCreateInfo {
+    set_layout_count: 1,
+    set_layouts: unsafe (&raw self.desc_set_layout_),
+    push_constant_range_count: 1,
+    push_constant_ranges: unsafe (&raw push_range),
+  };
+
+  if (unsafe vk_create_pipeline_layout(self.device_, &raw layout_ci, null, &raw var self.pipeline_layout_) != kVkSuccess) {
+    unsafe {
+      vk_destroy_shader_module(self.device_, vert_mod, null);
+      vk_destroy_shader_module(self.device_, frag_mod, null);
+    }
+    return false;
+  }
+
+  var pipeline: VkPipeline = 0;
+  let result = make_2d_pipeline(self.device_, vert_mod, frag_mod, self.pipeline_layout_, self.render_pass_, pipeline);
+  self.pipeline_ = pipeline;
+
+  unsafe {
+    vk_destroy_shader_module(self.device_, vert_mod, null);
+    vk_destroy_shader_module(self.device_, frag_mod, null);
+  }
+  return result == kVkSuccess;
+}
+
+fn VulkanRhiImpl::create_text_pipeline(var self&): bool {
+  let vert_mod = self.load_shader("text.vert.spv");
+  let frag_mod = self.load_shader("text.frag.spv");
+  if (vert_mod == 0 || frag_mod == 0) {
+    return false;
+  }
+
+  // Same vertex layout and pipeline layout as the quad pipeline
+  var pipeline: VkPipeline = 0;
+  let result = make_2d_pipeline(self.device_, vert_mod, frag_mod, self.pipeline_layout_, self.render_pass_, pipeline);
+  self.text_pipeline_ = pipeline;
+
+  unsafe {
+    vk_destroy_shader_module(self.device_, vert_mod, null);
+    vk_destroy_shader_module(self.device_, frag_mod, null);
+  }
+  return result == kVkSuccess;
+}
+
+fn VulkanRhiImpl::create_framebuffers(var self&): bool {
+  let n = self.swapchain_views_.len();
+  self.framebuffers_ = filled(n, 0);
+  for (let i in 0..n) {
+    let view = self.swapchain_views_[i];
+    let ci = VkFramebufferCreateInfo {
+      render_pass: self.render_pass_,
+      attachment_count: 1,
+      attachments: unsafe (&raw view),
+      width: self.swapchain_extent_.width,
+      height: self.swapchain_extent_.height,
+      layers: 1,
+    };
+    var fb: VkFramebuffer = 0;
+    let r = unsafe vk_create_framebuffer(self.device_, &raw ci, null, &raw var fb);
+    self.framebuffers_[i] = fb;
+    if (r != kVkSuccess) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Command & sync resources
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::create_command_resources(var self&): bool {
+  for (let i in 0..kMaxFrames as usize) {
+    let pci = VkCommandPoolCreateInfo {
+      flags: kVkCommandPoolCreateResetCommandBufferBit,
+      queue_family_index: self.graphics_family_,
+    };
+    if (unsafe vk_create_command_pool(self.device_, &raw pci, null, &raw var self.frames_[i].cmd_pool) != kVkSuccess) {
+      return false;
+    }
+
+    let ai = VkCommandBufferAllocateInfo {
+      command_pool: self.frames_[i].cmd_pool,
+      level: kVkCommandBufferLevelPrimary,
+      command_buffer_count: 1,
+    };
+    if (unsafe vk_allocate_command_buffers(self.device_, &raw ai, &raw var self.frames_[i].cmd_buffer) != kVkSuccess) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn VulkanRhiImpl::create_sync_objects(var self&): bool {
+  let sci = VkSemaphoreCreateInfo {};
+  let fci = VkFenceCreateInfo { flags: kVkFenceCreateSignaledBit };
+
+  for (let i in 0..kMaxFrames as usize) {
+    if (unsafe vk_create_semaphore(self.device_, &raw sci, null, &raw var self.frames_[i].image_available) != kVkSuccess) {
+      return false;
+    }
+    if (unsafe vk_create_fence(self.device_, &raw fci, null, &raw var self.frames_[i].in_flight) != kVkSuccess) {
+      return false;
+    }
+  }
+
+  // Per-swapchain-image semaphores: safe to reuse only after image re-acquired
+  let image_count = self.swapchain_images_.len() as u32;
+  var i: u32 = 0;
+  while (i < image_count && i < kMaxSwapchainImages) {
+    if (unsafe vk_create_semaphore(self.device_, &raw sci, null, &raw var self.render_finished_[i as usize]) != kVkSuccess) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Buffer helpers
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::find_memory_type(var self&, type_filter: u32, properties: u32): u32 {
+  var mem_props = VkPhysicalDeviceMemoryProperties {};
+  unsafe vk_get_physical_device_memory_properties(self.physical_device_, &raw var mem_props);
+  for (let i in 0..mem_props.memory_type_count) {
+    if ((type_filter & (1u32 << i)) != 0 && (mem_props.memory_types[i as usize].property_flags & properties) == properties) {
+      return i;
+    }
+  }
+  @stop("failed to find suitable memory type");
+}
+
+fn VulkanRhiImpl::create_buffer(var self&, size: u64, usage: u32, properties: u32): (VkBuffer, VkDeviceMemory) {
+  let ci = VkBufferCreateInfo { size, usage, sharing_mode: kVkSharingModeExclusive };
+  var buffer: VkBuffer = 0;
+  let _ = unsafe vk_create_buffer(self.device_, &raw ci, null, &raw var buffer);
+
+  var reqs = VkMemoryRequirements {};
+  unsafe vk_get_buffer_memory_requirements(self.device_, buffer, &raw var reqs);
+
+  let ai = VkMemoryAllocateInfo {
+    allocation_size: reqs.size,
+    memory_type_index: self.find_memory_type(reqs.memory_type_bits, properties),
+  };
+  var memory: VkDeviceMemory = 0;
+  unsafe {
+    let _ = vk_allocate_memory(self.device_, &raw ai, null, &raw var memory);
+    let _ = vk_bind_buffer_memory(self.device_, buffer, memory, 0);
+  }
+  return (buffer, memory);
+}
+
+// A buffer that outgrew itself part-way through a frame cannot be destroyed on
+// the spot: the open command buffer still binds it, and the draws already
+// recorded read their vertices out of it. Park it until the fence for this
+// frame signals.
+fn VulkanRhiImpl::retire_buffer(var self&, buffer: VkBuffer, memory: VkDeviceMemory) {
+  if (buffer == kVkNullHandle) {
+    return;
+  }
+  var f& = self.frames_[self.current_frame_ as usize];
+  f.retired_buffers.push(buffer);
+  f.retired_memory.push(memory);
+}
+
+fn VulkanRhiImpl::free_retired_buffers(var self&, frame: u32) {
+  let device = self.device_;
+  var f& = self.frames_[frame as usize];
+  unsafe {
+    for (let buffer in f.retired_buffers) {
+      vk_destroy_buffer(device, buffer, null);
+    }
+    for (let memory in f.retired_memory) {
+      vk_free_memory(device, memory, null);
+    }
+  }
+  f.retired_buffers.clear();
+  f.retired_memory.clear();
+}
+
+fn host_memory(): u32 => kVkMemoryPropertyHostVisibleBit | kVkMemoryPropertyHostCoherentBit;
+
+fn VulkanRhiImpl::ensure_vertex_capacity(var self&, vertex_count: u32) {
+  let cf = self.current_frame_ as usize;
+  if (self.frames_[cf].vertex_capacity >= vertex_count) {
+    return;
+  }
+
+  self.retire_buffer(self.frames_[cf].vertex_buffer, self.frames_[cf].vertex_memory);
+  // The cached offset refers to the retired buffer, so the next draw has to
+  // upload again rather than point into the new one.
+  self.last_quad_verts_ = null;
+  self.last_quad_vert_count_ = 0;
+
+  var new_cap = max(vertex_count, self.frames_[cf].vertex_capacity * 2);
+  new_cap = max(new_cap, 16384u32);
+  let (buffer, memory) = self.create_buffer(new_cap as u64 * @size_of(Vertex2D) as u64, kVkBufferUsageVertexBufferBit, host_memory());
+  self.frames_[cf].vertex_buffer = buffer;
+  self.frames_[cf].vertex_memory = memory;
+  self.frames_[cf].vertex_capacity = new_cap;
+}
+
+fn VulkanRhiImpl::ensure_index_capacity(var self&, index_count: u32) {
+  let cf = self.current_frame_ as usize;
+  if (self.frames_[cf].index_capacity >= index_count) {
+    return;
+  }
+
+  self.retire_buffer(self.frames_[cf].index_buffer, self.frames_[cf].index_memory);
+
+  var new_cap = max(index_count, self.frames_[cf].index_capacity * 2);
+  new_cap = max(new_cap, 32768u32);
+  let (buffer, memory) = self.create_buffer(new_cap as u64 * @size_of(u32) as u64, kVkBufferUsageIndexBufferBit, host_memory());
+  self.frames_[cf].index_buffer = buffer;
+  self.frames_[cf].index_memory = memory;
+  self.frames_[cf].index_capacity = new_cap;
+}
+
+fn VulkanRhiImpl::ensure_text_vertex_capacity(var self&, vertex_count: u32) {
+  let cf = self.current_frame_ as usize;
+  if (self.frames_[cf].text_vertex_capacity >= vertex_count) {
+    return;
+  }
+
+  self.retire_buffer(self.frames_[cf].text_vertex_buffer, self.frames_[cf].text_vertex_memory);
+  self.last_text_verts_ = null;
+  self.last_text_vert_count_ = 0;
+
+  var new_cap = max(vertex_count, self.frames_[cf].text_vertex_capacity * 2);
+  new_cap = max(new_cap, 16384u32);
+  let (buffer, memory) = self.create_buffer(new_cap as u64 * @size_of(Vertex2D) as u64, kVkBufferUsageVertexBufferBit, host_memory());
+  self.frames_[cf].text_vertex_buffer = buffer;
+  self.frames_[cf].text_vertex_memory = memory;
+  self.frames_[cf].text_vertex_capacity = new_cap;
+}
+
+fn VulkanRhiImpl::ensure_text_index_capacity(var self&, index_count: u32) {
+  let cf = self.current_frame_ as usize;
+  if (self.frames_[cf].text_index_capacity >= index_count) {
+    return;
+  }
+
+  self.retire_buffer(self.frames_[cf].text_index_buffer, self.frames_[cf].text_index_memory);
+
+  var new_cap = max(index_count, self.frames_[cf].text_index_capacity * 2);
+  new_cap = max(new_cap, 32768u32);
+  let (buffer, memory) = self.create_buffer(new_cap as u64 * @size_of(u32) as u64, kVkBufferUsageIndexBufferBit, host_memory());
+  self.frames_[cf].text_index_buffer = buffer;
+  self.frames_[cf].text_index_memory = memory;
+  self.frames_[cf].text_index_capacity = new_cap;
+}
+
+// Copies `n` bytes of `src` (zeros past its end) into `memory` at `offset`
+// through a mapping.
+fn VulkanRhiImpl::upload(var self&, memory: VkDeviceMemory, offset: u64, src: *const u8, src_len: usize, n: usize) {
+  var data: *var u8 = null;
+  unsafe {
+    let _ = vk_map_memory(self.device_, memory, offset, n as u64, 0, &raw var data);
+    let k = min(src_len, n);
+    if (k > 0) {
+      let _ = memcpy(data, src, k);
+    }
+    if (k < n) {
+      let _ = memset(data + k, 0, n - k);
+    }
+    vk_unmap_memory(self.device_, memory);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// One-time command buffers (texture uploads and transitions)
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::begin_one_time(var self&): VkCommandBuffer {
+  let cai = VkCommandBufferAllocateInfo {
+    command_pool: self.frames_[0].cmd_pool,
+    level: kVkCommandBufferLevelPrimary,
+    command_buffer_count: 1,
+  };
+  var cmd: VkCommandBuffer = null;
+  let bi = VkCommandBufferBeginInfo { flags: kVkCommandBufferUsageOneTimeSubmitBit };
+  unsafe {
+    let _ = vk_allocate_command_buffers(self.device_, &raw cai, &raw var cmd);
+    let _ = vk_begin_command_buffer(cmd, &raw bi);
+  }
+  return cmd;
+}
+
+fn VulkanRhiImpl::end_one_time(var self&, cmd: VkCommandBuffer) {
+  let c = cmd;
+  let si = VkSubmitInfo { command_buffer_count: 1, command_buffers: unsafe (&raw c) };
+  unsafe {
+    let _ = vk_end_command_buffer(cmd);
+    let _ = vk_queue_submit(self.graphics_queue_, 1, &raw si, kVkNullHandle);
+    let _ = vk_queue_wait_idle(self.graphics_queue_);
+    vk_free_command_buffers(self.device_, self.frames_[0].cmd_pool, 1, &raw c);
+  }
+}
+
+fn image_barrier(image: VkImage, old_layout: u32, new_layout: u32, src_access: u32, dst_access: u32): VkImageMemoryBarrier =>
+  VkImageMemoryBarrier {
+    old_layout,
+    new_layout,
+    src_queue_family_index: kVkQueueFamilyIgnored,
+    dst_queue_family_index: kVkQueueFamilyIgnored,
+    image,
+    subresource_range: color_range(),
+    src_access_mask: src_access,
+    dst_access_mask: dst_access,
+  };
+
+fn cmd_barrier(cmd: VkCommandBuffer, src_stage: u32, dst_stage: u32, barrier&: VkImageMemoryBarrier) {
+  let b = barrier;
+  unsafe vk_cmd_pipeline_barrier(cmd, src_stage, dst_stage, 0, 0, null, 0, null, 1, &raw b);
+}
+
+// ---------------------------------------------------------------------------
+// Default resources (white texture + sampler)
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::create_default_resources(var self&): bool {
+  // Linear sampler (images, general textures)
+  let sci = VkSamplerCreateInfo {
+    mag_filter: kVkFilterLinear,
+    min_filter: kVkFilterLinear,
+    address_mode_u: kVkSamplerAddressModeClampToEdge,
+    address_mode_v: kVkSamplerAddressModeClampToEdge,
+    address_mode_w: kVkSamplerAddressModeClampToEdge,
+  };
+  if (unsafe vk_create_sampler(self.device_, &raw sci, null, &raw var self.default_sampler_) != kVkSuccess) {
+    return false;
+  }
+
+  // Nearest sampler (text atlas: pixel-exact, no inter-glyph bleeding)
+  let nsci = VkSamplerCreateInfo {
+    mag_filter: kVkFilterNearest,
+    min_filter: kVkFilterNearest,
+    address_mode_u: kVkSamplerAddressModeClampToEdge,
+    address_mode_v: kVkSamplerAddressModeClampToEdge,
+    address_mode_w: kVkSamplerAddressModeClampToEdge,
+  };
+  if (unsafe vk_create_sampler(self.device_, &raw nsci, null, &raw var self.nearest_sampler_) != kVkSuccess) {
+    return false;
+  }
+
+  // White 1x1 texture
+  let white_pixel: [u8; 4] = [0xFF; 4];
+  self.white_texture_ = self.create_texture(1, 1, RhiFormat::Rgba8Unorm, white_pixel[..] as bytes, RhiFilter::Linear);
+  return self.white_texture_ != kInvalidTexture;
+}
+
+// ---------------------------------------------------------------------------
+// Texture management
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::free_slot(self&): RhiTextureHandle {
+  for (let i in 0..kMaxTextures) {
+    if (!self.textures_[i as usize].in_use) {
+      return i;
+    }
+  }
+  return kInvalidTexture;
+}
+
+fn VulkanRhiImpl::create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle {
+  // Find a free slot
+  let handle = self.free_slot();
+  if (handle == kInvalidTexture) {
+    return kInvalidTexture;
+  }
+
+  var vk_format = kVkFormatR8g8b8a8Unorm;
+  var pixel_size: u32 = 4;
+  switch (format) {
+    case RhiFormat::Rgba8Unorm: {
+      vk_format = kVkFormatR8g8b8a8Unorm;
+      pixel_size = 4;
+    }
+    case RhiFormat::Bgra8Unorm: {
+      vk_format = kVkFormatB8g8r8a8Unorm;
+      pixel_size = 4;
+    }
+    case RhiFormat::R8Unorm: {
+      vk_format = kVkFormatR8Unorm;
+      pixel_size = 1;
+    }
+    default: {
+      return kInvalidTexture;
+    }
+  }
+
+  // VkDeviceSize image_size = width * height * pixel_size: a u32 product.
+  let image_size = (width *% height *% pixel_size) as u64;
+
+  // Staging buffer
+  let (staging, staging_mem) = self.create_buffer(image_size, kVkBufferUsageTransferSrcBit, host_memory());
+  self.upload(staging_mem, 0, unsafe (@ptr(pixels) as *const u8), #pixels, image_size as usize);
+
+  // Image
+  let ici = VkImageCreateInfo {
+    image_type: kVkImageType2d,
+    extent: VkExtent3D { width, height, depth: 1 },
+    mip_levels: 1,
+    array_layers: 1,
+    format: vk_format,
+    tiling: kVkImageTilingOptimal,
+    initial_layout: kVkImageLayoutUndefined,
+    usage: kVkImageUsageTransferDstBit | kVkImageUsageSampledBit,
+    samples: kVkSampleCount1Bit,
+  };
+  let h = handle as usize;
+  let _ = unsafe vk_create_image(self.device_, &raw ici, null, &raw var self.textures_[h].image);
+
+  var reqs = VkMemoryRequirements {};
+  unsafe vk_get_image_memory_requirements(self.device_, self.textures_[h].image, &raw var reqs);
+  let ai = VkMemoryAllocateInfo {
+    allocation_size: reqs.size,
+    memory_type_index: self.find_memory_type(reqs.memory_type_bits, kVkMemoryPropertyDeviceLocalBit),
+  };
+  unsafe {
+    let _ = vk_allocate_memory(self.device_, &raw ai, null, &raw var self.textures_[h].memory);
+    let _ = vk_bind_image_memory(self.device_, self.textures_[h].image, self.textures_[h].memory, 0);
+  }
+
+  // Copy staging -> image (using a temporary command buffer)
+  let cmd = self.begin_one_time();
+  let image = self.textures_[h].image;
+
+  // Transition: UNDEFINED -> TRANSFER_DST
+  var barrier = image_barrier(image, kVkImageLayoutUndefined, kVkImageLayoutTransferDstOptimal, 0,
+    kVkAccessTransferWriteBit);
+  cmd_barrier(cmd, kVkPipelineStageTopOfPipeBit, kVkPipelineStageTransferBit, barrier);
+
+  let region = VkBufferImageCopy {
+    image_subresource: VkImageSubresourceLayers { aspect_mask: kVkImageAspectColorBit, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+    image_extent: VkExtent3D { width, height, depth: 1 },
+  };
+  unsafe vk_cmd_copy_buffer_to_image(cmd, staging, image, kVkImageLayoutTransferDstOptimal, 1, &raw region);
+
+  // Transition: TRANSFER_DST -> SHADER_READ
+  barrier.old_layout = kVkImageLayoutTransferDstOptimal;
+  barrier.new_layout = kVkImageLayoutShaderReadOnlyOptimal;
+  barrier.src_access_mask = kVkAccessTransferWriteBit;
+  barrier.dst_access_mask = kVkAccessShaderReadBit;
+  cmd_barrier(cmd, kVkPipelineStageTransferBit, kVkPipelineStageFragmentShaderBit, barrier);
+
+  self.end_one_time(cmd);
+
+  unsafe {
+    vk_destroy_buffer(self.device_, staging, null);
+    vk_free_memory(self.device_, staging_mem, null);
+  }
+
+  // Image view
+  let vci = VkImageViewCreateInfo {
+    image,
+    view_type: kVkImageViewType2d,
+    format: vk_format,
+    subresource_range: color_range(),
+  };
+  let _ = unsafe vk_create_image_view(self.device_, &raw vci, null, &raw var self.textures_[h].view);
+
+  // Descriptor set
+  let dai = VkDescriptorSetAllocateInfo {
+    descriptor_pool: self.desc_pool_,
+    descriptor_set_count: 1,
+    set_layouts: unsafe (&raw self.desc_set_layout_),
+  };
+  let _ = unsafe vk_allocate_descriptor_sets(self.device_, &raw dai, &raw var self.textures_[h].descriptor);
+
+  let dii = VkDescriptorImageInfo {
+    image_layout: kVkImageLayoutShaderReadOnlyOptimal,
+    image_view: self.textures_[h].view,
+    sampler: (filter == RhiFilter::Nearest) ? self.nearest_sampler_ : self.default_sampler_,
+  };
+
+  let write = VkWriteDescriptorSet {
+    dst_set: self.textures_[h].descriptor,
+    dst_binding: 0,
+    descriptor_count: 1,
+    descriptor_type: kVkDescriptorTypeCombinedImageSampler,
+    image_info: unsafe (&raw dii),
+  };
+  unsafe vk_update_descriptor_sets(self.device_, 1, &raw write, 0, null);
+
+  self.textures_[h].width = width;
+  self.textures_[h].height = height;
+  self.textures_[h].pixel_size = pixel_size;
+  self.textures_[h].in_use = true;
+  return handle;
+}
+
+fn VulkanRhiImpl::update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use) {
+    return;
+  }
+
+  let slot = self.textures_[handle as usize];
+  let image_size = (slot.width *% slot.height *% slot.pixel_size) as u64;
+
+  // Staging buffer
+  let (staging, staging_mem) = self.create_buffer(image_size, kVkBufferUsageTransferSrcBit, host_memory());
+  self.upload(staging_mem, 0, unsafe (@ptr(pixels) as *const u8), #pixels, image_size as usize);
+
+  // Upload via temporary command buffer
+  let cmd = self.begin_one_time();
+
+  // Transition: SHADER_READ -> TRANSFER_DST
+  var barrier = image_barrier(slot.image, kVkImageLayoutShaderReadOnlyOptimal, kVkImageLayoutTransferDstOptimal,
+    kVkAccessShaderReadBit, kVkAccessTransferWriteBit);
+  cmd_barrier(cmd, kVkPipelineStageFragmentShaderBit, kVkPipelineStageTransferBit, barrier);
+
+  let region = VkBufferImageCopy {
+    image_subresource: VkImageSubresourceLayers { aspect_mask: kVkImageAspectColorBit, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+    image_extent: VkExtent3D { width: slot.width, height: slot.height, depth: 1 },
+  };
+  unsafe vk_cmd_copy_buffer_to_image(cmd, staging, slot.image, kVkImageLayoutTransferDstOptimal, 1, &raw region);
+
+  // Transition: TRANSFER_DST -> SHADER_READ
+  barrier.old_layout = kVkImageLayoutTransferDstOptimal;
+  barrier.new_layout = kVkImageLayoutShaderReadOnlyOptimal;
+  barrier.src_access_mask = kVkAccessTransferWriteBit;
+  barrier.dst_access_mask = kVkAccessShaderReadBit;
+  cmd_barrier(cmd, kVkPipelineStageTransferBit, kVkPipelineStageFragmentShaderBit, barrier);
+
+  self.end_one_time(cmd);
+
+  unsafe {
+    vk_destroy_buffer(self.device_, staging, null);
+    vk_free_memory(self.device_, staging_mem, null);
+  }
+}
+
+fn VulkanRhiImpl::destroy_texture(var self&, handle: RhiTextureHandle) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use) {
+    return;
+  }
+  if (self.textures_[handle as usize].is_render_target) {
+    self.destroy_render_target(handle);
+    return;
+  }
+  let slot = self.textures_[handle as usize];
+  unsafe {
+    let _ = vk_device_wait_idle(self.device_);
+    vk_destroy_image_view(self.device_, slot.view, null);
+    vk_destroy_image(self.device_, slot.image, null);
+    vk_free_memory(self.device_, slot.memory, null);
+  }
+  self.textures_[handle as usize] = TextureSlot {};
+}
+
+// ---------------------------------------------------------------------------
+// Frame lifecycle
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::acquire_frame(var self&): bool {
+  if (self.frame_acquired_) {
+    return true;
+  }
+
+  let cf = self.current_frame_ as usize;
+  let in_flight = self.frames_[cf].in_flight;
+  let _ = unsafe vk_wait_for_fences(self.device_, 1, &raw in_flight, kVkTrue, 0xFFFF_FFFF_FFFF_FFFF);
+
+  // The fence is the point at which last frame's draws are done reading, so
+  // anything a mid-frame grow displaced can go now.
+  self.free_retired_buffers(self.current_frame_);
+
+  let result = unsafe vk_acquire_next_image_khr(self.device_, self.swapchain_, 0xFFFF_FFFF_FFFF_FFFF,
+    self.frames_[cf].image_available, kVkNullHandle, &raw var self.image_index_);
+
+  if (result == kVkErrorOutOfDateKhr) {
+    let _ = self.recreate_swapchain();
+    return false;
+  }
+
+  let cmd = self.frames_[cf].cmd_buffer;
+  let bi = VkCommandBufferBeginInfo { flags: kVkCommandBufferUsageOneTimeSubmitBit };
+  unsafe {
+    let _ = vk_reset_fences(self.device_, 1, &raw in_flight);
+    let _ = vk_reset_command_buffer(cmd, 0);
+    let _ = vk_begin_command_buffer(cmd, &raw bi);
+  }
+
+  // Reset write positions for the ring-buffer approach
+  var f& = self.frames_[cf];
+  f.vertex_write_pos = 0;
+  f.index_write_pos = 0;
+  f.text_vertex_write_pos = 0;
+  f.text_index_write_pos = 0;
+
+  // Reset vertex dedup tracking
+  self.last_quad_verts_ = null;
+  self.last_quad_vert_count_ = 0;
+  self.last_text_verts_ = null;
+  self.last_text_vert_count_ = 0;
+
+  self.frame_acquired_ = true;
+  return true;
+}
+
+fn push_projection(cmd: VkCommandBuffer, layout: VkPipelineLayout, push&: [f32; 4]) {
+  unsafe vk_cmd_push_constants(cmd, layout, kVkShaderStageVertexBit, 0, @size_of([f32; 4]) as u32, @ptr(push[..]) as *const u8);
+}
+
+fn VulkanRhiImpl::begin_frame(var self&, clear_color: Color): bool {
+  if (!self.acquire_frame()) {
+    return false;
+  }
+
+  let cmd = self.frames_[self.current_frame_ as usize].cmd_buffer;
+
+  let clear = VkClearValue { float32: [clear_color.r, clear_color.g, clear_color.b, clear_color.a] };
+
+  let rbi = VkRenderPassBeginInfo {
+    render_pass: self.render_pass_,
+    framebuffer: self.framebuffers_[self.image_index_ as usize],
+    render_area: VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: self.swapchain_extent_ },
+    clear_value_count: 1,
+    clear_values: unsafe (&raw clear),
+  };
+  unsafe {
+    vk_cmd_begin_render_pass(cmd, &raw rbi, kVkSubpassContentsInline);
+    vk_cmd_bind_pipeline(cmd, kVkPipelineBindPointGraphics, self.pipeline_);
+  }
+
+  let viewport = VkViewport {
+    width: self.swapchain_extent_.width as f32,
+    height: self.swapchain_extent_.height as f32,
+    max_depth: 1.0,
+  };
+  let scissor = VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: self.swapchain_extent_ };
+  unsafe {
+    vk_cmd_set_viewport(cmd, 0, 1, &raw viewport);
+    vk_cmd_set_scissor(cmd, 0, 1, &raw scissor);
+  }
+
+  // Push orthographic projection: use window (screen) coordinates so that
+  // vertex positions match the mouse/input coordinate space.
+  let win_w = self.swapchain_extent_.width as f32 / self.dpi_scale_;
+  let win_h = self.swapchain_extent_.height as f32 / self.dpi_scale_;
+  let push: [f32; 4] = [2.0 / win_w, 2.0 / win_h, -1.0, -1.0];
+  push_projection(cmd, self.pipeline_layout_, push);
+  return true;
+}
+
+fn VulkanRhiImpl::end_frame(var self&) {
+  let cf = self.current_frame_ as usize;
+  let cmd = self.frames_[cf].cmd_buffer;
+  unsafe {
+    vk_cmd_end_render_pass(cmd);
+    let _ = vk_end_command_buffer(cmd);
+  }
+
+  let signal_sem = self.render_finished_[self.image_index_ as usize];
+  let image_available = self.frames_[cf].image_available;
+
+  let wait_stage: u32 = kVkPipelineStageColorAttachmentOutputBit;
+  let si = VkSubmitInfo {
+    wait_semaphore_count: 1,
+    wait_semaphores: unsafe (&raw image_available),
+    wait_dst_stage_mask: unsafe (&raw wait_stage),
+    command_buffer_count: 1,
+    command_buffers: unsafe (&raw cmd),
+    signal_semaphore_count: 1,
+    signal_semaphores: unsafe (&raw signal_sem),
+  };
+  let _ = unsafe vk_queue_submit(self.graphics_queue_, 1, &raw si, self.frames_[cf].in_flight);
+
+  let image_index = self.image_index_;
+  let pi = VkPresentInfoKHR {
+    wait_semaphore_count: 1,
+    wait_semaphores: unsafe (&raw signal_sem),
+    swapchain_count: 1,
+    swapchains: unsafe (&raw self.swapchain_),
+    image_indices: unsafe (&raw image_index),
+  };
+
+  let result = unsafe vk_queue_present_khr(self.present_queue_, &raw pi);
+  if (result == kVkErrorOutOfDateKhr || result == kVkSuboptimalKhr || self.framebuffer_resized_) {
+    self.framebuffer_resized_ = false;
+    let _ = self.recreate_swapchain();
+  }
+
+  self.frame_acquired_ = false;
+  self.current_frame_ = (self.current_frame_ + 1) % kMaxFrames;
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::set_scissor(var self&, rect: Rect) {
+  let cmd = self.frames_[self.current_frame_ as usize].cmd_buffer;
+  // Offscreen targets are pixel-exact (no DPI scaling)
+  let scale: f32 = (self.active_offscreen_target_ != kInvalidTexture) ? 1.0 : self.dpi_scale_;
+  let scissor = VkRect2D {
+    offset: VkOffset2D { x: @saturating_cast(i32, rect.x * scale), y: @saturating_cast(i32, rect.y * scale) },
+    extent: VkExtent2D { width: @saturating_cast(u32, rect.w * scale), height: @saturating_cast(u32, rect.h * scale) },
+  };
+  unsafe vk_cmd_set_scissor(cmd, 0, 1, &raw scissor);
+}
+
+fn VulkanRhiImpl::reset_scissor(var self&) {
+  let cmd = self.frames_[self.current_frame_ as usize].cmd_buffer;
+  if (self.active_offscreen_target_ != kInvalidTexture) {
+    let slot = self.textures_[self.active_offscreen_target_ as usize];
+    let scissor = VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: VkExtent2D { width: slot.width, height: slot.height } };
+    unsafe vk_cmd_set_scissor(cmd, 0, 1, &raw scissor);
+  } else {
+    let scissor = VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: self.swapchain_extent_ };
+    unsafe vk_cmd_set_scissor(cmd, 0, 1, &raw scissor);
+  }
+}
+
+fn VulkanRhiImpl::draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return;
+  }
+
+  let cf = self.current_frame_ as usize;
+  let verts_ptr = @ptr(vertices);
+
+  // Renderer2D passes the SAME vertex array for every batch in a frame,
+  // with different index slices. Detect this to avoid redundant uploads.
+  var vb_byte_offset: u64 = 0;
+  if (verts_ptr == self.last_quad_verts_ && vertex_count == self.last_quad_vert_count_) {
+    vb_byte_offset = self.last_quad_vb_offset_;
+  } else {
+    self.ensure_vertex_capacity(self.frames_[cf].vertex_write_pos + vertex_count);
+    vb_byte_offset = self.frames_[cf].vertex_write_pos as u64 * @size_of(Vertex2D) as u64;
+    let n = vertex_count as usize * @size_of(Vertex2D);
+    self.upload(self.frames_[cf].vertex_memory, vb_byte_offset, unsafe (verts_ptr as *const u8), n, n);
+    self.last_quad_verts_ = verts_ptr;
+    self.last_quad_vert_count_ = vertex_count;
+    self.last_quad_vb_offset_ = vb_byte_offset;
+    self.frames_[cf].vertex_write_pos += vertex_count;
+  }
+
+  // Indices are always different per batch: always append
+  self.ensure_index_capacity(self.frames_[cf].index_write_pos + index_count);
+  let ib_byte_offset = self.frames_[cf].index_write_pos as u64 * @size_of(u32) as u64;
+  let ni = index_count as usize * @size_of(u32);
+  self.upload(self.frames_[cf].index_memory, ib_byte_offset, unsafe (@ptr(indices) as *const u8), ni, ni);
+  self.frames_[cf].index_write_pos += index_count;
+
+  let cmd = self.frames_[cf].cmd_buffer;
+
+  // Bind texture descriptor
+  let tex = (texture != kInvalidTexture) ? texture : self.white_texture_;
+  if (tex < kMaxTextures && self.textures_[tex as usize].in_use) {
+    let set = self.textures_[tex as usize].descriptor;
+    unsafe vk_cmd_bind_descriptor_sets(cmd, kVkPipelineBindPointGraphics, self.pipeline_layout_, 0, 1, &raw set, 0, null);
+  }
+
+  // Draw
+  let vb = self.frames_[cf].vertex_buffer;
+  unsafe {
+    vk_cmd_bind_vertex_buffers(cmd, 0, 1, &raw vb, &raw vb_byte_offset);
+    vk_cmd_bind_index_buffer(cmd, self.frames_[cf].index_buffer, ib_byte_offset, kVkIndexTypeUint32);
+    vk_cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
+  }
+}
+
+fn VulkanRhiImpl::draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+  let vertex_count = #vertices as u32;
+  let index_count = #indices as u32;
+  if (vertex_count == 0 || index_count == 0) {
+    return;
+  }
+
+  let cf = self.current_frame_ as usize;
+  let verts_ptr = @ptr(vertices);
+
+  // Use SEPARATE buffers for text to avoid overwriting quad data.
+  // Deduplicate vertex uploads (same pattern as draw_triangles).
+  var vb_byte_offset: u64 = 0;
+  if (verts_ptr == self.last_text_verts_ && vertex_count == self.last_text_vert_count_) {
+    vb_byte_offset = self.last_text_vb_offset_;
+  } else {
+    self.ensure_text_vertex_capacity(self.frames_[cf].text_vertex_write_pos + vertex_count);
+    vb_byte_offset = self.frames_[cf].text_vertex_write_pos as u64 * @size_of(Vertex2D) as u64;
+    let n = vertex_count as usize * @size_of(Vertex2D);
+    self.upload(self.frames_[cf].text_vertex_memory, vb_byte_offset, unsafe (verts_ptr as *const u8), n, n);
+    self.last_text_verts_ = verts_ptr;
+    self.last_text_vert_count_ = vertex_count;
+    self.last_text_vb_offset_ = vb_byte_offset;
+    self.frames_[cf].text_vertex_write_pos += vertex_count;
+  }
+
+  self.ensure_text_index_capacity(self.frames_[cf].text_index_write_pos + index_count);
+  let ib_byte_offset = self.frames_[cf].text_index_write_pos as u64 * @size_of(u32) as u64;
+  let ni = index_count as usize * @size_of(u32);
+  self.upload(self.frames_[cf].text_index_memory, ib_byte_offset, unsafe (@ptr(indices) as *const u8), ni, ni);
+  self.frames_[cf].text_index_write_pos += index_count;
+
+  let cmd = self.frames_[cf].cmd_buffer;
+
+  // Switch to text pipeline
+  unsafe vk_cmd_bind_pipeline(cmd, kVkPipelineBindPointGraphics, self.text_pipeline_);
+
+  // Bind atlas texture
+  let tex = atlas_texture;
+  if (tex < kMaxTextures && self.textures_[tex as usize].in_use) {
+    let set = self.textures_[tex as usize].descriptor;
+    unsafe vk_cmd_bind_descriptor_sets(cmd, kVkPipelineBindPointGraphics, self.pipeline_layout_, 0, 1, &raw set, 0, null);
+  }
+
+  // Re-push constants (pipeline change resets them): use display_size()
+  // which returns offscreen dimensions when inside an offscreen pass.
+  let ds = self.display_size();
+  let push: [f32; 4] = [2.0 / ds.x, 2.0 / ds.y, -1.0, -1.0];
+  push_projection(cmd, self.pipeline_layout_, push);
+
+  let vb = self.frames_[cf].text_vertex_buffer;
+  unsafe {
+    vk_cmd_bind_vertex_buffers(cmd, 0, 1, &raw vb, &raw vb_byte_offset);
+    vk_cmd_bind_index_buffer(cmd, self.frames_[cf].text_index_buffer, ib_byte_offset, kVkIndexTypeUint32);
+    vk_cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
+  }
+
+  // The C++ advances both write positions a second time here (see
+  // PORTING.md, quirks): kept, it only wastes buffer space.
+  self.frames_[cf].text_vertex_write_pos += vertex_count;
+  self.frames_[cf].text_index_write_pos += index_count;
+
+  // Switch back to quad pipeline
+  unsafe vk_cmd_bind_pipeline(cmd, kVkPipelineBindPointGraphics, self.pipeline_);
+  push_projection(cmd, self.pipeline_layout_, push);
+}
+
+fn VulkanRhiImpl::display_size(self&): Vec2 {
+  if (self.active_offscreen_target_ != kInvalidTexture) {
+    return self.offscreen_display_size_;
+  }
+  // Return window/screen coordinates (UI coordinate space), not framebuffer
+  // pixels
+  return Vec2 { x: self.swapchain_extent_.width as f32 / self.dpi_scale_, y: self.swapchain_extent_.height as f32 / self.dpi_scale_ };
+}
+
+// ---------------------------------------------------------------------------
+// Offscreen rendering
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::create_offscreen_render_pass(var self&): bool {
+  if (self.offscreen_render_pass_ != 0) {
+    return true;
+  }
+  var pass: VkRenderPass = 0;
+  let ok = self.make_color_pass(kVkImageLayoutShaderReadOnlyOptimal, pass);
+  self.offscreen_render_pass_ = pass;
+  return ok;
+}
+
+fn VulkanRhiImpl::create_render_target(var self&, width: u32, height: u32): RhiTextureHandle {
+  if (!self.create_offscreen_render_pass()) {
+    return kInvalidTexture;
+  }
+
+  // Find a free slot
+  let handle = self.free_slot();
+  if (handle == kInvalidTexture) {
+    return kInvalidTexture;
+  }
+  let h = handle as usize;
+
+  // Create image with COLOR_ATTACHMENT + SAMPLED usage
+  let ici = VkImageCreateInfo {
+    image_type: kVkImageType2d,
+    extent: VkExtent3D { width, height, depth: 1 },
+    mip_levels: 1,
+    array_layers: 1,
+    format: unorm_view_format(self.swapchain_format_),
+    flags: kVkImageCreateMutableFormatBit,
+    tiling: kVkImageTilingOptimal,
+    initial_layout: kVkImageLayoutUndefined,
+    usage: kVkImageUsageColorAttachmentBit | kVkImageUsageSampledBit,
+    samples: kVkSampleCount1Bit,
+  };
+  if (unsafe vk_create_image(self.device_, &raw ici, null, &raw var self.textures_[h].image) != kVkSuccess) {
+    return kInvalidTexture;
+  }
+
+  var reqs = VkMemoryRequirements {};
+  unsafe vk_get_image_memory_requirements(self.device_, self.textures_[h].image, &raw var reqs);
+  let ai = VkMemoryAllocateInfo {
+    allocation_size: reqs.size,
+    memory_type_index: self.find_memory_type(reqs.memory_type_bits, kVkMemoryPropertyDeviceLocalBit),
+  };
+  unsafe {
+    let _ = vk_allocate_memory(self.device_, &raw ai, null, &raw var self.textures_[h].memory);
+    let _ = vk_bind_image_memory(self.device_, self.textures_[h].image, self.textures_[h].memory, 0);
+  }
+  let image = self.textures_[h].image;
+
+  // Sampled view (UNORM: hands the shader the stored bytes as they are)
+  var vci = VkImageViewCreateInfo {
+    image,
+    view_type: kVkImageViewType2d,
+    format: unorm_view_format(self.swapchain_format_),
+    subresource_range: color_range(),
+  };
+  let _ = unsafe vk_create_image_view(self.device_, &raw vci, null, &raw var self.textures_[h].view);
+
+  // Attachment view (sRGB: the hardware encodes what the shader writes)
+  vci.format = self.swapchain_format_;
+  let _ = unsafe vk_create_image_view(self.device_, &raw vci, null, &raw var self.textures_[h].attachment_view);
+
+  // Framebuffer for offscreen rendering
+  let attachment = self.textures_[h].attachment_view;
+  let fci = VkFramebufferCreateInfo {
+    render_pass: self.offscreen_render_pass_,
+    attachment_count: 1,
+    attachments: unsafe (&raw attachment),
+    width,
+    height,
+    layers: 1,
+  };
+  if (unsafe vk_create_framebuffer(self.device_, &raw fci, null, &raw var self.textures_[h].framebuffer) != kVkSuccess) {
+    let slot = self.textures_[h];
+    unsafe {
+      vk_destroy_image_view(self.device_, slot.attachment_view, null);
+      vk_destroy_image_view(self.device_, slot.view, null);
+      vk_destroy_image(self.device_, slot.image, null);
+      vk_free_memory(self.device_, slot.memory, null);
+    }
+    self.textures_[h] = TextureSlot {};
+    return kInvalidTexture;
+  }
+
+  // Transition to SHADER_READ_ONLY so sampling before first render is safe
+  let cmd = self.begin_one_time();
+  let barrier = image_barrier(image, kVkImageLayoutUndefined, kVkImageLayoutShaderReadOnlyOptimal, 0, kVkAccessShaderReadBit);
+  cmd_barrier(cmd, kVkPipelineStageTopOfPipeBit, kVkPipelineStageFragmentShaderBit, barrier);
+  self.end_one_time(cmd);
+
+  // Descriptor set for sampling this texture
+  let dai = VkDescriptorSetAllocateInfo {
+    descriptor_pool: self.desc_pool_,
+    descriptor_set_count: 1,
+    set_layouts: unsafe (&raw self.desc_set_layout_),
+  };
+  let _ = unsafe vk_allocate_descriptor_sets(self.device_, &raw dai, &raw var self.textures_[h].descriptor);
+
+  let dii = VkDescriptorImageInfo {
+    image_layout: kVkImageLayoutShaderReadOnlyOptimal,
+    image_view: self.textures_[h].view,
+    sampler: self.default_sampler_,
+  };
+
+  let write = VkWriteDescriptorSet {
+    dst_set: self.textures_[h].descriptor,
+    dst_binding: 0,
+    descriptor_count: 1,
+    descriptor_type: kVkDescriptorTypeCombinedImageSampler,
+    image_info: unsafe (&raw dii),
+  };
+  unsafe vk_update_descriptor_sets(self.device_, 1, &raw write, 0, null);
+
+  self.textures_[h].width = width;
+  self.textures_[h].height = height;
+  self.textures_[h].pixel_size = 4;
+  self.textures_[h].in_use = true;
+  self.textures_[h].is_render_target = true;
+  return handle;
+}
+
+fn VulkanRhiImpl::destroy_render_target(var self&, handle: RhiTextureHandle) {
+  if (handle >= kMaxTextures || !self.textures_[handle as usize].in_use || !self.textures_[handle as usize].is_render_target) {
+    return;
+  }
+  let slot = self.textures_[handle as usize];
+  unsafe {
+    let _ = vk_device_wait_idle(self.device_);
+    if (slot.framebuffer != 0) {
+      vk_destroy_framebuffer(self.device_, slot.framebuffer, null);
+    }
+    if (slot.attachment_view != 0) {
+      vk_destroy_image_view(self.device_, slot.attachment_view, null);
+    }
+    vk_destroy_image_view(self.device_, slot.view, null);
+    vk_destroy_image(self.device_, slot.image, null);
+    vk_free_memory(self.device_, slot.memory, null);
+  }
+  self.textures_[handle as usize] = TextureSlot {};
+}
+
+fn VulkanRhiImpl::begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool {
+  if (target >= kMaxTextures || !self.textures_[target as usize].in_use || !self.textures_[target as usize].is_render_target) {
+    return false;
+  }
+
+  let slot = self.textures_[target as usize];
+  let cmd = self.frames_[self.current_frame_ as usize].cmd_buffer;
+
+  self.active_offscreen_target_ = target;
+  self.offscreen_display_size_ = Vec2 { x: slot.width as f32, y: slot.height as f32 };
+
+  let clear = VkClearValue { float32: [clear_color.r, clear_color.g, clear_color.b, clear_color.a] };
+
+  let rbi = VkRenderPassBeginInfo {
+    render_pass: self.offscreen_render_pass_,
+    framebuffer: slot.framebuffer,
+    render_area: VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: VkExtent2D { width: slot.width, height: slot.height } },
+    clear_value_count: 1,
+    clear_values: unsafe (&raw clear),
+  };
+  let viewport = VkViewport { width: slot.width as f32, height: slot.height as f32, max_depth: 1.0 };
+  let scissor = VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: VkExtent2D { width: slot.width, height: slot.height } };
+  unsafe {
+    vk_cmd_begin_render_pass(cmd, &raw rbi, kVkSubpassContentsInline);
+    vk_cmd_bind_pipeline(cmd, kVkPipelineBindPointGraphics, self.pipeline_);
+    vk_cmd_set_viewport(cmd, 0, 1, &raw viewport);
+    vk_cmd_set_scissor(cmd, 0, 1, &raw scissor);
+  }
+
+  // Orthographic projection for pixel-exact offscreen coordinates
+  let push: [f32; 4] = [2.0 / slot.width as f32, 2.0 / slot.height as f32, -1.0, -1.0];
+  push_projection(cmd, self.pipeline_layout_, push);
+  return true;
+}
+
+fn VulkanRhiImpl::end_offscreen(var self&, target: RhiTextureHandle) {
+  if (self.active_offscreen_target_ == kInvalidTexture) {
+    return;
+  }
+
+  let cmd = self.frames_[self.current_frame_ as usize].cmd_buffer;
+  unsafe vk_cmd_end_render_pass(cmd);
+
+  // Pipeline barrier: ensure the offscreen render is complete before it is
+  // sampled as a texture in a subsequent render pass.
+  let image = self.textures_[target as usize].image;
+  let barrier = image_barrier(image, kVkImageLayoutShaderReadOnlyOptimal, kVkImageLayoutShaderReadOnlyOptimal,
+    kVkAccessColorAttachmentWriteBit, kVkAccessShaderReadBit);
+  cmd_barrier(cmd, kVkPipelineStageColorAttachmentOutputBit, kVkPipelineStageFragmentShaderBit, barrier);
+
+  self.active_offscreen_target_ = kInvalidTexture;
+}
+
+// ---------------------------------------------------------------------------
+// Video pipeline (YCbCr -> RGBA)
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::ensure_video_pipeline(var self&): bool {
+  if (self.video_pipeline_ready_) {
+    return true;
+  }
+
+  if (!self.create_offscreen_render_pass()) {
+    return false;
+  }
+
+  // Descriptor set layout: 3 combined image samplers (Y, Cb, Cr)
+  var bindings = [VkDescriptorSetLayoutBinding {}; 3];
+  for (let i in 0..3u32) {
+    bindings[i as usize].binding = i;
+    bindings[i as usize].descriptor_type = kVkDescriptorTypeCombinedImageSampler;
+    bindings[i as usize].descriptor_count = 1;
+    bindings[i as usize].stage_flags = kVkShaderStageFragmentBit;
+  }
+
+  let dsl_ci = VkDescriptorSetLayoutCreateInfo { binding_count: 3, bindings: @ptr(bindings[..]) };
+  if (unsafe vk_create_descriptor_set_layout(self.device_, &raw dsl_ci, null, &raw var self.video_desc_set_layout_) != kVkSuccess) {
+    return false;
+  }
+
+  // Descriptor pool: one set per in-flight frame, 3 samplers each
+  let pool_size = VkDescriptorPoolSize { type_: kVkDescriptorTypeCombinedImageSampler, descriptor_count: kMaxFrames * 3 };
+  let dpc = VkDescriptorPoolCreateInfo { pool_size_count: 1, pool_sizes: unsafe (&raw pool_size), max_sets: kMaxFrames };
+  if (unsafe vk_create_descriptor_pool(self.device_, &raw dpc, null, &raw var self.video_desc_pool_) != kVkSuccess) {
+    return false;
+  }
+
+  // Allocate per-frame descriptor sets
+  for (let i in 0..kMaxFrames as usize) {
+    let dai = VkDescriptorSetAllocateInfo {
+      descriptor_pool: self.video_desc_pool_,
+      descriptor_set_count: 1,
+      set_layouts: unsafe (&raw self.video_desc_set_layout_),
+    };
+    if (unsafe vk_allocate_descriptor_sets(self.device_, &raw dai, &raw var self.video_desc_sets_[i]) != kVkSuccess) {
+      return false;
+    }
+  }
+
+  // Pipeline layout (no push constants: fullscreen pass from gl_VertexIndex)
+  let plc = VkPipelineLayoutCreateInfo { set_layout_count: 1, set_layouts: unsafe (&raw self.video_desc_set_layout_) };
+  if (unsafe vk_create_pipeline_layout(self.device_, &raw plc, null, &raw var self.video_pipeline_layout_) != kVkSuccess) {
+    return false;
+  }
+
+  // Shaders
+  let vert_mod = self.load_shader("video.vert.spv");
+  let frag_mod = self.load_shader("video.frag.spv");
+  if (vert_mod == 0 || frag_mod == 0) {
+    unsafe {
+      if (vert_mod != 0) {
+        vk_destroy_shader_module(self.device_, vert_mod, null);
+      }
+      if (frag_mod != 0) {
+        vk_destroy_shader_module(self.device_, frag_mod, null);
+      }
+    }
+    return false;
+  }
+
+  let stages = [
+    VkPipelineShaderStageCreateInfo { stage: kVkShaderStageVertexBit, module_: vert_mod, name: c"main" },
+    VkPipelineShaderStageCreateInfo { stage: kVkShaderStageFragmentBit, module_: frag_mod, name: c"main" },
+  ];
+
+  // No vertex input: vertices generated in shader from gl_VertexIndex
+  let vertex_input = VkPipelineVertexInputStateCreateInfo {};
+  let input_assembly = VkPipelineInputAssemblyStateCreateInfo { topology: kVkPrimitiveTopologyTriangleList };
+  let viewport_state = VkPipelineViewportStateCreateInfo { viewport_count: 1, scissor_count: 1 };
+  let raster = VkPipelineRasterizationStateCreateInfo {
+    polygon_mode: kVkPolygonModeFill,
+    line_width: 1.0,
+    cull_mode: kVkCullModeNone,
+  };
+  let multisample = VkPipelineMultisampleStateCreateInfo { rasterization_samples: kVkSampleCount1Bit };
+
+  // No blending: opaque video frame
+  let blend_att = VkPipelineColorBlendAttachmentState {
+    color_write_mask: kVkColorComponentRBit | kVkColorComponentGBit | kVkColorComponentBBit | kVkColorComponentABit,
+  };
+  let color_blend = VkPipelineColorBlendStateCreateInfo { attachment_count: 1, attachments: unsafe (&raw blend_att) };
+
+  let dyn_states: [VkDynamicState; 2] = [kVkDynamicStateViewport, kVkDynamicStateScissor];
+  let dynamic_state = VkPipelineDynamicStateCreateInfo { dynamic_state_count: 2, dynamic_states: @ptr(dyn_states[..]) };
+
+  let pi = VkGraphicsPipelineCreateInfo {
+    stage_count: 2,
+    stages: @ptr(stages[..]),
+    vertex_input_state: unsafe (&raw vertex_input),
+    input_assembly_state: unsafe (&raw input_assembly),
+    viewport_state: unsafe (&raw viewport_state),
+    rasterization_state: unsafe (&raw raster),
+    multisample_state: unsafe (&raw multisample),
+    color_blend_state: unsafe (&raw color_blend),
+    dynamic_state: unsafe (&raw dynamic_state),
+    layout: self.video_pipeline_layout_,
+    render_pass: self.offscreen_render_pass_,
+    subpass: 0,
+  };
+
+  let result = unsafe vk_create_graphics_pipelines(self.device_, kVkNullHandle, 1, &raw pi, null, &raw var self.video_pipeline_);
+
+  unsafe {
+    vk_destroy_shader_module(self.device_, vert_mod, null);
+    vk_destroy_shader_module(self.device_, frag_mod, null);
+  }
+
+  if (result != kVkSuccess) {
+    return false;
+  }
+
+  self.video_pipeline_ready_ = true;
+  return true;
+}
+
+fn VulkanRhiImpl::convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {
+  if (!self.ensure_video_pipeline()) {
+    return;
+  }
+  if (target >= kMaxTextures || !self.textures_[target as usize].in_use || !self.textures_[target as usize].is_render_target) {
+    return;
+  }
+  if (y >= kMaxTextures || !self.textures_[y as usize].in_use) {
+    return;
+  }
+  if (cb >= kMaxTextures || !self.textures_[cb as usize].in_use) {
+    return;
+  }
+  if (cr >= kMaxTextures || !self.textures_[cr as usize].in_use) {
+    return;
+  }
+
+  let slot = self.textures_[target as usize];
+  let cf = self.current_frame_ as usize;
+  let cmd = self.frames_[cf].cmd_buffer;
+
+  // Update the per-frame descriptor set with the 3 plane textures
+  var img_infos = [VkDescriptorImageInfo {}; 3];
+  let planes = [y, cb, cr];
+  for (let i in 0..3usize) {
+    img_infos[i].image_layout = kVkImageLayoutShaderReadOnlyOptimal;
+    img_infos[i].image_view = self.textures_[planes[i] as usize].view;
+    img_infos[i].sampler = self.default_sampler_;
+  }
+
+  var writes = [VkWriteDescriptorSet {}; 3];
+  for (let i in 0..3usize) {
+    writes[i].dst_set = self.video_desc_sets_[cf];
+    writes[i].dst_binding = i as u32;
+    writes[i].descriptor_count = 1;
+    writes[i].descriptor_type = kVkDescriptorTypeCombinedImageSampler;
+    writes[i].image_info = unsafe (@ptr(img_infos[..]) + i);
+  }
+  unsafe vk_update_descriptor_sets(self.device_, 3, @ptr(writes[..]), 0, null);
+
+  // Begin offscreen render pass
+  let clear = VkClearValue {};
+  let rbi = VkRenderPassBeginInfo {
+    render_pass: self.offscreen_render_pass_,
+    framebuffer: slot.framebuffer,
+    render_area: VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: VkExtent2D { width: slot.width, height: slot.height } },
+    clear_value_count: 1,
+    clear_values: unsafe (&raw clear),
+  };
+  let set = self.video_desc_sets_[cf];
+  let viewport = VkViewport { width: slot.width as f32, height: slot.height as f32, max_depth: 1.0 };
+  let scissor = VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: VkExtent2D { width: slot.width, height: slot.height } };
+  unsafe {
+    vk_cmd_begin_render_pass(cmd, &raw rbi, kVkSubpassContentsInline);
+
+    // Bind video pipeline and descriptor set
+    vk_cmd_bind_pipeline(cmd, kVkPipelineBindPointGraphics, self.video_pipeline_);
+    vk_cmd_bind_descriptor_sets(cmd, kVkPipelineBindPointGraphics, self.video_pipeline_layout_, 0, 1, &raw set, 0, null);
+
+    vk_cmd_set_viewport(cmd, 0, 1, &raw viewport);
+    vk_cmd_set_scissor(cmd, 0, 1, &raw scissor);
+
+    // Draw fullscreen triangle (3 vertices, no vertex buffer)
+    vk_cmd_draw(cmd, 3, 1, 0, 0);
+
+    vk_cmd_end_render_pass(cmd);
+  }
+
+  // Pipeline barrier: ensure the conversion is complete before sampling
+  let barrier = image_barrier(slot.image, kVkImageLayoutShaderReadOnlyOptimal, kVkImageLayoutShaderReadOnlyOptimal,
+    kVkAccessColorAttachmentWriteBit, kVkAccessShaderReadBit);
+  cmd_barrier(cmd, kVkPipelineStageColorAttachmentOutputBit, kVkPipelineStageFragmentShaderBit, barrier);
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
+fn VulkanRhiImpl::shutdown(var self&) {
+  unsafe {
+    s_rhi_instance = null;
+  }
+
+  let device = self.device_;
+  if (device != null) {
+    let _ = unsafe vk_device_wait_idle(device);
+  }
+
+  // Textures
+  for (let i in 0..kMaxTextures) {
+    if (self.textures_[i as usize].in_use) {
+      self.destroy_texture(i);
+    }
+  }
+
+  unsafe {
+    if (self.default_sampler_ != 0) {
+      vk_destroy_sampler(device, self.default_sampler_, null);
+    }
+    if (self.nearest_sampler_ != 0) {
+      vk_destroy_sampler(device, self.nearest_sampler_, null);
+    }
+
+    // Per-swapchain-image semaphores
+    for (let i in 0..kMaxSwapchainImages as usize) {
+      if (self.render_finished_[i] != 0) {
+        vk_destroy_semaphore(device, self.render_finished_[i], null);
+      }
+    }
+  }
+
+  // Per-frame resources
+  for (let i in 0..kMaxFrames) {
+    self.free_retired_buffers(i);
+    let f& = self.frames_[i as usize];
+    unsafe {
+      if (f.vertex_buffer != 0) {
+        vk_destroy_buffer(device, f.vertex_buffer, null);
+      }
+      if (f.vertex_memory != 0) {
+        vk_free_memory(device, f.vertex_memory, null);
+      }
+      if (f.index_buffer != 0) {
+        vk_destroy_buffer(device, f.index_buffer, null);
+      }
+      if (f.index_memory != 0) {
+        vk_free_memory(device, f.index_memory, null);
+      }
+      if (f.text_vertex_buffer != 0) {
+        vk_destroy_buffer(device, f.text_vertex_buffer, null);
+      }
+      if (f.text_vertex_memory != 0) {
+        vk_free_memory(device, f.text_vertex_memory, null);
+      }
+      if (f.text_index_buffer != 0) {
+        vk_destroy_buffer(device, f.text_index_buffer, null);
+      }
+      if (f.text_index_memory != 0) {
+        vk_free_memory(device, f.text_index_memory, null);
+      }
+      if (f.in_flight != 0) {
+        vk_destroy_fence(device, f.in_flight, null);
+      }
+      if (f.image_available != 0) {
+        vk_destroy_semaphore(device, f.image_available, null);
+      }
+      if (f.cmd_pool != 0) {
+        vk_destroy_command_pool(device, f.cmd_pool, null);
+      }
+    }
+  }
+
+  unsafe {
+    if (self.video_pipeline_ != 0) {
+      vk_destroy_pipeline(device, self.video_pipeline_, null);
+    }
+    if (self.video_pipeline_layout_ != 0) {
+      vk_destroy_pipeline_layout(device, self.video_pipeline_layout_, null);
+    }
+    if (self.video_desc_pool_ != 0) {
+      vk_destroy_descriptor_pool(device, self.video_desc_pool_, null);
+    }
+    if (self.video_desc_set_layout_ != 0) {
+      vk_destroy_descriptor_set_layout(device, self.video_desc_set_layout_, null);
+    }
+
+    if (self.desc_pool_ != 0) {
+      vk_destroy_descriptor_pool(device, self.desc_pool_, null);
+    }
+    if (self.pipeline_ != 0) {
+      vk_destroy_pipeline(device, self.pipeline_, null);
+    }
+    if (self.text_pipeline_ != 0) {
+      vk_destroy_pipeline(device, self.text_pipeline_, null);
+    }
+    if (self.pipeline_layout_ != 0) {
+      vk_destroy_pipeline_layout(device, self.pipeline_layout_, null);
+    }
+    if (self.desc_set_layout_ != 0) {
+      vk_destroy_descriptor_set_layout(device, self.desc_set_layout_, null);
+    }
+    if (self.offscreen_render_pass_ != 0) {
+      vk_destroy_render_pass(device, self.offscreen_render_pass_, null);
+    }
+    if (self.render_pass_ != 0) {
+      vk_destroy_render_pass(device, self.render_pass_, null);
+    }
+  }
+
+  self.cleanup_swapchain();
+
+  unsafe {
+    if (device != null) {
+      vk_destroy_device(device, null);
+    }
+    if (self.surface_ != 0) {
+      vk_destroy_surface_khr(self.instance_, self.surface_, null);
+    }
+
+    if (self.debug_messenger_ != 0) {
+      let func = vk_get_instance_proc_addr(self.instance_, c"vkDestroyDebugUtilsMessengerEXT");
+      if (let fp = func) {
+        var raw_fn = fp;
+        let destroy = @read(&raw var raw_fn as *const VkDestroyDebugUtilsMessengerFn);
+        destroy(self.instance_, self.debug_messenger_, null);
+      }
+    }
+
+    if (self.instance_ != null) {
+      vk_destroy_instance(self.instance_, null);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// VulkanRhi: the RHI forwarding methods (PIMPL)
+// ---------------------------------------------------------------------------
+
+pub struct VulkanRhi : Rhi {
+  var impl_: Box<VulkanRhiImpl>
+
+  pub fn VulkanRhi(): VulkanRhi => VulkanRhi { impl_: Box(VulkanRhiImpl {}) };
+
+  pub fn init(var self&, config&: RhiConfig): bool => self.impl_.get_var().init(config);
+  pub fn shutdown(var self&) {
+    self.impl_.get_var().shutdown();
+  }
+  pub fn begin_frame(var self&, clear_color: Color): bool => self.impl_.get_var().begin_frame(clear_color);
+  pub fn end_frame(var self&) {
+    self.impl_.get_var().end_frame();
+  }
+  pub fn set_scissor(var self&, rect: Rect) {
+    self.impl_.get_var().set_scissor(rect);
+  }
+  pub fn reset_scissor(var self&) {
+    self.impl_.get_var().reset_scissor();
+  }
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {
+    self.impl_.get_var().draw_triangles(vertices, indices, texture);
+  }
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {
+    self.impl_.get_var().draw_text_triangles(vertices, indices, atlas_texture);
+  }
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle =>
+    self.impl_.get_var().create_texture(width, height, format, pixels, filter);
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+    self.impl_.get_var().update_texture(handle, pixels);
+  }
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {
+    self.impl_.get_var().destroy_texture(handle);
+  }
+  pub fn acquire_frame(var self&): bool => self.impl_.get_var().acquire_frame();
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle =>
+    self.impl_.get_var().create_render_target(width, height);
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {
+    self.impl_.get_var().destroy_render_target(handle);
+  }
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool =>
+    self.impl_.get_var().begin_offscreen(target, clear_color);
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {
+    self.impl_.get_var().end_offscreen(target);
+  }
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {
+    self.impl_.get_var().convert_video_frame(target, y, cb, cr);
+  }
+  pub fn display_size(self&): Vec2 => self.impl_.get().display_size();
+  pub fn dpi_scale(self&): f32 => self.impl_.get().dpi_scale_;
+}

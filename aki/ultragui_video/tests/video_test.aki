@@ -1,0 +1,336 @@
+// The VideoPlayer decoding examples/demo.mpg through a recording Rhi, step by
+// step against what the C++ VideoPlayer did (tests/support/video_reference.aki,
+// from tools/gen_reference.cc): pl_mpeg's clock, the player's flags, the Rhi
+// call counters (frame count: three plane updates per decoded frame) and
+// FNV-1a hashes of the Y, Cb and Cr plane textures after every step. There is
+// no C++ test for video; this follows the scenario the reference tool ran.
+// Runs without and with an AudioBackend (the player only tests it for some);
+// the video must not depend on the audio clock.
+
+module video_test;
+
+import {List, to_list} from akikit::containers::list;
+import {String, from_str} from akikit::strings::string;
+import {println} from akikit::logging;
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D} from ultragui::render::vertex;
+import {DynAudioBackend, NullAudioBackend} from ultragui::audio::audio_backend;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {VideoPlayer} from ultragui_video::video;
+import {kStates} from support::video_reference;
+import {kWidth, kHeight, kDurationBits, kFrameRateBits, kTextureHandle, kYHandle, kCbHandle, kCrHandle} from support::video_reference;
+import {kPlaneW, kPlaneH, kChromaW, kChromaH, kFirstConvert} from support::video_reference;
+import {kVolumeWithBridgeBits, kMutedWithBridge, kVolumeWithoutBridgeBits, kMutedWithoutBridge} from support::video_reference;
+import {kUnloadDestroys, kTargetCreates, kTargetDestroys, kTotalConverts, kLiveAfterUnload} from support::video_reference;
+import {Suite, check} from ultragui_testing::check;
+
+// The demo clip, relative to the repository root.
+fn demo_path(): String => from_str(f"{@package_dir()}/../../examples/demo.mpg");
+
+// An Rhi that remembers the textures it was given (tools/recording_rhi.cc).
+struct Tex {
+  pub var id: RhiTextureHandle
+  pub var bytes: List<byte>
+  pub var width: u32
+  pub var height: u32
+}
+
+struct RecordingRhi : Rhi {
+  pub var textures: List<Tex> = List()
+  pub var next: RhiTextureHandle = 0
+  pub var creates: u32 = 0
+  pub var updates: u32 = 0
+  pub var destroys: u32 = 0
+  pub var target_creates: u32 = 0
+  pub var target_destroys: u32 = 0
+  pub var converts: u32 = 0
+  pub var last_convert: [u32; 4] = [0, 0, 0, 0]
+  pub var last_target_size: (u32, u32) = (0, 0)
+
+  pub fn init(var self&, config&: RhiConfig): bool => false;
+  pub fn shutdown(var self&) {}
+  pub fn begin_frame(var self&, clear_color: Color): bool => false;
+  pub fn end_frame(var self&) {}
+  pub fn set_scissor(var self&, rect: Rect) {}
+  pub fn reset_scissor(var self&) {}
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {}
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {}
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle {
+    let id = self.next;
+    self.next += 1;
+    self.textures.push(Tex { id, bytes: to_list(pixels), width, height });
+    self.creates += 1;
+    return id;
+  }
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {
+    for (var t& in self.textures) {
+      if (t.id == handle) {
+        for (let i in 0..#t.bytes) {
+          t.bytes[i] = pixels[i];
+        }
+      }
+    }
+    self.updates += 1;
+  }
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {
+    var keep: List<Tex> = List();
+    while (let t = self.textures.pop()) {
+      if (t.id != handle) {
+        keep.push(t);
+      }
+    }
+    self.textures = keep;
+    self.destroys += 1;
+  }
+  pub fn acquire_frame(var self&): bool => false;
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle {
+    let id = self.next;
+    self.next += 1;
+    self.target_creates += 1;
+    self.last_target_size = (width, height);
+    return id;
+  }
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {
+    self.target_destroys += 1;
+  }
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool => false;
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {}
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {
+    self.last_convert = [target, y, cb, cr];
+    self.converts += 1;
+  }
+  pub fn display_size(self&): Vec2 => Vec2 { x: 0.0, y: 0.0 };
+  pub fn dpi_scale(self&): f32 => 1.0;
+}
+
+// FNV-1a over a texture's bytes, continuing from `h`.
+fn fnv_add(h_in: u64, rec&: RecordingRhi, id: RhiTextureHandle): u64 {
+  var h = h_in;
+  for (let t& in rec.textures) {
+    if (t.id == id) {
+      for (let b in t.bytes) {
+        h = (h ^ (b as u8) as u64) *% 0x100000001b3;
+      }
+    }
+  }
+  return h;
+}
+
+comptime let kFnvBasis: u64 = 0xcbf29ce484222325;
+
+fn plane_hash(rec&: RecordingRhi, id: RhiTextureHandle): u64 => id == kInvalidTexture ? 0 : fnv_add(kFnvBasis, rec, id);
+
+// Y, then Cb, then Cr in one hash.
+fn frame_hash(v&: VideoPlayer, rec&: RecordingRhi): u64 {
+  var h = kFnvBasis;
+  for (let t in [v.y_texture(), v.cb_texture(), v.cr_texture()]) {
+    if (t != kInvalidTexture) {
+      h = fnv_add(h, rec, t);
+    }
+  }
+  return h;
+}
+
+// Compares the player and the Rhi with the next recorded state.
+struct Replay {
+  pub var next: usize = 0
+  pub var failures: u32 = 0
+
+  pub fn state(var self&, scenario: str, step: i32, v&: VideoPlayer, rec&: RecordingRhi) {
+    let s& = kStates[self.next];
+    self.next += 1;
+    let position = @bit_cast(u64, v.position());
+    let fh = frame_hash(v, rec);
+    let yh = plane_hash(rec, v.y_texture());
+    let cbh = plane_hash(rec, v.cb_texture());
+    let crh = plane_hash(rec, v.cr_texture());
+    let ok = s.scenario == scenario && s.step == step && s.position_bits == position && s.finished == v.is_finished()
+      && s.playing == v.is_playing() && s.needs_convert == v.needs_convert() && s.updates == rec.updates
+      && s.creates == rec.creates && s.converts == rec.converts && s.frame_hash == fh && s.y_hash == yh
+      && s.cb_hash == cbh && s.cr_hash == crh;
+    if (!ok) {
+      self.failures += 1;
+      if (self.failures <= 10) {
+        println(f"    MISMATCH {scenario} step {step} (state {self.next - 1}): position 0x{position:016x} (want 0x{s.position_bits:016x}), finished {v.is_finished()}/{s.finished}, playing {v.is_playing()}/{s.playing}, needs_convert {v.needs_convert()}/{s.needs_convert}, updates {rec.updates}/{s.updates}, creates {rec.creates}/{s.creates}, converts {rec.converts}/{s.converts}, hash 0x{fh:016x}/0x{s.frame_hash:016x}");
+      }
+    }
+  }
+}
+
+fn convert(var v&: VideoPlayer, var rec&: RecordingRhi) {
+  v.convert_frame(rec);
+}
+
+// The scripted run of tools/gen_reference.cc, state by state.
+fn run_scenario(audio: bool) {
+  var rec = RecordingRhi {};
+  var v = VideoPlayer();
+  var backend = NullAudioBackend();
+  var dyn = DynAudioBackend::of(backend);
+  let path = demo_path();
+  let loaded = audio ? v.load(rec, path.as_str(), dyn) : v.load(rec, path.as_str(), none);
+  check(loaded, "demo.mpg loads");
+  check(v.is_loaded(), "is_loaded");
+  // Whether the audio bridge came up depends on the machine (it needs a
+  // device): without it set_volume/set_muted do nothing, as in the C++.
+  check(audio || !v.audio_active(), "no audio bridge without an AudioBackend");
+  println(f"    (audio backend {audio}, audio bridge {v.audio_active()})");
+
+  check(v.width() == kWidth && v.height() == kHeight, f"size {v.width()}x{v.height()}");
+  check(@bit_cast(u64, v.duration()) == kDurationBits, "duration");
+  check(@bit_cast(u64, v.frame_rate()) == kFrameRateBits, "frame_rate");
+  check(v.texture() == kTextureHandle && v.y_texture() == kYHandle && v.cb_texture() == kCbHandle && v.cr_texture() == kCrHandle,
+        "texture handles: target, Y, Cb, Cr in creation order");
+  check(rec.last_target_size == (kWidth, kHeight), "render target is the display size");
+  for (let t& in rec.textures) {
+    let want_w = t.id == kYHandle ? kPlaneW : kChromaW;
+    let want_h = t.id == kYHandle ? kPlaneH : kChromaH;
+    check(t.width == want_w && t.height == want_h && #t.bytes == want_w as usize * want_h as usize,
+          "plane textures are macroblock-rounded, chroma half size");
+  }
+  check(@bit_cast(u32, v.volume()) == 0x3f800000 && !v.muted() && v.speed() == 1.0, "defaults");
+
+  var r = Replay {};
+  r.state("load", 0, v, rec);
+
+  // convert before anything: one call
+  convert(v, rec);
+  r.state("convert", 0, v, rec);
+  check(rec.last_convert == [kFirstConvert[0], kFirstConvert[1], kFirstConvert[2], kFirstConvert[3]], "convert_video_frame(target, y, cb, cr)");
+
+  // Not playing: Update does nothing
+  v.update(0.5, rec);
+  r.state("idle", 0, v, rec);
+
+  // Playing at 16 ms ticks, converting each frame
+  v.play();
+  for (let i in 0..120) {
+    v.update(0.016, rec);
+    if (v.needs_convert()) {
+      convert(v, rec);
+    }
+    r.state("play16", i, v, rec);
+  }
+  // Pause, then big ticks
+  v.pause();
+  v.update(0.1, rec);
+  r.state("paused", 0, v, rec);
+  v.set_speed(2.5);
+  v.play();
+  for (let i in 0..20) {
+    v.update(0.2, rec);
+    convert(v, rec);
+    r.state("fast", i, v, rec);
+  }
+  // Seek around
+  v.set_speed(1.0);
+  let seeks: [f64; 7] = [0.0, 1.0, 2.5, 0.2, -3.0, 1000.0, 3.1];
+  var k: i32 = 0;
+  for (let s in seeks) {
+    v.seek(s, rec);
+    r.state("seek", k, v, rec);
+    k += 1;
+    v.update(0.04, rec);
+    convert(v, rec);
+    r.state("seek_update", k, v, rec);
+  }
+  // Stop
+  v.stop(rec);
+  r.state("stop", 0, v, rec);
+  // Loop through the end
+  v.seek(v.duration() - 0.5, rec);
+  v.set_loop(true);
+  v.play();
+  for (let i in 0..60) {
+    v.update(0.05, rec);
+    convert(v, rec);
+    r.state("loop", i, v, rec);
+  }
+  // Run out without a loop, then restart with play()
+  v.set_loop(false);
+  v.seek(v.duration() - 0.5, rec);
+  var i: i32 = 0;
+  while (i < 30 && !v.is_finished()) {
+    v.update(0.05, rec);
+    convert(v, rec);
+    r.state("once", i, v, rec);
+    i += 1;
+  }
+  r.state("finished", 0, v, rec);
+  v.update(0.05, rec);
+  r.state("finished_update", 0, v, rec);
+  v.play();
+  r.state("restart", 0, v, rec);
+  v.set_volume(0.5);
+  v.set_muted(true);
+  if (v.audio_active()) {
+    check(@bit_cast(u32, v.volume()) == kVolumeWithBridgeBits && v.muted() == kMutedWithBridge, "volume and mute reach the audio bridge");
+  } else {
+    check(@bit_cast(u32, v.volume()) == kVolumeWithoutBridgeBits && v.muted() == kMutedWithoutBridge, "volume and mute without a bridge");
+  }
+  v.unload(rec);
+  check(rec.destroys == kUnloadDestroys && rec.target_creates == kTargetCreates && rec.target_destroys == kTargetDestroys
+          && rec.converts == kTotalConverts && #rec.textures == kLiveAfterUnload,
+        f"unload releases three planes and the target: destroys {rec.destroys}, converts {rec.converts}");
+  check(!v.is_loaded(), "unloaded");
+
+  check(r.next == #kStates, f"every recorded state replayed ({r.next} of {#kStates})");
+  check(r.failures == 0, f"{r.failures} states differ from the C++");
+}
+
+fn test_decode_demo_without_audio() {
+  run_scenario(false);
+}
+
+fn test_decode_demo_with_audio_backend() {
+  run_scenario(true);
+}
+
+fn test_missing_file() {
+  var rec = RecordingRhi {};
+  var v = VideoPlayer();
+  check(!v.load(rec, "does_not_exist.mpg", none), "a missing file fails");
+  check(!v.is_loaded(), "not loaded");
+  check(rec.creates == 0 && rec.target_creates == 0, "nothing created");
+}
+
+fn test_default_state() {
+  var rec = RecordingRhi {};
+  var v = VideoPlayer();
+  check(!v.is_loaded() && !v.is_playing() && !v.is_finished() && !v.is_looping(), "flags");
+  check(v.texture() == kInvalidTexture && v.y_texture() == kInvalidTexture && v.cb_texture() == kInvalidTexture
+          && v.cr_texture() == kInvalidTexture, "textures");
+  check(v.width() == 0 && v.height() == 0 && v.duration() == 0.0 && v.position() == 0.0 && v.frame_rate() == 0.0, "sizes");
+  check(v.speed() == 1.0 && v.volume() == 1.0 && !v.muted() && !v.needs_convert(), "audio and speed");
+  // No-ops without a load, not crashes
+  v.play();
+  v.pause();
+  v.stop(rec);
+  v.seek(1.0, rec);
+  v.set_loop(true);
+  v.set_speed(2.0);
+  v.set_volume(0.5);
+  v.set_muted(true);
+  v.update(0.016, rec);
+  v.convert_frame(rec);
+  v.unload(rec);
+  check(!v.is_playing() && rec.creates == 0 && rec.converts == 0, "no effect");
+}
+
+pub fn main(): i32 {
+  println("Video test suite");
+  println("================");
+  var s = Suite();
+  test_default_state();
+  s.pass("default_state");
+  test_missing_file();
+  s.pass("missing_file");
+  test_decode_demo_without_audio();
+  s.pass("decode_demo_without_audio");
+  test_decode_demo_with_audio_backend();
+  s.pass("decode_demo_with_audio_backend");
+  return s.finish();
+}

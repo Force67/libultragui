@@ -1,0 +1,16 @@
+# examples/video_demo in aki: MPEG-1 playback (pl_mpeg, GPU YCbCr -> RGB)
+# in three scenes (single player, one texture on many widgets, a textured
+# 3D cube); UIContext over GLFW and Vulkan, as examples/video_demo/main.cc.
+[package]
+name = "ultragui_video_demo"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../ultragui" }
+ultragui_glfw = { path = "../../ultragui_glfw" }
+ultragui_vulkan = { path = "../../ultragui_vulkan" }
+ultragui_video = { path = "../../ultragui_video" }
+
+[build]
+opt = 2

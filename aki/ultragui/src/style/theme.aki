@@ -1,0 +1,74 @@
+// ugui/style/theme.h: a named set of CSS custom properties (design tokens).
+
+module ultragui::style::theme;
+
+import {String, from_str} from akikit::strings::string;
+import {HashMap, get_str} from akikit::containers::hash_map;
+
+pub struct Theme {
+  pub var name: String = String()
+  pub var tokens: HashMap<String, String> = HashMap()
+
+  // Set a token value (e.g. "--bg-primary", "#1a1a2e").
+  pub fn set(var self&, token_name: str, value: str) {
+    self.tokens.insert(from_str(token_name), from_str(value));
+  }
+
+  // A token's value, or "" if not found.
+  pub fn get(self&, token_name: str): str {
+    if (let v& = get_str(self.tokens, token_name)) {
+      return v.as_str();
+    }
+    return "";
+  }
+
+  // Dark theme preset with common design tokens.
+  pub fn dark(): Theme;
+
+  // Light theme preset with common design tokens.
+  pub fn light(): Theme;
+}
+
+fn Theme::dark(): Theme {
+  var t = Theme {};
+  t.name = from_str("dark");
+  t.set("--bg-primary", "#0f0f1a");
+  t.set("--bg-secondary", "#1a1a2e");
+  t.set("--bg-tertiary", "#2a2a45");
+  t.set("--bg-surface", "#1e1e35");
+  t.set("--text-primary", "#e0e0ff");
+  t.set("--text-secondary", "#8888aa");
+  t.set("--text-muted", "#555570");
+  t.set("--accent", "#4a4aff");
+  t.set("--accent-hover", "#5a5aff");
+  t.set("--accent-active", "#3a3aee");
+  t.set("--success", "#4aea8a");
+  t.set("--warning", "#ffaa33");
+  t.set("--error", "#ff4466");
+  t.set("--border", "#ffffff15");
+  t.set("--border-focus", "#4a4aff80");
+  t.set("--shadow", "#00000040");
+  return t;
+}
+
+fn Theme::light(): Theme {
+  var t = Theme {};
+  t.name = from_str("light");
+  t.set("--bg-primary", "#ffffff");
+  t.set("--bg-secondary", "#f5f5fa");
+  t.set("--bg-tertiary", "#eeeef5");
+  t.set("--bg-surface", "#ffffff");
+  t.set("--text-primary", "#1a1a2e");
+  t.set("--text-secondary", "#555570");
+  t.set("--text-muted", "#8888aa");
+  t.set("--accent", "#3a3aee");
+  t.set("--accent-hover", "#4a4aff");
+  t.set("--accent-active", "#2a2add");
+  t.set("--success", "#22aa55");
+  t.set("--warning", "#dd8800");
+  t.set("--error", "#dd2244");
+  t.set("--border", "#00000015");
+  t.set("--border-focus", "#3a3aee80");
+  t.set("--shadow", "#00000020");
+  return t;
+}

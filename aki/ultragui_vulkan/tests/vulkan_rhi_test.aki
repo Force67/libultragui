@@ -1,0 +1,111 @@
+// VulkanRhi on a real device, through GlfwPlatform: init with the package's
+// SPIR-V copies as shader_dir, texture slots (the white texture takes slot
+// 0, freed slots are reused, out-of-range handles are ignored), render
+// targets, display size and dpi, offscreen and main passes, video
+// conversion, scissor, and shutdown. Rendering itself is compared against the
+// C++ by examples/rhi_scene. Needs a display and a Vulkan device; without
+// them it says so and passes. Run it on lavapipe under Xvfb with
+//   aki/tools/xshot.sh /tmp/x.png 60 bash -c 'cd aki/ultragui_vulkan && akiko test'
+
+module vulkan_rhi_test;
+
+import {println} from akikit::logging;
+import {join} from akikit::filesystem::path;
+import {from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {WindowConfig} from ultragui::platform::platform;
+import {Vertex2D, pack_color} from ultragui::render::vertex;
+import {RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {GlfwPlatform} from ultragui_glfw::platform_glfw;
+import {VulkanRhi} from ultragui_vulkan::vulkan_rhi;
+import {Expect} from ultragui_testing::expect;
+
+fn quad(x: f32, y: f32, w: f32, h: f32): [Vertex2D; 4] {
+  let c = pack_color(1.0, 1.0, 1.0, 1.0);
+  let v = Vertex2D { pos: [x, y], uv: [0.0, 0.0], color: c, color2: c, corner_radii: 0, softness: 0.0, half_size: [w * 0.5, h * 0.5],
+    border_width: 0.0, border_color: 0 };
+  var out = [v; 4];
+  out[1].pos = [x + w, y];
+  out[1].uv = [1.0, 0.0];
+  out[2].pos = [x + w, y + h];
+  out[2].uv = [1.0, 1.0];
+  out[3].pos = [x, y + h];
+  out[3].uv = [0.0, 1.0];
+  return out;
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var platform = GlfwPlatform();
+  if (!platform.init(WindowConfig { width: 320, height: 240, title: from_str("vulkan_rhi_test"), resizable: false })) {
+    println("vulkan_rhi_test: no display, skipped");
+    return 0;
+  }
+  var rhi = VulkanRhi();
+  let rc = RhiConfig { native_window: platform.native_handle(), validation: false, shader_dir: join(@package_dir(), "shaders") };
+  if (!rhi.init(rc)) {
+    println("vulkan_rhi_test: no Vulkan device, skipped");
+    platform.shutdown();
+    return 0;
+  }
+
+  let ds = rhi.display_size();
+  t.that(ds.x == 320.0 && ds.y == 240.0, f"display_size {ds.x}x{ds.y}");
+  t.that(rhi.dpi_scale() == 1.0, "dpi_scale");
+
+  // Slot 0 holds the white texture, so the first texture is 1.
+  let px = [0xFFu8; 64];
+  let a = rhi.create_texture(4, 4, RhiFormat::Rgba8Unorm, px[..] as bytes, RhiFilter::Linear);
+  let b = rhi.create_texture(8, 8, RhiFormat::R8Unorm, px[..] as bytes, RhiFilter::Nearest);
+  t.eq_u32(a, 1, "first texture handle");
+  t.eq_u32(b, 2, "second texture handle");
+  t.eq_u32(rhi.create_texture(1, 1, RhiFormat::Rgba32Float, px[..] as bytes, RhiFilter::Linear), kInvalidTexture,
+    "RGBA32F is not supported by the RHI");
+  rhi.destroy_texture(a);
+  let c = rhi.create_texture(2, 2, RhiFormat::Bgra8Unorm, [] as bytes, RhiFilter::Linear);
+  t.eq_u32(c, 1, "a freed slot is reused (empty pixels upload zeros)");
+  rhi.update_texture(c, px[..] as bytes);
+  rhi.update_texture(999, px[..] as bytes);  // ignored
+  rhi.destroy_texture(kInvalidTexture);      // ignored
+
+  let rt = rhi.create_render_target(64, 32);
+  t.eq_u32(rt, 3, "render target handle");
+  let video = rhi.create_render_target(16, 16);
+
+  let v = quad(10.0, 10.0, 50.0, 20.0);
+  let idx = [0u32, 1, 2, 0, 2, 3];
+  for (let frame in 0..3) {
+    t.that(rhi.acquire_frame(), "acquire_frame");
+    t.that(rhi.acquire_frame(), "acquire_frame twice is a no-op");
+    rhi.convert_video_frame(video, b, b, b);
+    t.that(rhi.begin_offscreen(rt, Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }), "begin_offscreen");
+    let os = rhi.display_size();
+    t.that(os.x == 64.0 && os.y == 32.0, "display_size is the target's inside an offscreen pass");
+    rhi.draw_triangles(v[..], idx[..], kInvalidTexture);
+    rhi.draw_text_triangles(v[..], idx[..], b);
+    rhi.end_offscreen(rt);
+    t.that(!rhi.begin_offscreen(a + 100, Color {}), "begin_offscreen on a non-target fails");
+    t.that(rhi.begin_frame(Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 }), "begin_frame");
+    rhi.draw_triangles(v[..], idx[..], rt);
+    rhi.draw_triangles(v[..], idx[..], c);  // the same vertices: no second upload
+    rhi.set_scissor(Rect::new(0.0, 0.0, 100.0, 100.0));
+    rhi.draw_text_triangles(v[..], idx[..], b);
+    rhi.reset_scissor();
+    rhi.draw_triangles([], idx[..], kInvalidTexture);  // nothing to draw
+    rhi.end_frame();
+    let back = rhi.display_size();
+    t.that(back.x == 320.0, "display_size is the window's again");
+  }
+
+  rhi.destroy_render_target(rt);
+  rhi.destroy_render_target(c);  // not a render target: ignored
+  let rt2 = rhi.create_render_target(8, 8);
+  t.eq_u32(rt2, 3, "a freed render-target slot is reused");
+  rhi.destroy_texture(rt2);      // destroy_texture forwards to destroy_render_target
+
+  rhi.shutdown();
+  platform.shutdown();
+  return t.finish();
+}

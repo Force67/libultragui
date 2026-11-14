@@ -1,0 +1,11 @@
+# embed_scene: a host that owns Vulkan records draw data through
+# VulkanBackend (ugui_impl_vulkan), the aki twin of embed_scene.cc.
+[package]
+name = "embed_scene"
+kind = "exe"
+version = "0.1.0"
+
+[dependencies]
+ultragui = { path = "../../../ultragui" }
+ultragui_glfw = { path = "../../../ultragui_glfw" }
+ultragui_vulkan = { path = "../.." }

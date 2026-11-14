@@ -1,0 +1,176 @@
+// ugui/widgets/toggle.{h,cc}: a toggle switch (WidgetKind::Toggle), a
+// generic widget carrying a ToggleContent (on_change, thumb slide progress);
+// the on/off flag is the widget's WidgetState::Checked bit. Behaviour: the
+// Toggle arms in widgets::widget_vtable (custom paint: draw + measure +
+// click + update).
+//
+// Shape differences: the World comes first; set_toggle_on takes the context
+// too (a state change may start a transition through the animator).
+
+module ultragui::widgets::toggle;
+
+import {swap} from akikit::algorithm;
+import {Color, lerp_color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {clamp} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii_uniform} from ultragui::render::vertex;
+import {WidgetState, has_state} from ultragui::style::enums;
+import {BoolHandler, CallbackEnv} from ultragui::widgets::callbacks;
+import {
+  WidgetKind, computed_style, kStyleC, kTransform, kWidgetNode, mark_paint_dirty, set_widget_state, ui_scale,
+  widget_state_of,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// Data for a toggle widget. The on/off flag lives in the state bit.
+pub struct ToggleContent {
+  pub var on_change: BoolHandler? = none
+  pub var thumb_anim: f32 = 0.0  // 0 = off (left), 1 = on (right)
+}
+
+pub static let kToggleContent: ComponentKey<ToggleContent> = ComponentKey();
+
+// ToggleMeasure: a 44x24 track plus padding.
+pub fn toggle_measure(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  let st& = world.get(kStyleC, e)!.style;
+  let track_w: f32 = 44.0;
+  let track_h: f32 = 24.0;
+  return (track_w + st.padding.horizontal(), track_h + st.padding.vertical());
+}
+
+// ToggleDraw: the whole widget (custom paint).
+pub fn toggle_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  var anim: f32 = is_toggle_on(world, e) ? 1.0 : 0.0;
+  if (let c& = world.get(kToggleContent, e)) {
+    anim = c.thumb_anim;
+  }
+
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+  let alpha = s.opacity;
+
+  let content = world.get(kTransform, e)!.content_rect;
+  let track_x = content.x;
+  let track_y = content.y;
+  let track_w = content.w;
+  let track_h = content.h;
+
+  // Pill-shaped track (corner radius = half height).
+  let track_radius = track_h * 0.5;
+  let track_radii = pack_radii_uniform(track_radius);
+
+  var off_color = Color::from_hex(0x3a3a3a);
+  var on_color = Color::from_hex(0x4a7aff);
+  if (s.background.a > 0.0) {
+    off_color = s.background;
+    if (s.background_end.a > 0.0) {
+      on_color = s.background_end;
+    }
+  }
+
+  var track_color = lerp_color(off_color, on_color, anim);
+  track_color = track_color.with_alpha(track_color.a * alpha);
+  renderer.draw_rect(Rect { x: track_x, y: track_y, w: track_w, h: track_h }, track_color, track_radii);
+
+  // Thumb: circle inset from the track edges.
+  let inset: f32 = 2.0;
+  let thumb_size = track_h - inset * 2.0;
+  let thumb_radius = thumb_size * 0.5;
+  let thumb_radii = pack_radii_uniform(thumb_radius);
+
+  let thumb_x = track_x + inset + anim * (track_w - thumb_size - inset * 2.0);
+  let thumb_y = track_y + inset;
+  let thumb_color = Color::white().with_alpha(alpha);
+  renderer.draw_rect(Rect { x: thumb_x, y: thumb_y, w: thumb_size, h: thumb_size }, thumb_color, thumb_radii);
+}
+
+// ToggleClick: flip, then on_change with the new value.
+pub fn toggle_click(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool {
+  let now = !is_toggle_on(world, e);
+  set_toggle_on(world, ctx, e, now);
+  var slot: BoolHandler? = none;
+  if (var c& = world.get_var(kToggleContent, e)) {
+    swap(c.on_change, slot);
+  }
+  if (let handler = slot) {
+    {
+      var env = CallbackEnv { world, ctx };
+      handler(env, now);
+    }
+    if (var c& = world.get_var(kToggleContent, e)) {
+      if (c.on_change == none) {
+        c.on_change = handler;
+      }
+    }
+  }
+  return true;
+}
+
+// ToggleUpdate: slide the thumb toward the current state.
+pub fn toggle_update(var world&: World, var ctx&: WidgetContext, e: WidgetId, dt: f64) {
+  let target: f32 = is_toggle_on(world, e) ? 1.0 : 0.0;
+  let c& = world.get_var(kToggleContent, e) else {
+    return;
+  };
+
+  let prev = c.thumb_anim;
+  let speed = clamp(dt as f32 * 12.0, 0.0, 1.0);
+  c.thumb_anim += (target - c.thumb_anim) * speed;
+
+  if (@abs(c.thumb_anim - target) < 0.001) {
+    c.thumb_anim = target;
+  }
+
+  if (c.thumb_anim != prev) {
+    mark_paint_dirty(world, e);
+  }
+}
+
+// CreateToggle: a widget tagged Toggle with a ToggleContent.
+pub fn create_toggle(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::Toggle;
+  world.add(kToggleContent, e, ToggleContent {});
+  return e;
+}
+
+fn is_toggle(world&: World, e: WidgetId): bool {
+  if (let n& = world.get(kWidgetNode, e)) {
+    return n.kind == WidgetKind::Toggle;
+  }
+  return false;
+}
+
+// SetToggleOn: set the Checked state bit and snap the thumb, so external
+// state restoration shows the right visual at once. Does not fire
+// on_change. No-op if `e` is not a toggle.
+pub fn set_toggle_on(var world&: World, var ctx&: WidgetContext, e: WidgetId, on: bool) {
+  if (!is_toggle(world, e)) {
+    return;
+  }
+  var s = widget_state_of(world, e);
+  if (on) {
+    s = s.with(WidgetState::Checked);
+  } else {
+    s = s.without(WidgetState::Checked);
+  }
+  set_widget_state(world, ctx, e, s);
+  world.get_or_add(kToggleContent, e, ToggleContent {}).thumb_anim = on ? 1.0 : 0.0;
+  mark_paint_dirty(world, e);
+}
+
+// IsToggleOn: whether the widget's Checked state bit is set.
+pub fn is_toggle_on(world&: World, e: WidgetId): bool => has_state(widget_state_of(world, e), WidgetState::Checked);
+
+// SetToggleChange: run with the new value when the user toggles it. No-op
+// if `e` is not a toggle.
+pub fn set_toggle_change(var world&: World, e: WidgetId, handler: BoolHandler) {
+  if (!is_toggle(world, e)) {
+    return;
+  }
+  world.get_or_add(kToggleContent, e, ToggleContent {}).on_change = handler;
+}

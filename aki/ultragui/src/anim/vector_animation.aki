@@ -1,0 +1,193 @@
+// ugui/anim/vector_animation.{h,cc}: the lightweight vector animation player.
+// Parses .uganim JSON and renders frames with the built-in SVG rasterizer.
+//
+// Differences in shape (not behavior):
+//
+// * The C++ stores the `TextureBackend*` it was loaded with and uses it in
+//   Update, Unload and the destructor. A struct that kept a borrowed backend
+//   would pin whoever owns both (UIContext), so the backend is an argument
+//   (`(&var T)?` for any `T: TextureBackend`; none is the C++ nullptr) of
+//   load, load_data, update and unload, and **the destructor cannot release
+//   the texture**: call `unload(backend)` first or the backend keeps the
+//   texture. Pass the same backend each time.
+// * `Load`/`LoadData` call Unload first, with the backend of the new call.
+// * `impl_ == nullptr` is the `loaded` flag; the accessors answer for an
+//   unloaded animation as the C++ does (0, kNullTextureId, speed 1).
+// * `loop` is `looping` (keyword). A looping document of zero duration
+//   spins in `update` forever, as in the C++ (`while (t >= dur) t -= dur`).
+
+module ultragui::anim::vector_animation;
+
+import {List, filled} from akikit::containers::list;
+import {AnimDocument} from ultragui::anim::anim_types;
+import {parse_anim_data, parse_anim_file} from ultragui::anim::anim_parser;
+import {render_anim_frame} from ultragui::anim::anim_render;
+import {eprintln} from akikit::logging;
+import {TextureId, kNullTextureId} from ultragui::render::draw_data;
+import {TextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+
+pub struct VectorAnimation {
+  var loaded: bool = false
+  var doc: AnimDocument = AnimDocument {}
+  var texture_id: TextureId = kNullTextureId
+  var w: u32 = 0
+  var h: u32 = 0
+  var rgba_buf: List<u8> = List()
+
+  var playing: bool = false
+  var speed_val: f32 = 1.0
+  var current_time: f64 = 0.0
+  var last_rendered_t: f32 = -1.0
+
+  pub fn VectorAnimation(): VectorAnimation => VectorAnimation {};
+
+  pub fn load<T: TextureBackend>(var self&, backend: (&var T)?, path: str, width: u32, height: u32): bool;
+  pub fn load_data<T: TextureBackend>(var self&, backend: (&var T)?, json_data: str, width: u32, height: u32): bool;
+  pub fn update<T: TextureBackend>(var self&, backend: (&var T)?, dt: f64);
+  pub fn unload<T: TextureBackend>(var self&, backend: (&var T)?);
+
+  pub fn is_loaded(self&): bool => self.loaded;
+  pub fn texture(self&): TextureId => self.loaded ? self.texture_id : kNullTextureId;
+  pub fn width(self&): u32 => self.loaded ? self.w : 0;
+  pub fn height(self&): u32 => self.loaded ? self.h : 0;
+
+  pub fn play(var self&) {
+    if (self.loaded) {
+      self.playing = true;
+    }
+  }
+  pub fn pause(var self&) {
+    if (self.loaded) {
+      self.playing = false;
+    }
+  }
+  pub fn stop(var self&) {
+    if (self.loaded) {
+      self.playing = false;
+      self.current_time = 0.0;
+    }
+  }
+  pub fn set_loop(var self&, looping: bool) {
+    if (self.loaded) {
+      self.doc.looping = looping;
+    }
+  }
+  pub fn set_speed(var self&, speed: f32) {
+    if (self.loaded) {
+      self.speed_val = speed;
+    }
+  }
+  pub fn seek(var self&, progress: f32) {
+    if (self.loaded) {
+      self.current_time = (progress * self.doc.duration) as f64;
+    }
+  }
+
+  pub fn is_playing(self&): bool => self.loaded && self.playing;
+  pub fn speed(self&): f32 => self.loaded ? self.speed_val : 1.0;
+  pub fn duration(self&): f64 => self.loaded ? self.doc.duration as f64 : 0.0;
+  pub fn progress(self&): f32 {
+    if (!self.loaded || self.doc.duration <= 0.0) {
+      return 0.0;
+    }
+    return (self.current_time / self.doc.duration as f64) as f32;
+  }
+
+  // Everything Load and LoadData do once the document is parsed into `doc`:
+  // the buffer, the first frame and its texture.
+  fn start<T: TextureBackend>(var self&, backend: (&var T)?, width: u32, height: u32);
+}
+
+fn VectorAnimation::start<T: TextureBackend>(var self&, backend: (&var T)?, width: u32, height: u32) {
+  self.w = width;
+  self.h = height;
+  // u32 arithmetic, wrapping, as the C++ computes the size.
+  let size = (width *% height *% 4) as usize;
+  self.rgba_buf = filled(size, 0u8);
+
+  // Render first frame
+  render_anim_frame(self.doc, 0.0, self.rgba_buf.as_slice_var(), width, height);
+  if (var b& = backend) {
+    self.texture_id = b.create_texture(width, height, RhiFormat::Rgba8Unorm, self.rgba_buf.as_slice() as bytes, RhiFilter::Linear);
+  }
+  self.last_rendered_t = 0.0;
+  self.loaded = true;
+}
+
+fn VectorAnimation::load<T: TextureBackend>(var self&, backend: (&var T)?, path: str, width: u32, height: u32): bool {
+  self.unload(backend);
+  if (!parse_anim_file(path, self.doc)) {
+    eprintln(f"ugui/anim: failed to parse '{path}'");
+    self.doc = AnimDocument {};
+    return false;
+  }
+  self.start(backend, width, height);
+  return true;
+}
+
+fn VectorAnimation::load_data<T: TextureBackend>(var self&, backend: (&var T)?, json_data: str, width: u32, height: u32): bool {
+  self.unload(backend);
+  if (!parse_anim_data(json_data, self.doc)) {
+    self.doc = AnimDocument {};
+    return false;
+  }
+  self.start(backend, width, height);
+  return true;
+}
+
+fn VectorAnimation::update<T: TextureBackend>(var self&, backend: (&var T)?, dt: f64) {
+  if (!self.loaded || !self.playing) {
+    return;
+  }
+
+  self.current_time += dt * self.speed_val as f64;
+  let dur = self.doc.duration as f64;
+
+  if (self.doc.looping) {
+    while (self.current_time >= dur) {
+      self.current_time -= dur;
+    }
+    if (self.current_time < 0.0) {
+      self.current_time += dur;
+    }
+  } else {
+    if (self.current_time >= dur) {
+      self.current_time = dur;
+      self.playing = false;
+    }
+  }
+
+  let t = self.current_time as f32;
+
+  // Only re-render if time changed enough (~60fps threshold)
+  if (@abs(t - self.last_rendered_t) > 0.012) {
+    render_anim_frame(self.doc, t, self.rgba_buf.as_slice_var(), self.w, self.h);
+    if (var b& = backend) {
+      if (self.texture_id != kNullTextureId) {
+        b.update_texture(self.texture_id, self.rgba_buf.as_slice() as bytes);
+      }
+    }
+    self.last_rendered_t = t;
+  }
+}
+
+fn VectorAnimation::unload<T: TextureBackend>(var self&, backend: (&var T)?) {
+  if (self.loaded) {
+    if (self.texture_id != kNullTextureId) {
+      if (var b& = backend) {
+        b.destroy_texture(self.texture_id);
+      }
+    }
+    self.loaded = false;
+    self.doc = AnimDocument {};
+    self.texture_id = kNullTextureId;
+    self.w = 0;
+    self.h = 0;
+    self.rgba_buf = List();
+    self.playing = false;
+    self.speed_val = 1.0;
+    self.current_time = 0.0;
+    self.last_rendered_t = -1.0;
+  }
+}

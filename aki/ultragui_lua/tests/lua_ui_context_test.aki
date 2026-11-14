@@ -1,0 +1,116 @@
+// UIContext over the Lua runtime (ultragui_lua::lua_ui_context): the C++
+// Init's Lua bindings reach UIContext through the script host.
+//
+// * RegisterAnimLua: ugui.load_anim loads through UIContext::LoadAnim (owned,
+//   updated by the context), ugui.anim_attach finds the widget through
+//   FindWidgetEntity and sets the image texture.
+// * RegisterAudioLua only with LuaBindings::audio (ULTRAGUI_AUDIO).
+// * set_script_click_dispatch: a left click on a named widget runs
+//   on_<name>(w) (the examples' on_click lambda).
+// * Timers fire through update_timers with the host lent.
+
+module lua_ui_context_test;
+
+import {World} from ultragui::widgets::widget_registry;
+import {String, from_str} from akikit::strings::string;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {MouseButton} from ultragui::input::input_queue;
+import {HostPlatform} from ultragui::platform::platform_host;
+import {TextureId} from ultragui::render::draw_data;
+import {TextureBackend, TextureBackendBox} from ultragui::render::texture_backend;
+import {NullRhi} from ultragui::rhi::null_rhi;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {UIConfig} from ultragui::ui_context;
+import {kImageContent} from ultragui::widgets::image;
+import {kTextContent} from ultragui::widgets::text;
+import {LuaBindings, lua_ui_context} from ultragui_lua::lua_ui_context;
+import {Expect} from ultragui_testing::expect;
+
+comptime let kFont: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+
+struct CountingTextures : TextureBackend {
+  pub var next: TextureId = 100
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+    self.next += 1;
+    return self.next;
+  }
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {}
+  pub fn destroy_texture(var self&, id: TextureId) {}
+}
+
+comptime let kUi: str = r"""
+panel root {
+  layout: column; width: 400; height: 300;
+  image spinner { width: 64; height: 64; }
+  button go { text: "Go"; width: 80; height: 30; }
+  text status { text: "idle"; }
+}
+""";
+
+fn text_of(world&: World, w: WidgetId): String {
+  if (let t& = world.get(kTextContent, w)) {
+    return t.text.clone();
+  }
+  return String();
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var anim_path = from_str(@package_dir());
+  anim_path.push_str("/../../examples/anim_demo/anims/spinner.uganim");
+
+  // Without audio: ugui.play_sound is nil, ugui.load_anim exists.
+  {
+    var ui = lua_ui_context(HostPlatform(), NullRhi(), LuaBindings { audio: false });
+    var u& = ui.get_var();
+    t.that(u.init(UIConfig { draw_data: true, width: 400, height: 300 }), "init");
+    u.set_texture_backend(TextureBackendBox::of(CountingTextures {}));
+    u.set_default_font(u.load_font(kFont));
+    let root = u.load_ui_string(kUi, "inline");
+    t.that(root.valid(), "ui loaded");
+    u.set_script_click_dispatch();
+
+    var script = from_str("assert(ugui.play_sound == nil)\nassert(ugui.load_anim ~= nil)\n");
+    script.push_str("local a = ugui.load_anim('");
+    script.push_str(anim_path.as_str());
+    script.push_str("', 64, 64)\nassert(a ~= nil)\nugui.anim_play(a)\nugui.anim_loop(a, true)\n");
+    script.push_str("ugui.anim_attach(a, 'spinner')\nassert(ugui.anim_playing(a))\n");
+    script.push_str("assert(ugui.load_anim('/nonexistent.uganim', 8, 8) == nil)\n");
+    script.push_str("function on_go(w) ugui.set('status', 'text', 'clicked') ugui.after(0.0, function() ugui.set('status', 'text', 'later') end) end\n");
+    t.that(u.exec_script(script.as_str(), "test"), "script ran");
+
+    let spinner = u.find_widget("spinner");
+    if (let img& = u.world.get(kImageContent, spinner)) {
+      t.that(img.texture > 100, "anim texture attached through anim_attach");
+      t.that(img.natural_w == 64.0, "attached at the anim's width");
+    } else {
+      t.that(false, "spinner is an image");
+    }
+    t.that(u.anim(0) != none, "UIContext owns the anim");
+    t.that(u.anim(1) == none, "the failed load is dropped");
+
+    // A click on "go" runs on_go(w).
+    let _ = u.render_draw_data();
+    u.platform.push_mouse_move(Vec2 { x: 40.0, y: 80.0 });
+    u.platform.push_mouse_button(MouseButton::Left, true);
+    u.platform.push_mouse_button(MouseButton::Left, false);
+    let _ = u.render_draw_data();
+    let status = u.find_widget("status");
+    // pump_input runs on_go, then the same frame's update_timers fires its
+    // zero-delay timer.
+    t.that(text_of(u.world, status).as_str() == "later", "on_go ran and its ugui.after timer fired");
+    u.shutdown();
+  }
+
+  // With audio: the audio natives reach UIContext's (silent) backend.
+  {
+    var ui = lua_ui_context(HostPlatform(), NullRhi(), LuaBindings {});
+    var u& = ui.get_var();
+    t.that(u.init(UIConfig { draw_data: true, width: 400, height: 300 }), "init (audio)");
+    t.that(u.exec_script("assert(ugui.play_sound ~= nil)\nassert(ugui.play_sound('x.wav') == 0)\nassert(ugui.master_volume() == 1.0)", "audio"),
+            "audio natives through the null backend");
+    u.shutdown();
+  }
+  return t.finish();
+}

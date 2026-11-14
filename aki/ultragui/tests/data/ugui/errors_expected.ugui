@@ -1,0 +1,8 @@
+panel a {
+  width 100;
+  height: 50;
+}
+panel b {
+  = oops;
+  child { x: 1; }
+}

@@ -1,0 +1,589 @@
+// Per-style Latin design metrics and their per-size scaling. Building these
+// metrics from shaped blue strings is separate from the fixed-point fitter.
+module ultragui::font::autofit::metrics;
+
+import {List} from akikit::containers::list;
+import {Face} from ultragui::font::face;
+import {mul_div, mul_fix, pix_round} from ultragui::font::fixed;
+import {Outline} from ultragui::font::outline;
+import {AfShaper, clusters} from ultragui::font::autofit::shaper;
+import {design_outline, standard_glyph, style_blue_strings, style_feature, style_script} from ultragui::font::autofit::style;
+import {Hints, abs, max, kNone} from ultragui::font::autofit::hints;
+import {compute_segments, link_segments, quantize_widths} from ultragui::font::autofit::features;
+
+pub comptime let kBlueActive: u32 = 1;
+pub comptime let kBlueTop: u32 = 2;
+pub comptime let kBlueSubTop: u32 = 4;
+pub comptime let kBlueNeutral: u32 = 8;
+pub comptime let kBlueAdjustment: u32 = 16;
+pub comptime let kBlueBottom: u32 = 32;
+pub comptime let kBlueSmallBottom: u32 = 64;
+
+pub struct Width : Copy {
+  pub var org: i64 = 0
+  pub var cur: i64 = 0
+  pub var fit: i64 = 0
+}
+pub struct Blue : Copy {
+  pub var reference: Width = Width {}
+  pub var shoot: Width = Width {}
+  pub var ascender: i64 = 0
+  pub var descender: i64 = 0
+  pub var flags: u32 = 0
+}
+pub struct AxisMetrics {
+  pub var scale: i64 = 0
+  pub var delta: i64 = 0
+  pub var widths: List<Width> = List()
+  pub var edge_distance: i64 = 0
+  pub var standard_width: i64 = 0
+  pub var extra_light: bool = false
+  pub var blues: List<Blue> = List()
+  pub var org_scale: i64 = 0
+  pub var org_delta: i64 = 0
+}
+pub struct LatinMetrics {
+  pub var units_per_em: i64 = 2048
+  pub var axis: [AxisMetrics; 2] = [AxisMetrics {}, AxisMetrics {}]
+  pub var x_scale: i64 = 0
+  pub var y_scale: i64 = 0
+  pub var x_delta: i64 = 0
+  pub var y_delta: i64 = 0
+  pub var ppem: u32 = 0
+  pub var increase_x_height: u32 = 0
+  pub var digits_same_width: bool = false
+  pub var italic: bool = false
+  pub var top_to_bottom: bool = false
+
+  pub fn scale(var self&, xs: i64, ys: i64, ppem: u32, xd: i64 = 0, yd: i64 = 0);
+  // The shaper chooses a single standard glyph; this analyzes its unscaled
+  // outline. An empty outline supplies the script's fallback widths.
+  pub fn init_widths(var self&, outline&: Outline);
+  // af_latin_metrics_init without the reverse character map: none when the
+  // style has no blue zone (FreeType's internal error -1). `unicode`:
+  // FT_Select_Charmap(UNICODE) succeeds.
+  pub fn init(var face&: Face, var shaper&: AfShaper, style: u32, unicode: bool): LatinMetrics?;
+}
+
+fn LatinMetrics::init_widths(var self&, outline&: Outline) {
+  var h = Hints { units_per_em: self.units_per_em };
+  h.reload(outline);
+  for (let dim in 0usize..2) {
+    self.axis[dim].widths.clear();
+    compute_segments(h, dim);
+    link_segments(h, dim, 0);
+    var widths: List<i64> = List();
+    for (let i in 0..h.axis[dim].segments.len()) {
+      let s = h.axis[dim].segments[i];
+      if (s.link != kNone && h.axis[dim].segments[s.link].link == i && s.link > i && widths.len() < 16) {
+        widths.push(abs(s.pos - h.axis[dim].segments[s.link].pos));
+      }
+    }
+    if (outline.points.len() > 0) { quantize_widths(widths, self.units_per_em / 100); }
+    for (let w in widths) { self.axis[dim].widths.push(Width { org: w }); }
+    let standard = widths.len() > 0 ? widths[0] : 50 * self.units_per_em / 2048;
+    self.axis[dim].standard_width = standard;
+    self.axis[dim].edge_distance = standard / 5;
+    self.axis[dim].extra_light = false;
+  }
+}
+
+fn scale_axis(var m&: LatinMetrics, dim: usize, original: i64, delta: i64) {
+  if (m.axis[dim].org_scale == original && m.axis[dim].org_delta == delta) { return; }
+  m.axis[dim].org_scale = original;
+  m.axis[dim].org_delta = delta;
+  var scale = original;
+  for (let blue in m.axis[1].blues) {
+    if ((blue.flags & kBlueAdjustment) == 0) { continue; }
+    let scaled = mul_fix(blue.shoot.org, scale);
+    let threshold: i64 = m.increase_x_height != 0 && m.ppem <= m.increase_x_height && m.ppem >= 6 ? 52 : 40;
+    let fitted = (scaled + threshold) & -64;
+    if (dim == 1 && scaled != fitted) {
+      let adjusted = mul_div(scale, fitted, scaled);
+      var height = m.units_per_em;
+      for (let b in m.axis[1].blues) { height = max(height, max(b.ascender, -b.descender)); }
+      let dist = mul_fix(height, adjusted - scale);
+      if (dist > -128 && dist < 128) { scale = adjusted; }
+    }
+    break;
+  }
+  m.axis[dim].scale = scale;
+  m.axis[dim].delta = delta;
+  if (dim == 0) { m.x_scale = scale; m.x_delta = delta; }
+  else { m.y_scale = scale; m.y_delta = delta; }
+  for (var width& in m.axis[dim].widths) { width.cur = mul_fix(width.org, scale); width.fit = width.cur; }
+  m.axis[dim].extra_light = mul_fix(m.axis[dim].standard_width, scale) < 40;
+  if (dim != 1) { return; }
+  for (var b& in m.axis[1].blues) {
+    b.reference.cur = mul_fix(b.reference.org, scale) + delta;
+    b.reference.fit = b.reference.cur;
+    b.shoot.cur = mul_fix(b.shoot.org, scale) + delta;
+    b.shoot.fit = b.shoot.cur;
+    b.flags &= ~kBlueActive;
+    let dist = mul_fix(b.reference.org - b.shoot.org, scale);
+    if (dist >= -48 && dist <= 48) {
+      var d = dist < 0 ? -dist : dist;
+      d = d < 32 ? 0 : (d < 48 ? 32 : 64);
+      if (dist < 0) { d = -d; }
+      b.reference.fit = pix_round(b.reference.cur);
+      b.shoot.fit = b.reference.fit - d;
+      b.flags |= kBlueActive;
+    }
+  }
+  for (let i in 0..m.axis[1].blues.len()) {
+    let blue = m.axis[1].blues[i];
+    if ((blue.flags & (kBlueSubTop | kBlueActive)) != (kBlueSubTop | kBlueActive)) { continue; }
+    for (let b in m.axis[1].blues) {
+      if ((b.flags & kBlueSubTop) != 0 || (b.flags & kBlueActive) == 0) { continue; }
+      if (b.reference.fit <= blue.shoot.fit && b.shoot.fit >= blue.reference.fit) { m.axis[1].blues[i].flags &= ~kBlueActive; break; }
+    }
+  }
+}
+
+fn LatinMetrics::scale(var self&, xs: i64, ys: i64, ppem: u32, xd: i64, yd: i64) {
+  self.ppem = ppem;
+  scale_axis(self, 0, xs, xd);
+  scale_axis(self, 1, ys, yd);
+}
+
+// --- af_latin_metrics_init -------------------------------------------------------------
+
+comptime let kPropTop: u32 = 1;
+comptime let kPropSubTop: u32 = 2;
+comptime let kPropNeutral: u32 = 4;
+comptime let kPropXHeight: u32 = 8;
+comptime let kPropLong: u32 = 16;
+comptime let kPropCapitalBottom: u32 = 32;
+comptime let kPropSmallBottom: u32 = 64;
+
+comptime let kLongMin: i64 = -9223372036854775807 - 1;
+comptime let kLongMax: i64 = 9223372036854775807;
+
+fn is_on(o&: Outline, i: i64): bool => (o.tags[i as usize] & 3) == 1;
+fn px(o&: Outline, i: i64): i64 => o.points[i as usize].x;
+fn py(o&: Outline, i: i64): i64 => o.points[i as usize].y;
+
+// One blue string's extremum search over the glyphs of a cluster.
+struct BlueScan {
+  pub var ascender: i64 = 0
+  pub var descender: i64 = 0
+  pub var flats: List<i64> = List()
+  pub var rounds: List<i64> = List()
+}
+
+fn scan_cluster(var face&: Face, var shaper&: AfShaper, text: &[u8], feature: u32, props: u32, upem: i64, var sc&: BlueScan) {
+  let glyphs = shaper.get_cluster(text, feature);
+  if (glyphs.len() == 0) {
+    return;
+  }
+  let top = (props & kPropTop) != 0;
+  let top_or_sub = (props & (kPropTop | kPropSubTop)) != 0;
+  let flat_threshold = upem / 14;  // FLAT_THRESHOLD
+  var best_y_extremum = top ? kLongMin : kLongMax;
+  var best_round = false;
+  for (let g in glyphs) {
+    let glyph_index = g.glyph_id;
+    let y_offset = g.y_offset as i64;
+    if (glyph_index == 0) {
+      continue;
+    }
+    let loaded = design_outline(face, glyph_index) else {
+      continue;
+    };
+    let o& = loaded;
+    if (o.points.len() <= 2) {
+      continue;
+    }
+    var best_point: i64 = -1;
+    var best_contour_first: i64 = -1;
+    var best_contour_last: i64 = -1;
+    var best_y: i64 = 0;
+    var round = false;
+    var last: i64 = -1;
+    for (let c in o.contours) {
+      let first = last + 1;
+      last = c as i64;
+      if (last <= first) {
+        continue;
+      }
+      for (let pp in first..last + 1) {
+        let y = py(o, pp);
+        if (top_or_sub) {
+          if (best_point < 0 || y > best_y) {
+            best_point = pp;
+            best_y = y;
+            if (best_y + y_offset > sc.ascender) {
+              sc.ascender = best_y + y_offset;
+            }
+          } else if (y + y_offset < sc.descender) {
+            sc.descender = y + y_offset;
+          }
+        } else {
+          if (best_point < 0 || y < best_y) {
+            best_point = pp;
+            best_y = y;
+            if (best_y + y_offset < sc.descender) {
+              sc.descender = best_y + y_offset;
+            }
+          } else if (y + y_offset > sc.ascender) {
+            sc.ascender = y + y_offset;
+          }
+        }
+      }
+      if (best_point > best_contour_last) {
+        best_contour_first = first;
+        best_contour_last = last;
+      }
+    }
+    if (best_point >= 0) {
+      let best_x = px(o, best_point);
+      var best_segment_first = best_point;
+      var best_segment_last = best_point;
+      var best_on_point_first: i64 = -1;
+      var best_on_point_last: i64 = -1;
+      if (is_on(o, best_point)) {
+        best_on_point_first = best_point;
+        best_on_point_last = best_point;
+      }
+      var prev = best_point;
+      var next = prev;
+      while (true) {
+        if (prev > best_contour_first) {
+          prev -= 1;
+        } else {
+          prev = best_contour_last;
+        }
+        let dist = abs(py(o, prev) - best_y);
+        if (dist > 5 && abs(px(o, prev) - best_x) <= 20 * dist) {
+          break;
+        }
+        best_segment_first = prev;
+        if (is_on(o, prev)) {
+          best_on_point_first = prev;
+          if (best_on_point_last < 0) {
+            best_on_point_last = prev;
+          }
+        }
+        if (prev == best_point) {
+          break;
+        }
+      }
+      while (true) {
+        if (next < best_contour_last) {
+          next += 1;
+        } else {
+          next = best_contour_first;
+        }
+        let dist = abs(py(o, next) - best_y);
+        if (dist > 5 && abs(px(o, next) - best_x) <= 20 * dist) {
+          break;
+        }
+        best_segment_last = next;
+        if (is_on(o, next)) {
+          best_on_point_last = next;
+          if (best_on_point_first < 0) {
+            best_on_point_first = next;
+          }
+        }
+        if (next == best_point) {
+          break;
+        }
+      }
+      if ((props & kPropLong) != 0) {
+        let length_threshold = upem / 25;
+        var dist = abs(px(o, best_segment_last) - px(o, best_segment_first));
+        if (dist < length_threshold && best_segment_last - best_segment_first + 2 <= best_contour_last - best_contour_first) {
+          let height_threshold = upem / 4;
+          var p_first: i64 = 0;
+          var p_last: i64 = 0;
+          prev = best_point;
+          while (true) {
+            if (prev > best_contour_first) {
+              prev -= 1;
+            } else {
+              prev = best_contour_last;
+            }
+            if (px(o, prev) != best_x) {
+              break;
+            }
+            if (prev == best_point) {
+              break;
+            }
+          }
+          if (prev == best_point) {
+            continue;  // degenerate: skip this glyph
+          }
+          let left2right = px(o, prev) < px(o, best_point);
+          var first = best_segment_last;
+          var lst = first;
+          var hit = false;
+          while (true) {
+            if (!hit) {
+              first = lst;
+              if (is_on(o, first)) {
+                p_first = first;
+                p_last = first;
+              } else {
+                p_first = -1;
+                p_last = -1;
+              }
+              hit = true;
+            }
+            if (lst < best_contour_last) {
+              lst += 1;
+            } else {
+              lst = best_contour_first;
+            }
+            var found = false;
+            if (abs(best_y - py(o, first)) > height_threshold) {
+              hit = false;
+            } else {
+              dist = abs(py(o, lst) - py(o, first));
+              if (dist > 5 && abs(px(o, lst) - px(o, first)) <= 20 * dist) {
+                hit = false;
+              } else {
+                if (is_on(o, lst)) {
+                  p_last = lst;
+                  if (p_first < 0) {
+                    p_first = lst;
+                  }
+                }
+                let l2r = px(o, first) < px(o, lst);
+                let d = abs(px(o, lst) - px(o, first));
+                if (l2r == left2right && d >= length_threshold) {
+                  // FreeType tests points[next] and dist here, not lst and d.
+                  while (true) {
+                    if (lst < best_contour_last) {
+                      lst += 1;
+                    } else {
+                      lst = best_contour_first;
+                    }
+                    let d2 = abs(py(o, lst) - py(o, first));
+                    if (d2 > 5 && abs(px(o, next) - px(o, first)) <= 20 * dist) {
+                      if (lst > best_contour_first) {
+                        lst -= 1;
+                      } else {
+                        lst = best_contour_last;
+                      }
+                      break;
+                    }
+                    p_last = lst;
+                    if (is_on(o, lst)) {
+                      p_last = lst;
+                      if (p_first < 0) {
+                        p_first = lst;
+                      }
+                    }
+                    if (lst == best_segment_first) {
+                      break;
+                    }
+                  }
+                  best_y = py(o, first);
+                  best_segment_first = first;
+                  best_segment_last = lst;
+                  best_on_point_first = p_first;
+                  best_on_point_last = p_last;
+                  found = true;
+                }
+              }
+            }
+            if (found || lst == best_segment_first) {
+              break;
+            }
+          }
+        }
+      }
+      best_y += y_offset;
+      if (best_on_point_first >= 0 && best_on_point_last >= 0 &&
+          abs(px(o, best_on_point_last) - px(o, best_on_point_first)) > flat_threshold) {
+        round = false;
+      } else {
+        round = !is_on(o, best_segment_first) || !is_on(o, best_segment_last);
+      }
+      if (round && (props & kPropNeutral) != 0) {
+        continue;
+      }
+    }
+    if (top) {
+      if (best_y > best_y_extremum) {
+        best_y_extremum = best_y;
+        best_round = round;
+      }
+    } else if (best_y < best_y_extremum) {
+      best_y_extremum = best_y;
+      best_round = round;
+    }
+  }
+  if (best_y_extremum != kLongMin && best_y_extremum != kLongMax) {
+    if (best_round) {
+      sc.rounds.push(best_y_extremum);
+    } else {
+      sc.flats.push(best_y_extremum);
+    }
+  }
+}
+
+// af_sort_pos
+fn sort_positions(var table&: List<i64>) {
+  let count = table.len();
+  for (let i in 1..count) {
+    var j = i;
+    while (j > 0) {
+      if (table[j] > table[j - 1]) {
+        break;
+      }
+      let swap = table[j];
+      table[j] = table[j - 1];
+      table[j - 1] = swap;
+      j -= 1;
+    }
+  }
+}
+
+fn sort_key(b&: Blue): i64 => (b.flags & (kBlueTop | kBlueSubTop)) != 0 ? b.reference.org : b.shoot.org;
+
+// af_latin_metrics_init_blues: false when no blue zone was found.
+fn init_blues(var m&: LatinMetrics, var face&: Face, var shaper&: AfShaper, style: u32): bool {
+  let feature = style_feature(style);
+  m.axis[1].blues.clear();
+  for (let bs in style_blue_strings(style)) {
+    let props = bs.properties;
+    var sc = BlueScan {};
+    let s = bs.chars;
+    for (let (a, b) in clusters(s)) {
+      scan_cluster(face, shaper, s[a..b], feature, props, m.units_per_em, sc);
+    }
+    if (sc.flats.len() == 0 && sc.rounds.len() == 0) {
+      continue;
+    }
+    sort_positions(sc.rounds);
+    sort_positions(sc.flats);
+    var blue = Blue {};
+    if (sc.flats.len() == 0) {
+      blue.reference.org = sc.rounds[sc.rounds.len() / 2];
+      blue.shoot.org = blue.reference.org;
+    } else if (sc.rounds.len() == 0) {
+      blue.reference.org = sc.flats[sc.flats.len() / 2];
+      blue.shoot.org = blue.reference.org;
+    } else {
+      blue.reference.org = sc.flats[sc.flats.len() / 2];
+      blue.shoot.org = sc.rounds[sc.rounds.len() / 2];
+    }
+    if (blue.shoot.org != blue.reference.org) {
+      let reference = blue.reference.org;
+      let shoot = blue.shoot.org;
+      let over_ref = shoot > reference;
+      if (((props & (kPropTop | kPropSubTop)) != 0) != over_ref) {
+        blue.reference.org = (shoot + reference) / 2;
+        blue.shoot.org = blue.reference.org;
+      }
+    }
+    blue.ascender = sc.ascender;
+    blue.descender = sc.descender;
+    if ((props & kPropTop) != 0) {
+      blue.flags |= kBlueTop;
+    }
+    if ((props & kPropSubTop) != 0) {
+      blue.flags |= kBlueSubTop;
+    }
+    if ((props & kPropNeutral) != 0) {
+      blue.flags |= kBlueNeutral;
+    }
+    if ((props & kPropCapitalBottom) != 0) {
+      blue.flags |= kBlueBottom;
+    }
+    if ((props & kPropSmallBottom) != 0) {
+      blue.flags |= kBlueSmallBottom;
+    }
+    if ((props & kPropXHeight) != 0) {
+      blue.flags |= kBlueAdjustment;
+    }
+    m.axis[1].blues.push(blue);
+  }
+  let count = m.axis[1].blues.len();
+  if (count == 0) {
+    return false;
+  }
+  // Order the zones from bottom to top (insertion sort over indices), then
+  // make sure no zone's top passes the next one's bottom.
+  var sorted: List<usize> = List();
+  for (let i in 0..count) {
+    sorted.push(i);
+  }
+  for (let i in 1..count) {
+    var j = i;
+    while (j > 0) {
+      let a = sort_key(m.axis[1].blues[sorted[j - 1]]);
+      let b = sort_key(m.axis[1].blues[sorted[j]]);
+      if (b >= a) {
+        break;
+      }
+      sorted.swap(j, j - 1);
+      j -= 1;
+    }
+  }
+  for (let i in 0..count - 1) {
+    let bi = sorted[i];
+    let bn = sorted[i + 1];
+    let a_top = (m.axis[1].blues[bi].flags & (kBlueTop | kBlueSubTop)) != 0;
+    let b_top = (m.axis[1].blues[bn].flags & (kBlueTop | kBlueSubTop)) != 0;
+    let a = a_top ? m.axis[1].blues[bi].shoot.org : m.axis[1].blues[bi].reference.org;
+    let b = b_top ? m.axis[1].blues[bn].shoot.org : m.axis[1].blues[bn].reference.org;
+    if (a > b) {
+      if (a_top) {
+        m.axis[1].blues[bi].shoot.org = b;
+      } else {
+        m.axis[1].blues[bi].reference.org = b;
+      }
+    }
+  }
+  return true;
+}
+
+// af_latin_metrics_check_digits
+fn check_digits(var m&: LatinMetrics, var shaper&: AfShaper, style: u32) {
+  let feature = style_feature(style);
+  let digits = "0 1 2 3 4 5 6 7 8 9" as &[u8];
+  var started = false;
+  var same_width = true;
+  var old_advance: i64 = 0;
+  for (let (a, b) in clusters(digits)) {
+    let glyphs = shaper.get_cluster(digits[a..b], feature);
+    if (glyphs.len() > 1 || glyphs.len() == 0 || glyphs[0].glyph_id == 0) {
+      continue;
+    }
+    let advance = glyphs[0].x_advance as i64;
+    if (started) {
+      if (advance != old_advance) {
+        same_width = false;
+        break;
+      }
+    } else {
+      old_advance = advance;
+      started = true;
+    }
+  }
+  m.digits_same_width = same_width;
+}
+
+fn LatinMetrics::init(var face&: Face, var shaper&: AfShaper, style: u32, unicode: bool): LatinMetrics? {
+  var m = LatinMetrics { units_per_em: face.units_per_em as i64 };
+  if (!unicode) {
+    return m;
+  }
+  var outline = Outline {};
+  let gid = standard_glyph(shaper, style_script(style), style_feature(style));
+  if (gid != 0) {
+    if (let o = design_outline(face, gid)) {
+      if (o.points.len() > 0) {
+        outline = o;
+      }
+    }
+  }
+  m.init_widths(outline);
+  if (!init_blues(m, face, shaper, style)) {
+    return none;
+  }
+  check_digits(m, shaper, style);
+  return m;
+}

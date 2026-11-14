@@ -1,0 +1,171 @@
+// The face the shaper reads: the font file's bytes, the tables HarfBuzz
+// shapes with (located in the sfnt directory, collection index 0 or the one
+// given), FreeType's cmap choice, and the shape plans built for it so far
+// (HarfBuzz caches shape plans per face the same way).
+//
+// The C++ library opens the face with FT_Open_Face and wraps it with
+// hb_ft_font_create_referenced: HarfBuzz reads its tables from the same file
+// FreeType does, and the face's upem is FreeType's units_per_EM.
+
+module ultragui::shape::face;
+
+import {List} from akikit::containers::list;
+import {Cmap, char_index, char_variant_index, select_cmap} from ultragui::shape::cmap;
+import {GrFace, load_gr_face} from ultragui::shape::graphite::grface;
+import {Gdef, GsubGpos, find_variations_index, gdef_is_blocklisted, parse_gdef, parse_gsubgpos} from ultragui::shape::otl;
+import {ShapePlan} from ultragui::shape::plan;
+import {arabic_pua_map} from ultragui::shape::ucd;
+import {sanitize_gdef, sanitize_gsubgpos} from ultragui::shape::sanitize;
+
+fn u16_at(d: &[u8], o: usize): u32 => o + 2 <= #d ? (d[o] as u32 << 8) | d[o + 1] as u32 : 0;
+fn u32_at(d: &[u8], o: usize): u32 => (u16_at(d, o) << 16) | u16_at(d, o + 2);
+
+pub struct TableRange : Copy {
+  pub var start: usize = 0
+  pub var end: usize = 0
+}
+
+pub struct ShapeFace {
+  var data_: List<u8>
+  pub var gsub_r: TableRange = TableRange {}
+  pub var gpos_r: TableRange = TableRange {}
+  pub var gdef_r: TableRange = TableRange {}
+  pub var kern_r: TableRange = TableRange {}
+  pub var gsub: GsubGpos = GsubGpos {}
+  pub var gpos: GsubGpos = GsubGpos {}
+  pub var gdef: Gdef = Gdef {}
+  pub var cmap: Cmap = Cmap {}
+  pub var upem: u32 = 1000
+  pub var num_glyphs: u32 = 0     // maxp, as HarfBuzz counts glyphs
+  pub var font_page: u32 = 0      // OS/2 font page (hb_ft's symbol-font Arabic PUA maps)
+  pub var has_graphite: bool = false  // a Silf table: HarfBuzz would shape with graphite2
+  pub var sfnt: usize = 0             // where the face's table directory is
+  // The graphite2 face, made on first use as HarfBuzz makes its shaper data:
+  // empty when graphite2 rejects the face (HarfBuzz then shapes with
+  // OpenType), else one entry.
+  pub var graphite: List<GrFace> = List()
+  var graphite_tried: bool = false
+  pub var gsub_variations: u32 = 0xFFFFFFFF
+  pub var gpos_variations: u32 = 0xFFFFFFFF
+  pub var plans: List<ShapePlan> = List()
+
+  // The face of the font in `data` (a TrueType collection: face `index`).
+  // `ft_num_glyphs` is FreeType's face->num_glyphs, which FT_Get_Char_Index
+  // checks glyph ids against (maxp for TrueType, the CFF glyph count or
+  // last CID + 1 for CFF); none takes maxp's.
+  pub fn from_bytes(data: List<u8>, index: u32 = 0, ft_num_glyphs: u32? = none): ShapeFace;
+
+  pub fn data(self&): &[u8] => self.data_.as_slice();
+  pub fn table(self&, r: TableRange): &[u8] => self.data_.as_slice()[r.start..r.end];
+  pub fn gsub_t(self&): &[u8] => self.table(self.gsub_r);
+  pub fn gpos_t(self&): &[u8] => self.table(self.gpos_r);
+  pub fn gdef_t(self&): &[u8] => self.table(self.gdef_r);
+  pub fn kern_t(self&): &[u8] => self.table(self.kern_r);
+
+  // hb_ft_get_nominal_glyph: FT_Get_Char_Index, with the symbol-font
+  // fallbacks (U+F000 + u, the Arabic PUA maps) when the charmap is MS Symbol.
+  pub fn nominal_glyph(self&, u: u32): u32?;
+
+  // hb_ft_get_variation_glyph: FT_Face_GetCharVariantIndex.
+  pub fn variation_glyph(self&, u: u32, selector: u32): u32? {
+    let g = char_variant_index(self.data_.as_slice(), self.cmap, u, selector);
+    return g == 0 ? none : g;
+  }
+
+  pub fn has_glyph(self&, u: u32): bool => self.nominal_glyph(u) != none;
+
+  // _hb_graphite2_shaper_face_data_create: whether graphite2 shapes this face.
+  pub fn uses_graphite(var self&): bool {
+    if (!self.graphite_tried) {
+      self.graphite_tried = true;
+      if (self.has_graphite) {
+        if (let g = load_gr_face(self.data_.as_slice(), self.sfnt)) {
+          self.graphite.push(g);
+        }
+      }
+    }
+    return self.graphite.len() != 0;
+  }
+}
+
+fn ShapeFace::from_bytes(data: List<u8>, index: u32, ft_num_glyphs: u32?): ShapeFace {
+  var f = ShapeFace { data_: data };
+  let d = f.data_.as_slice();
+  var off = 0usize;
+  if (u32_at(d, 0) == 0x74746366) {  // 'ttcf'
+    let n = u32_at(d, 8);
+    if (index < n) {
+      off = u32_at(d, 12 + index as usize * 4) as usize;
+    }
+  }
+  f.sfnt = off;
+  let num_tables = u16_at(d, off + 4) as usize;
+  var cmap_r = TableRange {};
+  var maxp_r = TableRange {};
+  var head_r = TableRange {};
+  var os2_r = TableRange {};
+  for (let i in 0..num_tables) {
+    let rec = off + 12 + i * 16;
+    let tag = u32_at(d, rec);
+    let start = u32_at(d, rec + 8) as usize;
+    let len = u32_at(d, rec + 12) as usize;
+    if (start > #d) {
+      continue;
+    }
+    let end = start + len <= #d ? start + len : #d;
+    let r = TableRange { start, end };
+    match (tag) {
+      0x47535542 => { f.gsub_r = r; },  // GSUB
+      0x47504F53 => { f.gpos_r = r; },  // GPOS
+      0x47444546 => { f.gdef_r = r; },  // GDEF
+      0x6B65726E => { f.kern_r = r; },  // kern
+      0x636D6170 => { cmap_r = r; },    // cmap
+      0x6D617870 => { maxp_r = r; },    // maxp
+      0x68656164 => { head_r = r; },    // head
+      0x4F532F32 => { os2_r = r; },     // OS/2
+      0x53696C66 => { f.has_graphite = true; },  // Silf
+      _ => {},
+    }
+  }
+  f.num_glyphs = u16_at(d, maxp_r.start + 4);
+  let upem = u16_at(d, head_r.start + 18);
+  f.upem = upem;
+  let os2_version = os2_r.end > os2_r.start ? u16_at(d, os2_r.start) : 0;
+  f.font_page = os2_r.end > os2_r.start && os2_version == 0 ? u16_at(d, os2_r.start + 62) & 0xFF00 : 0;
+  f.cmap = select_cmap(d, cmap_r.start, cmap_r.end, ft_num_glyphs ?? f.num_glyphs);
+  let gdef_len = f.gdef_r.end - f.gdef_r.start;
+  // HarfBuzz drops a table its sanitizer rejects (the blocklist compares the
+  // lengths of the tables as found).
+  if (!sanitize_gsubgpos(f.table(f.gsub_r), false)) {
+    f.gsub_r = TableRange {};
+  }
+  if (!sanitize_gsubgpos(f.table(f.gpos_r), true)) {
+    f.gpos_r = TableRange {};
+  }
+  if (gdef_len > 0 && (gdef_is_blocklisted(gdef_len, f.gsub_r.end - f.gsub_r.start, f.gpos_r.end - f.gpos_r.start) || !sanitize_gdef(f.table(f.gdef_r)))) {
+    f.gdef_r = TableRange {};
+  }
+  f.gsub = parse_gsubgpos(f.table(f.gsub_r));
+  f.gpos = parse_gsubgpos(f.table(f.gpos_r));
+  f.gdef = parse_gdef(f.table(f.gdef_r));
+  f.gsub_variations = find_variations_index(f.table(f.gsub_r), f.gsub);
+  f.gpos_variations = find_variations_index(f.table(f.gpos_r), f.gpos);
+  return f;
+}
+
+fn ShapeFace::nominal_glyph(self&, u: u32): u32? {
+  let d = self.data_.as_slice();
+  var g = char_index(d, self.cmap, u);
+  if (g == 0 && self.cmap.symbol) {
+    if (self.font_page == 0) {
+      if (u <= 0x00FF) {
+        g = char_index(d, self.cmap, 0xF000 + u);
+      }
+    } else if (self.font_page == 0xB100) {  // FONT_PAGE_SIMP_ARABIC
+      g = char_index(d, self.cmap, arabic_pua_map(u, false));
+    } else if (self.font_page == 0xB200) {  // FONT_PAGE_TRAD_ARABIC
+      g = char_index(d, self.cmap, arabic_pua_map(u, true));
+    }
+  }
+  return g == 0 ? none : g;
+}

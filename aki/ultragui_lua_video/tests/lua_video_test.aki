@@ -1,0 +1,160 @@
+// ugui/scripting/lua_video.cc: every ugui.video_* function on
+// examples/demo.mpg, played through a NullRhi. The C++ VideoPlayer needs a
+// live RHI to load, so these are checked here rather than recorded from the
+// C++ (the player itself is ultragui_video's, checked against the C++
+// there): each value Lua sees equals the player's own, the nil handle reads
+// as false/0 and skips its argument checks, the checks raise luaL_check*'s
+// messages, and video_attach puts the player's texture on an image.
+
+module lua_video_test;
+
+import {List} from akikit::containers::list;
+import {Box} from akikit::memory::box;
+import {String, from_str} from akikit::strings::string;
+import {WidgetId} from ultragui::core::handle;
+import {texture_id_from_rhi_handle} from ultragui::render::texture_backend;
+import {NullRhi} from ultragui::rhi::null_rhi;
+import {register_widget_tree} from ultragui::scripting::lua_widgets;
+import {create_image, kImageContent} from ultragui::widgets::image;
+import {create_text} from ultragui::widgets::text;
+import {add_child, destroy_widget, kWidgetNode} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {VideoPlayer} from ultragui_video::video;
+import {LuaCall} from ultragui_lua::lua_call;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {register_video_lua} from ultragui_lua_video::lua_video;
+import {Expect} from ultragui_testing::expect;
+
+comptime let kScript: str = r"""
+local v = ugui.load_video(VIDEO_PATH)
+check(v ~= nil and type(v) == "userdata", "load_video")
+check(ugui.load_video("/nonexistent.mpg") == nil, "missing file is nil")
+local ok, err = pcall(ugui.load_video)
+check(not ok and err == "bad argument #1 to '?' (string expected, got no value)", "load_video check: " .. tostring(err))
+check(ugui.video_duration(v) == DURATION, "duration")
+check(ugui.video_duration(nil) == 0, "duration of nil")
+check(ugui.video_position(v) == 0, "position at load")
+check(ugui.video_position(nil) == 0, "position of nil")
+check(ugui.video_playing(v) == false and ugui.video_playing(nil) == false, "not playing")
+check(ugui.video_finished(v) == false and ugui.video_finished(nil) == false, "not finished")
+ugui.video_play(v)
+check(ugui.video_playing(v) == true, "playing")
+ugui.video_pause(v)
+check(ugui.video_playing(v) == false, "paused")
+ugui.video_seek(v, 0.5)
+SEEK_POS = ugui.video_position(v)
+ugui.video_stop(v)
+STOP_POS = ugui.video_position(v)
+ugui.video_loop(v, true)
+ugui.video_speed(v, 2)
+ugui.video_volume(v, 0.5)
+ugui.video_mute(v, true)
+-- the nil handle skips the argument checks
+ugui.video_seek(nil)
+ugui.video_speed(nil, "x")
+ugui.video_volume(nil)
+ugui.video_play(nil)
+ugui.video_pause(nil)
+ugui.video_stop(nil)
+ugui.video_loop(nil, true)
+ugui.video_mute(nil, true)
+ok, err = pcall(ugui.video_seek, v)
+check(not ok and err == "bad argument #2 to '?' (number expected, got no value)", "seek check: " .. tostring(err))
+ok, err = pcall(ugui.video_speed, v, "fast")
+check(not ok and err == "bad argument #2 to '?' (number expected, got string)", "speed check: " .. tostring(err))
+ok, err = pcall(ugui.video_volume, v)
+check(not ok and err == "bad argument #2 to '?' (number expected, got no value)", "volume check: " .. tostring(err))
+ok, err = pcall(ugui.video_attach, nil)
+check(not ok and err == "bad argument #2 to '?' (string expected, got no value)", "attach check: " .. tostring(err))
+ugui.video_attach(nil, "pic")
+ugui.video_attach(v, "nope")
+ugui.video_attach(v, "label")
+ugui.video_attach(v, "pic")
+""";
+
+pub fn main(): i32 {
+  var t = Expect();
+  var world = World();
+  var ctx = WidgetContext::detached();
+  let root = create_image(world, 1);
+  world.get_var(kWidgetNode, root)!.name = from_str("pic");
+  let label = create_text(world, 2);
+  world.get_var(kWidgetNode, label)!.name = from_str("label");
+  add_child(world, root, label);
+
+  let path = from_str(f"{@package_dir()}/../../examples/demo.mpg");
+  var rhi = NullRhi();
+  var reference = VideoPlayer();
+  t.that(reference.load(rhi, path.as_str(), none), "reference player loads");
+
+  var rt = LuaRuntime();
+  t.that(rt.init(), "init");
+  var players: List<Box<VideoPlayer>> = List();
+  let players_ptr = unsafe (&raw var players);
+  let rhi_ptr = unsafe (&raw var rhi);
+  let rt_ptr = unsafe (&raw var rt);
+  var stops: u32 = 0;
+  var seeks: List<f64> = List();
+  let stops_ptr = unsafe (&raw var stops);
+  let seeks_ptr = unsafe (&raw var seeks);
+  var finds: List<String> = List();
+  let finds_ptr = unsafe (&raw var finds);
+  register_video_lua(rt,
+    own fn(call: &var LuaCall, p: String): *var VideoPlayer {
+      var v = Box(VideoPlayer());
+      if (!v.get_var().load(unsafe *rhi_ptr, p, none)) {
+        return null;
+      }
+      let raw = unsafe (v.as_ptr() as *var VideoPlayer);
+      unsafe (*players_ptr).push(v);
+      return raw;
+    },
+    own fn(call: &var LuaCall, name: String): WidgetId {
+      unsafe (*finds_ptr).push(name.clone());
+      return unsafe (*rt_ptr).find_registered_widget(name);
+    },
+    own fn(call: &var LuaCall, v: *var VideoPlayer) {
+      unsafe {
+        *stops_ptr += 1;
+        (*v).stop(*rhi_ptr);
+      }
+    },
+    own fn(call: &var LuaCall, v: *var VideoPlayer, seconds: f64) {
+      unsafe {
+        (*seeks_ptr).push(seconds);
+        (*v).seek(seconds, *rhi_ptr);
+      }
+    });
+  register_widget_tree(rt, world, root);
+
+  var setup = from_str(f"VIDEO_PATH = '{path}'; DURATION = {reference.duration():.17g}; ");
+  setup.push_str("FAILED = 0; function check(ok, what) if not ok then FAILED = FAILED + 1; print('FAILED: ' .. what) end end");
+  t.that(rt.exec(world, ctx, setup, "setup"), "setup");
+  t.that(rt.exec(world, ctx, kScript, "video"), "script runs");
+  t.that(rt.exec(world, ctx, "assert(FAILED == 0, 'checks failed')", "verdict"), "every Lua check passed");
+
+  t.that(#players == 1, "one player loaded");
+  if (#players == 1) {
+    let v& = players[0].get();
+    t.that(stops == 1 && #seeks == 1 && seeks[0] == 0.5, "stop and seek reach their hooks once, with the seconds");
+    t.that(v.is_looping() && v.speed() == 2.0, "loop and speed applied");
+    // volume and mute reach the audio bridge; without one (no AudioBackend
+    // here) they do nothing and read back the defaults, as in the C++.
+    let want_volume: f32 = v.audio_active() ? 0.5 : 1.0;
+    t.that(v.volume() == want_volume && v.muted() == v.audio_active(), "volume and mute applied where an audio bridge exists");
+    t.that(v.position() == 0.0, "stopped at the start");
+    let img& = world.get(kImageContent, root)!;
+    t.that(img.texture == texture_id_from_rhi_handle(v.texture()) && img.natural_w == v.width() as f32 && img.natural_h == v.height() as f32,
+           "video_attach sets the image's texture and size");
+  }
+  t.that(#finds == 3 && finds[0] == "nope" && finds[1] == "label" && finds[2] == "pic", "find_widget only for a non-nil handle");
+
+  rt.shutdown();
+  for (var v& in players) {
+    v.get_var().unload(rhi);
+  }
+  reference.unload(rhi);
+  destroy_widget(world, root);
+  return t.finish();
+}

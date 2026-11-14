@@ -1,0 +1,46 @@
+// ugui/style/property_types.h: unit-aware lengths and the IDL's property
+// value tags.
+
+module ultragui::style::property_types;
+
+// Length::Unit. Px: absolute pixels. Percent: of the parent's corresponding
+// dimension. Vw/Vh: percent of the viewport width/height. Frac: fraction of
+// the viewport (0..1 of the corresponding dimension). Auto: automatic sizing.
+pub enum LengthUnit as u8 { Px, Percent, Vw, Vh, Frac, Auto }
+
+// Unit-aware length value for CSS-like properties.
+pub struct Length : Copy, Equal {
+  pub var value: f32 = 0.0
+  pub var unit: LengthUnit = LengthUnit::Px
+
+  pub fn new(v: f32, u: LengthUnit): Length => Length { value: v, unit: u };
+
+  pub fn px(v: f32): Length => Length { value: v, unit: LengthUnit::Px };
+  pub fn pct(v: f32): Length => Length { value: v, unit: LengthUnit::Percent };
+  pub fn percent(v: f32): Length => Length { value: v, unit: LengthUnit::Percent };
+  pub fn vw(v: f32): Length => Length { value: v, unit: LengthUnit::Vw };
+  pub fn vh(v: f32): Length => Length { value: v, unit: LengthUnit::Vh };
+  pub fn frac(v: f32): Length => Length { value: v, unit: LengthUnit::Frac };
+  pub fn auto(): Length => Length { value: 0.0, unit: LengthUnit::Auto };
+
+  pub fn is_auto(self&): bool => self.unit == LengthUnit::Auto;
+  pub fn is_percent(self&): bool => self.unit == LengthUnit::Percent;
+
+  // Resolve to absolute pixels given the parent size and viewport size. Frac
+  // maps to viewport_h when `for_height`, else viewport_w.
+  pub fn resolve(self&, parent_size: f32, viewport_w: f32, viewport_h: f32, for_height: bool = false): f32 => match (self.unit) {
+    LengthUnit::Px => self.value,
+    LengthUnit::Percent => self.value * 0.01 * parent_size,
+    LengthUnit::Vw => self.value * 0.01 * viewport_w,
+    LengthUnit::Vh => self.value * 0.01 * viewport_h,
+    LengthUnit::Frac => self.value * (for_height ? viewport_h : viewport_w),
+    LengthUnit::Auto => 0.0,
+  };
+
+  // Auto lengths are equal whatever their value.
+  pub fn eq(self&, rhs&: Length): bool => self.unit == rhs.unit && (self.unit == LengthUnit::Auto || self.value == rhs.value);
+}
+
+// Property value that can be one of several types; used for the generic
+// property system in the IDL parser.
+pub enum PropType as u8 { None, Length, Color, Number, Enum, String }

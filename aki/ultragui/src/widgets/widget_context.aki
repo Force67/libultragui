@@ -1,0 +1,44 @@
+// ugui/widgets/widget_context.h: the subsystems widgets reach (text shaping,
+// the animator, the clock, the platform) without per-widget injection.
+//
+// In the C++ every WidgetNode points at the context and the context points at
+// the registry. Here the context is an argument: whoever drives the widgets
+// (UIContext, a test) builds one from views of its own subsystems and passes
+// it, with the World, to every widget function that needs it:
+//
+//   var ctx = WidgetContext {
+//     text_engine: self.text_engine, animator: self.animator,
+//     current_time: self.last_time, platform: DynPlatform::of(self.platform),
+//     default_font: self.default_font, ui_scale: self.ui_scale,
+//   };
+//   set_widget_state(self.world, ctx, e, WidgetState::Hovered);
+//
+// WidgetNode::has_context stands for the C++ non-null context pointer:
+// SetContext(e, &ctx) is set_context(world, e, true), and widget code asks
+// widget_context_of(world, ctx, e), which is none for a detached widget,
+// exactly where the C++ pointer was null. `registry` is gone (the World is
+// the other argument); `current_time` is the time itself, read when the
+// context is built, where the C++ points at UIContext's clock.
+
+module ultragui::widgets::widget_context;
+
+import {Animator} from ultragui::animation::animator;
+import {DynPlatform} from ultragui::platform::platform;
+import {ScriptHost} from ultragui::scripting::script_host;
+import {FontHandle, TextEngine, kInvalidFont} from ultragui::text::text_engine;
+
+pub struct WidgetContext<'a> {
+  pub var text_engine: (&'a var TextEngine)? = none
+  pub var default_font: FontHandle = kInvalidFont
+  pub var animator: (&'a var Animator)? = none
+  pub var current_time: f64? = none
+  pub var platform: DynPlatform<'a>? = none
+  pub var ui_scale: f32 = 1.0  // Viewport scale factor (1.0 = design resolution)
+  // UIContext's services for script natives (scripting::script_host), lent
+  // only for calls that can run a script; none elsewhere and outside a
+  // UIContext. No C++ counterpart: the C++ natives capture UIContext.
+  pub var host: ScriptHost<'a>? = none
+
+  // A context with no subsystems, for driving widgets outside a UIContext.
+  pub fn detached(): WidgetContext<'static> => WidgetContext::<'static> {};
+}

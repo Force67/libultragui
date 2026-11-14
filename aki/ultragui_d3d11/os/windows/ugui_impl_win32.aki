@@ -1,0 +1,116 @@
+// ugui/backends/ugui_impl_win32.{h,cc}: Win32 window messages as ultragui input,
+// for the host platform (platform_host), modeled on Dear ImGui's
+// imgui_impl_win32. Windows only (os/windows); the part that is not about
+// Windows, key and message decoding, is win32_keys, built and tested everywhere.
+//
+// Call from the host's window procedure, or a subclass of someone else's:
+//
+//   if (handle_message(platform, hwnd, msg, wparam, lparam, scale) && ui_wants_input) {
+//     return 0;  // the UI had it
+//   }
+//
+// Keys become GLFW key codes, which is what ultragui's widgets read.
+//
+// Shape differences from the C++ (behavior is the same):
+//
+// * `platform` is the HostPlatform (the C++ takes a Platform& and reaches the
+//   host feed through host::Push*); `window` is the HWND as `*var u8`.
+// * `message`, `wparam`, `lparam` are u32, u64 and i64 (UINT, WPARAM, LPARAM).
+// * `scale` is passed as a Vec2; the C++ defaults it to {1, 1}, so callers that
+//   lay out in client pixels pass Vec2 { x: 1.0, y: 1.0 }.
+// * The WM_CHAR surrogate state is a module static, as the C++'s file static.
+
+module ultragui_d3d11::ugui_impl_win32;
+
+import {Vec2} from ultragui::core::math;
+import {HostPlatform} from ultragui::platform::platform_host;
+import {CharDecoder, InputKind, KeyState, decode_message, is_key_message, key_from_virtual_key, mods_from_state,
+  scancode_of} from ultragui_d3d11::win32_keys;
+
+extern("GetKeyState") fn win_get_key_state(virtual_key: i32): i16;
+extern("MapVirtualKeyW") fn win_map_virtual_key(code: u32, map_type: u32): u32;
+extern("SetCapture") fn win_set_capture(window: *var u8): *var u8;
+extern("GetCapture") fn win_get_capture(): *var u8;
+extern("ReleaseCapture") fn win_release_capture(): i32;
+
+comptime let kMapvkVscToVkEx: u32 = 3;
+comptime let kVkShift: i32 = 0x10;
+comptime let kVkControl: i32 = 0x11;
+comptime let kVkMenu: i32 = 0x12;
+comptime let kVkLWin: i32 = 0x5B;
+comptime let kVkRWin: i32 = 0x5C;
+comptime let kVkCapital: i32 = 0x14;
+comptime let kVkNumLock: i32 = 0x90;
+comptime let kVkRShift: u32 = 0xA1;
+
+static var s_chars: CharDecoder = CharDecoder {};
+
+fn key_state(vk: i32): i32 => unsafe win_get_key_state(vk) as i32;
+fn is_down(vk: i32): bool => (key_state(vk) & 0x8000) != 0;
+fn is_toggled(vk: i32): bool => (key_state(vk) & 0x1) != 0;
+
+// The keyboard state CurrentMods() reads, as GetKeyState reports it now.
+fn current_key_state(): KeyState => KeyState {
+  shift_down: is_down(kVkShift),
+  control_down: is_down(kVkControl),
+  alt_down: is_down(kVkMenu),
+  win_down: ((key_state(kVkLWin) | key_state(kVkRWin)) & 0x8000) != 0,
+  caps_lock_on: is_toggled(kVkCapital),
+  num_lock_on: is_toggled(kVkNumLock),
+};
+
+// MapVirtualKeyW(scan code, MAPVK_VSC_TO_VK_EX) == VK_RSHIFT: which side the
+// generic VK_SHIFT of a key message is.
+fn is_right_shift(lparam: i64): bool => unsafe win_map_virtual_key(scancode_of(lparam), kMapvkVscToVkEx) == kVkRShift;
+
+// CurrentMods(): GLFW modifier bits for the keyboard's state right now.
+pub fn current_mods(): i32 => mods_from_state(current_key_state());
+
+// KeyFromVirtualKey(): the GLFW key code for a Win32 virtual key; `lparam` tells
+// the keypad Enter and the right-hand modifiers apart. -1 (GLFW_KEY_UNKNOWN)
+// for a key GLFW has no code for.
+pub fn key_from_win32_virtual_key(virtual_key: u32, lparam: i64): i32 =>
+  key_from_virtual_key(virtual_key, lparam, is_right_shift(lparam));
+
+// HandleMessage(): feeds mouse, wheel, key and character messages to
+// `platform`. `scale` maps the window's client pixels to the UI's units: {1, 1}
+// when the UI lays out in client pixels, back buffer size over client size when
+// it lays out in the back buffer's. True when `message` was input of a kind
+// handled here; whether to keep it from the window is the caller's choice.
+pub fn handle_message(platform&: HostPlatform, window: *var u8, message: u32, wparam: u64, lparam: i64, scale: Vec2): bool {
+  var right_shift = false;
+  var keys = KeyState {};
+  if (is_key_message(message)) {
+    right_shift = is_right_shift(lparam);
+    keys = current_key_state();
+  }
+  let d = unsafe decode_message(s_chars, message, wparam, lparam, scale, right_shift, keys);
+
+  if (!d.handled) {
+    return false;
+  }
+  // A drag that leaves the window still ends here.
+  if (d.capture != 0 && window != null) {
+    unsafe {
+      if (d.capture > 0) {
+        win_set_capture(window);
+      } else if (win_get_capture() == window) {
+        win_release_capture();
+      }
+    }
+  }
+  if (let i = d.input) {
+    match (i.kind) {
+      InputKind::MouseMove => platform.push_mouse_move(i.position),
+      InputKind::MouseButton => {
+        platform.push_mouse_move(i.position);
+        platform.push_mouse_button(i.button, i.pressed);
+      }
+      InputKind::Scroll => platform.push_scroll(i.scroll),
+      InputKind::Key => platform.push_key(i.key, i.scancode, i.pressed, i.repeat, i.mods),
+      InputKind::Char => platform.push_char(i.codepoint),
+      _ => {}
+    }
+  }
+  return true;
+}

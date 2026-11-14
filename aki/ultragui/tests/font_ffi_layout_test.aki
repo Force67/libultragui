@@ -1,0 +1,131 @@
+// All declared FreeType/HarfBuzz field offsets and complete-struct sizes /
+// alignments, recorded from the real headers (FreeType 2.14.3, HarfBuzz 13.2.1)
+// with clang 18 for x86_64 Linux (LP64) and Windows (LLP64). The FreeType
+// face/size/glyph-slot declarations are prefixes, so only their field offsets
+// are compared. Compile-time checks also run during the Windows target check.
+module font_ffi_layout_test;
+
+import {FtGeneric, FtVector, FtBBox, FtBitmap, FtGlyphMetrics, FtGlyphSlotRec, FtSizeMetrics, FtSizeRec, FtFaceRec, FtOpenArgs} from ultragui_ft_oracle::freetype;
+import {HbGlyphInfo, HbGlyphPosition} from ultragui_ft_oracle::harfbuzz;
+import {Expect} from ultragui_testing::expect;
+
+comptime let kWindows: bool = @target_os() == "windows";
+comptime let kVerified: bool = verify_layouts();
+
+fn verify_layouts(): bool {
+  if (@offset_of(FtGeneric, data) != 0) { @stop("FtGeneric.data differs from the C header"); }
+  if (@offset_of(FtGeneric, finalizer) != 8) { @stop("FtGeneric.finalizer differs from the C header"); }
+  if (@size_of(FtGeneric) != 16) { @stop("FtGeneric.__size differs from the C header"); }
+  if (@align_of(FtGeneric) != 8) { @stop("FtGeneric.__align differs from the C header"); }
+  if (@offset_of(FtVector, x) != 0) { @stop("FtVector.x differs from the C header"); }
+  if (@offset_of(FtVector, y) != (kWindows ? 4usize : 8usize)) { @stop("FtVector.y differs from the C header"); }
+  if (@size_of(FtVector) != (kWindows ? 8usize : 16usize)) { @stop("FtVector.__size differs from the C header"); }
+  if (@align_of(FtVector) != (kWindows ? 4usize : 8usize)) { @stop("FtVector.__align differs from the C header"); }
+  if (@offset_of(FtBBox, x_min) != 0) { @stop("FtBBox.x_min differs from the C header"); }
+  if (@offset_of(FtBBox, y_min) != (kWindows ? 4usize : 8usize)) { @stop("FtBBox.y_min differs from the C header"); }
+  if (@offset_of(FtBBox, x_max) != (kWindows ? 8usize : 16usize)) { @stop("FtBBox.x_max differs from the C header"); }
+  if (@offset_of(FtBBox, y_max) != (kWindows ? 12usize : 24usize)) { @stop("FtBBox.y_max differs from the C header"); }
+  if (@size_of(FtBBox) != (kWindows ? 16usize : 32usize)) { @stop("FtBBox.__size differs from the C header"); }
+  if (@align_of(FtBBox) != (kWindows ? 4usize : 8usize)) { @stop("FtBBox.__align differs from the C header"); }
+  if (@offset_of(FtBitmap, rows) != 0) { @stop("FtBitmap.rows differs from the C header"); }
+  if (@offset_of(FtBitmap, width) != 4) { @stop("FtBitmap.width differs from the C header"); }
+  if (@offset_of(FtBitmap, pitch) != 8) { @stop("FtBitmap.pitch differs from the C header"); }
+  if (@offset_of(FtBitmap, buffer) != 16) { @stop("FtBitmap.buffer differs from the C header"); }
+  if (@offset_of(FtBitmap, num_grays) != 24) { @stop("FtBitmap.num_grays differs from the C header"); }
+  if (@offset_of(FtBitmap, pixel_mode) != 26) { @stop("FtBitmap.pixel_mode differs from the C header"); }
+  if (@offset_of(FtBitmap, palette_mode) != 27) { @stop("FtBitmap.palette_mode differs from the C header"); }
+  if (@offset_of(FtBitmap, palette) != 32) { @stop("FtBitmap.palette differs from the C header"); }
+  if (@size_of(FtBitmap) != 40) { @stop("FtBitmap.__size differs from the C header"); }
+  if (@align_of(FtBitmap) != 8) { @stop("FtBitmap.__align differs from the C header"); }
+  if (@offset_of(FtGlyphMetrics, width) != 0) { @stop("FtGlyphMetrics.width differs from the C header"); }
+  if (@offset_of(FtGlyphMetrics, height) != (kWindows ? 4usize : 8usize)) { @stop("FtGlyphMetrics.height differs from the C header"); }
+  if (@offset_of(FtGlyphMetrics, hori_bearing_x) != (kWindows ? 8usize : 16usize)) { @stop("FtGlyphMetrics.hori_bearing_x differs from the C header"); }
+  if (@offset_of(FtGlyphMetrics, hori_bearing_y) != (kWindows ? 12usize : 24usize)) { @stop("FtGlyphMetrics.hori_bearing_y differs from the C header"); }
+  if (@offset_of(FtGlyphMetrics, hori_advance) != (kWindows ? 16usize : 32usize)) { @stop("FtGlyphMetrics.hori_advance differs from the C header"); }
+  if (@offset_of(FtGlyphMetrics, vert_bearing_x) != (kWindows ? 20usize : 40usize)) { @stop("FtGlyphMetrics.vert_bearing_x differs from the C header"); }
+  if (@offset_of(FtGlyphMetrics, vert_bearing_y) != (kWindows ? 24usize : 48usize)) { @stop("FtGlyphMetrics.vert_bearing_y differs from the C header"); }
+  if (@offset_of(FtGlyphMetrics, vert_advance) != (kWindows ? 28usize : 56usize)) { @stop("FtGlyphMetrics.vert_advance differs from the C header"); }
+  if (@size_of(FtGlyphMetrics) != (kWindows ? 32usize : 64usize)) { @stop("FtGlyphMetrics.__size differs from the C header"); }
+  if (@align_of(FtGlyphMetrics) != (kWindows ? 4usize : 8usize)) { @stop("FtGlyphMetrics.__align differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, library) != 0) { @stop("FtGlyphSlotRec.library differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, face) != 8) { @stop("FtGlyphSlotRec.face differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, next) != 16) { @stop("FtGlyphSlotRec.next differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, glyph_index) != 24) { @stop("FtGlyphSlotRec.glyph_index differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, generic) != 32) { @stop("FtGlyphSlotRec.generic differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, metrics) != 48) { @stop("FtGlyphSlotRec.metrics differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, linear_hori_advance) != (kWindows ? 80usize : 112usize)) { @stop("FtGlyphSlotRec.linear_hori_advance differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, linear_vert_advance) != (kWindows ? 84usize : 120usize)) { @stop("FtGlyphSlotRec.linear_vert_advance differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, advance) != (kWindows ? 88usize : 128usize)) { @stop("FtGlyphSlotRec.advance differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, format) != (kWindows ? 96usize : 144usize)) { @stop("FtGlyphSlotRec.format differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, bitmap) != (kWindows ? 104usize : 152usize)) { @stop("FtGlyphSlotRec.bitmap differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, bitmap_left) != (kWindows ? 144usize : 192usize)) { @stop("FtGlyphSlotRec.bitmap_left differs from the C header"); }
+  if (@offset_of(FtGlyphSlotRec, bitmap_top) != (kWindows ? 148usize : 196usize)) { @stop("FtGlyphSlotRec.bitmap_top differs from the C header"); }
+  if (@offset_of(FtSizeMetrics, x_ppem) != 0) { @stop("FtSizeMetrics.x_ppem differs from the C header"); }
+  if (@offset_of(FtSizeMetrics, y_ppem) != 2) { @stop("FtSizeMetrics.y_ppem differs from the C header"); }
+  if (@offset_of(FtSizeMetrics, x_scale) != (kWindows ? 4usize : 8usize)) { @stop("FtSizeMetrics.x_scale differs from the C header"); }
+  if (@offset_of(FtSizeMetrics, y_scale) != (kWindows ? 8usize : 16usize)) { @stop("FtSizeMetrics.y_scale differs from the C header"); }
+  if (@offset_of(FtSizeMetrics, ascender) != (kWindows ? 12usize : 24usize)) { @stop("FtSizeMetrics.ascender differs from the C header"); }
+  if (@offset_of(FtSizeMetrics, descender) != (kWindows ? 16usize : 32usize)) { @stop("FtSizeMetrics.descender differs from the C header"); }
+  if (@offset_of(FtSizeMetrics, height) != (kWindows ? 20usize : 40usize)) { @stop("FtSizeMetrics.height differs from the C header"); }
+  if (@offset_of(FtSizeMetrics, max_advance) != (kWindows ? 24usize : 48usize)) { @stop("FtSizeMetrics.max_advance differs from the C header"); }
+  if (@size_of(FtSizeMetrics) != (kWindows ? 28usize : 56usize)) { @stop("FtSizeMetrics.__size differs from the C header"); }
+  if (@align_of(FtSizeMetrics) != (kWindows ? 4usize : 8usize)) { @stop("FtSizeMetrics.__align differs from the C header"); }
+  if (@offset_of(FtSizeRec, face) != 0) { @stop("FtSizeRec.face differs from the C header"); }
+  if (@offset_of(FtSizeRec, generic) != 8) { @stop("FtSizeRec.generic differs from the C header"); }
+  if (@offset_of(FtSizeRec, metrics) != 24) { @stop("FtSizeRec.metrics differs from the C header"); }
+  if (@offset_of(FtFaceRec, num_faces) != 0) { @stop("FtFaceRec.num_faces differs from the C header"); }
+  if (@offset_of(FtFaceRec, face_index) != (kWindows ? 4usize : 8usize)) { @stop("FtFaceRec.face_index differs from the C header"); }
+  if (@offset_of(FtFaceRec, face_flags) != (kWindows ? 8usize : 16usize)) { @stop("FtFaceRec.face_flags differs from the C header"); }
+  if (@offset_of(FtFaceRec, style_flags) != (kWindows ? 12usize : 24usize)) { @stop("FtFaceRec.style_flags differs from the C header"); }
+  if (@offset_of(FtFaceRec, num_glyphs) != (kWindows ? 16usize : 32usize)) { @stop("FtFaceRec.num_glyphs differs from the C header"); }
+  if (@offset_of(FtFaceRec, family_name) != (kWindows ? 24usize : 40usize)) { @stop("FtFaceRec.family_name differs from the C header"); }
+  if (@offset_of(FtFaceRec, style_name) != (kWindows ? 32usize : 48usize)) { @stop("FtFaceRec.style_name differs from the C header"); }
+  if (@offset_of(FtFaceRec, num_fixed_sizes) != (kWindows ? 40usize : 56usize)) { @stop("FtFaceRec.num_fixed_sizes differs from the C header"); }
+  if (@offset_of(FtFaceRec, available_sizes) != (kWindows ? 48usize : 64usize)) { @stop("FtFaceRec.available_sizes differs from the C header"); }
+  if (@offset_of(FtFaceRec, num_charmaps) != (kWindows ? 56usize : 72usize)) { @stop("FtFaceRec.num_charmaps differs from the C header"); }
+  if (@offset_of(FtFaceRec, charmaps) != (kWindows ? 64usize : 80usize)) { @stop("FtFaceRec.charmaps differs from the C header"); }
+  if (@offset_of(FtFaceRec, generic) != (kWindows ? 72usize : 88usize)) { @stop("FtFaceRec.generic differs from the C header"); }
+  if (@offset_of(FtFaceRec, bbox) != (kWindows ? 88usize : 104usize)) { @stop("FtFaceRec.bbox differs from the C header"); }
+  if (@offset_of(FtFaceRec, units_per_em) != (kWindows ? 104usize : 136usize)) { @stop("FtFaceRec.units_per_em differs from the C header"); }
+  if (@offset_of(FtFaceRec, ascender) != (kWindows ? 106usize : 138usize)) { @stop("FtFaceRec.ascender differs from the C header"); }
+  if (@offset_of(FtFaceRec, descender) != (kWindows ? 108usize : 140usize)) { @stop("FtFaceRec.descender differs from the C header"); }
+  if (@offset_of(FtFaceRec, height) != (kWindows ? 110usize : 142usize)) { @stop("FtFaceRec.height differs from the C header"); }
+  if (@offset_of(FtFaceRec, max_advance_width) != (kWindows ? 112usize : 144usize)) { @stop("FtFaceRec.max_advance_width differs from the C header"); }
+  if (@offset_of(FtFaceRec, max_advance_height) != (kWindows ? 114usize : 146usize)) { @stop("FtFaceRec.max_advance_height differs from the C header"); }
+  if (@offset_of(FtFaceRec, underline_position) != (kWindows ? 116usize : 148usize)) { @stop("FtFaceRec.underline_position differs from the C header"); }
+  if (@offset_of(FtFaceRec, underline_thickness) != (kWindows ? 118usize : 150usize)) { @stop("FtFaceRec.underline_thickness differs from the C header"); }
+  if (@offset_of(FtFaceRec, glyph) != (kWindows ? 120usize : 152usize)) { @stop("FtFaceRec.glyph differs from the C header"); }
+  if (@offset_of(FtFaceRec, size) != (kWindows ? 128usize : 160usize)) { @stop("FtFaceRec.size differs from the C header"); }
+  if (@offset_of(FtFaceRec, charmap) != (kWindows ? 136usize : 168usize)) { @stop("FtFaceRec.charmap differs from the C header"); }
+  if (@offset_of(FtOpenArgs, flags) != 0) { @stop("FtOpenArgs.flags differs from the C header"); }
+  if (@offset_of(FtOpenArgs, memory_base) != 8) { @stop("FtOpenArgs.memory_base differs from the C header"); }
+  if (@offset_of(FtOpenArgs, memory_size) != 16) { @stop("FtOpenArgs.memory_size differs from the C header"); }
+  if (@offset_of(FtOpenArgs, pathname) != 24) { @stop("FtOpenArgs.pathname differs from the C header"); }
+  if (@offset_of(FtOpenArgs, stream) != 32) { @stop("FtOpenArgs.stream differs from the C header"); }
+  if (@offset_of(FtOpenArgs, driver) != 40) { @stop("FtOpenArgs.driver differs from the C header"); }
+  if (@offset_of(FtOpenArgs, num_params) != 48) { @stop("FtOpenArgs.num_params differs from the C header"); }
+  if (@offset_of(FtOpenArgs, params) != 56) { @stop("FtOpenArgs.params differs from the C header"); }
+  if (@size_of(FtOpenArgs) != 64) { @stop("FtOpenArgs.__size differs from the C header"); }
+  if (@align_of(FtOpenArgs) != 8) { @stop("FtOpenArgs.__align differs from the C header"); }
+  if (@offset_of(HbGlyphInfo, codepoint) != 0) { @stop("HbGlyphInfo.codepoint differs from the C header"); }
+  if (@offset_of(HbGlyphInfo, mask) != 4) { @stop("HbGlyphInfo.mask differs from the C header"); }
+  if (@offset_of(HbGlyphInfo, cluster) != 8) { @stop("HbGlyphInfo.cluster differs from the C header"); }
+  if (@offset_of(HbGlyphInfo, var1) != 12) { @stop("HbGlyphInfo.var1 differs from the C header"); }
+  if (@offset_of(HbGlyphInfo, var2) != 16) { @stop("HbGlyphInfo.var2 differs from the C header"); }
+  if (@size_of(HbGlyphInfo) != 20) { @stop("HbGlyphInfo.__size differs from the C header"); }
+  if (@align_of(HbGlyphInfo) != 4) { @stop("HbGlyphInfo.__align differs from the C header"); }
+  if (@offset_of(HbGlyphPosition, x_advance) != 0) { @stop("HbGlyphPosition.x_advance differs from the C header"); }
+  if (@offset_of(HbGlyphPosition, y_advance) != 4) { @stop("HbGlyphPosition.y_advance differs from the C header"); }
+  if (@offset_of(HbGlyphPosition, x_offset) != 8) { @stop("HbGlyphPosition.x_offset differs from the C header"); }
+  if (@offset_of(HbGlyphPosition, y_offset) != 12) { @stop("HbGlyphPosition.y_offset differs from the C header"); }
+  if (@offset_of(HbGlyphPosition, var_) != 16) { @stop("HbGlyphPosition.var_ differs from the C header"); }
+  if (@size_of(HbGlyphPosition) != 20) { @stop("HbGlyphPosition.__size differs from the C header"); }
+  if (@align_of(HbGlyphPosition) != 4) { @stop("HbGlyphPosition.__align differs from the C header"); }
+  return true;
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  t.that(kVerified, "108 FreeType/HarfBuzz ABI properties match the C headers");
+  return t.finish();
+}

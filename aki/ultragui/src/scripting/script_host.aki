@@ -1,0 +1,293 @@
+// No single C++ counterpart: what a ScriptRuntime (and a package's players)
+// reach UIContext through.
+//
+// * ScriptHost: the services the C++ Init hands RegisterAnimLua,
+//   RegisterAudioLua, RegisterLottieLua and RegisterVideoLua as lambdas over
+//   `this` (UIContext::LoadAnim, FindWidgetEntity, the audio backend, the
+//   lottie/video players). UIContext lends one inside the WidgetContext
+//   (`ctx.host`) for every call that can run a script: load_script,
+//   exec_script, call_handler, the timers, and input processing (widget
+//   callbacks, the wired change handlers). Elsewhere `ctx.host` is none.
+// * WidgetCache: UIContext's widget name/id caches (FindWidget, WidgetById).
+// * UiExtension / FrameEnv / UiExtensionBox: UIContext's frame extensions,
+//   the C++ lottie_anims_ and video_players_ (see UiExtension).
+
+module ultragui::scripting::script_host;
+
+import {List} from akikit::containers::list;
+import {Box} from akikit::memory::box;
+import {HashMap, get_str} from akikit::containers::hash_map;
+import {String} from akikit::strings::string;
+import {VectorAnimation} from ultragui::anim::vector_animation;
+import {AudioBackendBox} from ultragui::audio::audio_backend;
+import {ComponentKey} from ultragui::core::component_store;
+import {ErasedBox} from ultragui::core::erased;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {DynTextureBackend, TextureBackendBox} from ultragui::render::texture_backend;
+import {DynRhi} from ultragui::rhi::rhi;
+import {RhiTextureBackend} from ultragui::rhi::rhi_texture_backend;
+import {kHierarchy, kWidgetNode} from ultragui::widgets::widget;
+import {World} from ultragui::widgets::widget_registry;
+
+// UIContext::LoadAnim's result: the index of an animation UIContext owns
+// (the C++ hands out the VectorAnimation*; animations live until Shutdown).
+pub type AnimId = u32;
+
+// ---------------------------------------------------------------------------
+// Frame extensions (LoadLottie / LoadVideo's players)
+// ---------------------------------------------------------------------------
+
+// What an extension gets each time UIContext calls it: the Rhi, the texture
+// sink the C++ texture_backend_ is (none in draw-data mode until the host
+// sets one), the audio backend, and the frame's dt.
+pub struct FrameEnv<'a> {
+  pub var rhi: DynRhi<'a>
+  pub var dt: f64 = 0.0
+  pub var host_textures: (&'a var TextureBackendBox)?  // see with_textures
+  pub var rhi_textures: bool
+  pub var audio: &'a var AudioBackendBox
+
+  // The texture sink, lent: the host's backend, or (legacy mode) an adapter
+  // over the Rhi; none where the C++ texture_backend_ is null.
+  pub fn with_textures(var self&, f: fn((&var DynTextureBackend)?): ());
+}
+
+fn FrameEnv::with_textures(var self&, f: fn((&var DynTextureBackend)?): ()) {
+  if (var b& = self.host_textures) {
+    var d = b.as_dyn();
+    f(d);
+    return;
+  }
+  if (self.rhi_textures) {
+    var adapter = RhiTextureBackend::<DynRhi>(self.rhi);
+    var d = DynTextureBackend::of(adapter);
+    f(d);
+    return;
+  }
+  f(none);
+}
+
+// A subsystem UIContext owns and drives each frame, for the optional
+// packages' players (ultragui_lottie's LottieAnimation, ultragui_video's
+// VideoPlayer). UIContext::update calls `update` on every extension after the
+// vector animations, in the order they were added; then, if any
+// `needs_convert` and the Rhi acquires a frame, `convert` on those that need
+// it; `shutdown` runs from UIContext::shutdown in order. An extension holds
+// its players and hands out ids for them, as LoadAnim does.
+//
+// An extension type declares a ComponentKey as its identity (as a component
+// does): `add_extension(kMyPlayers, MyPlayers {})`, then
+// `extension_var(kMyPlayers, index)` gets it back.
+pub capability UiExtension {
+  fn update(var self&, var env&: FrameEnv);
+  fn needs_convert(self&): bool {
+    return false;
+  }
+  fn convert(var self&, var env&: FrameEnv) {}
+  fn shutdown(var self&, var env&: FrameEnv) {}
+}
+
+// UIContext's widget_cache_ and id_cache_: name/id -> entity, rebuilt lazily
+// together from the root.
+pub struct WidgetCache {
+  var by_name: HashMap<String, WidgetId> = HashMap()
+  var by_id: HashMap<u32, WidgetId> = HashMap()
+  var dirty: bool = true
+
+  pub fn WidgetCache(): WidgetCache => WidgetCache {};
+  pub fn invalidate(var self&) {
+    self.dirty = true;
+  }
+  // FindWidgetEntity
+  pub fn find(var self&, world&: World, root: WidgetId, name: str): WidgetId;
+  // WidgetById
+  pub fn by_id(var self&, world&: World, root: WidgetId, id: u32): WidgetId;
+}
+
+fn cache_widget_tree(world&: World, w: WidgetId, var cache&: HashMap<String, WidgetId>, var by_id&: HashMap<u32, WidgetId>) {
+  if (!w.valid()) {
+    return;
+  }
+  if (let n& = world.get(kWidgetNode, w)) {
+    if (n.name.len() > 0) {
+      cache.insert(n.name.clone(), w);
+    }
+    by_id.insert(n.id, w);
+  }
+  var children = List::<WidgetId>();
+  if (let h& = world.get(kHierarchy, w)) {
+    for (let c in h.children.iter()) {
+      children.push(c);
+    }
+  }
+  for (let child in children.iter()) {
+    cache_widget_tree(world, child, cache, by_id);
+  }
+}
+
+fn WidgetCache::rebuild(var self&, world&: World, root: WidgetId) {
+  self.by_name.clear();
+  self.by_id.clear();
+  cache_widget_tree(world, root, self.by_name, self.by_id);
+  self.dirty = false;
+}
+
+fn WidgetCache::find(var self&, world&: World, root: WidgetId, name: str): WidgetId {
+  if (self.dirty) {
+    self.rebuild(world, root);
+  }
+  if (let hit = get_str(self.by_name, name)) {
+    return hit;
+  }
+  return kNullWidget;
+}
+
+fn WidgetCache::by_id(var self&, world&: World, root: WidgetId, id: u32): WidgetId {
+  if (self.dirty) {
+    self.rebuild(world, root);
+  }
+  if (let hit = self.by_id.get(id)) {
+    return hit;
+  }
+  return kNullWidget;
+}
+
+pub struct UiExtensionFns : Copy {
+  pub let update: static fn(*var u8, &var FrameEnv): ()
+  pub let needs_convert: static fn(*var u8): bool
+  pub let convert: static fn(*var u8, &var FrameEnv): ()
+  pub let shutdown: static fn(*var u8, &var FrameEnv): ()
+}
+
+fn ext_update<T: UiExtension>(p: *var u8, env: &var FrameEnv) {
+  var t& = unsafe *(p as *var T);
+  t.update(env);
+}
+fn ext_needs_convert<T: UiExtension>(p: *var u8): bool {
+  let t& = unsafe *(p as *var T);
+  return t.needs_convert();
+}
+fn ext_convert<T: UiExtension>(p: *var u8, env: &var FrameEnv) {
+  var t& = unsafe *(p as *var T);
+  t.convert(env);
+}
+fn ext_shutdown<T: UiExtension>(p: *var u8, env: &var FrameEnv) {
+  var t& = unsafe *(p as *var T);
+  t.shutdown(env);
+}
+
+// An owned UiExtension of a type only the thunks know.
+pub struct UiExtensionBox {
+  var object: ErasedBox
+  pub var fns: UiExtensionFns
+  var type_index: u32
+
+  pub fn of<T: UiExtension>(key&: ComponentKey<T>, value: T): UiExtensionBox => UiExtensionBox {
+    object: ErasedBox::of(value),
+    fns: UiExtensionFns {
+      update: ext_update::<T>, needs_convert: ext_needs_convert::<T>, convert: ext_convert::<T>, shutdown: ext_shutdown::<T>,
+    },
+    type_index: key.index(),
+  };
+
+  pub fn ptr(var self&): *var u8 => self.object.ptr();
+
+  // True if the extension is of the type `key` names.
+  pub fn is<T: UiExtension>(self&, key&: ComponentKey<T>): bool => self.type_index == key.index();
+
+  pub fn downcast<T: UiExtension>(var self&, key&: ComponentKey<T>): (&var T)? {
+    if (self.type_index != key.index()) {
+      return none;
+    }
+    return unsafe *(self.object.ptr() as *var T);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ScriptHost
+// ---------------------------------------------------------------------------
+
+// The views of UIContext a script's natives use, lent beside the World (see
+// the header). Built by UIContext; a runtime reads it from `ctx.host`.
+//
+// Everything a C++ `[this]` lambda of UIContext::Init reached is here:
+// LoadAnim (`load_anim`, through `env`'s texture sink), FindWidgetEntity
+// (`find_widget`), the audio backend and the Rhi (`env`), and LoadLottie /
+// LoadVideo's players (`extensions`). Each loaded object is boxed, so the
+// address a loader hands to a script stays valid until UIContext::shutdown,
+// as the C++'s `new`ed objects do.
+pub struct ScriptHost<'a> {
+  pub var anims: &'a var List<Box<VectorAnimation>>   // UIContext's vector animations
+  pub var env: FrameEnv<'a>                           // the Rhi, texture_backend_, audio_
+  pub var widgets: &'a var WidgetCache
+  pub var root: WidgetId                              // the root the widget cache walks
+  pub var extensions: &'a var List<UiExtensionBox>
+
+  // UIContext::LoadAnim: load a .uganim, owned by UIContext and updated each
+  // frame; none on failure.
+  pub fn load_anim(var self&, path: str, width: u32, height: u32): AnimId?;
+  pub fn anim_var(var self&, id: AnimId): (&var VectorAnimation)?;
+  // The animation's address (the C++ VectorAnimation*), stable until
+  // UIContext::shutdown; null for an unknown id.
+  pub fn anim_ptr(var self&, id: AnimId): *var VectorAnimation;
+  // UIContext::FindWidgetEntity: a widget by name, through the cache.
+  pub fn find_widget(var self&, world&: World, name: str): WidgetId => self.widgets.find(world, self.root, name);
+  // The extension added at `index` as the type `key` names (a package's
+  // players); none if out of range or of another type.
+  pub fn extension_var<T: UiExtension>(var self&, key&: ComponentKey<T>, index: u32): (&var T)?;
+  // The index of the first extension of the type `key` names; none if none
+  // was added.
+  pub fn find_extension<T: UiExtension>(self&, key&: ComponentKey<T>): u32? => find_extension_in(self.extensions, key);
+}
+
+fn ScriptHost::load_anim(var self&, path: str, width: u32, height: u32): AnimId? {
+  var anim = VectorAnimation();
+  var ok = false;
+  {
+    var a& = anim;
+    var r& = ok;
+    self.env.with_textures(fn(t: (&var DynTextureBackend)?) {
+      if (var b& = t) {
+        r = a.load(b, path, width, height);
+      } else {
+        r = a.load::<DynTextureBackend>(none, path, width, height);
+      }
+    });
+  }
+  if (!ok) {
+    return none;
+  }
+  self.anims.push(Box(anim));
+  return (self.anims.len() - 1) as u32;
+}
+
+fn ScriptHost::anim_var(var self&, id: AnimId): (&var VectorAnimation)? {
+  if (id as usize >= self.anims.len()) {
+    return none;
+  }
+  return self.anims[id as usize].get_var();
+}
+
+fn ScriptHost::anim_ptr(var self&, id: AnimId): *var VectorAnimation {
+  if (id as usize >= self.anims.len()) {
+    return null;
+  }
+  return unsafe (self.anims[id as usize].as_ptr() as *var VectorAnimation);
+}
+
+fn ScriptHost::extension_var<T: UiExtension>(var self&, key&: ComponentKey<T>, index: u32): (&var T)? {
+  if (index as usize >= self.extensions.len()) {
+    return none;
+  }
+  return self.extensions[index as usize].downcast(key);
+}
+
+// The index of the first extension of the type `key` names.
+pub fn find_extension_in<T: UiExtension>(extensions&: List<UiExtensionBox>, key&: ComponentKey<T>): u32? {
+  for (let i in 0..extensions.len()) {
+    if (extensions[i].is(key)) {
+      return i as u32;
+    }
+  }
+  return none;
+}

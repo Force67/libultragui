@@ -1,0 +1,165 @@
+// ugui/layout/layout_tree.{h,cc}: build a LayoutNode array from a widget
+// tree, run Yoga layout, and apply the results back to the entities. The node
+// array lives in the engine, one per root, and is refreshed rather than
+// rebuilt: a widget that has not been marked dirty keeps last frame's entry.
+//
+// Shape: ComputeWidgetLayout(root, vp, engine) takes the World and the
+// WidgetContext first (layout_widget runs the kinds' on_layout entries).
+
+module ultragui::layout::layout_tree;
+
+import {to_list} from akikit::containers::list;
+import {min_f32} from ultragui::core::algorithm;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {LayoutEngine, LayoutNode, LayoutViewport, NodeStore, kNoNode} from ultragui::layout::layout;
+import {Position, Visibility} from ultragui::style::enums;
+import {scroll_offset} from ultragui::widgets::scroll_view;
+import {
+  WidgetKind, apply_layout_result, kHierarchy, kTransform, kWidgetNode, layout_widget, populate_layout_node,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// A collapsed widget is `display: none`: the layout engine gives it no size
+// and zeroes its whole subtree, so building nodes under it is work with no
+// result. Both walks read the answer off the node's own style, the copy
+// apply_style hands to Yoga, so they cannot disagree about the cut.
+fn subtree_is_collapsed(node&: LayoutNode): bool => node.style.visibility == Visibility::Collapsed;
+
+// Walk the widget tree into the node array, refreshing only the entries whose
+// widget asked for it. `store` holds the previous frame's array and is updated
+// in place; `reusable` is false on the first frame for a root; per entry, a
+// widget key that does not match means the tree changed shape and that entry
+// is repopulated whatever its flag says.
+fn build_layout_nodes(var world&: World, e: WidgetId, parent_index: u32, var store&: NodeStore, reusable: bool, var cursor&: u32) {
+  let my_index = cursor;
+  cursor += 1;
+  let mi = my_index as usize;
+  if (mi >= store.nodes.len()) {
+    store.nodes.push(LayoutNode {});
+    store.widget_keys.push(0);
+  }
+
+  let key = world.get(kWidgetNode, e)!.id;
+  let keep = reusable && store.widget_keys[mi] == key;
+  store.widget_keys[mi] = key;
+
+  let t = world.get(kTransform, e)!;
+  if (keep && !t.layout_dirty) {
+    var node& = store.nodes[mi];
+    node.dirty = false;
+    // Intrinsic size comes from the measure pass, which writes it straight
+    // into the Transform without marking the widget dirty (and it moves with
+    // the ui scale): refreshed whatever the flag says.
+    node.intrinsic_width = t.intrinsic_w;
+    node.intrinsic_height = t.intrinsic_h;
+  } else {
+    populate_layout_node(world, e, store.nodes[mi]);
+    store.nodes[mi].dirty = true;
+    // Cleared here rather than after layout: a node whose rect does not move
+    // is never visited by the apply walk, and would stay dirty forever.
+    world.get_var(kTransform, e)!.layout_dirty = false;
+  }
+
+  let kids = to_list(world.get(kHierarchy, e)!.children.as_slice());
+  var node& = store.nodes[mi];
+  node.parent = parent_index;
+  node.first_child = kNoNode;
+  node.next_sibling = kNoNode;
+  let collapsed = subtree_is_collapsed(node);
+  node.child_count = collapsed ? 0 : kids.len() as u32;
+
+  // Link to parent.
+  if (parent_index != kNoNode) {
+    let pi = parent_index as usize;
+    if (store.nodes[pi].first_child == kNoNode) {
+      store.nodes[pi].first_child = my_index;
+    } else {
+      var sib = store.nodes[pi].first_child;
+      while (store.nodes[sib as usize].next_sibling != kNoNode) {
+        sib = store.nodes[sib as usize].next_sibling;
+      }
+      store.nodes[sib as usize].next_sibling = my_index;
+    }
+  }
+
+  if (collapsed) {
+    return;
+  }
+  for (let child in kids) {
+    build_layout_nodes(world, child, my_index, store, reusable, cursor);
+  }
+}
+
+// The nearest scroll-view ancestor of `e`.
+fn find_scroll_parent(world&: World, e: WidgetId): WidgetId {
+  var p = world.get(kHierarchy, e)!.parent;
+  while (p.valid()) {
+    if (let n& = world.get(kWidgetNode, p)) {
+      if (n.kind == WidgetKind::ScrollView) {
+        return p;
+      }
+    }
+    if (let h& = world.get(kHierarchy, p)) {
+      p = h.parent;
+    } else {
+      p = kNullWidget;
+    }
+  }
+  return kNullWidget;
+}
+
+fn apply_layout_results(var world&: World, var ctx&: WidgetContext, e: WidgetId, var node_index&: u32, var nodes&: [LayoutNode]) {
+  var node = nodes[node_index as usize];
+
+  // Sticky positioning: clamp y so it stays pinned to the top of the scroll
+  // parent's visible region when scrolled past.
+  if (node.style.position == Position::Sticky) {
+    let sv = find_scroll_parent(world, e);
+    if (sv.valid()) {
+      let visible = world.get(kTransform, sv)!.rect;
+      let offset = scroll_offset(world, sv);
+      let sticky_min_y = visible.y + offset.y;
+      if (node.computed_rect.y < sticky_min_y) {
+        node.computed_rect.y = sticky_min_y;
+        let max_y = visible.y + visible.h - node.computed_rect.h;
+        node.computed_rect.y = min_f32(node.computed_rect.y, max_y);
+      }
+      nodes[node_index as usize].computed_rect = node.computed_rect;
+    }
+  }
+
+  let collapsed = subtree_is_collapsed(node);
+
+  apply_layout_result(world, e, node);
+  layout_widget(world, ctx, e, node.computed_rect, node.content_rect);
+
+  node_index += 1;
+  if (collapsed) {
+    return;  // its children never got nodes; see build_layout_nodes
+  }
+  let kids = to_list(world.get(kHierarchy, e)!.children.as_slice());
+  for (let child in kids) {
+    apply_layout_results(world, ctx, child, node_index, nodes);
+  }
+}
+
+// ComputeWidgetLayout
+pub fn compute_widget_layout(var world&: World, var ctx&: WidgetContext, root: WidgetId, vp&: LayoutViewport, var engine&: LayoutEngine) {
+  if (!root.valid()) {
+    return;
+  }
+  let root_id = world.get(kWidgetNode, root)!.id;
+
+  var store& = engine.store_for(root_id);
+  var cursor: u32 = 0;
+  let reusable = store.nodes.len() != 0;
+  build_layout_nodes(world, root, kNoNode, store, reusable, cursor);
+  store.nodes.truncate(cursor as usize);
+  store.widget_keys.truncate(cursor as usize);
+
+  engine.compute_store(root_id, vp);
+
+  var idx: u32 = 0;
+  apply_layout_results(world, ctx, root, idx, engine.store_for(root_id).nodes.as_slice_var());
+}

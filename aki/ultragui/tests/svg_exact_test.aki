@@ -1,0 +1,56 @@
+// The SVG rasterizer against the C++, byte for byte: every render of the
+// corpus in tests/data/svg/ (paths with arcs and curves, joins, gradients,
+// transforms, groups, opacity, viewBox scaling, fill rules, edge ties, random
+// scenes) must hash to what the C++ rasterizes (tools/gen_svg_reference.cc;
+// the table is tests/support/svg_corpus.aki). The hash is FNV-1a over the
+// RGBA8 bytes. With UGUI_DUMP=<dir> each render is also written there as
+// <file>.<w>x<h>.rgba, the same files the C++ tool writes, to diff a failure.
+
+module svg_exact_test;
+
+import {println} from akikit::logging;
+import {write_bytes} from akikit::filesystem::file_util;
+import {get_environment_variable} from akikit::process::environment_variables;
+import {load_svg_memory} from ultragui::svg::svg;
+import {Expect} from ultragui_testing::expect;
+import {kCases, kFiles} from support::svg_corpus;
+
+fn fnv1a64(pixels&: [u8]): u64 {
+  var h: u64 = 0xcbf29ce484222325;
+  for (let b& in pixels) {
+    h = h ^ (b as u64);
+    h = h *% 0x100000001b3;
+  }
+  return h;
+}
+
+fn file_data(name: str): bytes {
+  for (let f& in kFiles) {
+    if (f.name == name) {
+      return f.data;
+    }
+  }
+  @stop("no corpus file");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  let dump = get_environment_variable("UGUI_DUMP");
+  for (let c& in kCases) {
+    let label = f"{c.file} {c.width}x{c.height}";
+    let img = load_svg_memory(file_data(c.file), c.width, c.height);
+    t.that((img != none) == c.ok, f"{label}: loads");
+    if (let i& = img) {
+      let got = fnv1a64(i.pixels.as_slice());
+      t.that(got == c.hash, f"{label}: hash got 0x{got:016x}, want 0x{c.hash:016x}");
+      if (let d& = dump) {
+        if (let e = write_bytes(f"{d}/{c.file}.{c.width}x{c.height}.rgba", i.pixels.as_slice() as bytes)) {
+        } else (let err) {
+          println(f"dump failed for {label}");
+        }
+      }
+    }
+  }
+  println(f"{kCases.len()} renders compared");
+  return t.finish();
+}

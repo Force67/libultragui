@@ -346,12 +346,28 @@ CachedGlyph* TextEngine::Impl::rasterize_glyph(FontHandle font, u32 glyph_id,
     return nullptr;
   }
 
-  // Copy bitmap into atlas
+  // Copy bitmap into atlas. Embedded bitmaps (EBDT strikes) can come back
+  // packed at 1, 2 or 4 bits per pixel, with rows of fewer than `width`
+  // bytes: expand those to 8-bit coverage instead of copying `width` bytes
+  // per row past the end of FreeType's buffer.
+  const int bits = bmp.pixel_mode == FT_PIXEL_MODE_MONO    ? 1
+                   : bmp.pixel_mode == FT_PIXEL_MODE_GRAY2 ? 2
+                   : bmp.pixel_mode == FT_PIXEL_MODE_GRAY4 ? 4
+                                                           : 8;
   for (u32 row = 0; row < bh; ++row) {
     u8* dst =
         atlas_pixels + (atlas_cursor_y + row) * ATLAS_SIZE + atlas_cursor_x;
     u8* src = bmp.buffer + row * bmp.pitch;
-    memcpy(dst, src, bw);
+    if (bits == 8) {
+      memcpy(dst, src, bw);
+      continue;
+    }
+    const u32 max = (1u << bits) - 1;
+    for (u32 x = 0; x < bw; ++x) {
+      const u32 bit = x * bits;
+      const u32 v = (src[bit >> 3] >> (8 - bits - (bit & 7))) & max;
+      dst[x] = static_cast<u8>(v * 255 / max);
+    }
   }
 
   CachedGlyph cg{};

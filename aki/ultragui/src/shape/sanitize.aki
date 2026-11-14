@@ -1,0 +1,1147 @@
+// HarfBuzz's sanitizer for GSUB, GPOS and GDEF (hb-sanitize.hh and each
+// structure's sanitize ()): HarfBuzz 13 checks a whole table when it first
+// loads it and, if anything is out of bounds (or the checks exceed the
+// operation budget of 64 per table byte), uses an empty table instead. The
+// checks here are HarfBuzz's, in its order, with its budget accounting
+// (check_range spends its length, check_ops its count, at most 0x4000
+// lookup subtables), so a table is accepted or rejected exactly as HarfBuzz
+// does. GPOS is checked with HarfBuzz's lazy_some_gpos (value records' device
+// tables and anchor matrices' anchors are not followed).
+//
+// The 24-bit ("beyond 64K") formats are accepted unchecked, as the shaper
+// does not read them.
+
+module ultragui::shape::sanitize;
+
+import {rd16, rd32, rd8, rd24} from ultragui::shape::otl;
+
+struct San<'a> {
+  pub let t: &'a [u8]
+  pub var max_ops: i64 = 0
+  pub var max_subtables: i64 = 0
+  pub var lazy_gpos: bool = false
+  pub var is_gpos: bool = false
+
+  // check_struct on 64-bit: check_point (obj + min_size).
+  pub fn st(self&, p: usize, size: usize): bool => p + size <= #self.t;
+
+  // check_range (p, len)
+  pub fn range(var self&, p: usize, len: u64): bool {
+    if (p > #self.t || ((#self.t - p) as u64) < len) {
+      return false;
+    }
+    self.max_ops -= len as i64;
+    return self.max_ops > 0;
+  }
+
+  // check_ops (count)
+  pub fn ops(var self&, count: u64): bool {
+    if (self.max_ops < 0 || count as i64 >= self.max_ops) {
+      self.max_ops = -1;
+      return false;
+    }
+    self.max_ops -= count as i64;
+    return true;
+  }
+
+  // An ArrayOf with a 16-bit length at p of elements of `size` bytes (shallow).
+  pub fn array16(var self&, p: usize, size: usize): bool => self.st(p, 2) && self.range(p + 2, rd16(self.t, p) as u64 * size as u64);
+}
+
+fn new_san<'a>(t: &'a [u8]): San<'a> {
+  var c = San { t };
+  let m = #t as u64 * 64;
+  c.max_ops = m < 16384 ? 16384 : (m > 0x3FFFFFFF ? 0x3FFFFFFF : m as i64);
+  return c;
+}
+
+// The target of the Offset16 at p from base: none for a zero offset; the
+// shallow check (check_struct of the offset) is part of it.
+fn off16(var c&: San, p: usize, base: usize): (bool, usize) {
+  if (!c.st(p, 2)) {
+    return (false, 0);
+  }
+  return (true, rd16(c.t, p) as usize);
+}
+
+fn off32(var c&: San, p: usize, base: usize): (bool, usize) {
+  if (!c.st(p, 4)) {
+    return (false, 0);
+  }
+  return (true, rd32(c.t, p) as usize);
+}
+
+// --- Common structures --------------------------------------------------------------------
+
+fn coverage(var c&: San, p: usize): bool {
+  if (!c.st(p, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, p);
+  if (format == 1) {
+    return c.array16(p + 2, 2);
+  }
+  if (format == 2) {
+    return c.array16(p + 2, 6);
+  }
+  return true;
+}
+
+// OffsetTo<Coverage>::sanitize
+fn coverage_at(var c&: San, p: usize, base: usize): bool {
+  let (ok, o) = off16(c, p, base);
+  if (!ok) {
+    return false;
+  }
+  return o == 0 || coverage(c, base + o);
+}
+
+fn coverage_population(t: &[u8], p: usize): u64 {
+  let format = rd16(t, p);
+  if (format == 1) {
+    return rd16(t, p + 2) as u64;
+  }
+  if (format == 2) {
+    var n = 0u64;
+    for (let i in 0..rd16(t, p + 2)) {
+      let r = p + 4 + i as usize * 6;
+      let first = rd16(t, r);
+      let last = rd16(t, r + 2);
+      if (last >= first) {
+        n += (last - first + 1) as u64;
+      }
+    }
+    return n;
+  }
+  return 0;
+}
+
+fn class_def(var c&: San, p: usize): bool {
+  if (!c.st(p, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, p);
+  if (format == 1) {
+    return c.st(p, 6) && c.array16(p + 4, 2);
+  }
+  if (format == 2) {
+    return c.array16(p + 2, 6);
+  }
+  return true;
+}
+
+fn class_def_at(var c&: San, p: usize, base: usize): bool {
+  let (ok, o) = off16(c, p, base);
+  if (!ok) {
+    return false;
+  }
+  return o == 0 || class_def(c, base + o);
+}
+
+fn device(var c&: San, p: usize): bool {
+  if (!c.st(p + 4, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, p + 4);
+  if (format >= 1 && format <= 3) {
+    if (!c.st(p, 6)) {
+      return false;
+    }
+    let start = rd16(c.t, p);
+    let end = rd16(c.t, p + 2);
+    var size = 6u64;
+    if (!(format < 1 || format > 3 || start > end)) {
+      size = 2 * (4 + ((end - start) >> (4 - format)) as u64);
+    }
+    return c.range(p, size);
+  }
+  if (format == 0x8000) {
+    return c.st(p, 6);
+  }
+  return true;
+}
+
+fn device_at(var c&: San, p: usize, base: usize): bool {
+  let (ok, o) = off16(c, p, base);
+  if (!ok) {
+    return false;
+  }
+  return o == 0 || device(c, base + o);
+}
+
+// LangSys at p
+fn langsys(var c&: San, p: usize): bool => c.st(p, 6) && c.array16(p + 4, 2);
+
+fn script(var c&: San, p: usize): bool {
+  let (ok, o) = off16(c, p, p);
+  if (!ok || (o != 0 && !langsys(c, p + o))) {
+    return false;
+  }
+  // RecordArrayOf<LangSys>
+  if (!c.array16(p + 2, 6)) {
+    return false;
+  }
+  for (let i in 0..rd16(c.t, p + 2)) {
+    let rec = p + 4 + i as usize * 6;
+    if (!c.st(rec, 6)) {
+      return false;
+    }
+    let (ok2, o2) = off16(c, rec + 4, p);
+    if (!ok2 || (o2 != 0 && !langsys(c, p + o2))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn feature_params(var c&: San, p: usize, tag: u32): bool {
+  if (tag == 0x73697A65) {  // 'size'
+    if (!c.st(p, 10)) {
+      return false;
+    }
+    let design_size = rd16(c.t, p);
+    let subfamily_id = rd16(c.t, p + 2);
+    let subfamily_name_id = rd16(c.t, p + 4);
+    let range_start = rd16(c.t, p + 6);
+    let range_end = rd16(c.t, p + 8);
+    if (design_size == 0) {
+      return false;
+    }
+    if (subfamily_id == 0 && subfamily_name_id == 0 && range_start == 0 && range_end == 0) {
+      return true;
+    }
+    if (design_size < range_start || design_size > range_end || subfamily_name_id < 256 || subfamily_name_id > 32767) {
+      return false;
+    }
+    return true;
+  }
+  if ((tag & 0xFFFF0000) == 0x73730000) {  // ssXX
+    return c.st(p, 4);
+  }
+  if ((tag & 0xFFFF0000) == 0x63760000) {  // cvXX
+    return c.st(p, 14) && c.array16(p + 12, 3);
+  }
+  return true;
+}
+
+fn feature(var c&: San, p: usize, tag: u32): bool {
+  if (!c.st(p, 4)) {
+    return false;
+  }
+  let (ok, o) = off16(c, p, p);
+  if (!ok || (o != 0 && !feature_params(c, p + o, tag))) {
+    return false;
+  }
+  return c.array16(p + 2, 2);
+}
+
+// RecordListOf<Script>
+fn script_list(var c&: San, p: usize): bool {
+  if (!c.array16(p, 6)) {
+    return false;
+  }
+  for (let i in 0..rd16(c.t, p)) {
+    let rec = p + 2 + i as usize * 6;
+    if (!c.st(rec, 6)) {
+      return false;
+    }
+    let (ok, o) = off16(c, rec + 4, p);
+    if (!ok || (o != 0 && !script(c, p + o))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn feature_list(var c&: San, p: usize): bool {
+  if (!c.array16(p, 6)) {
+    return false;
+  }
+  for (let i in 0..rd16(c.t, p)) {
+    let rec = p + 2 + i as usize * 6;
+    if (!c.st(rec, 6)) {
+      return false;
+    }
+    let tag = rd32(c.t, rec);
+    let (ok, o) = off16(c, rec + 4, p);
+    if (!ok || (o != 0 && !feature(c, p + o, tag))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn condition(var c&: San, p: usize, depth: u32): bool {
+  if (!c.st(p, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, p);
+  return match (format) {
+    1 | 2 => c.st(p, 8),
+    3 | 4 => {
+      // Array8OfOffset24To<Condition>
+      var ok = c.st(p + 2, 1) && c.range(p + 3, rd8(c.t, p + 2) as u64 * 3);
+      if (ok) {
+        for (let i in 0..rd8(c.t, p + 2)) {
+          let q = p + 3 + i as usize * 3;
+          if (!c.st(q, 3)) {
+            ok = false;
+            break;
+          }
+          let o = rd24(c.t, q) as usize;
+          if (o != 0 && (depth > 64 || !condition(c, p + o, depth + 1))) {
+            ok = false;
+            break;
+          }
+        }
+      }
+      ok
+    },
+    5 => {
+      if (!c.st(p, 5)) {
+        false
+      } else {
+        let o = rd24(c.t, p + 2) as usize;
+        o == 0 || (depth <= 64 && condition(c, p + o, depth + 1))
+      }
+    },
+    _ => true,
+  };
+}
+
+fn feature_variations(var c&: San, p: usize, gsubgpos: usize): bool {
+  if (!c.st(p, 4) || rd16(c.t, p) != 1) {
+    return false;
+  }
+  // Array32Of<FeatureVariationRecord>
+  if (!c.st(p + 4, 4)) {
+    return false;
+  }
+  let n = rd32(c.t, p + 4) as u64;
+  if (n > 0xFFFFFFFF / 8 || !c.range(p + 8, n * 8)) {
+    return false;
+  }
+  for (let i in 0..n) {
+    let rec = p + 8 + i as usize * 8;
+    // conditions: Offset32To<ConditionSet>
+    let (ok, o) = off32(c, rec, p);
+    if (!ok) {
+      return false;
+    }
+    if (o != 0) {
+      let cs = p + o;
+      if (!c.st(cs, 2) || !c.range(cs + 2, rd16(c.t, cs) as u64 * 4)) {
+        return false;
+      }
+      for (let k in 0..rd16(c.t, cs)) {
+        let (ok2, o2) = off32(c, cs + 2 + k as usize * 4, cs);
+        if (!ok2 || (o2 != 0 && !condition(c, cs + o2, 0))) {
+          return false;
+        }
+      }
+    }
+    // substitutions: Offset32To<FeatureTableSubstitution>
+    let (ok3, o3) = off32(c, rec + 4, p);
+    if (!ok3) {
+      return false;
+    }
+    if (o3 != 0) {
+      let fs = p + o3;
+      if (!c.st(fs, 4) || rd16(c.t, fs) != 1 || !c.array16(fs + 4, 6)) {
+        return false;
+      }
+      for (let k in 0..rd16(c.t, fs + 4)) {
+        let r = fs + 6 + k as usize * 6;
+        if (!c.st(r, 6)) {
+          return false;
+        }
+        let (ok4, o4) = off32(c, r + 2, fs);
+        if (!ok4 || (o4 != 0 && !feature(c, fs + o4, 0))) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+// --- Contextual subtables (shared by GSUB and GPOS) -----------------------------------------
+
+fn rule_set(var c&: San, p: usize, chain: bool): bool {
+  if (!c.array16(p, 2)) {
+    return false;
+  }
+  for (let i in 0..rd16(c.t, p)) {
+    let (ok, o) = off16(c, p + 2 + i as usize * 2, p);
+    if (!ok) {
+      return false;
+    }
+    if (o == 0) {
+      continue;
+    }
+    let r = p + o;
+    if (!chain) {
+      // Rule: check_struct (4) and the input and lookup records.
+      if (!c.st(r, 4)) {
+        return false;
+      }
+      let input_count = rd16(c.t, r);
+      let lookup_count = rd16(c.t, r + 2);
+      let n = 2 * (input_count > 0 ? input_count - 1 : 0) as u64 + 4 * lookup_count as u64;
+      if (!c.range(r + 4, n)) {
+        return false;
+      }
+    } else {
+      // ChainRule: only the lengths of backtrack, input and lookahead are
+      // checked (each one's position bounds the array before it), then the
+      // lookup records.
+      if (!c.st(r, 2)) {
+        return false;
+      }
+      let ip = r + 2 + rd16(c.t, r) as usize * 2;
+      if (!c.st(ip, 2)) {
+        return false;
+      }
+      let lp1 = rd16(c.t, ip);
+      let lp = ip + 2 + (lp1 > 0 ? lp1 - 1 : 0) as usize * 2;
+      if (!c.st(lp, 2)) {
+        return false;
+      }
+      let rp = lp + 2 + rd16(c.t, lp) as usize * 2;
+      if (!c.array16(rp, 4)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Array16Of<Offset16To<RuleSet>> at p from base s
+fn rule_sets(var c&: San, p: usize, s: usize, chain: bool): bool {
+  if (!c.array16(p, 2)) {
+    return false;
+  }
+  for (let i in 0..rd16(c.t, p)) {
+    let (ok, o) = off16(c, p + 2 + i as usize * 2, s);
+    if (!ok || (o != 0 && !rule_set(c, s + o, chain))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Array16Of<Offset16To<Coverage>> at p from base s
+fn coverages(var c&: San, p: usize, s: usize): bool {
+  if (!c.array16(p, 2)) {
+    return false;
+  }
+  for (let i in 0..rd16(c.t, p)) {
+    if (!coverage_at(c, p + 2 + i as usize * 2, s)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn context(var c&: San, s: usize): bool {
+  if (!c.st(s, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, s);
+  if (format == 1) {
+    return coverage_at(c, s + 2, s) && rule_sets(c, s + 4, s, false);
+  }
+  if (format == 2) {
+    return coverage_at(c, s + 2, s) && class_def_at(c, s + 4, s) && rule_sets(c, s + 6, s, false);
+  }
+  if (format == 3) {
+    if (!c.st(s, 6)) {
+      return false;
+    }
+    let count = rd16(c.t, s + 2);
+    if (count == 0) {
+      return false;
+    }
+    if (!c.range(s + 6, count as u64 * 2)) {
+      return false;
+    }
+    for (let i in 0..count) {
+      if (!coverage_at(c, s + 6 + i as usize * 2, s)) {
+        return false;
+      }
+    }
+    let lr = s + 6 + count as usize * 2;
+    return c.range(lr, rd16(c.t, s + 4) as u64 * 4);
+  }
+  return true;
+}
+
+fn chain_context(var c&: San, s: usize): bool {
+  if (!c.st(s, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, s);
+  if (format == 1) {
+    return coverage_at(c, s + 2, s) && rule_sets(c, s + 4, s, true);
+  }
+  if (format == 2) {
+    return coverage_at(c, s + 2, s) && class_def_at(c, s + 4, s) && class_def_at(c, s + 6, s) && class_def_at(c, s + 8, s) &&
+           rule_sets(c, s + 10, s, true);
+  }
+  if (format == 3) {
+    let bp = s + 2;
+    if (!coverages(c, bp, s)) {
+      return false;
+    }
+    let ip = bp + 2 + rd16(c.t, bp) as usize * 2;
+    if (!coverages(c, ip, s)) {
+      return false;
+    }
+    if (rd16(c.t, ip) == 0) {
+      return false;
+    }
+    let lp = ip + 2 + rd16(c.t, ip) as usize * 2;
+    if (!coverages(c, lp, s)) {
+      return false;
+    }
+    let rp = lp + 2 + rd16(c.t, lp) as usize * 2;
+    return c.array16(rp, 4);
+  }
+  return true;
+}
+
+// --- GSUB subtables ----------------------------------------------------------------------------
+
+fn gsub_subtable(var c&: San, type_: u32, s: usize): bool {
+  if (type_ == 7) {
+    if (!c.st(s, 2)) {
+      return false;
+    }
+    if (rd16(c.t, s) != 1) {
+      return true;
+    }
+    if (!c.st(s, 8) || rd16(c.t, s + 2) == 7) {
+      return false;
+    }
+    let inner = rd16(c.t, s + 2);
+    if (inner < 1 || inner > 8) {
+      return true;
+    }
+    let o = rd32(c.t, s + 4) as usize;
+    if (o == 0) {
+      return false;  // the Null subtable is not in the blob
+    }
+    return gsub_subtable(c, inner, s + o);
+  }
+  if (type_ < 1 || type_ > 8) {
+    return true;
+  }
+  if (!c.st(s, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, s);
+  if (type_ == 1) {
+    if (format == 1) {
+      if (!(c.st(s, 6) && coverage_at(c, s + 2, s))) {
+        return false;
+      }
+      let o = rd16(c.t, s + 2) as usize;
+      return c.ops(o == 0 ? 0 : coverage_population(c.t, s + o) >> 1);
+    }
+    if (format == 2) {
+      return coverage_at(c, s + 2, s) && c.array16(s + 4, 2);
+    }
+    return true;
+  }
+  if (type_ == 2 || type_ == 3 || type_ == 4) {
+    if (format != 1) {
+      return true;
+    }
+    if (!coverage_at(c, s + 2, s) || !c.array16(s + 4, 2)) {
+      return false;
+    }
+    for (let i in 0..rd16(c.t, s + 4)) {
+      let (ok, o) = off16(c, s + 6 + i as usize * 2, s);
+      if (!ok) {
+        return false;
+      }
+      if (o == 0) {
+        continue;
+      }
+      let q = s + o;
+      if (type_ == 2 || type_ == 3) {
+        if (!c.array16(q, 2)) {
+          return false;
+        }
+      } else {
+        // LigatureSet: Array16Of<Offset16To<Ligature>>
+        if (!c.array16(q, 2)) {
+          return false;
+        }
+        for (let k in 0..rd16(c.t, q)) {
+          let (ok2, o2) = off16(c, q + 2 + k as usize * 2, q);
+          if (!ok2) {
+            return false;
+          }
+          if (o2 == 0) {
+            continue;
+          }
+          let l = q + o2;
+          // ligGlyph, then HeadlessArray16Of<HBGlyphID16>
+          if (!c.st(l, 2) || !c.st(l + 2, 2)) {
+            return false;
+          }
+          let lp1 = rd16(c.t, l + 2);
+          if (lp1 != 0 && !c.range(l + 4, (lp1 - 1) as u64 * 2)) {
+            return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+  if (type_ == 5) {
+    return context(c, s);
+  }
+  if (type_ == 6) {
+    return chain_context(c, s);
+  }
+  // 8: ReverseChainSingleSubst
+  if (format != 1) {
+    return true;
+  }
+  if (!coverage_at(c, s + 2, s) || !coverages(c, s + 4, s)) {
+    return false;
+  }
+  let lp = s + 6 + rd16(c.t, s + 4) as usize * 2;
+  if (!coverages(c, lp, s)) {
+    return false;
+  }
+  let sp = lp + 2 + rd16(c.t, lp) as usize * 2;
+  return c.array16(sp, 2);
+}
+
+// --- GPOS subtables ----------------------------------------------------------------------------
+
+fn value_len(format: u32): u32 => @pop_count(format & 0xFF);
+
+// ValueFormat::sanitize_value_devices
+fn value_devices(var c&: San, format: u32, base: usize, v_: usize): bool {
+  var v = v_;
+  for (let bit in [1u32, 2, 4, 8]) {
+    if ((format & bit) != 0) {
+      v += 2;
+    }
+  }
+  for (let bit in [0x10u32, 0x20, 0x40, 0x80]) {
+    if ((format & bit) != 0) {
+      if (!device_at(c, v, base)) {
+        return false;
+      }
+      v += 2;
+    }
+  }
+  return true;
+}
+
+fn values_stride(var c&: San, format: u32, base: usize, v_: usize, count: u64, stride: usize): bool {
+  if ((format & 0xF0) == 0) {
+    return true;
+  }
+  var v = v_;
+  for (let i in 0..count) {
+    if (!value_devices(c, format, base, v)) {
+      return false;
+    }
+    v += stride;
+  }
+  return true;
+}
+
+fn anchor(var c&: San, p: usize): bool {
+  if (!c.st(p, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, p);
+  if (format == 1) {
+    return c.st(p, 6);
+  }
+  if (format == 2) {
+    return c.st(p, 8);
+  }
+  if (format == 3) {
+    return c.st(p, 10) && device_at(c, p + 6, p) && device_at(c, p + 8, p);
+  }
+  return true;
+}
+
+fn anchor_at(var c&: San, p: usize, base: usize): bool {
+  let (ok, o) = off16(c, p, base);
+  if (!ok) {
+    return false;
+  }
+  return o == 0 || anchor(c, base + o);
+}
+
+fn anchor_matrix(var c&: San, p: usize, cols: u32): bool {
+  if (!c.st(p, 2)) {
+    return false;
+  }
+  let rows = rd16(c.t, p) as u64;
+  let count = rows * cols as u64;
+  if (count > 0xFFFFFFFF || !c.range(p + 2, count * 2)) {
+    return false;
+  }
+  if (c.lazy_gpos) {
+    return true;
+  }
+  for (let i in 0..count) {
+    if (!anchor_at(c, p + 2 + i as usize * 2, p)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn mark_array(var c&: San, p: usize): bool {
+  if (!c.array16(p, 4)) {
+    return false;
+  }
+  for (let i in 0..rd16(c.t, p)) {
+    let rec = p + 2 + i as usize * 4;
+    if (!c.st(rec, 4) || !anchor_at(c, rec + 2, p)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn gpos_subtable(var c&: San, type_: u32, s: usize): bool {
+  if (type_ == 9) {
+    if (!c.st(s, 2)) {
+      return false;
+    }
+    if (rd16(c.t, s) != 1) {
+      return true;
+    }
+    if (!c.st(s, 8) || rd16(c.t, s + 2) == 9) {
+      return false;
+    }
+    let inner = rd16(c.t, s + 2);
+    if (inner < 1 || inner > 9) {
+      return true;
+    }
+    let o = rd32(c.t, s + 4) as usize;
+    if (o == 0) {
+      return false;
+    }
+    return gpos_subtable(c, inner, s + o);
+  }
+  if (type_ < 1 || type_ > 9) {
+    return true;
+  }
+  if (!c.st(s, 2)) {
+    return false;
+  }
+  let format = rd16(c.t, s);
+  if (type_ == 1) {
+    let vf = rd16(c.t, s + 4);
+    let size = value_len(vf) as u64 * 2;
+    if (format == 1) {
+      if (!(c.st(s, 6) && coverage_at(c, s + 2, s))) {
+        return false;
+      }
+      let o = rd16(c.t, s + 2) as usize;
+      if (!c.ops(o == 0 ? 0 : coverage_population(c.t, s + o) >> 1)) {
+        return false;
+      }
+      if (!c.range(s + 6, size)) {
+        return false;
+      }
+      return c.lazy_gpos || (vf & 0xF0) == 0 || value_devices(c, vf, s, s + 6);
+    }
+    if (format == 2) {
+      if (!(c.st(s, 8) && coverage_at(c, s + 2, s))) {
+        return false;
+      }
+      let count = rd16(c.t, s + 6) as u64;
+      if (!c.range(s + 8, count * size)) {
+        return false;
+      }
+      return c.lazy_gpos || values_stride(c, vf, s, s + 8, count, size as usize);
+    }
+    return true;
+  }
+  if (type_ == 2) {
+    if (format == 1) {
+      if (!c.st(s, 10)) {
+        return false;
+      }
+      let vf1 = rd16(c.t, s + 4);
+      let vf2 = rd16(c.t, s + 6);
+      let len1 = value_len(vf1);
+      let len2 = value_len(vf2);
+      let stride = 2 * (1 + len1 + len2) as usize;
+      if (!coverage_at(c, s + 2, s) || !c.array16(s + 8, 2)) {
+        return false;
+      }
+      for (let i in 0..rd16(c.t, s + 8)) {
+        let (ok, o) = off16(c, s + 10 + i as usize * 2, s);
+        if (!ok) {
+          return false;
+        }
+        if (o == 0) {
+          continue;
+        }
+        let ps = s + o;
+        if (!c.st(ps, 2)) {
+          return false;
+        }
+        let n = rd16(c.t, ps) as u64;
+        if (!c.range(ps + 2, n * stride as u64)) {
+          return false;
+        }
+        if (!c.lazy_gpos) {
+          if (!values_stride(c, vf1, ps, ps + 4, n, stride) || !values_stride(c, vf2, ps, ps + 4 + len1 as usize * 2, n, stride)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+    if (format == 2) {
+      if (!(c.st(s, 16) && coverage_at(c, s + 2, s) && class_def_at(c, s + 8, s) && class_def_at(c, s + 10, s))) {
+        return false;
+      }
+      let vf1 = rd16(c.t, s + 4);
+      let vf2 = rd16(c.t, s + 6);
+      let len1 = value_len(vf1);
+      let len2 = value_len(vf2);
+      let stride = 2 * (len1 + len2) as u64;
+      let count = rd16(c.t, s + 12) as u64 * rd16(c.t, s + 14) as u64;
+      if (!c.range(s + 16, count * stride)) {
+        return false;
+      }
+      return c.lazy_gpos ||
+             (values_stride(c, vf1, s, s + 16, count, stride as usize) && values_stride(c, vf2, s, s + 16 + len1 as usize * 2, count, stride as usize));
+    }
+    return true;
+  }
+  if (type_ == 3) {
+    if (format != 1) {
+      return true;
+    }
+    if (!coverage_at(c, s + 2, s)) {
+      return false;
+    }
+    if (!c.array16(s + 4, 4)) {
+      return false;
+    }
+    if (c.lazy_gpos) {
+      return true;
+    }
+    for (let i in 0..rd16(c.t, s + 4)) {
+      let rec = s + 6 + i as usize * 4;
+      if (!anchor_at(c, rec, s) || !anchor_at(c, rec + 2, s)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (type_ == 4 || type_ == 5 || type_ == 6) {
+    if (format != 1) {
+      return true;
+    }
+    if (!(c.st(s, 12) && coverage_at(c, s + 2, s) && coverage_at(c, s + 4, s))) {
+      return false;
+    }
+    let class_count = rd16(c.t, s + 6);
+    let (ok, mo) = off16(c, s + 8, s);
+    if (!ok || (mo != 0 && !mark_array(c, s + mo))) {
+      return false;
+    }
+    let (ok2, bo) = off16(c, s + 10, s);
+    if (!ok2) {
+      return false;
+    }
+    if (bo == 0) {
+      return true;
+    }
+    if (type_ != 5) {
+      return anchor_matrix(c, s + bo, class_count);
+    }
+    // LigatureArray: List16OfOffset16To<LigatureAttach>, each an AnchorMatrix.
+    let la = s + bo;
+    if (!c.array16(la, 2)) {
+      return false;
+    }
+    for (let i in 0..rd16(c.t, la)) {
+      let (ok3, o3) = off16(c, la + 2 + i as usize * 2, la);
+      if (!ok3 || (o3 != 0 && !anchor_matrix(c, la + o3, class_count))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (type_ == 7) {
+    return context(c, s);
+  }
+  return chain_context(c, s);
+}
+
+// --- Lookups and the tables -----------------------------------------------------------------
+
+fn lookup(var c&: San, l: usize): bool {
+  if (!c.st(l, 6) || !c.array16(l + 4, 2)) {
+    return false;
+  }
+  let n = rd16(c.t, l + 4);
+  c.max_subtables += n as i64;
+  if (!(c.max_subtables < 0x4000)) {
+    return false;
+  }
+  let flag = rd16(c.t, l + 2);
+  if ((flag & 0x10) != 0 && !c.st(l + 6 + n as usize * 2, 2)) {
+    return false;
+  }
+  let type_ = rd16(c.t, l);
+  for (let i in 0..n) {
+    let (ok, o) = off16(c, l + 6 + i as usize * 2, l);
+    if (!ok) {
+      return false;
+    }
+    if (o == 0) {
+      continue;
+    }
+    let ok2 = c.is_gpos ? gpos_subtable(c, type_, l + o) : gsub_subtable(c, type_, l + o);
+    if (!ok2) {
+      return false;
+    }
+  }
+  let ext = c.is_gpos ? 9u32 : 7;
+  if (type_ == ext && n > 0) {
+    // all subtables of an Extension lookup have the same type
+    let type_of = fn(i: u32): u32 {
+      let o = rd16(c.t, l + 6 + i as usize * 2) as usize;
+      if (o == 0) {
+        return 0;
+      }
+      let s = l + o;
+      return rd16(c.t, s) == 1 ? rd16(c.t, s + 2) : 0;
+    };
+    let first = type_of(0);
+    for (let i in 1..n) {
+      if (type_of(i) != first) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// GSUBGPOS::sanitize: whether HarfBuzz keeps the table.
+pub fn sanitize_gsubgpos(t: &[u8], is_gpos: bool): bool {
+  var c = new_san(t);
+  c.is_gpos = is_gpos;
+  c.lazy_gpos = is_gpos;
+  if (!c.st(0, 4)) {
+    return #t == 0;
+  }
+  let major = rd16(t, 0);
+  if (major != 1) {
+    return true;
+  }
+  let (ok1, so) = off16(c, 4, 0);
+  if (!ok1 || (so != 0 && !script_list(c, so))) {
+    return false;
+  }
+  let (ok2, fo) = off16(c, 6, 0);
+  if (!ok2 || (fo != 0 && !feature_list(c, fo))) {
+    return false;
+  }
+  let (ok3, lo) = off16(c, 8, 0);
+  if (!ok3) {
+    return false;
+  }
+  if (lo != 0) {
+    if (!c.array16(lo, 2)) {
+      return false;
+    }
+    for (let i in 0..rd16(t, lo)) {
+      let (ok4, o) = off16(c, lo + 2 + i as usize * 2, lo);
+      if (!ok4 || (o != 0 && !lookup(c, lo + o))) {
+        return false;
+      }
+    }
+  }
+  if (rd32(t, 0) >= 0x00010001) {
+    let (ok5, vo) = off32(c, 10, 0);
+    if (!ok5 || (vo != 0 && !feature_variations(c, vo, 0))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// --- GDEF -------------------------------------------------------------------------------------
+
+fn item_variation_store(var c&: San, p: usize): bool {
+  if (!c.st(p, 8) || rd16(c.t, p) != 1) {
+    return false;
+  }
+  // regions: Offset32To<VarRegionList>
+  let (ok, ro) = off32(c, p + 2, p);
+  if (!ok) {
+    return false;
+  }
+  if (ro != 0) {
+    let r = p + ro;
+    if (!c.st(r, 4)) {
+      return false;
+    }
+    let n = rd16(c.t, r) as u64 * rd16(c.t, r + 2) as u64;
+    if (!c.range(r + 4, n * 6)) {
+      return false;
+    }
+  }
+  // dataSets: Array16Of<Offset32To<VarData>>
+  if (!c.array16(p + 6, 4)) {
+    return false;
+  }
+  for (let i in 0..rd16(c.t, p + 6)) {
+    let (ok2, o) = off32(c, p + 8 + i as usize * 4, p);
+    if (!ok2) {
+      return false;
+    }
+    if (o == 0) {
+      continue;
+    }
+    let d = p + o;
+    if (!c.st(d, 6) || !c.array16(d + 4, 2)) {
+      return false;
+    }
+    let item_count = rd16(c.t, d) as u64;
+    let word_size_count = rd16(c.t, d + 2);
+    let region_count = rd16(c.t, d + 4);
+    let word_count = word_size_count & 0x7FFF;
+    let long_words = (word_size_count & 0x8000) != 0;
+    if (word_count > region_count) {
+      return false;
+    }
+    let row = long_words ? (region_count + word_count) as u64 * 2 : (region_count + word_count) as u64;
+    if (!c.range(d + 6 + region_count as usize * 2, item_count * row)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// GDEF::sanitize
+pub fn sanitize_gdef(t: &[u8]): bool {
+  var c = new_san(t);
+  if (!c.st(0, 4)) {
+    return #t == 0;
+  }
+  if (rd16(t, 0) != 1) {
+    return true;
+  }
+  let version = rd32(t, 0);
+  // version (check_struct of FixedVersion), then the offsets one by one.
+  if (!class_def_at(c, 4, 0)) {
+    return false;
+  }
+  // AttachList
+  let (ok1, ao) = off16(c, 6, 0);
+  if (!ok1) {
+    return false;
+  }
+  if (ao != 0) {
+    if (!coverage_at(c, ao, ao) || !c.array16(ao + 2, 2)) {
+      return false;
+    }
+    for (let i in 0..rd16(t, ao + 2)) {
+      let (ok, o) = off16(c, ao + 4 + i as usize * 2, ao);
+      if (!ok || (o != 0 && !c.array16(ao + o, 2))) {
+        return false;
+      }
+    }
+  }
+  // LigCaretList
+  let (ok2, lo) = off16(c, 8, 0);
+  if (!ok2) {
+    return false;
+  }
+  if (lo != 0) {
+    if (!coverage_at(c, lo, lo) || !c.array16(lo + 2, 2)) {
+      return false;
+    }
+    for (let i in 0..rd16(t, lo + 2)) {
+      let (ok, o) = off16(c, lo + 4 + i as usize * 2, lo);
+      if (!ok) {
+        return false;
+      }
+      if (o == 0) {
+        continue;
+      }
+      let lg = lo + o;
+      if (!c.array16(lg, 2)) {
+        return false;
+      }
+      for (let k in 0..rd16(t, lg)) {
+        let (ok3, o3) = off16(c, lg + 2 + k as usize * 2, lg);
+        if (!ok3) {
+          return false;
+        }
+        if (o3 == 0) {
+          continue;
+        }
+        let cv = lg + o3;
+        if (!c.st(cv, 2)) {
+          return false;
+        }
+        let f = rd16(t, cv);
+        let ok4 = match (f) {
+          1 | 2 => c.st(cv, 4),
+          3 => c.st(cv, 6) && device_at(c, cv + 4, cv),
+          _ => true,
+        };
+        if (!ok4) {
+          return false;
+        }
+      }
+    }
+  }
+  if (!class_def_at(c, 10, 0)) {
+    return false;
+  }
+  if (version >= 0x00010002) {
+    let (ok5, mo) = off16(c, 12, 0);
+    if (!ok5) {
+      return false;
+    }
+    if (mo != 0) {
+      if (!c.st(mo, 2)) {
+        return false;
+      }
+      if (rd16(t, mo) == 1) {
+        // Array16Of<Offset32To<Coverage>>
+        if (!c.array16(mo + 2, 4)) {
+          return false;
+        }
+        for (let i in 0..rd16(t, mo + 2)) {
+          let (ok6, o) = off32(c, mo + 4 + i as usize * 4, mo);
+          if (!ok6 || (o != 0 && !coverage(c, mo + o))) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  if (version >= 0x00010003) {
+    let (ok7, vo) = off32(c, 14, 0);
+    if (!ok7 || (vo != 0 && !item_variation_store(c, vo))) {
+      return false;
+    }
+  }
+  return true;
+}

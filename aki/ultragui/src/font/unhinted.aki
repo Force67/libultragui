@@ -1,0 +1,87 @@
+// The unhinted numbers HarfBuzz's FreeType font functions (harfbuzz 13.2.1
+// src/hb-ft.cc) give the shaper, computed the way hb_ft computes them from
+// FreeType 2.14.3:
+//
+// - hb_ft_get_glyph_h_advances: FT_Get_Advance(face, gid, FT_LOAD_DEFAULT |
+//   FT_LOAD_NO_HINTING), which for TrueType is the 'hmtx' advance scaled by
+//   FT_MulFix(1024 * advance, x_scale) (base/ftadvanc.c, the fast path),
+//   then (int)(|v| * 1.0f + 512) >> 10 in float;
+// - hb_ft_get_glyph_extents: FT_Load_Glyph(FT_LOAD_DEFAULT |
+//   FT_LOAD_NO_HINTING) metrics, roundf'ed as hb_font_t::scale_glyph_extents
+//   does;
+// - hb_ft_get_glyph_contour_point: a point of that unhinted outline.
+//
+// The scales are positive (no hb transform), so hb's x_mult/y_mult are 1.
+// For a CFF face the outline comes from the CFF loader (font/cff): the
+// integration step routes `Face::load_glyph_unhinted` there.
+
+module ultragui::font::unhinted;
+
+import {Face} from ultragui::font::face;
+import {mul_fix} from ultragui::font::fixed;
+import {GlyphFormat} from ultragui::font::outline;
+import {FontError} from ultragui::font::sfnt;
+import {face_metrics} from ultragui::font::tt_glyph;
+
+// hb_glyph_extents_t.
+pub struct GlyphExtents : Copy, Equal {
+  pub var x_bearing: i32 = 0
+  pub var y_bearing: i32 = 0
+  pub var width: i32 = 0
+  pub var height: i32 = 0
+}
+
+// FT_Get_Advance(face, gid, FT_LOAD_DEFAULT | FT_LOAD_NO_HINTING): 16.16
+// pixels. (TrueType and CFF-in-sfnt both take the 'hmtx' fast path.)
+pub fn ft_advance(face&: Face, gid: u32): i64 ! FontError {
+  if (gid >= face.num_glyphs) {
+    return fail FontError::InvalidGlyphIndex;
+  }
+  let (_, aw) = face_metrics(face, false, gid);
+  return mul_fix(1024 * aw as i64, face.size.metrics.x_scale);
+}
+
+// hb_ft_get_glyph_h_advances for one glyph (26.6; 0 when FreeType fails).
+pub fn hb_h_advance(face&: Face, gid: u32): i32 {
+  var v: i64 = 0;
+  if (let a = ft_advance(face, gid)) {
+    v = a;
+  }
+  if (v < 0) {
+    v = 0 - v;
+  }
+  let f = (v as f32) * 1.0f32 + 512.0f32;
+  return (f as i32) >> 10;
+}
+
+// hb_ft_get_glyph_extents: none when FT_Load_Glyph fails.
+pub fn hb_extents(var face&: Face, gid: u32): GlyphExtents? {
+  let g = face.load_glyph_unhinted(gid) else {
+    return none;
+  };
+  let x1 = g.metrics.hori_bearing_x as f32;
+  let y1 = g.metrics.hori_bearing_y as f32;
+  let x2 = x1 + (g.metrics.width as f32);
+  let y2 = y1 + (0 - g.metrics.height) as f32;
+  let xb = @round(x1);
+  let yb = @round(y1);
+  return GlyphExtents {
+    x_bearing: xb as i32,
+    y_bearing: yb as i32,
+    width: (@round(x2) - xb) as i32,
+    height: (@round(y2) - yb) as i32,
+  };
+}
+
+// hb_ft_get_glyph_contour_point: none when the load fails, the glyph is not
+// an outline, or there is no such point.
+pub fn hb_contour_point(var face&: Face, gid: u32, point: u32): (i32, i32)? {
+  let g = face.load_glyph_unhinted(gid) else {
+    return none;
+  };
+  if (!(g.format is GlyphFormat::Outline) || point as usize >= g.outline.points.len()) {
+    return none;
+  }
+  let p = g.outline.points[point as usize];
+  return (p.x as i32, p.y as i32);
+}

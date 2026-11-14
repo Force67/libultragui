@@ -1,0 +1,887 @@
+// graphite2's segment (Segment.cpp, Slot.cpp, CharInfo.h, Face.cpp's glyph
+// metrics): the slots the passes rewrite, linked in a list, with their glyph,
+// character association, slot attributes, attachment tree and positions;
+// slot allocation (blocks and a free list, whose sizes decide when an
+// insertion fails), reversal for right-to-left passes, mirroring, the
+// character association after the substitution passes, and Slot::finalise's
+// positioning.
+//
+// Differences in shape: slots live in one list and refer to each other by
+// index (kNone for a null pointer); a slot's user attributes are at its index
+// in `user_attrs`, the C++'s per-slot pointer, which copies keep. Positions
+// are f32 as in the C++ (with no gr_font, graphite2 works in font units).
+// Collision avoidance (SlotCollision) is not modeled: a face whose Silf asks
+// for it is shaped without it (no font of the corpus does; see PORTING).
+
+module ultragui::shape::graphite::segment;
+
+import {List} from akikit::containers::list;
+import {Features} from ultragui::shape::graphite::features;
+import {GlyphCache, kMetAdvHeight, kMetAdvWidth, kMetAscent, kMetBbBottom, kMetBbHeight, kMetBbLeft, kMetBbRight, kMetBbTop, kMetBbWidth,
+        kMetDescent, kMetLsb, kMetRsb} from ultragui::shape::graphite::glyphs;
+import {Silf} from ultragui::shape::graphite::silf;
+
+pub comptime let kNone: u32 = 0xFFFFFFFF;
+
+// Slot::Flag
+pub comptime let kSlotDeleted: u32 = 1;
+pub comptime let kSlotInserted: u32 = 2;
+pub comptime let kSlotCopied: u32 = 4;
+pub comptime let kSlotPositioned: u32 = 8;
+
+// gr_attrCode
+pub comptime let kSlatAdvX: u32 = 0;
+pub comptime let kSlatAdvY: u32 = 1;
+pub comptime let kSlatAttTo: u32 = 2;
+pub comptime let kSlatAttX: u32 = 3;
+pub comptime let kSlatAttY: u32 = 4;
+pub comptime let kSlatAttXOff: u32 = 6;
+pub comptime let kSlatAttYOff: u32 = 7;
+pub comptime let kSlatAttWithX: u32 = 8;
+pub comptime let kSlatAttWithY: u32 = 9;
+pub comptime let kSlatAttWithXOff: u32 = 11;
+pub comptime let kSlatAttWithYOff: u32 = 12;
+pub comptime let kSlatAttLevel: u32 = 13;
+pub comptime let kSlatBreak: u32 = 14;
+pub comptime let kSlatCompRef: u32 = 15;
+pub comptime let kSlatDir: u32 = 16;
+pub comptime let kSlatInsert: u32 = 17;
+pub comptime let kSlatPosX: u32 = 18;
+pub comptime let kSlatPosY: u32 = 19;
+pub comptime let kSlatShiftX: u32 = 20;
+pub comptime let kSlatShiftY: u32 = 21;
+pub comptime let kSlatUserDefnV1: u32 = 22;
+pub comptime let kSlatMeasureSol: u32 = 23;
+pub comptime let kSlatMeasureEol: u32 = 24;
+pub comptime let kSlatJStretch: u32 = 25;
+pub comptime let kSlatJWidth: u32 = 29;
+pub comptime let kSlatSegSplit: u32 = 54;
+pub comptime let kSlatUserDefn: u32 = 55;
+pub comptime let kSlatBidiLevel: u32 = 56;
+
+pub struct Pos : Copy {
+  pub var x: f32 = 0.0
+  pub var y: f32 = 0.0
+}
+
+fn pos(x: f32, y: f32): Pos => Pos { x, y };
+fn add(a: Pos, b: Pos): Pos => Pos { x: a.x + b.x, y: a.y + b.y };
+
+pub struct Rect : Copy {
+  pub var bl: Pos = Pos {}
+  pub var tr: Pos = Pos {}
+}
+
+pub struct Slot : Copy {
+  pub var next: u32 = kNone
+  pub var prev: u32 = kNone
+  pub var glyphid: u32 = 0
+  pub var realglyphid: u32 = 0
+  pub var original: i32 = 0
+  pub var before: i32 = 0
+  pub var after: i32 = 0
+  pub var index: u32 = 0
+  pub var parent: u32 = kNone
+  pub var child: u32 = kNone
+  pub var sibling: u32 = kNone
+  pub var position: Pos = Pos {}
+  pub var shift: Pos = Pos {}
+  pub var advance: Pos = Pos {}
+  pub var attach: Pos = Pos {}
+  pub var with: Pos = Pos {}
+  pub var just: f32 = 0.0
+  pub var flags: u32 = 0
+  pub var att_level: u32 = 0
+  pub var bidi_cls: i32 = -1
+  pub var bidi_level: u32 = 0
+  pub var justs: u32 = kNone  // m_justs: an entry of Segment::justs, shared by copies
+
+  // Slot::glyph
+  pub fn glyph(self&): u32 => self.realglyphid != 0 ? self.realglyphid : self.glyphid;
+  pub fn is_deleted(self&): bool => (self.flags & kSlotDeleted) != 0;
+  pub fn is_copied(self&): bool => (self.flags & kSlotCopied) != 0;
+  pub fn is_insert_before(self&): bool => (self.flags & kSlotInserted) == 0;
+  pub fn is_base(self&): bool => self.parent == kNone;
+}
+
+pub struct CharInfo : Copy {
+  pub var ch: u32 = 0
+  pub var before: i32 = -1
+  pub var after: i32 = -1
+  pub var base: usize = 0
+  pub var fid: u32 = 0      // uint8
+  pub var brk: i32 = 0      // int8
+  pub var flags: u32 = 0    // uint8
+}
+
+pub struct Segment {
+  pub var slots: List<Slot> = List()
+  pub var user_attrs: List<i16> = List()
+  pub var justs: List<i16> = List()   // SlotJustify values, 5 per level (at least one level)
+  pub var free: u32 = kNone
+  pub var buf_size: usize = 0
+  pub var num_user: usize = 0
+  pub var just_size: usize = 5
+  pub var charinfo: List<CharInfo> = List()
+  pub var feats: List<Features> = List()
+  pub var first: u32 = kNone
+  pub var last: u32 = kNone
+  pub var num_glyphs: i64 = 0
+  pub var num_charinfo: usize = 0
+  pub var default_original: i32 = 0
+  pub var dir: i32 = 0          // int8
+  pub var flags: u32 = 0        // uint8
+  pub var pass_bits: u32 = 0    // uint8
+  pub var advance: Pos = Pos {}
+
+  pub fn slot_count(self&): i64 => self.num_glyphs;
+  pub fn currdir(self&): bool => (((self.dir >> 6) ^ self.dir) & 1) != 0;
+  pub fn s(self&, i: u32): &Slot => self.slots[i as usize];
+  pub fn sv(var self&, i: u32): &var Slot => self.slots[i as usize];
+
+  pub fn new_slot(var self&): u32;
+  pub fn free_slot(var self&, s: u32);
+  pub fn add_child(var self&, s: u32, ap: u32): bool;
+  pub fn add_sibling(var self&, s0: u32, ap: u32): bool;
+  pub fn remove_child(var self&, s: u32, ap: u32): bool;
+  pub fn set_glyph(var self&, silf&: Silf, glyphs&: GlyphCache, s: u32, gid: u32);
+  pub fn append_slot(var self&, silf&: Silf, glyphs&: GlyphCache, id: usize, cid: u32, gid: u32, fid: u32, coffset: usize);
+  pub fn bidi_class(var self&, silf&: Silf, glyphs&: GlyphCache, s: u32): i32;
+  pub fn reverse_slots(var self&, silf&: Silf, glyphs&: GlyphCache);
+  pub fn do_mirror(var self&, silf&: Silf, glyphs&: GlyphCache, a_mirror: u32);
+  pub fn finalise(var self&, glyphs&: GlyphCache, s: u32, base: Pos, var bbox&: Rect, attr_level: u32, var cluster_min&: f32, rtl: bool, depth: i32): Pos;
+  pub fn position_slots(var self&, silf&: Silf, glyphs&: GlyphCache, start0: u32, end0: u32, is_rtl: bool): Pos;
+  pub fn associate_chars(var self&, offset: usize, num: usize);
+  pub fn glyph_metric(var self&, glyphs&: GlyphCache, s: u32, metric: u32, attr_level: u32, rtl: bool): i32;
+  pub fn get_attr(self&, silf&: Silf, glyphs&: GlyphCache, s: u32, ind: u32, sub0: u32): i32;
+  pub fn set_attr(var self&, silf&: Silf, glyphs&: GlyphCache, s: u32, ind0: u32, sub0: u32, value0: i32, map&: [u32], map_dir: u32);
+}
+
+// log_binary(n) + 1: the bit length of n.
+fn bit_length(n: usize): usize {
+  var v = n;
+  var b = 0usize;
+  while (v != 0) {
+    b += 1;
+    v >>= 1;
+  }
+  return b;
+}
+
+// Segment::Segment
+pub fn new_segment(numchars: usize, silf&: Silf, dir: i32): Segment {
+  var seg = Segment {};
+  seg.buf_size = numchars + 10;
+  seg.num_glyphs = numchars as i64;
+  seg.num_charinfo = numchars;
+  seg.num_user = silf.a_user as usize;
+  seg.just_size = 5 * (silf.num_justs > 1 ? silf.num_justs as usize : 1);
+  for (let i in 0..numchars) {
+    seg.charinfo.push(CharInfo {});
+  }
+  seg.dir = ((dir & 0xFF) as u8 as i8) as i32;
+  seg.flags = ((silf.flags & 0x20) != 0 ? 1u32 : 0) << 1;
+  seg.pass_bits = silf.a_pass_bits != 0 ? 0xFF : 0;
+  let s = seg.new_slot();
+  seg.free_slot(s);
+  seg.buf_size = bit_length(numchars);
+  return seg;
+}
+
+// Segment::newSlot: kNone when the segment may grow no more.
+fn Segment::new_slot(var self&): u32 {
+  if (self.free == kNone) {
+    if (self.num_glyphs > self.num_charinfo as i64 * 64) {
+      return kNone;
+    }
+    let base = self.slots.len() as u32;
+    let n = self.buf_size;
+    for (let i in 0..n) {
+      var sl = Slot {};
+      sl.next = i + 1 < n ? base + i as u32 + 1 : kNone;
+      self.slots.push(sl);
+      for (let k in 0..self.num_user) {
+        self.user_attrs.push(0);
+      }
+    }
+    self.slots[base as usize].next = kNone;
+    self.free = n > 1 ? base + 1 : kNone;
+    return base;
+  }
+  let res = self.free;
+  self.free = self.slots[res as usize].next;
+  self.slots[res as usize].next = kNone;
+  return res;
+}
+
+// Segment::freeSlot
+fn Segment::free_slot(var self&, s: u32) {
+  if (s == kNone) {
+    return;
+  }
+  if (self.last == s) {
+    self.last = self.slots[s as usize].prev;
+  }
+  if (self.first == s) {
+    self.first = self.slots[s as usize].next;
+  }
+  let parent = self.slots[s as usize].parent;
+  if (parent != kNone) {
+    let _ = self.remove_child(parent, s);
+  }
+  while (self.slots[s as usize].child != kNone) {
+    let c = self.slots[s as usize].child;
+    if (self.slots[c as usize].parent == s) {
+      self.slots[c as usize].parent = kNone;
+      let _ = self.remove_child(s, c);
+    } else {
+      self.slots[s as usize].child = kNone;
+    }
+  }
+  self.slots[s as usize] = Slot {};
+  for (let k in 0..self.num_user) {
+    self.user_attrs[s as usize * self.num_user + k] = 0;
+  }
+  self.slots[s as usize].next = self.free;
+  self.free = s;
+}
+
+// Segment::newJustify + SlotJustify::LoadSlot
+fn Segment::new_justify(var self&, silf&: Silf, glyphs&: GlyphCache, s: u32): u32 {
+  let at = self.justs.len() / self.just_size;
+  for (let i in 0..self.just_size) {
+    self.justs.push(0);
+  }
+  let gid = self.slots[s as usize].glyphid;
+  var i = silf.num_justs as i32 - 1;
+  while (i >= 0) {
+    let j = silf.justs[i as usize];
+    let v = at * self.just_size + i as usize * 5;
+    self.justs[v] = glyphs.glyph_attr(gid, j >> 24) as i16;
+    self.justs[v + 1] = glyphs.glyph_attr(gid, (j >> 16) & 0xFF) as i16;
+    self.justs[v + 2] = glyphs.glyph_attr(gid, (j >> 8) & 0xFF) as i16;
+    self.justs[v + 3] = glyphs.glyph_attr(gid, j & 0xFF) as i16;
+    i -= 1;
+  }
+  return at as u32;
+}
+
+// Slot::child
+fn Segment::add_child(var self&, s: u32, ap: u32): bool {
+  if (s == ap) {
+    return false;
+  }
+  if (ap == self.slots[s as usize].child) {
+    return true;
+  }
+  if (self.slots[s as usize].child == kNone) {
+    self.slots[s as usize].child = ap;
+    return true;
+  }
+  return self.add_sibling(self.slots[s as usize].child, ap);
+}
+
+// Slot::sibling
+fn Segment::add_sibling(var self&, s0: u32, ap: u32): bool {
+  var s = s0;
+  while (true) {
+    if (s == ap) {
+      return false;
+    }
+    let sib = self.slots[s as usize].sibling;
+    if (ap == sib) {
+      return true;
+    }
+    if (sib == kNone || ap == kNone) {
+      self.slots[s as usize].sibling = ap;
+      return true;
+    }
+    s = sib;
+  }
+  return false;
+}
+
+// Slot::removeChild
+fn Segment::remove_child(var self&, s: u32, ap: u32): bool {
+  let c = self.slots[s as usize].child;
+  if (s == ap || c == kNone || ap == kNone) {
+    return false;
+  }
+  if (ap == c) {
+    let n = self.slots[c as usize].sibling;
+    self.slots[c as usize].sibling = kNone;
+    self.slots[s as usize].child = n;
+    return true;
+  }
+  var p = c;
+  while (p != kNone) {
+    let ps = self.slots[p as usize].sibling;
+    if (ps != kNone && ps == ap) {
+      self.slots[p as usize].sibling = self.slots[ps as usize].sibling;
+      self.slots[ap as usize].sibling = kNone;
+      return true;
+    }
+    p = ps;
+  }
+  return false;
+}
+
+// Slot::setGlyph
+fn Segment::set_glyph(var self&, silf&: Silf, glyphs&: GlyphCache, s: u32, gid: u32) {
+  self.slots[s as usize].glyphid = gid & 0xFFFF;
+  self.slots[s as usize].bidi_cls = -1;
+  let g = gid & 0xFFFF;
+  if (g >= glyphs.num_glyphs) {
+    self.slots[s as usize].realglyphid = 0;
+    self.slots[s as usize].advance = Pos {};
+    return;
+  }
+  let the& = glyphs.glyphs[g as usize];
+  var real = glyphs.attr_of(the, silf.a_pseudo);
+  if (real > glyphs.num_glyphs) {
+    real = 0;
+  }
+  self.slots[s as usize].realglyphid = real;
+  var adv = the.advance;
+  if (real != 0 && real < glyphs.num_glyphs) {
+    adv = glyphs.glyphs[real as usize].advance;
+  }
+  self.slots[s as usize].advance = pos(adv, 0.0);
+  if (silf.a_pass_bits != 0) {
+    self.pass_bits &= glyphs.attr_of(the, silf.a_pass_bits) & 0xFF;
+    if (silf.num_passes > 16) {
+      self.pass_bits &= (glyphs.attr_of(the, silf.a_pass_bits + 1) << 16) & 0xFF;
+    }
+  }
+}
+
+// Segment::appendSlot
+fn Segment::append_slot(var self&, silf&: Silf, glyphs&: GlyphCache, id: usize, cid: u32, gid: u32, fid: u32, coffset: usize) {
+  let s = self.new_slot();
+  if (s == kNone) {
+    return;
+  }
+  self.charinfo[id].ch = cid;
+  self.charinfo[id].fid = fid & 0xFF;
+  self.charinfo[id].base = coffset;
+  let has = gid < glyphs.num_glyphs;
+  let brk = has ? glyphs.attr_of(glyphs.glyphs[gid as usize], silf.a_break) : 0;
+  self.charinfo[id].brk = ((brk & 0xFF) as u8 as i8) as i32;
+  self.set_glyph(silf, glyphs, s, gid);
+  self.slots[s as usize].original = id as i32;
+  self.slots[s as usize].before = id as i32;
+  self.slots[s as usize].after = id as i32;
+  if (self.last != kNone) {
+    self.slots[self.last as usize].next = s;
+  }
+  self.slots[s as usize].prev = self.last;
+  self.last = s;
+  if (self.first == kNone) {
+    self.first = s;
+  }
+  if (has && silf.a_pass_bits != 0) {
+    let g& = glyphs.glyphs[gid as usize];
+    let hi = silf.num_passes > 16 ? glyphs.attr_of(g, silf.a_pass_bits + 1) << 16 : 0;
+    self.pass_bits &= (glyphs.attr_of(g, silf.a_pass_bits) | hi) & 0xFF;
+  }
+}
+
+// Segment::getSlotBidiClass
+fn Segment::bidi_class(var self&, silf&: Silf, glyphs&: GlyphCache, s: u32): i32 {
+  let c = self.slots[s as usize].bidi_cls;
+  if (c != -1) {
+    return c;
+  }
+  let r = ((glyphs.glyph_attr(self.slots[s as usize].glyphid, silf.a_bidi) & 0xFF) as u8 as i8) as i32;
+  self.slots[s as usize].bidi_cls = r;
+  return r;
+}
+
+// Segment::reverseSlots: reverse the slots, diacritics (bidi class 16)
+// staying after their bases.
+fn Segment::reverse_slots(var self&, silf&: Silf, glyphs&: GlyphCache) {
+  self.dir = self.dir ^ 64;
+  if (self.first == self.last) {
+    return;
+  }
+  var curr = self.first;
+  while (curr != kNone && self.bidi_class(silf, glyphs, curr) == 16) {
+    curr = self.slots[curr as usize].next;
+  }
+  if (curr == kNone) {
+    return;
+  }
+  let tfirst = self.slots[curr as usize].prev;
+  var tlast = curr;
+  var out = kNone;
+  var t = kNone;
+  while (curr != kNone) {
+    if (self.bidi_class(silf, glyphs, curr) == 16) {
+      var d = self.slots[curr as usize].next;
+      while (d != kNone && self.bidi_class(silf, glyphs, d) == 16) {
+        d = self.slots[d as usize].next;
+      }
+      d = d != kNone ? self.slots[d as usize].prev : self.last;
+      let p = self.slots[out as usize].next;
+      if (p != kNone) {
+        self.slots[p as usize].prev = d;
+      } else {
+        tlast = d;
+      }
+      t = self.slots[d as usize].next;
+      self.slots[d as usize].next = p;
+      self.slots[curr as usize].prev = out;
+      self.slots[out as usize].next = curr;
+    } else {
+      if (out != kNone) {
+        self.slots[out as usize].prev = curr;
+      }
+      t = self.slots[curr as usize].next;
+      self.slots[curr as usize].next = out;
+      out = curr;
+    }
+    curr = t;
+  }
+  self.slots[out as usize].prev = tfirst;
+  if (tfirst != kNone) {
+    self.slots[tfirst as usize].next = out;
+  } else {
+    self.first = out;
+  }
+  self.last = tlast;
+}
+
+// Segment::doMirror
+fn Segment::do_mirror(var self&, silf&: Silf, glyphs&: GlyphCache, a_mirror: u32) {
+  var s = self.first;
+  while (s != kNone) {
+    let gid = self.slots[s as usize].glyphid;
+    let g = glyphs.glyph_attr(gid, a_mirror) as u32 & 0xFFFF;
+    if (g != 0 && ((self.dir & 4) == 0 || glyphs.glyph_attr(gid, a_mirror + 1) == 0)) {
+      self.set_glyph(silf, glyphs, s, g);
+    }
+    s = self.slots[s as usize].next;
+  }
+}
+
+// Slot::floodShift
+fn Segment::flood_shift(var self&, s: u32, adj: Pos, depth: i32) {
+  if (depth > 100) {
+    return;
+  }
+  self.slots[s as usize].position = add(self.slots[s as usize].position, adj);
+  let c = self.slots[s as usize].child;
+  if (c != kNone) {
+    self.flood_shift(c, adj, depth + 1);
+  }
+  let n = self.slots[s as usize].sibling;
+  if (n != kNone) {
+    self.flood_shift(n, adj, depth + 1);
+  }
+}
+
+// Rect::widen
+fn widen(a: Rect, b: Rect): Rect => Rect {
+  bl: pos(a.bl.x > b.bl.x ? b.bl.x : a.bl.x, a.bl.y > b.bl.y ? b.bl.y : a.bl.y),
+  tr: pos(a.tr.x > b.tr.x ? a.tr.x : b.tr.x, a.tr.y > b.tr.y ? a.tr.y : b.tr.y),
+};
+
+// Slot::finalise with no font (scale 1) and no collision information.
+fn Segment::finalise(var self&, glyphs&: GlyphCache, s: u32, base: Pos, var bbox&: Rect, attr_level: u32, var cluster_min&: f32, rtl: bool,
+                         depth: i32): Pos {
+  let sl = self.slots[s as usize];
+  if (depth > 100 || (attr_level != 0 && sl.att_level > attr_level)) {
+    return Pos {};
+  }
+  let sign: f32 = rtl ? -1.0 : 1.0;
+  let sx = sl.shift.x * sign;
+  let shift = pos(sx + sl.just, sl.shift.y);
+  let t_advance = sl.advance.x + sl.just;
+  var res = Pos {};
+  var p = add(base, shift);
+  if (sl.parent == kNone) {
+    res = add(base, pos(t_advance, sl.advance.y));
+    cluster_min = p.x;
+  } else {
+    p = add(p, pos(sl.attach.x - sl.with.x, sl.attach.y - sl.with.y));
+    let t_adv: f32 = sl.advance.x >= 0.5 ? p.x + t_advance - shift.x : 0.0;
+    res = pos(t_adv, 0.0);
+    if ((sl.advance.x >= 0.5 || p.x < 0.0) && p.x < cluster_min) {
+      cluster_min = p.x;
+    }
+  }
+  self.slots[s as usize].position = p;
+  let g = sl.glyph();
+  if (g < glyphs.num_glyphs) {
+    let gf& = glyphs.glyphs[g as usize];
+    let ours = Rect { bl: pos(gf.bl_x + p.x, gf.bl_y + p.y), tr: pos(gf.tr_x + p.x, gf.tr_y + p.y) };
+    bbox = widen(bbox, ours);
+  }
+  let c = sl.child;
+  if (c != kNone && c != s && self.slots[c as usize].parent == s) {
+    let t_res = self.finalise(glyphs, c, p, bbox, attr_level, cluster_min, rtl, depth + 1);
+    if ((sl.parent == kNone || sl.advance.x >= 0.5) && t_res.x > res.x) {
+      res = t_res;
+    }
+  }
+  let sib = sl.sibling;
+  if (sl.parent != kNone && sib != kNone && sib != s && self.slots[sib as usize].parent == sl.parent) {
+    let t_res = self.finalise(glyphs, sib, base, bbox, attr_level, cluster_min, rtl, depth + 1);
+    if (t_res.x > res.x) {
+      res = t_res;
+    }
+  }
+  if (sl.parent == kNone && cluster_min < base.x) {
+    let here = self.slots[s as usize].position;
+    let adj = pos(here.x - cluster_min, 0.0);
+    res = add(res, adj);
+    self.slots[s as usize].position = add(here, adj);
+    if (c != kNone) {
+      self.flood_shift(c, adj, 0);
+    }
+  }
+  return res;
+}
+
+// Segment::positionSlots with no font: positions the slots from `start` to
+// `end` (kNone: the segment's ends) and returns the advance.
+fn Segment::position_slots(var self&, silf&: Silf, glyphs&: GlyphCache, start0: u32, end0: u32, is_rtl: bool): Pos {
+  var currpos = Pos {};
+  var cluster_min: f32 = 0.0;
+  var bbox = Rect {};
+  let reorder = self.currdir() != is_rtl;
+  var start = start0;
+  var end = end0;
+  if (reorder) {
+    self.reverse_slots(silf, glyphs);
+    start = end0;
+    end = start0;
+  }
+  if (start == kNone) {
+    start = self.first;
+  }
+  if (end == kNone) {
+    end = self.last;
+  }
+  if (start == kNone || end == kNone) {
+    return currpos;
+  }
+  if (is_rtl) {
+    let stop = self.slots[start as usize].prev;
+    var s = end;
+    while (s != kNone && s != stop) {
+      if (self.slots[s as usize].is_base()) {
+        cluster_min = currpos.x;
+        currpos = self.finalise(glyphs, s, currpos, bbox, 0, cluster_min, is_rtl, 0);
+      }
+      s = self.slots[s as usize].prev;
+    }
+  } else {
+    let stop = self.slots[end as usize].next;
+    var s = start;
+    while (s != kNone && s != stop) {
+      if (self.slots[s as usize].is_base()) {
+        cluster_min = currpos.x;
+        currpos = self.finalise(glyphs, s, currpos, bbox, 0, cluster_min, is_rtl, 0);
+      }
+      s = self.slots[s as usize].next;
+    }
+  }
+  if (reorder) {
+    self.reverse_slots(silf, glyphs);
+  }
+  return currpos;
+}
+
+// Segment::associateChars
+fn Segment::associate_chars(var self&, offset: usize, num: usize) {
+  for (let k in offset..offset + num) {
+    self.charinfo[k].before = -1;
+    self.charinfo[k].after = -1;
+  }
+  var i = 0i32;
+  var s = self.first;
+  while (s != kNone) {
+    var j = self.slots[s as usize].before;
+    if (j >= 0) {
+      let after = self.slots[s as usize].after;
+      while (j <= after) {
+        if (j as usize < self.num_charinfo) {
+          let c& = self.charinfo[j as usize];
+          if (c.before == -1 || i < c.before) {
+            self.charinfo[j as usize].before = i;
+          }
+          if (self.charinfo[j as usize].after < i) {
+            self.charinfo[j as usize].after = i;
+          }
+        }
+        j += 1;
+      }
+    }
+    self.slots[s as usize].index = i as u32;
+    i += 1;
+    s = self.slots[s as usize].next;
+  }
+  s = self.first;
+  let lim = (offset + num) as i32;
+  while (s != kNone) {
+    let idx = self.slots[s as usize].index as i32;
+    var a = self.slots[s as usize].after + 1;
+    while (a < lim && a >= 0 && self.charinfo[a as usize].after < 0) {
+      self.charinfo[a as usize].after = idx;
+      a += 1;
+    }
+    a -= 1;
+    self.slots[s as usize].after = a;
+    a = self.slots[s as usize].before - 1;
+    while (a >= offset as i32 && (a as usize) < self.num_charinfo && self.charinfo[a as usize].before < 0) {
+      self.charinfo[a as usize].before = idx;
+      a -= 1;
+    }
+    a += 1;
+    self.slots[s as usize].before = a;
+    s = self.slots[s as usize].next;
+  }
+}
+
+// Slot::clusterMetric
+fn Segment::cluster_metric(var self&, glyphs&: GlyphCache, s: u32, metric: u32, attr_level: u32, rtl: bool): i32 {
+  let g = self.slots[s as usize].glyph();
+  if (g >= glyphs.num_glyphs) {
+    return 0;
+  }
+  let gf& = glyphs.glyphs[g as usize];
+  var bbox = Rect { bl: pos(gf.bl_x, gf.bl_y), tr: pos(gf.tr_x, gf.tr_y) };
+  var cluster_min: f32 = 0.0;
+  let res = self.finalise(glyphs, s, Pos {}, bbox, attr_level, cluster_min, rtl, 0);
+  let f = fn(v: f32): i32 => @saturating_cast(i32, v);
+  return match (metric) {
+    kMetLsb => f(bbox.bl.x),
+    kMetRsb => f(res.x - bbox.tr.x),
+    kMetBbTop => f(bbox.tr.y),
+    kMetBbBottom => f(bbox.bl.y),
+    kMetBbLeft => f(bbox.bl.x),
+    kMetBbRight => f(bbox.tr.x),
+    kMetBbWidth => f(bbox.tr.x - bbox.bl.x),
+    kMetBbHeight => f(bbox.tr.y - bbox.bl.y),
+    kMetAdvWidth => f(res.x),
+    kMetAdvHeight => f(res.y),
+    _ => 0,
+  };
+}
+
+// Segment::getGlyphMetric
+fn Segment::glyph_metric(var self&, glyphs&: GlyphCache, s: u32, metric: u32, attr_level: u32, rtl: bool): i32 {
+  if (attr_level > 0) {
+    var root = s;
+    var hops = 0u32;
+    while (self.slots[root as usize].parent != kNone && hops < 100000) {
+      root = self.slots[root as usize].parent;
+      hops += 1;
+    }
+    return self.cluster_metric(glyphs, root, metric, attr_level, rtl);
+  }
+  if (metric == kMetAscent || metric == kMetDescent) {
+    return 0;  // Face::m_ascent and m_descent stay 0
+  }
+  let gid = self.slots[s as usize].glyphid;
+  if (gid >= glyphs.num_glyphs) {
+    return 0;
+  }
+  return glyphs.glyphs[gid as usize].metric(metric);
+}
+
+// Slot::getJustify
+fn Segment::get_justify(self&, silf&: Silf, glyphs&: GlyphCache, s: u32, level: u32, sub: u32): i32 {
+  if (level != 0 && level >= silf.num_justs) {
+    return 0;
+  }
+  let j = self.slots[s as usize].justs;
+  if (j != kNone) {
+    return self.justs[j as usize * self.just_size + (level * 5 + sub) as usize] as i32;
+  }
+  if (level >= silf.num_justs) {
+    return 0;
+  }
+  let info = silf.justs[level as usize];
+  let gid = self.slots[s as usize].glyphid;
+  return match (sub) {
+    0 => glyphs.glyph_attr(gid, info >> 24),
+    1 => glyphs.glyph_attr(gid, (info >> 16) & 0xFF),
+    2 => glyphs.glyph_attr(gid, (info >> 8) & 0xFF),
+    3 => glyphs.glyph_attr(gid, info & 0xFF),
+    _ => 0,
+  };
+}
+
+// Slot::setJustify
+fn Segment::set_justify(var self&, silf&: Silf, glyphs&: GlyphCache, s: u32, level: u32, sub: u32, value: i32) {
+  if (level != 0 && level >= silf.num_justs) {
+    return;
+  }
+  if (self.slots[s as usize].justs == kNone) {
+    let j = self.new_justify(silf, glyphs, s);
+    self.slots[s as usize].justs = j;
+  }
+  let j = self.slots[s as usize].justs;
+  self.justs[j as usize * self.just_size + (level * 5 + sub) as usize] = value as i16;
+}
+
+fn trunc(v: f32): i32 => @saturating_cast(i32, v);
+
+// Slot::getAttr (no collision information: those attributes read 0).
+fn Segment::get_attr(self&, silf&: Silf, glyphs&: GlyphCache, s: u32, ind: u32, sub0: u32): i32 {
+  if (ind >= kSlatJStretch && ind < kSlatJStretch + 20 && ind != kSlatJWidth) {
+    let indx = ind - kSlatJStretch;
+    return self.get_justify(silf, glyphs, s, indx / 5, indx % 5);
+  }
+  let sl& = self.slots[s as usize];
+  let sub = sub0;
+  return match (ind) {
+    kSlatAdvX => trunc(sl.advance.x),
+    kSlatAdvY => trunc(sl.advance.y),
+    kSlatAttTo => sl.parent != kNone ? 1 : 0,
+    kSlatAttX => trunc(sl.attach.x),
+    kSlatAttY => trunc(sl.attach.y),
+    kSlatAttXOff | kSlatAttYOff => 0,
+    kSlatAttWithX => trunc(sl.with.x),
+    kSlatAttWithY => trunc(sl.with.y),
+    kSlatAttWithXOff | kSlatAttWithYOff => 0,
+    kSlatAttLevel => sl.att_level as i32,
+    kSlatBreak => self.charinfo[sl.original as usize].brk,
+    kSlatCompRef => 0,
+    kSlatDir => self.dir & 1,
+    kSlatInsert => sl.is_insert_before() ? 1 : 0,
+    kSlatPosX => trunc(sl.position.x),
+    kSlatPosY => trunc(sl.position.y),
+    kSlatShiftX => trunc(sl.shift.x),
+    kSlatShiftY => trunc(sl.shift.y),
+    kSlatMeasureSol | kSlatMeasureEol => -1,
+    kSlatJWidth => trunc(sl.just),
+    kSlatUserDefnV1 => self.num_user > 0 ? self.user_attrs[s as usize * self.num_user] as i32 : 0,
+    kSlatUserDefn => (sub as usize) < self.num_user ? self.user_attrs[s as usize * self.num_user + sub as usize] as i32 : 0,
+    kSlatSegSplit => (self.charinfo[sl.original as usize].flags & 3) as i32,
+    kSlatBidiLevel => sl.bidi_level as i32,
+    _ => 0,
+  };
+}
+
+// Slot::setAttr (no collision information: those attributes are not kept).
+// `map` is the slot map the rule runs on (for attach-to), `map_dir` its
+// direction.
+fn Segment::set_attr(var self&, silf&: Silf, glyphs&: GlyphCache, s: u32, ind0: u32, sub0: u32, value0: i32, map&: [u32], map_dir: u32) {
+  var ind = ind0;
+  var sub = sub0 & 0xFF;
+  let value = ((value0 & 0xFFFF) as u16 as i16) as i32;  // the int16 parameter
+  if (ind == kSlatUserDefnV1) {
+    ind = kSlatUserDefn;
+    sub = 0;
+    if (self.num_user == 0) {
+      return;
+    }
+  } else if (ind >= kSlatJStretch && ind < kSlatJStretch + 20 && ind != kSlatJWidth) {
+    let indx = ind - kSlatJStretch;
+    self.set_justify(silf, glyphs, s, indx / 5, indx % 5, value);
+    return;
+  }
+  let v = value as f32;
+  match (ind) {
+    kSlatAdvX => {
+      self.slots[s as usize].advance.x = v;
+    },
+    kSlatAdvY => {
+      self.slots[s as usize].advance.y = v;
+    },
+    kSlatAttTo => {
+      // map[0] is the slot before the rule (SlotMap::m_slot_map[0]); a slot
+      // map index n is map[n + 1].
+      let idx = (value as u32) & 0xFFFF;
+      if (idx as usize + 1 >= #map || map[idx as usize + 1] == kNone) {
+        return;
+      }
+      let other = map[idx as usize + 1];
+      let me = self.slots[s as usize];
+      if (other == s || other == me.parent || self.slots[other as usize].is_copied()) {
+        return;
+      }
+      if (me.parent != kNone) {
+        let _ = self.remove_child(me.parent, s);
+        self.slots[s as usize].parent = kNone;
+      }
+      var count = 0u32;
+      var found = false;
+      var p = other;
+      while (p != kNone && count < 1000) {
+        count += 1;
+        if (p == s) {
+          found = true;
+        }
+        p = self.slots[p as usize].parent;
+      }
+      p = self.slots[s as usize].child;
+      while (p != kNone && count < 1000) {
+        count += 1;
+        p = self.slots[p as usize].child;
+      }
+      p = self.slots[s as usize].sibling;
+      while (p != kNone && count < 1000) {
+        count += 1;
+        p = self.slots[p as usize].sibling;
+      }
+      if (count < 100 && !found && self.add_child(other, s)) {
+        self.slots[s as usize].parent = other;
+        if ((map_dir != 0) != (idx > sub)) {
+          self.slots[s as usize].with = pos(self.slots[s as usize].advance.x, 0.0);
+        } else {
+          self.slots[s as usize].attach = pos(self.slots[other as usize].advance.x, 0.0);
+        }
+      }
+    },
+    kSlatAttX => {
+      self.slots[s as usize].attach.x = v;
+    },
+    kSlatAttY => {
+      self.slots[s as usize].attach.y = v;
+    },
+    kSlatAttWithX => {
+      self.slots[s as usize].with.x = v;
+    },
+    kSlatAttWithY => {
+      self.slots[s as usize].with.y = v;
+    },
+    kSlatAttLevel => {
+      self.slots[s as usize].att_level = value as u32 & 0xFF;
+    },
+    kSlatBreak => {
+      let o = self.slots[s as usize].original as usize;
+      self.charinfo[o].brk = ((value & 0xFF) as u8 as i8) as i32;
+    },
+    kSlatInsert => {
+      if (value != 0) {
+        self.slots[s as usize].flags &= ~kSlotInserted;
+      } else {
+        self.slots[s as usize].flags |= kSlotInserted;
+      }
+    },
+    kSlatShiftX => {
+      self.slots[s as usize].shift.x = v;
+    },
+    kSlatShiftY => {
+      self.slots[s as usize].shift.y = v;
+    },
+    kSlatJWidth => {
+      self.slots[s as usize].just = v;
+    },
+    kSlatSegSplit => {
+      let o = self.slots[s as usize].original as usize;
+      self.charinfo[o].flags |= (value as u32) & 3;
+    },
+    kSlatUserDefn => {
+      // m_userAttr[subindex]: the decoder bounds the index by numUser.
+      if ((sub as usize) < self.num_user) {
+        self.user_attrs[s as usize * self.num_user + sub as usize] = value as i16;
+      }
+    },
+    _ => {},
+  }
+}

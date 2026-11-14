@@ -1,0 +1,263 @@
+// ugui/audio/audio_backend.h: the host-providable audio backend.
+//
+// The application wires an implementation in at run time
+// (UIContext::set_audio before init; the bundled miniaudio engine lives in
+// the ultragui_audio package). Until then the silent NullAudioBackend is
+// active. The C++ abstract class becomes the erased-seam trio of
+// render::texture_backend:
+//
+// * `capability AudioBackend`, which a backend type implements;
+// * `DynAudioBackend<'a>`, a borrowed backend of any type (`AudioBackend*`);
+// * `AudioBackendBox`, an owned one, for UIContext to keep. `as_dyn()` lends
+//   it.
+//
+// Paths are `str` (the C++ `const char*`). The C++ default arguments
+// (volume = 1, loop = false) are spelled out by callers. `loop` is `looping`.
+
+module ultragui::audio::audio_backend;
+
+import {ErasedBox, ErasedRef} from ultragui::core::erased;
+
+pub type SoundHandle = u32;
+pub comptime let kInvalidSound: SoundHandle = 0;
+
+pub capability AudioBackend {
+  fn init(var self&): bool;
+  fn shutdown(var self&);
+  fn is_initialized(self&): bool;
+
+  // ----- Playback -----
+  fn play(var self&, path: str, volume: f32, looping: bool): SoundHandle;
+  fn load(var self&, path: str): SoundHandle;
+  fn play_loaded(var self&, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle;
+  fn stop(var self&, handle: SoundHandle);
+  fn is_playing(self&, handle: SoundHandle): bool;
+
+  // ----- Per-sound control -----
+  fn set_volume(var self&, handle: SoundHandle, volume: f32);
+  fn set_pan(var self&, handle: SoundHandle, pan: f32);
+  fn set_pitch(var self&, handle: SoundHandle, pitch: f32);
+  fn seek(var self&, handle: SoundHandle, seconds: f32);
+
+  // ----- Global control -----
+  fn set_master_volume(var self&, volume: f32);
+  fn master_volume(self&): f32;
+  fn stop_all(var self&);
+  fn pause_all(var self&);
+  fn resume_all(var self&);
+}
+
+// No-op audio backend: the default until a real backend is wired in.
+pub struct NullAudioBackend : AudioBackend, Copy {
+  pub fn NullAudioBackend(): NullAudioBackend => NullAudioBackend {};
+
+  pub fn init(var self&): bool => true;
+  pub fn shutdown(var self&) {}
+  pub fn is_initialized(self&): bool => false;
+  pub fn play(var self&, path: str, volume: f32, looping: bool): SoundHandle => kInvalidSound;
+  pub fn load(var self&, path: str): SoundHandle => kInvalidSound;
+  pub fn play_loaded(var self&, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle => kInvalidSound;
+  pub fn stop(var self&, handle: SoundHandle) {}
+  pub fn is_playing(self&, handle: SoundHandle): bool => false;
+  pub fn set_volume(var self&, handle: SoundHandle, volume: f32) {}
+  pub fn set_pan(var self&, handle: SoundHandle, pan: f32) {}
+  pub fn set_pitch(var self&, handle: SoundHandle, pitch: f32) {}
+  pub fn seek(var self&, handle: SoundHandle, seconds: f32) {}
+  pub fn set_master_volume(var self&, volume: f32) {}
+  pub fn master_volume(self&): f32 => 1.0;
+  pub fn stop_all(var self&) {}
+  pub fn pause_all(var self&) {}
+  pub fn resume_all(var self&) {}
+}
+
+// --- The thunks: each casts the erased pointer back to T and calls T's method.
+
+fn init_thunk<T: AudioBackend>(p: *var u8): bool => unsafe (*(p as *var T)).init();
+fn shutdown_thunk<T: AudioBackend>(p: *var u8) {
+  unsafe (*(p as *var T)).shutdown();
+}
+fn is_initialized_thunk<T: AudioBackend>(p: *var u8): bool => unsafe (*(p as *var T)).is_initialized();
+fn play_thunk<T: AudioBackend>(p: *var u8, path: str, volume: f32, looping: bool): SoundHandle =>
+  unsafe (*(p as *var T)).play(path, volume, looping);
+fn load_thunk<T: AudioBackend>(p: *var u8, path: str): SoundHandle => unsafe (*(p as *var T)).load(path);
+fn play_loaded_thunk<T: AudioBackend>(p: *var u8, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle =>
+  unsafe (*(p as *var T)).play_loaded(preloaded, volume, looping);
+fn stop_thunk<T: AudioBackend>(p: *var u8, handle: SoundHandle) {
+  unsafe (*(p as *var T)).stop(handle);
+}
+fn is_playing_thunk<T: AudioBackend>(p: *var u8, handle: SoundHandle): bool => unsafe (*(p as *var T)).is_playing(handle);
+fn set_volume_thunk<T: AudioBackend>(p: *var u8, handle: SoundHandle, v: f32) {
+  unsafe (*(p as *var T)).set_volume(handle, v);
+}
+fn set_pan_thunk<T: AudioBackend>(p: *var u8, handle: SoundHandle, v: f32) {
+  unsafe (*(p as *var T)).set_pan(handle, v);
+}
+fn set_pitch_thunk<T: AudioBackend>(p: *var u8, handle: SoundHandle, v: f32) {
+  unsafe (*(p as *var T)).set_pitch(handle, v);
+}
+fn seek_thunk<T: AudioBackend>(p: *var u8, handle: SoundHandle, v: f32) {
+  unsafe (*(p as *var T)).seek(handle, v);
+}
+fn set_master_volume_thunk<T: AudioBackend>(p: *var u8, v: f32) {
+  unsafe (*(p as *var T)).set_master_volume(v);
+}
+fn master_volume_thunk<T: AudioBackend>(p: *var u8): f32 => unsafe (*(p as *var T)).master_volume();
+fn stop_all_thunk<T: AudioBackend>(p: *var u8) {
+  unsafe (*(p as *var T)).stop_all();
+}
+fn pause_all_thunk<T: AudioBackend>(p: *var u8) {
+  unsafe (*(p as *var T)).pause_all();
+}
+fn resume_all_thunk<T: AudioBackend>(p: *var u8) {
+  unsafe (*(p as *var T)).resume_all();
+}
+
+// The methods of one backend type, as function values.
+struct AudioBackendFns : Copy {
+  pub let init: static fn(*var u8): bool
+  pub let shutdown: static fn(*var u8): ()
+  pub let is_initialized: static fn(*var u8): bool
+  pub let play: static fn(*var u8, str, f32, bool): SoundHandle
+  pub let load: static fn(*var u8, str): SoundHandle
+  pub let play_loaded: static fn(*var u8, SoundHandle, f32, bool): SoundHandle
+  pub let stop: static fn(*var u8, SoundHandle): ()
+  pub let is_playing: static fn(*var u8, SoundHandle): bool
+  pub let set_volume: static fn(*var u8, SoundHandle, f32): ()
+  pub let set_pan: static fn(*var u8, SoundHandle, f32): ()
+  pub let set_pitch: static fn(*var u8, SoundHandle, f32): ()
+  pub let seek: static fn(*var u8, SoundHandle, f32): ()
+  pub let set_master_volume: static fn(*var u8, f32): ()
+  pub let master_volume: static fn(*var u8): f32
+  pub let stop_all: static fn(*var u8): ()
+  pub let pause_all: static fn(*var u8): ()
+  pub let resume_all: static fn(*var u8): ()
+}
+
+fn fns_for<T: AudioBackend>(): AudioBackendFns => AudioBackendFns {
+  init: init_thunk::<T>,
+  shutdown: shutdown_thunk::<T>,
+  is_initialized: is_initialized_thunk::<T>,
+  play: play_thunk::<T>,
+  load: load_thunk::<T>,
+  play_loaded: play_loaded_thunk::<T>,
+  stop: stop_thunk::<T>,
+  is_playing: is_playing_thunk::<T>,
+  set_volume: set_volume_thunk::<T>,
+  set_pan: set_pan_thunk::<T>,
+  set_pitch: set_pitch_thunk::<T>,
+  seek: seek_thunk::<T>,
+  set_master_volume: set_master_volume_thunk::<T>,
+  master_volume: master_volume_thunk::<T>,
+  stop_all: stop_all_thunk::<T>,
+  pause_all: pause_all_thunk::<T>,
+  resume_all: resume_all_thunk::<T>,
+};
+
+// A borrowed AudioBackend of any type: `AudioBackend*` in the C++.
+pub struct DynAudioBackend<'a> : AudioBackend {
+  var object: ErasedRef<'a>
+  let fns: AudioBackendFns
+
+  // Borrows `backend` for as long as the result lives.
+  pub fn of<'a, T: AudioBackend>(backend: &'a var T): DynAudioBackend<'a> =>
+    DynAudioBackend { object: ErasedRef::of(backend), fns: fns_for::<T>() };
+
+  pub fn init(var self&): bool => (self.fns.init)(self.object.ptr());
+  pub fn shutdown(var self&) {
+    (self.fns.shutdown)(self.object.ptr());
+  }
+  pub fn is_initialized(self&): bool => (self.fns.is_initialized)(self.object.const_ptr());
+  pub fn play(var self&, path: str, volume: f32, looping: bool): SoundHandle => (self.fns.play)(self.object.ptr(), path, volume, looping);
+  pub fn load(var self&, path: str): SoundHandle => (self.fns.load)(self.object.ptr(), path);
+  pub fn play_loaded(var self&, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle =>
+    (self.fns.play_loaded)(self.object.ptr(), preloaded, volume, looping);
+  pub fn stop(var self&, handle: SoundHandle) {
+    (self.fns.stop)(self.object.ptr(), handle);
+  }
+  pub fn is_playing(self&, handle: SoundHandle): bool => (self.fns.is_playing)(self.object.const_ptr(), handle);
+  pub fn set_volume(var self&, handle: SoundHandle, volume: f32) {
+    (self.fns.set_volume)(self.object.ptr(), handle, volume);
+  }
+  pub fn set_pan(var self&, handle: SoundHandle, pan: f32) {
+    (self.fns.set_pan)(self.object.ptr(), handle, pan);
+  }
+  pub fn set_pitch(var self&, handle: SoundHandle, pitch: f32) {
+    (self.fns.set_pitch)(self.object.ptr(), handle, pitch);
+  }
+  pub fn seek(var self&, handle: SoundHandle, seconds: f32) {
+    (self.fns.seek)(self.object.ptr(), handle, seconds);
+  }
+  pub fn set_master_volume(var self&, volume: f32) {
+    (self.fns.set_master_volume)(self.object.ptr(), volume);
+  }
+  pub fn master_volume(self&): f32 => (self.fns.master_volume)(self.object.const_ptr());
+  pub fn stop_all(var self&) {
+    (self.fns.stop_all)(self.object.ptr());
+  }
+  pub fn pause_all(var self&) {
+    (self.fns.pause_all)(self.object.ptr());
+  }
+  pub fn resume_all(var self&) {
+    (self.fns.resume_all)(self.object.ptr());
+  }
+}
+
+fn DynAudioBackend::from_parts<'a>(object: ErasedRef<'a>, fns: AudioBackendFns): DynAudioBackend<'a> =>
+  DynAudioBackend { object, fns };
+
+// An owned AudioBackend of any type, dropped with the box.
+pub struct AudioBackendBox : AudioBackend {
+  var object: ErasedBox
+  let fns: AudioBackendFns
+
+  // Moves `backend` into the box.
+  pub fn of<T: AudioBackend>(backend: T): AudioBackendBox => AudioBackendBox { object: ErasedBox::of(backend), fns: fns_for::<T>() };
+
+  // The silent default.
+  pub fn silent(): AudioBackendBox => AudioBackendBox::of(NullAudioBackend {});
+
+  // Lends the boxed backend to code that takes a DynAudioBackend.
+  pub fn as_dyn(var self&): DynAudioBackend => DynAudioBackend::from_parts(self.object.as_ref(), self.fns);
+
+  pub fn init(var self&): bool => (self.fns.init)(self.object.ptr());
+  pub fn shutdown(var self&) {
+    (self.fns.shutdown)(self.object.ptr());
+  }
+  pub fn is_initialized(self&): bool => (self.fns.is_initialized)(self.raw());
+  pub fn play(var self&, path: str, volume: f32, looping: bool): SoundHandle => (self.fns.play)(self.object.ptr(), path, volume, looping);
+  pub fn load(var self&, path: str): SoundHandle => (self.fns.load)(self.object.ptr(), path);
+  pub fn play_loaded(var self&, preloaded: SoundHandle, volume: f32, looping: bool): SoundHandle =>
+    (self.fns.play_loaded)(self.object.ptr(), preloaded, volume, looping);
+  pub fn stop(var self&, handle: SoundHandle) {
+    (self.fns.stop)(self.object.ptr(), handle);
+  }
+  pub fn is_playing(self&, handle: SoundHandle): bool => (self.fns.is_playing)(self.raw(), handle);
+  pub fn set_volume(var self&, handle: SoundHandle, volume: f32) {
+    (self.fns.set_volume)(self.object.ptr(), handle, volume);
+  }
+  pub fn set_pan(var self&, handle: SoundHandle, pan: f32) {
+    (self.fns.set_pan)(self.object.ptr(), handle, pan);
+  }
+  pub fn set_pitch(var self&, handle: SoundHandle, pitch: f32) {
+    (self.fns.set_pitch)(self.object.ptr(), handle, pitch);
+  }
+  pub fn seek(var self&, handle: SoundHandle, seconds: f32) {
+    (self.fns.seek)(self.object.ptr(), handle, seconds);
+  }
+  pub fn set_master_volume(var self&, volume: f32) {
+    (self.fns.set_master_volume)(self.object.ptr(), volume);
+  }
+  pub fn master_volume(self&): f32 => (self.fns.master_volume)(self.raw());
+  pub fn stop_all(var self&) {
+    (self.fns.stop_all)(self.object.ptr());
+  }
+  pub fn pause_all(var self&) {
+    (self.fns.pause_all)(self.object.ptr());
+  }
+  pub fn resume_all(var self&) {
+    (self.fns.resume_all)(self.object.ptr());
+  }
+}
+
+// The object pointer for a read-only call. The thunk only reads through it.
+fn AudioBackendBox::raw(self&): *var u8 => unsafe (self.object.const_ptr() as *var u8);

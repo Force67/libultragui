@@ -1,0 +1,629 @@
+// The Arabic shaper (hb-ot-shaper-arabic.cc, hb-ot-shaper-arabic-fallback.hh):
+// cursive joining (the joining state machine over the Unicode joining types)
+// selecting isol/fina/fin2/fin3/medi/med2/init per character, the stch
+// stretching of Syriac abbreviation marks, the reordering of modifier
+// combining marks, and, for Arabic fonts without those GSUB features, the
+// fallback shaping HarfBuzz synthesizes from the presentation forms in the
+// font's cmap (built here as a small GSUB table and applied by the same
+// engine). Also used for Syriac, N'Ko, Mongolian and the other joining scripts.
+//
+// The Windows-1256 fallback HarfBuzz has only on Windows builds is not here.
+
+module ultragui::shape::shaper_arabic;
+
+import {List} from akikit::containers::list;
+import {Buffer, GlyphInfo, GlyphPos, kScratchShaper0} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {Scale, apply_string, is_default_ignorable, lig_comp, new_ctx, set_lookup} from ultragui::shape::layout;
+import {MapBuilder, MapTable, OtMap, has_feature, kFHasFallback, kFManualZwj, kFNone} from ultragui::shape::map;
+import {parse_gsubgpos} from ultragui::shape::otl;
+import {gc_of, info_cc, set_info_cc} from ultragui::shape::props;
+import {joining_type, tag} from ultragui::shape::ucd;
+import {kArabicLigatures, kArabicLigatures3, kArabicMarkLigatures, kArabicShaping, kArabicShapingFirst, kArabicShapingLast} from ultragui::shape::ucd_tables;
+
+// Pause functions of the Arabic shaper.
+pub comptime let kPauseRecordStch: u32 = 10;
+pub comptime let kPauseArabicFallback: u32 = 11;
+
+// arabic_action_t
+comptime let kIsol: u32 = 0;
+comptime let kFina: u32 = 1;
+comptime let kFin2: u32 = 2;
+comptime let kFin3: u32 = 3;
+comptime let kMedi: u32 = 4;
+comptime let kMed2: u32 = 5;
+comptime let kInit: u32 = 6;
+comptime let kNone: u32 = 7;
+comptime let kStchFixed: u32 = 8;
+comptime let kStchRepeating: u32 = 9;
+
+static let kFeatures: [str; 7] = ["isol", "fina", "fin2", "fin3", "medi", "med2", "init"];
+
+// hb_arabic_joining_type_t
+comptime let kJtU: u32 = 0;
+comptime let kJtR: u32 = 2;
+comptime let kJtT: u32 = 6;
+comptime let kJtX: u32 = 7;
+
+// arabic_state_table: (prev_action, curr_action, next_state) per state and joining type.
+static let kStateTable: [(u32, u32, u32); 42] = [
+  (kNone, kNone, 0), (kNone, kIsol, 2), (kNone, kIsol, 1), (kNone, kIsol, 2), (kNone, kIsol, 1), (kNone, kIsol, 6),
+  (kNone, kNone, 0), (kNone, kIsol, 2), (kNone, kIsol, 1), (kNone, kIsol, 2), (kNone, kFin2, 5), (kNone, kIsol, 6),
+  (kNone, kNone, 0), (kNone, kIsol, 2), (kInit, kFina, 1), (kInit, kFina, 3), (kInit, kFina, 4), (kInit, kFina, 6),
+  (kNone, kNone, 0), (kNone, kIsol, 2), (kMedi, kFina, 1), (kMedi, kFina, 3), (kMedi, kFina, 4), (kMedi, kFina, 6),
+  (kNone, kNone, 0), (kNone, kIsol, 2), (kMed2, kIsol, 1), (kMed2, kIsol, 2), (kMed2, kFin2, 5), (kMed2, kIsol, 6),
+  (kNone, kNone, 0), (kNone, kIsol, 2), (kIsol, kIsol, 1), (kIsol, kIsol, 2), (kIsol, kFin2, 5), (kIsol, kIsol, 6),
+  (kNone, kNone, 0), (kNone, kIsol, 2), (kNone, kIsol, 1), (kNone, kIsol, 2), (kNone, kFin3, 5), (kNone, kIsol, 6),
+];
+
+fn feature_is_syriac(t: str): bool => t[3] == '2' || t[3] == '3';
+
+// The Arabic plan (arabic_shape_plan_t) and its fallback plan.
+pub struct ArabicPlan {
+  pub var mask_array: [u32; 8] = [0u32; 8]
+  pub var do_fallback: bool = false
+  pub var has_stch: bool = false
+  pub var fallback_table: List<u8> = List()   // a synthesized GSUB of the fallback lookups
+  pub var fallback_masks: List<u32> = List()
+}
+
+// collect_features_arabic
+pub fn collect_features_arabic(var b&: MapBuilder, gsub&: MapTable, gpos&: MapTable, script: u32) {
+  b.enable_feature(tag("stch"));
+  b.add_gsub_pause(kPauseRecordStch);
+  b.enable_feature(tag("ccmp"), kFManualZwj);
+  b.enable_feature(tag("locl"), kFManualZwj);
+  b.add_gsub_pause(0);
+  let arab = script == tag("Arab");
+  for (let f in kFeatures) {
+    let has_fallback = arab && !feature_is_syriac(f);
+    b.add_feature(tag(f), kFManualZwj | (has_fallback ? kFHasFallback : kFNone));
+    b.add_gsub_pause(0);
+  }
+  b.add_gsub_pause(0);  // deallocate_buffer_var
+  b.enable_feature(tag("rlig"), kFManualZwj | kFHasFallback);
+  if (arab) {
+    b.add_gsub_pause(kPauseArabicFallback);
+  }
+  b.enable_feature(tag("calt"), kFManualZwj);
+  if (!has_feature(b, gsub, gpos, tag("rclt"))) {
+    b.add_gsub_pause(0);
+  }
+  b.enable_feature(tag("liga"), kFManualZwj);
+  b.enable_feature(tag("clig"), kFManualZwj);
+  b.enable_feature(tag("mset"), kFManualZwj);
+}
+
+// data_create_arabic (with the fallback plan HarfBuzz creates on first use).
+pub fn plan_arabic(map&: OtMap, face&: ShapeFace, script: u32): ArabicPlan {
+  var p = ArabicPlan {};
+  p.do_fallback = script == tag("Arab");
+  p.has_stch = map.get_1_mask(tag("stch")) != 0;
+  for (let i in 0..7) {
+    p.mask_array[i] = map.get_1_mask(tag(kFeatures[i]));
+    p.do_fallback = p.do_fallback && (feature_is_syriac(kFeatures[i]) || map.needs_fallback(tag(kFeatures[i])));
+  }
+  if (p.do_fallback) {
+    build_fallback(p, map, face);
+  }
+  return p;
+}
+
+fn get_joining_type(u: u32, gen_cat: u32): u32 {
+  let j = joining_type(u);
+  if (j != kJtX) {
+    return j;
+  }
+  // NON_SPACING_MARK, ENCLOSING_MARK, FORMAT
+  return gen_cat == 12 || gen_cat == 11 || gen_cat == 1 ? kJtT : kJtU;
+}
+
+// setup_masks_arabic_plan (no pre/post context: the C++ adds the whole text)
+pub fn setup_masks_arabic(ap&: ArabicPlan, var buf&: Buffer, script: u32) {
+  let count = buf.len();
+  var prev: usize? = none;
+  var state = 0u32;
+  for (let i in 0..count) {
+    let this_type = get_joining_type(buf.info[i].codepoint, gc_of(buf.info[i]));
+    if (this_type == kJtT) {
+      buf.info[i].aux = kNone;
+      continue;
+    }
+    let entry = kStateTable[(state * 6 + this_type) as usize];
+    if (entry.0 != kNone) {
+      if (let p = prev) {
+        buf.info[p].aux = entry.0;
+      }
+    }
+    buf.info[i].aux = entry.1;
+    prev = i;
+    state = entry.2;
+  }
+  if (script == tag("Mong")) {
+    for (let i in 1..count) {
+      let u = buf.info[i].codepoint;
+      if ((u >= 0x180B && u <= 0x180D) || u == 0x180F) {
+        buf.info[i].aux = buf.info[i - 1].aux;
+      }
+    }
+  }
+  for (var g& in buf.info) {
+    g.mask |= ap.mask_array[(g.aux & 7) as usize];
+  }
+}
+
+// record_stch
+pub fn record_stch(ap&: ArabicPlan, var buf&: Buffer) {
+  if (!ap.has_stch) {
+    return;
+  }
+  for (let i in 0..buf.len()) {
+    if ((buf.info[i].glyph_props & 0x40) != 0) {
+      let comp = lig_comp(buf.info[i]);
+      buf.info[i].aux = comp % 2 != 0 ? kStchRepeating : kStchFixed;
+      buf.scratch_flags |= kScratchShaper0;
+    }
+  }
+}
+
+static let kModifierCombiningMarks: [u32; 14] = [
+  0x0654, 0x0655, 0x0658, 0x06DC, 0x06E3, 0x06E7, 0x06E8, 0x08CA, 0x08CB, 0x08CD, 0x08CE, 0x08CF, 0x08D3, 0x08F3,
+];
+
+fn is_mcm(g&: GlyphInfo): bool {
+  for (let u in kModifierCombiningMarks) {
+    if (g.codepoint == u) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// reorder_marks_arabic
+pub fn reorder_marks_arabic(var buf&: Buffer, start_: usize, end: usize) {
+  var start = start_;
+  var i = start;
+  var cc = 220u32;
+  while (cc <= 230) {
+    while (i < end && info_cc(buf.info[i]) < cc) {
+      i += 1;
+    }
+    if (i == end) {
+      break;
+    }
+    if (info_cc(buf.info[i]) > cc) {
+      cc += 10;
+      continue;
+    }
+    var j = i;
+    while (j < end && info_cc(buf.info[j]) == cc && is_mcm(buf.info[j])) {
+      j += 1;
+    }
+    if (i == j) {
+      cc += 10;
+      continue;
+    }
+    buf.merge_clusters(start, j);
+    var temp: List<GlyphInfo> = List();
+    for (let k in i..j) {
+      temp.push(buf.info[k]);
+    }
+    // move info[start..i] to start + (j - i)
+    var k = i;
+    while (k > start) {
+      k -= 1;
+      buf.info[k + (j - i)] = buf.info[k];
+    }
+    for (let t in 0..temp.len()) {
+      buf.info[start + t] = temp[t];
+    }
+    let new_start = start + j - i;
+    let new_cc = cc == 220 ? 25u32 : 26;  // HB_MODIFIED_COMBINING_CLASS_CCC22 / CCC26
+    while (start < new_start) {
+      set_info_cc(buf.info[start], new_cc);
+      start += 1;
+    }
+    i = j;
+    cc += 10;
+  }
+}
+
+fn is_word_category(gc: u32): bool {
+  // UNASSIGNED, PRIVATE_USE, MODIFIER_LETTER, OTHER_LETTER, SPACING_MARK, ENCLOSING_MARK,
+  // NON_SPACING_MARK, DECIMAL_NUMBER, LETTER_NUMBER, OTHER_NUMBER, CURRENCY_SYMBOL,
+  // MODIFIER_SYMBOL, MATH_SYMBOL, OTHER_SYMBOL
+  let flags = (1u32 << 2) | (1u32 << 3) | (1u32 << 6) | (1u32 << 7) | (1u32 << 10) | (1u32 << 11) | (1u32 << 12) | (1u32 << 13) |
+              (1u32 << 14) | (1u32 << 15) | (1u32 << 23) | (1u32 << 24) | (1u32 << 25) | (1u32 << 26);
+  return ((1u32 << gc) & flags) != 0;
+}
+
+fn is_stch(a: u32): bool => a == kStchFixed || a == kStchRepeating;
+
+// apply_stch (postprocess_glyphs_arabic)
+pub fn apply_stch<F: ShapeFontFuncs>(var buf&: Buffer, var funcs&: F, x_scale: i32) {
+  if ((buf.scratch_flags & kScratchShaper0) == 0) {
+    return;
+  }
+  let rtl = buf.direction == 5;
+  if (!rtl) {
+    buf.reverse();
+  }
+  let sign: i64 = x_scale < 0 ? -1 : 1;
+  var extra_glyphs_needed = 0usize;
+  for (let step in 0..2) {
+    let count = buf.len();
+    let new_len = count + extra_glyphs_needed;
+    var j = new_len;
+    if (step == 1) {
+      // Room for the copies: the buffer grows to new_len.
+      while (buf.info.len() < new_len) {
+        buf.info.push(GlyphInfo {});
+        buf.pos.push(GlyphPos {});
+      }
+    }
+    var i = count;
+    while (i > 0) {
+      if (!is_stch(buf.info[i - 1].aux)) {
+        if (step == 1) {
+          j -= 1;
+          buf.info[j] = buf.info[i - 1];
+          buf.pos[j] = buf.pos[i - 1];
+        }
+        i -= 1;
+        continue;
+      }
+      var w_total: i32 = 0;
+      var w_fixed: i32 = 0;
+      var w_repeating: i32 = 0;
+      var n_fixed: i32 = 0;
+      var n_repeating: i32 = 0;
+      let end = i;
+      while (i > 0 && is_stch(buf.info[i - 1].aux)) {
+        i -= 1;
+        let width = funcs.h_advance(buf.info[i].codepoint);
+        if (buf.info[i].aux == kStchFixed) {
+          w_fixed += width;
+          n_fixed += 1;
+        } else {
+          w_repeating += width;
+          n_repeating += 1;
+        }
+      }
+      let start = i;
+      var context = i;
+      while (context > 0 && !is_stch(buf.info[context - 1].aux) &&
+             (is_default_ignorable(buf.info[context - 1]) || is_word_category(gc_of(buf.info[context - 1])))) {
+        context -= 1;
+        w_total += buf.pos[context].x_advance;
+      }
+      i += 1;  // Don't touch i again.
+
+      var n_copies = 0u32;
+      var w_remaining_signed = w_total as i64 - w_fixed as i64;
+      var w_repeating_signed = w_repeating as i64;
+      if (sign < 0) {
+        w_remaining_signed = -w_remaining_signed;
+        w_repeating_signed = -w_repeating_signed;
+      }
+      var w_remaining: i32 = w_total -% w_fixed;
+      if (w_remaining_signed > w_repeating_signed && w_repeating_signed > 0) {
+        n_copies = (w_remaining_signed / w_repeating_signed - 1) as u32;
+      }
+      var extra_repeat_overlap: i32 = 0;
+      let shortfall = w_remaining_signed - w_repeating_signed * (n_copies as i64 + 1);
+      if (shortfall > 0 && n_repeating > 0) {
+        n_copies += 1;
+        let excess = (n_copies as i64 + 1) * w_repeating_signed - w_remaining_signed;
+        if (excess > 0) {
+          extra_repeat_overlap = (excess / (n_copies as i64 * n_repeating as i64)) as i32;
+          w_remaining = 0;
+        }
+      }
+      var max_copies = 0u32;
+      if (n_repeating > 0) {
+        let base_glyphs = (n_fixed + n_repeating) as u32;
+        if (base_glyphs < 256) {
+          max_copies = (256 - base_glyphs) / n_repeating as u32;
+        }
+      }
+      n_copies = n_copies < max_copies ? n_copies : max_copies;
+      if (step == 0) {
+        extra_glyphs_needed += (n_copies * n_repeating as u32) as usize;
+      } else {
+        var x_offset = w_remaining / 2;
+        var k = end;
+        while (k > start) {
+          let width = funcs.h_advance(buf.info[k - 1].codepoint);
+          var repeat = 1u32;
+          if (buf.info[k - 1].aux == kStchRepeating) {
+            repeat += n_copies;
+          }
+          buf.pos[k - 1].x_advance = 0;
+          for (let n in 0..repeat) {
+            if (rtl) {
+              x_offset -= width;
+              if (n > 0) {
+                x_offset += extra_repeat_overlap;
+              }
+            }
+            buf.pos[k - 1].x_offset = x_offset;
+            j -= 1;
+            buf.info[j] = buf.info[k - 1];
+            buf.pos[j] = buf.pos[k - 1];
+            if (!rtl) {
+              x_offset += width;
+              if (n > 0) {
+                x_offset -= extra_repeat_overlap;
+              }
+            }
+          }
+          k -= 1;
+        }
+      }
+      i -= 1;
+    }
+    if (step == 1) {
+      buf.info.truncate(new_len);
+      buf.pos.truncate(new_len);
+    }
+  }
+  if (!rtl) {
+    buf.reverse();
+  }
+}
+
+// --- The fallback plan ---------------------------------------------------------------------------
+
+fn put16(var t&: List<u8>, v: u32) {
+  t.push(((v >> 8) & 0xFF) as u8);
+  t.push((v & 0xFF) as u8);
+}
+
+fn set16(var t&: List<u8>, at: usize, v: u32) {
+  t[at] = ((v >> 8) & 0xFF) as u8;
+  t[at + 1] = (v & 0xFF) as u8;
+}
+
+// A format 1 coverage of sorted glyphs.
+fn put_coverage(var t&: List<u8>, glyphs&: List<u32>) {
+  put16(t, 1);
+  put16(t, glyphs.len() as u32);
+  for (let g in glyphs) {
+    put16(t, g);
+  }
+}
+
+// arabic_fallback_synthesize_lookup_single: a SingleSubst format 2 lookup,
+// sorted by glyph (a stable sort, as hb_stable_sort).
+fn synthesize_single(face&: ShapeFace, feature_index: usize, var t&: List<u8>): bool {
+  var glyphs: List<u32> = List();
+  var subs: List<u32> = List();
+  var u = kArabicShapingFirst;
+  while (u <= kArabicShapingLast) {
+    let s = kArabicShaping[((u - kArabicShapingFirst) * 4) as usize + feature_index] as u32;
+    u += 1;
+    if (s == 0) {
+      continue;
+    }
+    let ug = face.nominal_glyph(u - 1) else {
+      continue;
+    };
+    let sg = face.nominal_glyph(s) else {
+      continue;
+    };
+    if (ug == sg || ug > 0xFFFF || sg > 0xFFFF) {
+      continue;
+    }
+    // insertion: stable by glyph
+    var k = glyphs.len();
+    glyphs.push(ug);
+    subs.push(sg);
+    while (k > 0 && glyphs[k - 1] > ug) {
+      glyphs[k] = glyphs[k - 1];
+      subs[k] = subs[k - 1];
+      k -= 1;
+    }
+    glyphs[k] = ug;
+    subs[k] = sg;
+  }
+  if (glyphs.len() == 0) {
+    return false;
+  }
+  // Lookup: type 1, IgnoreMarks, one subtable at 8.
+  put16(t, 1);
+  put16(t, 0x8);
+  put16(t, 1);
+  put16(t, 8);
+  // SingleSubstFormat2: format, coverage, count, substitutes
+  let s = t.len();
+  put16(t, 2);
+  put16(t, 0);
+  put16(t, subs.len() as u32);
+  for (let g in subs) {
+    put16(t, g);
+  }
+  let cov = t.len();
+  put_coverage(t, glyphs);
+  set16(t, s + 2, (cov - s) as u32);
+  return true;
+}
+
+// arabic_fallback_synthesize_lookup_ligature over a table of
+// (first, components..., ligature) rows with `n` components after the first.
+fn synthesize_ligature(face&: ShapeFace, table: &[u16], n: usize, lookup_flags: u32, var t&: List<u8>): bool {
+  let row = n + 2;
+  let rows = #table / row;
+  // The first characters in table order, each once.
+  var firsts_u: List<u32> = List();
+  for (let r in 0..rows) {
+    let f = table[r * row] as u32;
+    var seen = false;
+    for (let x in firsts_u) {
+      if (x == f) {
+        seen = true;
+      }
+    }
+    if (!seen) {
+      firsts_u.push(f);
+    }
+  }
+  var first_glyphs: List<u32> = List();
+  var first_index: List<usize> = List();
+  for (let i in 0..firsts_u.len()) {
+    if (let g = face.nominal_glyph(firsts_u[i])) {
+      var k = first_glyphs.len();
+      first_glyphs.push(g);
+      first_index.push(i);
+      while (k > 0 && first_glyphs[k - 1] > g) {
+        first_glyphs[k] = first_glyphs[k - 1];
+        first_index[k] = first_index[k - 1];
+        k -= 1;
+      }
+      first_glyphs[k] = g;
+      first_index[k] = i;
+    }
+  }
+  // Per first glyph: its ligatures (ligature glyph, component glyphs).
+  var sets: List<List<u32>> = List();
+  var total = 0usize;
+  for (let i in 0..first_glyphs.len()) {
+    let fu = firsts_u[first_index[i]];
+    var set: List<u32> = List();
+    for (let r in 0..rows) {
+      if (table[r * row] as u32 != fu) {
+        continue;
+      }
+      let lig_u = table[r * row + row - 1] as u32;
+      let lig = face.nominal_glyph(lig_u) else {
+        continue;
+      };
+      var comps: List<u32> = List();
+      var ok = true;
+      for (let c in 0..n) {
+        let cu = table[r * row + 1 + c] as u32;
+        if (cu == 0) {
+          ok = false;
+          break;
+        }
+        if (let cg = face.nominal_glyph(cu)) {
+          comps.push(cg);
+        } else {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) {
+        continue;
+      }
+      set.push(lig);
+      for (let c in comps) {
+        set.push(c);
+      }
+      total += 1;
+    }
+    sets.push(set);
+  }
+  if (total == 0) {
+    return false;
+  }
+  // Lookup: type 4, flags, one subtable at 8.
+  put16(t, 4);
+  put16(t, lookup_flags);
+  put16(t, 1);
+  put16(t, 8);
+  // LigatureSubstFormat1: format, coverage, count, ligature set offsets
+  let s = t.len();
+  put16(t, 1);
+  put16(t, 0);
+  put16(t, sets.len() as u32);
+  let offs = t.len();
+  for (let i in 0..sets.len()) {
+    put16(t, 0);
+  }
+  for (let i in 0..sets.len()) {
+    let set& = sets[i];
+    let ls = t.len();
+    set16(t, offs + i * 2, (ls - s) as u32);
+    let count = set.len() / (n + 1);
+    put16(t, count as u32);
+    let loffs = t.len();
+    for (let k in 0..count) {
+      put16(t, 0);
+    }
+    for (let k in 0..count) {
+      let lp = t.len();
+      set16(t, loffs + k * 2, (lp - ls) as u32);
+      put16(t, set[k * (n + 1)]);
+      put16(t, (n + 1) as u32);
+      for (let c in 0..n) {
+        put16(t, set[k * (n + 1) + 1 + c]);
+      }
+    }
+  }
+  let cov = t.len();
+  put_coverage(t, first_glyphs);
+  set16(t, s + 2, (cov - s) as u32);
+  return true;
+}
+
+// arabic_fallback_plan_init_unicode: one lookup per fallback feature the
+// map has a mask for, in a GSUB table of their own.
+fn build_fallback(var p&: ArabicPlan, map&: OtMap, face&: ShapeFace) {
+  let features = ["init", "medi", "fina", "isol", "rlig", "rlig", "rlig"];
+  var lookups: List<List<u8>> = List();
+  for (let i in 0..7) {
+    let mask = map.get_1_mask(tag(features[i]));
+    if (mask == 0) {
+      continue;
+    }
+    var l: List<u8> = List();
+    let ok = match (i) {
+      0 | 1 | 2 | 3 => synthesize_single(face, i, l),
+      4 => synthesize_ligature(face, kArabicLigatures3[..], 2, 0x8, l),
+      5 => synthesize_ligature(face, kArabicLigatures[..], 1, 0x8, l),
+      _ => synthesize_ligature(face, kArabicMarkLigatures[..], 1, 0, l),
+    };
+    if (ok) {
+      lookups.push(l);
+      p.fallback_masks.push(mask);
+    }
+  }
+  if (lookups.len() == 0) {
+    return;
+  }
+  // GSUB 1.0: no scripts or features, a lookup list at 10.
+  var t: List<u8> = List();
+  put16(t, 1);
+  put16(t, 0);
+  put16(t, 0);
+  put16(t, 0);
+  put16(t, 10);
+  put16(t, lookups.len() as u32);
+  let offs = t.len();
+  for (let i in 0..lookups.len()) {
+    put16(t, 0);
+  }
+  for (let i in 0..lookups.len()) {
+    let at = t.len();
+    set16(t, offs + i * 2, (at - 10) as u32);
+    for (let b in lookups[i]) {
+      t.push(b);
+    }
+  }
+  p.fallback_table = t;
+}
+
+// arabic_fallback_shape: the fallback lookups, each with its feature's mask.
+pub fn arabic_fallback_shape(ap&: ArabicPlan, face&: ShapeFace, var buf&: Buffer) {
+  if (!ap.do_fallback || ap.fallback_masks.len() == 0) {
+    return;
+  }
+  let t = ap.fallback_table.as_slice();
+  let gg = parse_gsubgpos(t);
+  var c = new_ctx(t, face.gdef_t(), face.gdef, gg, 0, Scale {}, buf);
+  for (let i in 0..ap.fallback_masks.len()) {
+    set_lookup(c, i as u32, ap.fallback_masks[i], true, true, false, false);
+    apply_string(c, buf, i as u32);
+  }
+}

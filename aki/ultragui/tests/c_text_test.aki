@@ -1,0 +1,23 @@
+// The safe CText wrapper must not hand libc an out-of-bounds pointer.
+module c_text_test;
+
+import {CText} from ultragui::sys::c_text;
+import {Expect} from ultragui_testing::expect;
+
+pub fn main(): i32 {
+  var t = Expect();
+  let text = CText("  0x1.8p+1,");
+  let f = text.strtof_at(0);
+  let d = text.strtod_at(0);
+  t.that(f.0 == 3.0 && f.1 == 10, "strtof value and end offset match libc");
+  t.that(d.0 == 3.0 && d.1 == 10, "strtod value and end offset match libc");
+  for (let pos in [text.len(), text.len() + 1, 1usize << 40]) {
+    let f = text.strtof_at(pos);
+    let d = text.strtod_at(pos);
+    t.that(f.0 == 0.0 && f.1 == pos, "strtof at or past the end converts nothing");
+    t.that(d.0 == 0.0 && d.1 == pos, "strtod at or past the end converts nothing");
+  }
+  let nul = CText("1\0tail");
+  t.that(nul.len() == 1 && nul.strtof_at(1).0 == 0.0, "first NUL ends the C string");
+  return t.finish();
+}

@@ -1,0 +1,862 @@
+// ugui/input/input.{h,cc}: InputRouter routes input events from the
+// platform's InputQueue to the widget tree: hover (with the ancestor hover
+// chain and cursor), press/click, drag-to-move (Movable/DragHandle), scroll
+// bubbling, keyboard focus (Tab ring, spatial arrow navigation, Enter/Space
+// activation), shortcuts, text input to the focused widget, and gamepad
+// navigation.
+//
+// Differences in shape:
+// * No `Init(Platform*)`: the router reaches the platform through the
+//   WidgetContext's `platform` view (UIContext points both at the same
+//   platform). Where the C++ checks `!platform_`, the port checks
+//   `ctx.platform == none`.
+// * Every method that touches widgets takes the World and the WidgetContext
+//   (no active registry): process, refresh_hover, set_focus, set_hover,
+//   reset_state.
+// * process copies the platform's queue before walking it (widget functions
+//   need the context, which lends the platform) and clears the platform's
+//   queue at the end, as the C++ does. Events pushed into the queue while
+//   process runs (nothing in the library does) are dropped by that clear
+//   rather than possibly seen.
+// * Handlers are `own fn` values with the C++ signatures. They get no World:
+//   one that must reach the widgets records what it needs and acts after
+//   process returns (PORTING.md, InputRouter).
+
+module ultragui::input::input;
+
+import {List} from akikit::containers::list;
+import {index_of, intro_sort} from ultragui::core::algorithm;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {GamepadAxis, GamepadButton, InputQueue, MouseButton} from ultragui::input::input_queue;
+import {Cursor, Position, Visibility, WidgetState} from ultragui::style::enums;
+import {Length} from ultragui::style::property_types;
+import {Style} from ultragui::style::style;
+import {kDragHandle, kMovable} from ultragui::widgets::components;
+import {
+  WidgetKind, char_input_widget, click_widget, computed_style, consumes_text_input, hit_test, kHierarchy, kStyleC, kTransform,
+  kWidgetNode, key_down_widget, mark_dirty, scroll_widget, set_widget_state, widget_state_of,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// Event callbacks (optional, for the application layer)
+pub type ClickHandler = own fn(WidgetId, MouseButton): ();
+pub type HoverHandler = own fn(WidgetId, bool): ();
+// A global keyboard shortcut, checked before dispatch to the focused widget.
+pub type ShortcutHandler = own fn(): ();
+// Gamepad B-button callback for "back" / "cancel" navigation.
+pub type GamepadBackHandler = own fn(): ();
+
+comptime let kGamepadNavInitialDelay: f32 = 0.35;
+comptime let kGamepadNavRepeatRate: f32 = 0.12;
+comptime let kDragThreshold: f32 = 4.0;
+comptime let kStickNavThreshold: f32 = 0.5;
+
+// GLFW key codes and modifiers the router acts on.
+comptime let kKeyRight: i32 = 262;
+comptime let kKeyLeft: i32 = 263;
+comptime let kKeyDown: i32 = 264;
+comptime let kKeyUp: i32 = 265;
+comptime let kKeyTab: i32 = 258;
+comptime let kKeyEnter: i32 = 257;
+comptime let kKeyKpEnter: i32 = 335;
+comptime let kKeySpace: i32 = 32;
+comptime let kModShift: i32 = 0x0001;
+
+struct Shortcut {
+  pub var key: i32
+  pub var mods: i32
+  pub var handler: ShortcutHandler
+}
+
+// Routes input events from an InputQueue to the widget tree. Manages hover,
+// press, and focus state. Platform-agnostic.
+pub struct InputRouter {
+  // Handles, not pointers: a tree rebuild makes them stale instead of
+  // dangling.
+  var hovered_: WidgetId = kNullWidget
+  var focused_: WidgetId = kNullWidget
+  var pressed_: WidgetId = kNullWidget
+  // Usually `pressed_`; a draggable ancestor if the press landed on a drag
+  // handle.
+  var drag_target_: WidgetId = kNullWidget
+
+  var mouse_pos_: Vec2 = Vec2::zero()
+  var drag_start_: Vec2 = Vec2::zero()
+  var drag_prev_: Vec2 = Vec2::zero()
+  var dragging_: bool = false
+  var gamepad_nav_active_: bool = false
+  var keyboard_nav_: bool = true
+
+  // Gamepad stick repeat navigation
+  var gamepad_nav_timer_: f32 = 0.0
+  var gamepad_nav_dir_x_: i8 = 0
+  var gamepad_nav_dir_y_: i8 = 0
+
+  var shortcuts_: List<Shortcut> = List()
+
+  var on_click_: ClickHandler? = none
+  var on_hover_: HoverHandler? = none
+  var on_gamepad_back_: GamepadBackHandler? = none
+
+  pub fn InputRouter(): InputRouter => InputRouter {};
+
+  // Process all pending input from the queue. Call once per frame. Returns
+  // true if any input was consumed.
+  pub fn process(var self&, var world&: World, var ctx&: WidgetContext, root: WidgetId): bool;
+
+  // Clear cached hover/press/focus state. Call when replacing the widget tree.
+  pub fn reset_state(var self&, var world&: World, var ctx&: WidgetContext);
+
+  pub fn hovered_widget(self&): WidgetId => self.hovered_;
+  pub fn focused_widget(self&): WidgetId => self.focused_;
+  pub fn pressed_widget(self&): WidgetId => self.pressed_;
+  // True between drag start and drag end. Defer tree rebuilds while
+  // dragging, or the drag target gets destroyed mid-move.
+  pub fn is_dragging(self&): bool => self.dragging_;
+
+  // Re-run hit-testing at the cached mouse position. Call after replacing the
+  // widget tree so hover survives the rebuild.
+  pub fn refresh_hover(var self&, var world&: World, var ctx&: WidgetContext, root: WidgetId);
+
+  pub fn set_focus(var self&, var world&: World, var ctx&: WidgetContext, widget: WidgetId);
+  // Set the hovered widget directly (for apps that rebuild the tree on a
+  // dirty flag and want hover to survive without a mouse-move).
+  pub fn set_hover(var self&, var world&: World, var ctx&: WidgetContext, widget: WidgetId);
+  pub fn mouse_position(self&): Vec2 => self.mouse_pos_;
+
+  pub fn set_on_click(var self&, handler: ClickHandler) {
+    self.on_click_ = handler;
+  }
+  pub fn set_on_hover(var self&, handler: HoverHandler) {
+    self.on_hover_ = handler;
+  }
+
+  // Register a global keyboard shortcut. Checked before dispatching to the
+  // focused widget.
+  pub fn register_shortcut(var self&, key: i32, mods: i32, handler: ShortcutHandler) {
+    self.shortcuts_.push(Shortcut { key, mods, handler });
+  }
+  pub fn clear_shortcuts(var self&) {
+    self.shortcuts_.clear();
+  }
+
+  pub fn set_on_gamepad_back(var self&, handler: GamepadBackHandler) {
+    self.on_gamepad_back_ = handler;
+  }
+
+  // Whether gamepad navigation is currently active (last input was from the
+  // gamepad).
+  pub fn gamepad_nav_active(self&): bool => self.gamepad_nav_active_;
+
+  // Keyboard navigation: arrows move focus, Enter/Space activate. On by
+  // default; disable for UIs that use arrow keys themselves.
+  //
+  // Focus ring: widgets with `tab-index` form the ring when present;
+  // otherwise an implicit ring of interactive widgets (buttons, checkboxes,
+  // sliders, dropdowns, `cursor: pointer`). Off: only explicit `tab-index`
+  // is focusable.
+  pub fn set_keyboard_navigation(var self&, enabled: bool) {
+    self.keyboard_nav_ = enabled;
+  }
+  pub fn keyboard_navigation(self&): bool => self.keyboard_nav_;
+}
+
+fn has_platform(ctx&: WidgetContext): bool {
+  if (let _ = ctx.platform) {
+    return true;
+  }
+  return false;
+}
+
+fn set_cursor(var ctx&: WidgetContext, cursor: Cursor) {
+  if (var p& = ctx.platform) {
+    p.set_cursor(cursor);
+  }
+}
+
+fn set_hover_bit(var world&: World, var ctx&: WidgetContext, w: WidgetId, on: bool) {
+  let state = widget_state_of(world, w);
+  if (on) {
+    set_widget_state(world, ctx, w, state.with(WidgetState::Hovered));
+  } else {
+    set_widget_state(world, ctx, w, state.without(WidgetState::Hovered));
+  }
+}
+
+fn clear_state_bit(var world&: World, var ctx&: WidgetContext, w: WidgetId, bit: WidgetState) {
+  let state = widget_state_of(world, w);
+  set_widget_state(world, ctx, w, state.without(bit));
+}
+
+fn add_state_bit(var world&: World, var ctx&: WidgetContext, w: WidgetId, bit: WidgetState) {
+  let state = widget_state_of(world, w);
+  set_widget_state(world, ctx, w, state.with(bit));
+}
+
+// Without an authored tab-index, a widget is focusable when it is an
+// interactive kind or styled `cursor: pointer`.
+fn is_implicitly_focusable(world&: World, w: WidgetId, s&: Style): bool {
+  let kind = world.get(kWidgetNode, w)!.kind;
+  if (kind == WidgetKind::Button || kind == WidgetKind::Checkbox || kind == WidgetKind::Radio || kind == WidgetKind::Toggle ||
+      kind == WidgetKind::Slider || kind == WidgetKind::Dropdown || kind == WidgetKind::TextInput) {
+    return true;
+  }
+  return s.cursor == Cursor::Pointer;
+}
+
+// Gather the focus ring under `w`, skipping anything hidden or collapsed.
+// `implicit` widens the ring from authored tab-indices to anything that
+// looks interactive.
+fn collect_focusable(world&: World, w: WidgetId, var out&: List<WidgetId>, implicit: bool) {
+  let s = computed_style(world, w);
+  if (s.visibility == Visibility::Hidden || s.visibility == Visibility::Collapsed) {
+    return;
+  }
+  let explicit_index = world.get(kWidgetNode, w)!.tab_index >= 0;
+  if (explicit_index || (implicit && is_implicitly_focusable(world, w, s))) {
+    out.push(w);
+  }
+  for (let child in world.get(kHierarchy, w)!.children) {
+    collect_focusable(world, child, out, implicit);
+  }
+}
+
+// The ring to navigate: authored tab-indices, or when there are none, the
+// implicitly focusable widgets. Decided per collection, so a host that
+// concatenates every screen into one tree only asks the screen on display.
+fn collect_focus_ring(world&: World, root: WidgetId, var out&: List<WidgetId>, allow_implicit: bool) {
+  collect_focusable(world, root, out, false);
+  if (out.len() == 0 && allow_implicit) {
+    collect_focusable(world, root, out, true);
+  }
+}
+
+// Order the ring by tab index; the widget index breaks ties so the walk is
+// repeatable.
+fn sort_focusable(world&: World, var ring&: List<WidgetId>) {
+  intro_sort(ring.as_slice_var(), fn(a&: WidgetId, b&: WidgetId): bool {
+    let ta = world.get(kWidgetNode, a)!.tab_index;
+    let tb = world.get(kWidgetNode, b)!.tab_index;
+    if (ta != tb) {
+      return ta < tb;
+    }
+    return a.index < b.index;
+  });
+}
+
+// Is the widget, or any of its ancestors, hidden or collapsed? Focus
+// survives a screen change, so a focused widget can be painted away;
+// activating it would fire a click nobody aimed at.
+fn is_widget_visible(world&: World, start: WidgetId): bool {
+  var w = start;
+  while (w.valid()) {
+    let s = computed_style(world, w);
+    if (s.visibility == Visibility::Hidden || s.visibility == Visibility::Collapsed) {
+      return false;
+    }
+    w = world.get(kHierarchy, w)!.parent;
+  }
+  return true;
+}
+
+// A widget and all of its ancestors up to the root.
+fn collect_ancestor_chain(world&: World, start: WidgetId, var out&: List<WidgetId>) {
+  var w = start;
+  while (w.valid()) {
+    out.push(w);
+    if (let h& = world.get(kHierarchy, w)) {
+      w = h.parent;
+    } else {
+      w = kNullWidget;
+    }
+  }
+}
+
+fn chain_contains(v&: List<WidgetId>, x: WidgetId): bool {
+  for (let w in v) {
+    if (w == x) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Move the :hover state between the old and new leaf's ancestor chains.
+// Hit testing returns the deepest widget only, but CSS hover lights up every
+// ancestor too. Common ancestors are left untouched so a container's hover
+// transition fires once on enter.
+fn update_hover_chain(var world&: World, var ctx&: WidgetContext, old_leaf: WidgetId, new_leaf: WidgetId) {
+  if (old_leaf == new_leaf) {
+    return;
+  }
+  var old_chain: List<WidgetId> = List();
+  var new_chain: List<WidgetId> = List();
+  collect_ancestor_chain(world, old_leaf, old_chain);
+  collect_ancestor_chain(world, new_leaf, new_chain);
+  for (let w in old_chain) {
+    if (!chain_contains(new_chain, w)) {
+      set_hover_bit(world, ctx, w, false);
+    }
+  }
+  for (let w in new_chain) {
+    if (!chain_contains(old_chain, w)) {
+      set_hover_bit(world, ctx, w, true);
+    }
+  }
+}
+
+// The effective cursor for a hovered leaf: the nearest explicit cursor up the
+// ancestor chain.
+fn resolve_cursor(world&: World, leaf: WidgetId): Cursor {
+  var w = leaf;
+  while (w.valid()) {
+    let c = computed_style(world, w).cursor;
+    if (c != Cursor::Auto) {
+      return c;
+    }
+    if (let h& = world.get(kHierarchy, w)) {
+      w = h.parent;
+    } else {
+      w = kNullWidget;
+    }
+  }
+  return Cursor::Auto;
+}
+
+// --- Drag-to-move ----------------------------------------------------------------
+// The Movable component carries the drag state. The first move pins the
+// widget to its current rect via style left/top in pixels (clearing any
+// right/bottom anchoring), then each move offsets that anchor by
+// cursor - press.
+
+fn drag_start(var world&: World, w: WidgetId, pos: Vec2) {
+  if (!world.has(kMovable, w)) {
+    return;
+  }
+  let r = world.get(kTransform, w)!.rect;
+  {
+    var m& = world.get_var(kMovable, w)!;
+    m.origin_x = r.x;
+    m.origin_y = r.y;
+    m.press = pos;
+  }
+  {
+    var s& = world.get_var(kStyleC, w)!.style;
+    s.left_offset = Length::px(r.x);
+    s.top = Length::px(r.y);
+    s.right_offset = Length::auto();
+    s.bottom = Length::auto();
+    if (s.position != Position::Absolute) {
+      s.position = Position::Absolute;
+    }
+  }
+  mark_dirty(world, w);
+}
+
+fn drag_move(var world&: World, w: WidgetId, pos: Vec2) {
+  let m& = world.get(kMovable, w) else {
+    return;
+  };
+  let nx = m.origin_x + (pos.x - m.press.x);
+  let ny = m.origin_y + (pos.y - m.press.y);
+  {
+    var s& = world.get_var(kStyleC, w)!.style;
+    s.left_offset = Length::px(nx);
+    s.top = Length::px(ny);
+  }
+  mark_dirty(world, w);
+  if (let m2& = world.get(kMovable, w)) {
+    if (let f& = m2.on_drag) {
+      f(Vec2 { x: nx, y: ny });
+    }
+  }
+}
+
+fn InputRouter::notify_hover(self&, w: WidgetId, on: bool) {
+  if (let h& = self.on_hover_) {
+    h(w, on);
+  }
+}
+
+fn InputRouter::notify_click(self&, w: WidgetId, button: MouseButton) {
+  if (let h& = self.on_click_) {
+    h(w, button);
+  }
+}
+
+fn InputRouter::process(var self&, var world&: World, var ctx&: WidgetContext, root: WidgetId): bool {
+  if (!root.valid()) {
+    return false;
+  }
+  var queue = InputQueue {};
+  if (var p& = ctx.platform) {
+    queue = p.input_queue();
+  } else {
+    return false;
+  }
+  var consumed = false;
+
+  // Stale handles (after a tree rebuild) resolve to none automatically.
+
+  // Mouse movement -> hover detection
+  if (queue.move_count > 0) {
+    let pos = queue.move_events[(queue.move_count - 1) as usize].position;  // latest
+    self.mouse_pos_ = pos;
+    let new_hover = hit_test(world, ctx, root, pos);
+
+    if (new_hover != self.hovered_) {
+      if (self.hovered_.valid()) {
+        self.notify_hover(self.hovered_, false);
+      }
+      update_hover_chain(world, ctx, self.hovered_, new_hover);
+      self.hovered_ = new_hover;
+      if (new_hover.valid()) {
+        self.notify_hover(new_hover, true);
+        set_cursor(ctx, resolve_cursor(world, new_hover));
+      } else {
+        set_cursor(ctx, Cursor::Auto);
+      }
+      consumed = true;
+    }
+
+    // Drag detection: only enter drag mode if there's a draggable target
+    // reachable from the pressed widget, otherwise leave drag_target_ null so
+    // the release path still fires a click.
+    if (self.pressed_.valid()) {
+      let diff = Vec2 { x: pos.x - self.drag_start_.x, y: pos.y - self.drag_start_.y };
+      let dist2 = diff.x * diff.x + diff.y * diff.y;
+      if (!self.dragging_ && dist2 > kDragThreshold * kDragThreshold) {
+        // A DragHandle on the pressed widget (or an ancestor) climbs to the
+        // nearest Movable ancestor: "drag the header moves the panel".
+        var dt = kNullWidget;
+        var w = self.pressed_;
+        while (w.valid() && !world.has(kDragHandle, w)) {
+          w = world.get(kHierarchy, w)!.parent;
+        }
+        if (w.valid()) {
+          var anc = world.get(kHierarchy, w)!.parent;
+          while (anc.valid() && !world.has(kMovable, anc)) {
+            anc = world.get(kHierarchy, anc)!.parent;
+          }
+          if (anc.valid()) {
+            dt = anc;
+          } else if (world.has(kMovable, w)) {
+            dt = w;
+          }
+        } else if (world.has(kMovable, self.pressed_)) {
+          dt = self.pressed_;
+        }
+        if (dt.valid()) {
+          self.dragging_ = true;
+          self.drag_target_ = dt;
+          drag_start(world, dt, self.drag_start_);
+        }
+      }
+      if (self.dragging_ && self.drag_target_.valid()) {
+        drag_move(world, self.drag_target_, pos);
+        self.drag_prev_ = pos;
+        consumed = true;
+      }
+    }
+  }
+
+  // Mouse buttons -> press/click
+  for (let evt in queue.buttons()) {
+    let target = hit_test(world, ctx, root, evt.position);
+
+    if (evt.pressed) {
+      self.pressed_ = target;
+      self.drag_start_ = evt.position;
+      self.drag_prev_ = evt.position;
+      self.dragging_ = false;
+      self.drag_target_ = kNullWidget;
+      if (target.valid()) {
+        add_state_bit(world, ctx, target, WidgetState::Pressed);
+      }
+      self.set_focus(world, ctx, target);
+      consumed = true;
+    } else {
+      // Release. Drag end is a no-op: the position was already committed by
+      // drag_move during the drag.
+      let was_dragging = self.drag_target_.valid() && world.alive(self.drag_target_);
+      self.dragging_ = false;
+      self.drag_target_ = kNullWidget;
+      if (self.pressed_.valid()) {
+        clear_state_bit(world, ctx, self.pressed_, WidgetState::Pressed);
+
+        // Click: press and release on the same widget (only if not dragging)
+        if (!was_dragging && self.pressed_ == target && target.valid()) {
+          self.notify_click(target, evt.button);
+          let _ = click_widget(world, ctx, target);
+        }
+      }
+      self.pressed_ = kNullWidget;
+      consumed = true;
+    }
+  }
+
+  // Scroll -> bubble up to find a handler
+  for (let evt in queue.scrolls()) {
+    var w = hit_test(world, ctx, root, evt.position);
+    while (w.valid()) {
+      if (scroll_widget(world, ctx, w, Vec2 { x: -evt.delta.x * 40.0, y: -evt.delta.y * 40.0 })) {
+        consumed = true;
+        break;
+      }
+      w = world.get(kHierarchy, w)!.parent;
+    }
+  }
+
+  // Arrow-key navigation, the keyboard half of what the d-pad does. Handled
+  // before Tab; repeats count.
+  if (self.keyboard_nav_) {
+    for (let evt in queue.keys()) {
+      if (!evt.pressed) {
+        continue;
+      }
+      var dir_x: i8 = 0;
+      var dir_y: i8 = 0;
+      if (evt.key == kKeyRight) {
+        dir_x = 1;
+      } else if (evt.key == kKeyLeft) {
+        dir_x = -1;
+      } else if (evt.key == kKeyDown) {
+        dir_y = 1;
+      } else if (evt.key == kKeyUp) {
+        dir_y = -1;
+      } else {
+        continue;
+      }
+      self.navigate_focus(world, ctx, root, dir_x, dir_y);
+      consumed = true;
+    }
+  }
+
+  // Tab navigation
+  for (let evt in queue.keys()) {
+    if (evt.pressed && evt.key == kKeyTab) {
+      let reverse = (evt.mods & kModShift) != 0;
+      var focusable: List<WidgetId> = List();
+      collect_focus_ring(world, root, focusable, self.keyboard_nav_);
+      if (focusable.len() == 0) {
+        continue;
+      }
+      sort_focusable(world, focusable);
+      let count = focusable.len();
+      let at = index_of(focusable.as_slice(), self.focused_) ?? count;
+      if (reverse) {
+        if (at == 0 || at == count) {
+          self.set_focus(world, ctx, focusable[count - 1]);
+        } else {
+          self.set_focus(world, ctx, focusable[at - 1]);
+        }
+      } else {
+        if (at == count || at + 1 == count) {
+          self.set_focus(world, ctx, focusable[0]);
+        } else {
+          self.set_focus(world, ctx, focusable[at + 1]);
+        }
+      }
+      consumed = true;
+    }
+  }
+
+  // Global shortcuts before dispatching to the focused widget
+  for (let evt in queue.keys()) {
+    if (evt.pressed) {
+      var handled = false;
+      for (let sc in self.shortcuts_) {
+        if (evt.key == sc.key && (evt.mods & sc.mods) == sc.mods) {
+          (sc.handler)();
+          consumed = true;
+          handled = true;
+          break;
+        }
+      }
+      if (handled) {
+        continue;
+      }
+
+      // Enter or Space activates the focused widget (keyboard/gamepad nav),
+      // unless it consumes text input (then Space is a literal character).
+      if (self.focused_.valid() && is_widget_visible(world, self.focused_) && !consumes_text_input(world, ctx, self.focused_) &&
+          (evt.key == kKeyEnter || evt.key == kKeyKpEnter || evt.key == kKeySpace)) {
+        self.notify_click(self.focused_, MouseButton::Left);
+        let _ = click_widget(world, ctx, self.focused_);
+        consumed = true;
+        continue;
+      }
+    }
+    // Dispatch to the focused widget (key-down / repeat only).
+    if (self.focused_.valid() && (evt.pressed || evt.repeat)) {
+      consumed = key_down_widget(world, ctx, self.focused_, evt.key, evt.mods) || consumed;
+    }
+  }
+
+  // Character input to the focused widget
+  for (let ce in queue.chars()) {
+    if (self.focused_.valid()) {
+      consumed = char_input_widget(world, ctx, self.focused_, ce.codepoint) || consumed;
+    }
+  }
+
+  // Gamepad buttons
+  for (let evt in queue.gamepad_buttons()) {
+    if (!evt.pressed) {
+      continue;
+    }
+
+    self.gamepad_nav_active_ = true;
+
+    if (evt.button == GamepadButton::A) {
+      if (self.focused_.valid() && is_widget_visible(world, self.focused_)) {
+        self.notify_click(self.focused_, MouseButton::Left);
+        let _ = click_widget(world, ctx, self.focused_);
+        consumed = true;
+      }
+    } else if (evt.button == GamepadButton::B) {
+      if (let h& = self.on_gamepad_back_) {
+        h();
+        consumed = true;
+      }
+    } else if (evt.button == GamepadButton::DPadUp) {
+      self.navigate_focus(world, ctx, root, 0, -1);
+      consumed = true;
+    } else if (evt.button == GamepadButton::DPadDown) {
+      self.navigate_focus(world, ctx, root, 0, 1);
+      consumed = true;
+    } else if (evt.button == GamepadButton::DPadLeft) {
+      self.navigate_focus(world, ctx, root, -1, 0);
+      consumed = true;
+    } else if (evt.button == GamepadButton::DPadRight) {
+      self.navigate_focus(world, ctx, root, 1, 0);
+      consumed = true;
+    }
+  }
+
+  // Gamepad left stick navigation (with repeat)
+  var stick_x: f32 = 0.0;
+  var stick_y: f32 = 0.0;
+  for (let evt in queue.gamepad_axes()) {
+    if (evt.axis == GamepadAxis::LeftX) {
+      stick_x = evt.value;
+    } else if (evt.axis == GamepadAxis::LeftY) {
+      stick_y = evt.value;
+    }
+  }
+  if (stick_x != 0.0 || stick_y != 0.0) {
+    self.gamepad_nav_active_ = true;
+  }
+
+  let nav_x: i8 = (stick_x > kStickNavThreshold) ? 1 : ((stick_x < -kStickNavThreshold) ? -1 : 0);
+  let nav_y: i8 = (stick_y > kStickNavThreshold) ? 1 : ((stick_y < -kStickNavThreshold) ? -1 : 0);
+
+  if (nav_x != self.gamepad_nav_dir_x_ || nav_y != self.gamepad_nav_dir_y_) {
+    self.gamepad_nav_dir_x_ = nav_x;
+    self.gamepad_nav_dir_y_ = nav_y;
+    self.gamepad_nav_timer_ = kGamepadNavInitialDelay;
+    if (nav_x != 0 || nav_y != 0) {
+      self.navigate_focus(world, ctx, root, nav_x, nav_y);
+      consumed = true;
+    }
+  } else if (nav_x != 0 || nav_y != 0) {
+    self.gamepad_nav_timer_ -= 1.0 / 60.0;
+    if (self.gamepad_nav_timer_ <= 0.0) {
+      self.gamepad_nav_timer_ = kGamepadNavRepeatRate;
+      self.navigate_focus(world, ctx, root, nav_x, nav_y);
+      consumed = true;
+    }
+  }
+
+  if (queue.move_count > 0 || queue.button_count > 0) {
+    self.gamepad_nav_active_ = false;
+  }
+
+  if (var p& = ctx.platform) {
+    p.input_queue().clear();
+  }
+  return consumed;
+}
+
+fn InputRouter::refresh_hover(var self&, var world&: World, var ctx&: WidgetContext, root: WidgetId) {
+  if (!root.valid() || !has_platform(ctx)) {
+    return;
+  }
+  let new_hover = hit_test(world, ctx, root, self.mouse_pos_);
+  if (new_hover == self.hovered_) {
+    return;
+  }
+  if (self.hovered_.valid()) {
+    self.notify_hover(self.hovered_, false);
+  }
+  update_hover_chain(world, ctx, self.hovered_, new_hover);
+  self.hovered_ = new_hover;
+  if (new_hover.valid()) {
+    self.notify_hover(new_hover, true);
+    set_cursor(ctx, resolve_cursor(world, new_hover));
+  } else {
+    set_cursor(ctx, Cursor::Auto);
+  }
+}
+
+fn InputRouter::set_hover(var self&, var world&: World, var ctx&: WidgetContext, widget: WidgetId) {
+  if (self.hovered_ == widget) {
+    return;
+  }
+  if (self.hovered_.valid()) {
+    self.notify_hover(self.hovered_, false);
+  }
+  update_hover_chain(world, ctx, self.hovered_, widget);
+  self.hovered_ = widget;
+  if (widget.valid()) {
+    self.notify_hover(widget, true);
+    set_cursor(ctx, resolve_cursor(world, widget));
+  } else {
+    set_cursor(ctx, Cursor::Auto);
+  }
+}
+
+fn InputRouter::set_focus(var self&, var world&: World, var ctx&: WidgetContext, widget: WidgetId) {
+  if (self.focused_ == widget) {
+    return;
+  }
+  if (self.focused_.valid()) {
+    clear_state_bit(world, ctx, self.focused_, WidgetState::Focused);
+  }
+  self.focused_ = widget;
+  if (widget.valid()) {
+    add_state_bit(world, ctx, widget, WidgetState::Focused);
+  }
+}
+
+fn InputRouter::reset_state(var self&, var world&: World, var ctx&: WidgetContext) {
+  if (self.hovered_.valid()) {
+    update_hover_chain(world, ctx, self.hovered_, kNullWidget);
+  }
+  if (self.pressed_.valid()) {
+    clear_state_bit(world, ctx, self.pressed_, WidgetState::Pressed);
+  }
+  if (self.focused_.valid()) {
+    clear_state_bit(world, ctx, self.focused_, WidgetState::Focused);
+  }
+
+  self.hovered_ = kNullWidget;
+  self.focused_ = kNullWidget;
+  self.pressed_ = kNullWidget;
+  self.drag_target_ = kNullWidget;
+  self.dragging_ = false;
+  self.mouse_pos_ = Vec2::zero();
+  self.drag_start_ = Vec2::zero();
+  self.drag_prev_ = Vec2::zero();
+
+  set_cursor(ctx, Cursor::Auto);
+}
+
+// Centre of a widget's laid-out rect: where a control looks like it is, not
+// where it sits in the document.
+fn focus_centre(world&: World, w: WidgetId): Vec2 {
+  let r = world.get(kTransform, w)!.rect;
+  return Vec2 { x: r.x + r.w * 0.5, y: r.y + r.h * 0.5 };
+}
+
+// The widget to move to from `from` heading (dir_x, dir_y), or the null
+// handle when there is nothing that way. Geometry, not document order:
+// candidates must lie in the direction asked for; nearest wins, with
+// sideways drift penalized so a straight-ahead neighbour beats a closer
+// diagonal one.
+fn nearest_in_direction(world&: World, ring&: List<WidgetId>, from: WidgetId, dir_x: i8, dir_y: i8): WidgetId {
+  // Below this a candidate counts as level with the focus rather than beyond
+  // it, which is what stops Left/Right walking a vertical list.
+  let k_min_travel: f32 = 1.0;
+  let k_drift_penalty: f32 = 2.0;
+
+  let fx = dir_x as f32;
+  let fy = dir_y as f32;
+  let origin = focus_centre(world, from);
+  var best = kNullWidget;
+  var best_score: f32 = 0.0;
+  for (let candidate in ring) {
+    if (candidate == from) {
+      continue;
+    }
+    let to = focus_centre(world, candidate);
+    let dx = to.x - origin.x;
+    let dy = to.y - origin.y;
+    let along = dx * fx + dy * fy;
+    if (along < k_min_travel) {
+      continue;  // level with, or behind, the focus
+    }
+    let drift = @abs(dx * -fy + dy * fx);
+    let score = along + drift * k_drift_penalty;
+    if (!best.valid() || score < best_score) {
+      best = candidate;
+      best_score = score;
+    }
+  }
+  return best;
+}
+
+// The far end of the ring in the OPPOSITE direction, so walking off the
+// bottom of a list comes back on at the top. Same geometry test, so a
+// vertical list still refuses to wrap horizontally.
+fn wrap_in_direction(world&: World, ring&: List<WidgetId>, from: WidgetId, dir_x: i8, dir_y: i8): WidgetId {
+  let k_min_travel: f32 = 1.0;
+  let fx = dir_x as f32;
+  let fy = dir_y as f32;
+  let origin = focus_centre(world, from);
+  var best = kNullWidget;
+  var best_distance: f32 = 0.0;
+  for (let candidate in ring) {
+    if (candidate == from) {
+      continue;
+    }
+    let to = focus_centre(world, candidate);
+    let dx = to.x - origin.x;
+    let dy = to.y - origin.y;
+    let back = -(dx * fx + dy * fy);
+    if (back < k_min_travel) {
+      continue;
+    }
+    if (!best.valid() || back > best_distance) {
+      best = candidate;
+      best_distance = back;
+    }
+  }
+  return best;
+}
+
+fn InputRouter::navigate_focus(var self&, var world&: World, var ctx&: WidgetContext, root: WidgetId, dir_x: i8, dir_y: i8) {
+  if (!root.valid()) {
+    return;
+  }
+
+  var focusable: List<WidgetId> = List();
+  collect_focus_ring(world, root, focusable, self.keyboard_nav_);
+  if (focusable.len() == 0) {
+    return;
+  }
+
+  sort_focusable(world, focusable);
+
+  // Nothing focused yet (a screen just opened, or the mouse has been
+  // driving): the first press lands on the ring's head.
+  if (!self.focused_.valid() || index_of(focusable.as_slice(), self.focused_) == none) {
+    let head = focusable[0];
+    self.set_focus(world, ctx, head);
+    self.notify_hover(head, true);
+    return;
+  }
+
+  var next = nearest_in_direction(world, focusable, self.focused_, dir_x, dir_y);
+  if (!next.valid()) {
+    next = wrap_in_direction(world, focusable, self.focused_, dir_x, dir_y);
+  }
+  if (!next.valid()) {
+    return;  // nothing that way, and nothing to wrap to
+  }
+
+  self.set_focus(world, ctx, next);
+  self.notify_hover(next, true);
+}

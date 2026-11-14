@@ -1,0 +1,131 @@
+// The loader's edges (no C++ test covers them): files, the TextureBackend
+// upload, parse_path_data on its own, and the three C++ loops that never end
+// on malformed input, which here must stop (see svg_parser's header).
+
+module svg_loader_test;
+
+import {write_bytes} from akikit::filesystem::file_util;
+import {create_temp_dir} from akikit::filesystem::scoped_temp_dir;
+import {TextureId, kNullTextureId} from ultragui::render::draw_data;
+import {DynTextureBackend, TextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {load_svg, load_svg_memory, load_svg_texture} from ultragui::svg::svg;
+import {parse_path_data} from ultragui::svg::svg_parser;
+import {Path, PathCmd} from ultragui::svg::svg_types;
+import {Expect} from ultragui_testing::expect;
+
+comptime let kRect: str = "<svg width=\"8\" height=\"6\"><rect x=\"1\" y=\"1\" width=\"4\" height=\"3\" fill=\"#102030\"/></svg>";
+
+// Records what an upload looked like.
+struct Recorder : TextureBackend {
+  pub var calls: u32 = 0
+  pub var width: u32 = 0
+  pub var height: u32 = 0
+  pub var format: RhiFormat = RhiFormat::R8Unorm
+  pub var filter: RhiFilter = RhiFilter::Nearest
+  pub var bytes: usize = 0
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): TextureId {
+    self.calls += 1;
+    self.width = width;
+    self.height = height;
+    self.format = format;
+    self.filter = filter;
+    self.bytes = #pixels;
+    return 77;
+  }
+  pub fn update_texture(var self&, id: TextureId, pixels: bytes) {}
+  pub fn destroy_texture(var self&, id: TextureId) {}
+}
+
+fn check_files(var t&: Expect) {
+  t.that(load_svg("/nonexistent/dir/x.svg") == none, "missing file");
+  let dir = create_temp_dir("ugui_svg_") else {
+    t.that(false, "temp dir");
+    return;
+  };
+  let good = f"{dir.path()}/rect.svg";
+  let empty = f"{dir.path()}/empty.svg";
+  let bad = f"{dir.path()}/bad.svg";
+  let _ = write_bytes(good, kRect as bytes);
+  let _ = write_bytes(empty, "" as bytes);
+  let _ = write_bytes(bad, "<html/>" as bytes);
+
+  let from_file = load_svg(good);
+  let from_mem = load_svg_memory(kRect as bytes);
+  t.that(from_file != none && from_mem != none, "file and memory load");
+  if (let a& = from_file) {
+    if (let b& = from_mem) {
+      t.that(a.width == 8 && a.height == 6 && a.width == b.width && a.height == b.height, "file size");
+      t.that(a.pixels.as_slice() == b.pixels.as_slice(), "file pixels equal memory pixels");
+      // The rect covers pixel (2, 2) exactly: #102030, opaque.
+      let at = (2 * 8 + 2) * 4;
+      t.that(a.pixels[at] == 0x10 && a.pixels[at + 1] == 0x20 && a.pixels[at + 2] == 0x30 && a.pixels[at + 3] == 255, "pixel value");
+      t.that(a.pixels[3] == 0, "outside is transparent");
+    }
+  }
+  t.that(load_svg(empty) == none, "empty file");
+  t.that(load_svg(bad) == none, "not svg");
+}
+
+fn check_texture(var t&: Expect) {
+  var rec = Recorder {};
+  let dir = create_temp_dir("ugui_svg_") else {
+    t.that(false, "temp dir");
+    return;
+  };
+  let path = f"{dir.path()}/rect.svg";
+  let _ = write_bytes(path, kRect as bytes);
+
+  t.that(load_svg_texture(rec, path) == 77, "texture id from the backend");
+  t.that(rec.calls == 1 && rec.width == 8 && rec.height == 6 && rec.format == RhiFormat::Rgba8Unorm, "upload shape");
+  t.that(rec.filter == RhiFilter::Linear && rec.bytes == 8 * 6 * 4, "upload filter and size");
+  t.that(load_svg_texture(rec, path, 16, 12) == 77 && rec.width == 16 && rec.height == 12 && rec.bytes == 16 * 12 * 4, "target size");
+  t.that(load_svg_texture(rec, f"{dir.path()}/missing.svg") == kNullTextureId && rec.calls == 2, "missing file: no upload");
+  let none_backend: (&var Recorder)? = none;
+  t.that(load_svg_texture(none_backend, path) == kNullTextureId, "no backend");
+  // Through the erased seam, as UIContext holds its backend.
+  var dyn = DynTextureBackend::of(rec);
+  t.that(load_svg_texture(dyn, path) == 77, "through DynTextureBackend");
+}
+
+fn entry_count(d: str): usize {
+  var p = Path();
+  parse_path_data(d, p);
+  return p.entries.len();
+}
+
+fn check_paths(var t&: Expect) {
+  var p = Path();
+  parse_path_data("M1 2 L3 4 h5 v6 z", p);
+  t.that(p.entries.len() == 5, "M L h v z");
+  t.that(p.entries[0].cmd == PathCmd::MoveTo && p.entries[0].pts[0].x == 1.0 && p.entries[0].pts[0].y == 2.0, "M");
+  t.that(p.entries[2].cmd == PathCmd::LineTo && p.entries[2].pts[0].x == 8.0 && p.entries[2].pts[0].y == 4.0, "h is relative to the current point");
+  t.that(p.entries[3].pts[0].y == 10.0, "v");
+  t.that(p.entries[4].cmd == PathCmd::Close, "z");
+  t.that(entry_count("M0 0 10 10 20 20") == 3, "implicit LineTo after M");
+  t.that(entry_count("M0 0 L1 1 1") == 3, "a missing coordinate reads as 0, as strtof does");
+  t.that(entry_count("M0 0 A5 5 0 1 1 10 0") == 1 + 2, "a half circle is two quarter arcs");
+  t.that(entry_count("M0 0 A0 5 0 1 1 10 0") == 2, "a zero radius is a line");
+  t.that(entry_count("") == 0, "empty");
+}
+
+// The inputs the C++ never returns from.
+fn check_no_hang(var t&: Expect) {
+  t.that(entry_count("M0 0 L1 1 #") >= 2, "path data with trailing junk ends");
+  t.that(entry_count("#$%") == 0, "path data of junk ends");
+  let text = load_svg_memory("garbage<svg width=\"4\" height=\"4\"><rect width=\"4\" height=\"4\"/></svg>" as bytes);
+  t.that(text != none, "text before the root is skipped");
+  let close = load_svg_memory("</a><svg width=\"4\" height=\"4\"/>" as bytes);
+  t.that(close != none, "a stray close tag before the root is skipped");
+  let points = load_svg_memory("<svg width=\"4\" height=\"4\"><polyline points=\"1,1 2,2 zz\" stroke=\"red\"/></svg>" as bytes);
+  t.that(points != none, "points with junk end");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  check_files(t);
+  check_texture(t);
+  check_paths(t);
+  check_no_hang(t);
+  return t.finish();
+}

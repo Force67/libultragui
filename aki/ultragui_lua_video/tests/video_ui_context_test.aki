@@ -1,0 +1,123 @@
+// UIContext's video players (ultragui_video::video_ui) and the video Lua
+// bindings wired through the script host (add_video_lua): ugui.load_video
+// loads through LoadVideo (the context's Rhi and audio backend), Update
+// advances the players each legacy frame and converts new frames after
+// acquire_frame; ugui.video_attach sets the image texture; video_seek/stop
+// decode through the Rhi; load_video(ui, ..) adds to the same players;
+// shutdown unloads every player.
+
+module video_ui_context_test;
+
+import {from_str} from akikit::strings::string;
+import {eprintln} from akikit::logging;
+import {milliseconds, sleep} from akikit::time::time;
+import {Color} from ultragui::core::color;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {HostPlatform} from ultragui::platform::platform_host;
+import {Vertex2D} from ultragui::render::vertex;
+import {Rhi, RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, RhiTextureHandle} from ultragui::rhi::rhi_types;
+import {UIConfig} from ultragui::ui_context;
+import {kImageContent} from ultragui::widgets::image;
+import {LuaBindings, lua_ui_context} from ultragui_lua::lua_ui_context;
+import {kVideoPlayers, load_video, video_var} from ultragui_video::video_ui;
+import {add_video_lua} from ultragui_lua_video::lua_video;
+
+struct CountingRhi : Rhi {
+  pub var textures: u32 = 0
+  pub var converts: u32 = 0
+  pub var acquired: u32 = 0
+  pub var destroyed: u32 = 0
+
+  pub fn init(var self&, config&: RhiConfig): bool => true;
+  pub fn shutdown(var self&) {}
+  pub fn begin_frame(var self&, clear_color: Color): bool => true;
+  pub fn end_frame(var self&) {}
+  pub fn set_scissor(var self&, rect: Rect) {}
+  pub fn reset_scissor(var self&) {}
+  pub fn draw_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], texture: RhiTextureHandle) {}
+  pub fn draw_text_triangles(var self&, vertices&: [Vertex2D], indices&: [u32], atlas_texture: RhiTextureHandle) {}
+  pub fn create_texture(var self&, width: u32, height: u32, format: RhiFormat, pixels: bytes, filter: RhiFilter): RhiTextureHandle {
+    self.textures += 1;
+    return self.textures;
+  }
+  pub fn update_texture(var self&, handle: RhiTextureHandle, pixels: bytes) {}
+  pub fn destroy_texture(var self&, handle: RhiTextureHandle) {
+    self.destroyed += 1;
+  }
+  pub fn acquire_frame(var self&): bool {
+    self.acquired += 1;
+    return true;
+  }
+  pub fn create_render_target(var self&, width: u32, height: u32): RhiTextureHandle {
+    self.textures += 1;
+    return self.textures;
+  }
+  pub fn destroy_render_target(var self&, handle: RhiTextureHandle) {
+    self.destroyed += 1;
+  }
+  pub fn begin_offscreen(var self&, target: RhiTextureHandle, clear_color: Color): bool => true;
+  pub fn end_offscreen(var self&, target: RhiTextureHandle) {}
+  pub fn convert_video_frame(var self&, target: RhiTextureHandle, y: RhiTextureHandle, cb: RhiTextureHandle, cr: RhiTextureHandle) {
+    self.converts += 1;
+  }
+  pub fn display_size(self&): Vec2 => Vec2 { x: 640.0, y: 480.0 };
+  pub fn dpi_scale(self&): f32 => 1.0;
+}
+
+struct Checks {
+  pub var failures: u32 = 0
+  pub fn check(var self&, ok: bool, what: str) {
+    if (!ok) {
+      eprintln(f"FAILED: {what}");
+      self.failures += 1;
+    }
+  }
+}
+
+pub fn main(): i32 {
+  var t = Checks {};
+  var path = from_str(@package_dir());
+  path.push_str("/../../examples/demo.mpg");
+  var ui = lua_ui_context(HostPlatform(), CountingRhi {}, LuaBindings { audio: false });
+  var u& = ui.get_var();
+  add_video_lua(u);
+  t.check(u.init(UIConfig { width: 400, height: 300 }), "init");
+  let _ = u.load_ui_string("panel root { width: 400; height: 300; image img { width: 64; height: 64; } }", "inline");
+
+  var script = from_str("V = ugui.load_video('");
+  script.push_str(path.as_str());
+  script.push_str("')\nassert(V ~= nil)\nugui.video_mute(V, true)\nugui.video_play(V)\nugui.video_attach(V, 'img')\nassert(ugui.video_playing(V))\n");
+  script.push_str("assert(ugui.load_video('/nonexistent.mpg') == nil)\n");
+  t.check(u.exec_script(script.as_str(), "test"), "lua script ran");
+
+  let img = u.find_widget("img");
+  if (let c& = u.world.get(kImageContent, img)) {
+    t.check(c.texture != 0, "video texture attached");
+  } else {
+    t.check(false, "img is an image");
+  }
+  let id = load_video(u, path.as_str());
+  t.check(id == 1u32, "load_video adds to the same players");
+  t.check(u.find_extension(kVideoPlayers) == 0u32, "one players extension");
+
+  let converts0 = u.rhi.converts;
+  for (let i in 0..6) {
+    sleep(milliseconds(40));
+    u.update();
+  }
+  if (let v& = video_var(u, 0)) {
+    t.check(v.position() > 0.0, "the Lua-loaded video advanced");
+  }
+  t.check(u.rhi.converts > converts0, "new frames converted after acquire_frame");
+  t.check(u.exec_script("ugui.video_seek(V, 1.0)\nugui.video_stop(V)\nassert(not ugui.video_playing(V))\nassert(ugui.video_position(V) == 0)", "seek"),
+          "seek and stop through the Rhi");
+  let before = u.rhi.destroyed;
+  u.shutdown();
+  t.check(u.rhi.destroyed > before, "shutdown unloads the players");
+  if (t.failures != 0) {
+    return 1;
+  }
+  return 0;
+}

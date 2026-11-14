@@ -1,0 +1,40 @@
+// Shared by the tests: the host platform with a clock the test sets (as
+// aki/tools/golden's GoldenPlatform), so UIContext's timing is deterministic.
+
+module support::clock_platform;
+
+import {Vec2} from ultragui::core::math;
+import {InputQueue} from ultragui::input::input_queue;
+import {Platform, WindowConfig} from ultragui::platform::platform;
+import {HostPlatform} from ultragui::platform::platform_host;
+import {Cursor} from ultragui::style::enums;
+
+pub struct ClockPlatform : Platform {
+  pub var host: HostPlatform = HostPlatform()
+  pub var clock: f64 = 0.0
+
+  pub fn ClockPlatform(): ClockPlatform => ClockPlatform {};
+
+  pub fn init(var self&, config&: WindowConfig): bool => self.host.init(config);
+  pub fn shutdown(var self&) {
+    self.host.shutdown();
+  }
+  pub fn should_close(self&): bool => self.host.should_close();
+  pub fn poll_events(var self&) {
+    self.host.poll_events();
+  }
+  pub fn window_size(self&): Vec2 => self.host.window_size();
+  pub fn framebuffer_size(self&): Vec2 => self.host.framebuffer_size();
+  pub fn dpi_scale(self&): f32 => self.host.dpi_scale();
+  pub fn time(self&): f64 => self.clock;
+  pub fn native_handle(self&): *var u8 => self.host.native_handle();
+  pub fn set_cursor(var self&, cursor: Cursor) {
+    self.host.set_cursor(cursor);
+  }
+  pub fn clipboard_text(var self&): str => self.host.clipboard_text();
+  pub fn set_clipboard_text(var self&, text: str) {
+    self.host.set_clipboard_text(text);
+  }
+  pub fn input_queue(var self&): &var InputQueue => self.host.input_queue();
+  pub fn host_fed(self&): bool => true;
+}

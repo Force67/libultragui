@@ -1,0 +1,58 @@
+// ugui/render/draw_data.h: one frame's geometry and commands, like ImDrawData.
+
+module ultragui::render::draw_data;
+
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D} from ultragui::render::vertex;
+
+// Opaque, host-assigned texture identifier carried by draw commands, like Dear
+// ImGui's ImTextureID. A renderer backend fills/interprets these as values
+// meaningful to its graphics API (a GL texture name, a VkDescriptorSet as
+// u64, ...).
+pub type TextureId = u64;
+
+pub comptime let kNullTextureId: TextureId = 0;                     // no texture (white)
+pub comptime let kFontTextureId: TextureId = 18446744073709551615;  // the glyph atlas (~0)
+
+// One draw command: a contiguous run of indices sharing a clip rect, a
+// texture, and a pipeline. Mirrors ImDrawCmd.
+pub struct DrawCmd : Copy, Equal {
+  pub var clip_rect: Rect = Rect {}  // scissor, in display (window) coordinates
+  pub var texture_id: TextureId = kNullTextureId
+  pub var index_offset: u32 = 0  // first index into the relevant index buffer
+  pub var elem_count: u32 = 0    // number of indices to draw
+  pub var is_text: bool = false  // text pipeline + glyph buffers vs quad pipeline
+  // Backdrop blur radius (px) for this batch's quads (frosted glass). A
+  // backend with a blurred copy of what is behind the UI fills the quad with
+  // it instead of sampling the command's texture. 0 = none.
+  pub var blur: f32 = 0.0
+}
+
+// All geometry and commands produced for one UI frame. Two pipelines (SDF
+// rounded-rect "quad", alpha-only "text") with separate vertex/index buffers;
+// a backend uploads both and selects per command via DrawCmd::is_text.
+//
+// The C++ pointer+count pairs are slices that view the renderer's storage:
+// the borrow checker keeps a DrawData from outliving the next frame build,
+// which the C++ only documents.
+pub struct DrawData<'a> {
+  pub var quad_vertices: &'a [Vertex2D] = []
+  pub var quad_indices: &'a [u32] = []
+  pub var text_vertices: &'a [Vertex2D] = []
+  pub var text_indices: &'a [u32] = []
+  pub var commands: &'a [DrawCmd] = []
+
+  pub var display_pos: Vec2 = Vec2 { x: 0.0, y: 0.0 }        // top-left in display coords
+  pub var display_size: Vec2 = Vec2 { x: 0.0, y: 0.0 }       // size in display coords
+  pub var framebuffer_scale: Vec2 = Vec2 { x: 1.0, y: 1.0 }  // display -> framebuffer px (dpi)
+
+  pub var valid: bool = false
+
+  // The C++ count fields.
+  pub fn quad_vertex_count(self&): u32 => #self.quad_vertices as u32;
+  pub fn quad_index_count(self&): u32 => #self.quad_indices as u32;
+  pub fn text_vertex_count(self&): u32 => #self.text_vertices as u32;
+  pub fn text_index_count(self&): u32 => #self.text_indices as u32;
+  pub fn command_count(self&): u32 => #self.commands as u32;
+}

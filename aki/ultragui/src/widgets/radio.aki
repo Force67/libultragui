@@ -1,0 +1,223 @@
+// ugui/widgets/radio.{h,cc}: a radio button (WidgetKind::Radio), a generic
+// widget carrying a RadioContent (label, font, group, on_change); the
+// selected flag is the widget's WidgetState::Checked bit. Radios with the
+// same group under one parent are mutually exclusive. Behaviour: the Radio
+// arms in widgets::widget_vtable (draw + measure + click).
+//
+// Shape differences: the World comes first; set_radio_selected takes the
+// context too (a state change may start a transition through the animator).
+// As in the C++, the label/group/change setters do not check the kind.
+
+module ultragui::widgets::radio;
+
+import {swap} from akikit::algorithm;
+import {to_list} from akikit::containers::list;
+import {String, from_str} from akikit::strings::string;
+import {max_f32} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii_uniform} from ultragui::render::vertex;
+import {WidgetState, has_state} from ultragui::style::enums;
+import {FontHandle, kInvalidFont} from ultragui::text::text_engine;
+import {BoolHandler, CallbackEnv} from ultragui::widgets::callbacks;
+import {
+  WidgetKind, computed_style, kHierarchy, kStyleC, kTransform, kWidgetNode, mark_dirty, set_widget_state, ui_scale,
+  widget_context_of, widget_state_of,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// Data for a radio button. The selected flag lives in the state bit.
+pub struct RadioContent {
+  pub var label: String = String()
+  pub var font: FontHandle = kInvalidFont  // override; kInvalidFont -> context default
+  pub var group: String = String()
+  pub var on_change: BoolHandler? = none
+}
+
+pub static let kRadioContent: ComponentKey<RadioContent> = ComponentKey();
+
+comptime let kGap: f32 = 8.0;
+
+// DeselectSiblings: clear every other radio of `group` under e's parent.
+fn deselect_siblings(var world&: World, var ctx&: WidgetContext, e: WidgetId, group: str) {
+  let parent = world.get(kHierarchy, e)!.parent;
+  if (!parent.valid()) {
+    return;
+  }
+  // The C++ walks the live child list; deselecting changes no tree, so a
+  // copy walks the same handles.
+  let kids = to_list(world.get(kHierarchy, parent)!.children.as_slice());
+  for (let sib in kids) {
+    if (sib == e) {
+      continue;
+    }
+    if (world.get(kWidgetNode, sib)!.kind != WidgetKind::Radio) {
+      continue;
+    }
+    var same = false;
+    if (let sc& = world.get(kRadioContent, sib)) {
+      same = sc.group == group;
+    }
+    if (same) {
+      set_radio_selected(world, ctx, sib, false);
+    }
+  }
+}
+
+// RadioMeasure
+pub fn radio_measure(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  let st& = world.get(kStyleC, e)!.style;
+  let sc = ui_scale(world, ctx, e);
+  let circle_size = st.font_size * 1.2;
+
+  if (let c& = world.get(kRadioContent, e)) {
+    if (let wc& = widget_context_of(world, ctx, e)) {
+      let fh = c.font != kInvalidFont ? c.font : wc.default_font;
+      if (var te& = wc.text_engine) {
+        if (fh != kInvalidFont && !c.label.is_empty()) {
+          let run = te.shape(fh, c.label.as_str(), st.font_size * sc, st.letter_spacing * sc, st.line_height_multiplier);
+          return (circle_size + kGap + run.total_advance, max_f32(circle_size, run.line_height));
+        }
+      }
+    }
+  }
+  return (circle_size, circle_size);
+}
+
+// RadioDraw. PaintWidget already drew background / shadow / border.
+pub fn radio_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+  let alpha = s.opacity;
+  let circle_size = s.font_size * 1.0;
+  let radius = circle_size * 0.5;
+  let radii = pack_radii_uniform(radius);
+
+  let content = world.get(kTransform, e)!.content_rect;
+  let circle_x = content.x;
+  let circle_y = content.y + (content.h - circle_size) * 0.5;
+
+  let border_color = s.border_color.a > 0.0 ?
+    s.border_color.with_alpha(s.border_color.a * alpha) : Color::rgba(0.6, 0.6, 0.6, alpha);
+  let bw = max_f32(s.border_width, 1.5);
+
+  if (is_radio_selected(world, e)) {
+    let accent = Color::from_hex(0x4a7aff, alpha);
+    renderer.draw_bordered_rect(Rect { x: circle_x, y: circle_y, w: circle_size, h: circle_size }, Color::transparent(),
+                                accent.with_alpha(alpha), bw, radii);
+
+    let inner_size = circle_size * 0.6;
+    let inner_x = circle_x + (circle_size - inner_size) * 0.5;
+    let inner_y = circle_y + (circle_size - inner_size) * 0.5;
+    let inner_radius = inner_size * 0.5;
+    let inner_radii = pack_radii_uniform(inner_radius);
+    renderer.draw_rect(Rect { x: inner_x, y: inner_y, w: inner_size, h: inner_size }, accent, inner_radii);
+  } else {
+    renderer.draw_bordered_rect(Rect { x: circle_x, y: circle_y, w: circle_size, h: circle_size }, Color::transparent(),
+                                border_color, bw, radii);
+  }
+
+  // Label to the right of the circle.
+  let c& = world.get(kRadioContent, e) else {
+    return;
+  };
+  let wc& = widget_context_of(world, ctx, e) else {
+    return;
+  };
+  let fh = c.font != kInvalidFont ? c.font : wc.default_font;
+  var te& = wc.text_engine else {
+    return;
+  };
+  if (fh == kInvalidFont || c.label.is_empty()) {
+    return;
+  }
+  let run = te.shape(fh, c.label.as_str(), s.font_size, s.letter_spacing, s.line_height_multiplier);
+
+  let text_x = circle_x + circle_size + kGap;
+  let text_y = content.y + (content.h - run.line_height) * 0.5;
+
+  let text_color = s.text_color.with_alpha(s.text_color.a * alpha);
+  let atlas = te.atlas_texture();
+
+  if (s.text_shadow_color.a > 0.0) {
+    let shadow_pos = Vec2 { x: text_x + s.text_shadow_offset.x, y: text_y + s.text_shadow_offset.y };
+    let shadow_color = s.text_shadow_color.with_alpha(s.text_shadow_color.a * alpha);
+    renderer.draw_text(shadow_pos, run, shadow_color, atlas);
+  }
+
+  renderer.draw_text(Vec2 { x: text_x, y: text_y }, run, text_color, atlas);
+}
+
+// RadioClick: deselect the group's siblings, select this one, then
+// on_change(true).
+pub fn radio_click(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool {
+  var group: String? = none;
+  if (let c& = world.get(kRadioContent, e)) {
+    group = c.group.clone();
+  }
+  if (let g& = group) {
+    deselect_siblings(world, ctx, e, g.as_str());
+  }
+  set_radio_selected(world, ctx, e, true);
+  var slot: BoolHandler? = none;
+  if (var c& = world.get_var(kRadioContent, e)) {
+    swap(c.on_change, slot);
+  }
+  if (let handler = slot) {
+    {
+      var env = CallbackEnv { world, ctx };
+      handler(env, true);
+    }
+    if (var c& = world.get_var(kRadioContent, e)) {
+      if (c.on_change == none) {
+        c.on_change = handler;
+      }
+    }
+  }
+  return true;
+}
+
+// CreateRadio: a widget tagged Radio with a RadioContent.
+pub fn create_radio(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::Radio;
+  world.add(kRadioContent, e, RadioContent {});
+  return e;
+}
+
+// SetRadioLabel
+pub fn set_radio_label(var world&: World, e: WidgetId, label: str) {
+  world.get_or_add(kRadioContent, e, RadioContent {}).label = from_str(label);
+  mark_dirty(world, e);
+}
+
+// SetRadioGroup: radios of one group are mutually exclusive.
+pub fn set_radio_group(var world&: World, e: WidgetId, group: str) {
+  world.get_or_add(kRadioContent, e, RadioContent {}).group = from_str(group);
+}
+
+// SetRadioChange: run with true when the user selects the radio.
+pub fn set_radio_change(var world&: World, e: WidgetId, handler: BoolHandler) {
+  world.get_or_add(kRadioContent, e, RadioContent {}).on_change = handler;
+}
+
+// SetRadioSelected: set or clear the Checked state bit. Does not fire
+// on_change and does not deselect siblings (that happens only on a user
+// click). Works on any widget.
+pub fn set_radio_selected(var world&: World, var ctx&: WidgetContext, e: WidgetId, selected: bool) {
+  var s = widget_state_of(world, e);
+  if (selected) {
+    s = s.with(WidgetState::Checked);
+  } else {
+    s = s.without(WidgetState::Checked);
+  }
+  set_widget_state(world, ctx, e, s);
+}
+
+// IsRadioSelected: whether the widget's Checked state bit is set.
+pub fn is_radio_selected(world&: World, e: WidgetId): bool => has_state(widget_state_of(world, e), WidgetState::Checked);

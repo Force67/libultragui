@@ -1,0 +1,95 @@
+// No C++ counterpart: the type erasure behind the run-time seams
+// (TextureBackend, AudioBackend, the platform view widgets get, host
+// component stores). aki has no open dynamic dispatch, so a seam is a
+// capability plus a struct that carries the object as an untyped pointer and
+// the capability's methods as `static fn` thunks instantiated for the
+// object's type. The unsafe code lives here and in the thunks; the seams'
+// public APIs are safe:
+//
+// * ErasedRef<'a> borrows the object. Its lifetime keeps the borrow alive, so
+//   the borrow checker rejects any other use of the object while it lives.
+// * ErasedBox owns the object on the heap and drops it with the type's own
+//   drop.
+//
+// See PORTING.md, "Seams", for the pattern spelled out.
+
+module ultragui::core::erased;
+
+import {Heap} from akikit::allocator::heap;
+import {new_value, free_value} from akikit::allocator::allocator_primitives;
+
+// A borrowed object of a type only the thunks know.
+pub struct ErasedRef<'a> {
+  var anchor: &'a var u8
+
+  // Borrows `object` for 'a.
+  pub fn of<'a, T>(object: &'a var T): ErasedRef<'a>;
+
+  // The object's address, for a thunk to cast back. Valid while self lives.
+  pub fn ptr(var self&): *var u8;
+
+  // The same address through a read-only receiver, for thunks of `self&`
+  // methods, which only read through it.
+  pub fn const_ptr(self&): *var u8;
+}
+
+fn ErasedRef::of<'a, T>(object: &'a var T): ErasedRef<'a> {
+  // A binding of the view, so &raw takes the object's address rather than
+  // the parameter's (see PORTING.md, pitfalls).
+  var target& = object;
+  let p = unsafe (&raw var target as *var u8);
+  return ErasedRef { anchor: unsafe *p };
+}
+
+fn ErasedRef::const_ptr(self&): *var u8 {
+  let a& = self.anchor;
+  return unsafe (&raw a as *const u8 as *var u8);
+}
+
+// The caller vouches that p points at a live object for as long as the
+// result is used.
+unsafe fn ErasedRef::from_ptr<'a>(p: *var u8): ErasedRef<'a> => ErasedRef { anchor: unsafe *p };
+
+fn ErasedRef::ptr(var self&): *var u8 {
+  var a& = self.anchor;
+  return unsafe (&raw var a as *var u8);
+}
+
+fn drop_thunk<T>(p: *var u8) {
+  unsafe {
+    @drop_at(p as *var T);
+    free_value::<T, Heap>(Heap {}, p as *var T);
+  }
+}
+
+// An owned heap object of a type only the thunks know.
+pub struct ErasedBox {
+  var object: *var u8
+  let drop_fn: static fn(*var u8): ()
+
+  // Moves `value` to the heap.
+  pub fn of<T>(value: T): ErasedBox;
+
+  // The object's address, for a thunk to cast back. Valid while self lives.
+  pub fn ptr(var self&): *var u8 => self.object;
+
+  // The same address through a read-only receiver, for code that only reads
+  // through it.
+  pub fn const_ptr(self&): *const u8 => unsafe (self.object as *const u8);
+
+  // A borrow of the object, for code that takes the borrowed form.
+  pub fn as_ref(var self&): ErasedRef;
+
+  fn ~ErasedBox();
+}
+
+fn ErasedBox::of<T>(value: T): ErasedBox {
+  let p = unsafe new_value::<T, Heap>(Heap {}, value);
+  return ErasedBox { object: unsafe (p as *var u8), drop_fn: drop_thunk::<T> };
+}
+
+fn ErasedBox::as_ref(var self&): ErasedRef => unsafe ErasedRef::from_ptr(self.object);
+
+fn ErasedBox::~ErasedBox() {
+  (self.drop_fn)(self.object);
+}

@@ -1,0 +1,509 @@
+// Behaviour of the widget kinds that needs no renderer: clicks, keys and
+// characters, callbacks (through CallbackEnv), selection and option picking,
+// scrolling, overlays (context menu, modal, message box). Mirrors the
+// C++ logic in ugui/widgets/*.cc case for case.
+
+module widget_behavior_test;
+
+import {List} from akikit::containers::list;
+import {String, from_str} from akikit::strings::string;
+import {Atomic} from akikit::threading::atomic;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {MouseButton} from ultragui::input::input_queue;
+import {DynPlatform, WindowConfig} from ultragui::platform::platform;
+import {HostFeed, HostPlatform} from ultragui::platform::platform_host;
+import {LengthUnit} from ultragui::style::property_types;
+import {TextTransform, WidgetState} from ultragui::style::enums;
+import {TextEngine} from ultragui::text::text_engine;
+import {create_button, kButtonContent, set_button_click, set_button_label} from ultragui::widgets::button;
+import {CallbackEnv} from ultragui::widgets::callbacks;
+import {create_checkbox, is_checked, set_checkbox_change, set_checked} from ultragui::widgets::checkbox;
+import {
+  add_context_menu_item, add_context_menu_separator, clear_context_menu_items, create_context_menu, hide_context_menu,
+  kContextMenuContent, show_context_menu_at,
+} from ultragui::widgets::context_menu;
+import {
+  create_dropdown, dropdown_selected, dropdown_selected_text, kDropdownContent, set_dropdown_change,
+  set_dropdown_options, set_dropdown_selected,
+} from ultragui::widgets::dropdown;
+import {create_image, image_measure, set_image_texture} from ultragui::widgets::image;
+import {
+  MessageBoxButtons, MessageBoxResult, create_message_box, dismiss_message_box, set_message_box_result,
+  setup_message_box, show_message_box,
+} from ultragui::widgets::message_box;
+import {create_modal, kModalContent, modal_visible, set_modal_dismiss} from ultragui::widgets::modal;
+import {hide_modal, show_modal} from ultragui::widgets::modal;
+import {Overlays} from ultragui::widgets::overlays;
+import {create_radio, is_radio_selected, set_radio_change, set_radio_group} from ultragui::widgets::radio;
+import {create_scroll_view, scroll_by, scroll_offset, set_scroll_offset} from ultragui::widgets::scroll_view;
+import {create_slider, kSliderContent, set_slider_change, set_slider_value, slider_value} from ultragui::widgets::slider;
+import {apply_text_transform, create_text, kTextContent, set_text} from ultragui::widgets::text;
+import {
+  kKeyA, kKeyBackspace, kKeyC, kKeyDelete, kKeyDown, kKeyEnd, kKeyEnter, kKeyEscape, kKeyHome, kKeyLeft, kKeyRight,
+  kKeyUp, kKeyV, kKeyX, kModControl, kModShift, create_text_input, kTextInputContent, set_text_input_cancel,
+  set_text_input_change, set_text_input_history_next, set_text_input_history_prev, set_text_input_submit,
+  set_text_input_value, text_input_value,
+} from ultragui::widgets::text_input;
+import {create_toggle, is_toggle_on, kToggleContent, set_toggle_on} from ultragui::widgets::toggle;
+import {
+  WidgetKind, add_child, char_input_widget, click_widget, consumes_text_input, dismiss_widget, hit_test,
+  input_to_layout_point, kHierarchy, kStyleC, kWidgetNode, key_down_widget, layout_widget, set_context,
+  set_widget_state, update_widget, widget_revision,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {Expect} from ultragui_testing::expect;
+
+// What callbacks saw; handlers write here through `static` atomics since
+// they own their captures.
+static let kCalls: Atomic<u32> = Atomic::<u32>(0);
+static let kLastBool: Atomic<u32> = Atomic::<u32>(0);
+static let kLastIndex: Atomic<i32> = Atomic::<i32>(0);
+static let kLastResult: Atomic<u32> = Atomic::<u32>(99);
+
+fn reset_calls() {
+  kCalls.store(0);
+}
+
+fn layout(var world&: World, var ctx&: WidgetContext, e: WidgetId, r: Rect) {
+  layout_widget(world, ctx, e, r, r);
+}
+
+fn feed_mouse(feed&: HostFeed, var ctx&: WidgetContext, pos: Vec2) {
+  feed.push_mouse_move(pos);
+  if (var p& = ctx.platform) {
+    p.poll_events();
+  }
+}
+
+fn check_button_text_image(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let label = create_text(world, 0);
+  let b = create_button(world, 0);
+  t.that(!click_widget(world, ctx, b), "button without handler: not handled");
+  set_button_click(world, b, own fn(env: &var CallbackEnv) {
+    let _ = kCalls.fetch_add(1);
+    set_text(env.world, label, "clicked");
+  });
+  reset_calls();
+  t.that(click_widget(world, ctx, b), "button click handled");
+  t.that(click_widget(world, ctx, b), "handler is put back after the call");
+  t.eq_u32(kCalls.load(), 2, "button handler ran twice");
+  t.that(world.get(kTextContent, label)!.text == "clicked", "the handler reached the World");
+
+  // A handler that installs its replacement keeps the replacement.
+  set_button_click(world, b, own fn(env: &var CallbackEnv) {
+    set_button_click(env.world, b, own fn(env2: &var CallbackEnv) {
+      let _ = kCalls.fetch_add(100);
+    });
+  });
+  reset_calls();
+  let _ = click_widget(world, ctx, b);
+  let _ = click_widget(world, ctx, b);
+  t.eq_u32(kCalls.load(), 100, "a replaced handler stays replaced");
+
+  // Setters gate on the kind.
+  set_button_label(world, label, "nope");
+  t.that(!world.has(kButtonContent, label), "set_button_label on a text: no-op");
+  set_text(world, b, "nope");
+  t.that(!world.has(kTextContent, b), "set_text on a button: no-op");
+
+  // SetText skips an unchanged string (no dirty walk).
+  let rev = widget_revision();
+  set_text(world, label, "clicked");
+  t.that(widget_revision() == rev, "unchanged text marks nothing");
+  set_text(world, label, "changed");
+  t.that(widget_revision() != rev, "changed text marks dirty");
+
+  t.that(apply_text_transform("hello wide-world x", TextTransform::Capitalize) == "Hello Wide-world X", "capitalize");
+  // C++ C-locale capitalization preserves UTF-8 bytes and capitalizes the
+  // first ASCII letter after a space, even after a non-ASCII character.
+  t.that(apply_text_transform("éclair über café 世界hello", TextTransform::Capitalize) == "éClair üBer Café 世界Hello", "capitalize preserves UTF-8");
+  t.that(apply_text_transform("MiXeD é", TextTransform::Uppercase) == "MIXED é", "uppercase is ASCII only");
+  t.that(apply_text_transform("MiXeD", TextTransform::Lowercase) == "mixed", "lowercase");
+
+  let img = create_image(world, 0);
+  set_image_texture(world, img, 7, 64.0, 32.0);
+  let (w, h) = image_measure(world, ctx, img);
+  t.that(w == 64.0 && h == 32.0, "image natural size");
+  let rev2 = widget_revision();
+  set_image_texture(world, img, 7, 64.0, 32.0);
+  t.that(widget_revision() == rev2, "same texture: no relayout");
+}
+
+fn check_toggles(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let cb = create_checkbox(world, 0);
+  set_checkbox_change(world, cb, own fn(env: &var CallbackEnv, v: bool) {
+    let _ = kCalls.fetch_add(1);
+    kLastBool.store(v ? 1 : 0);
+  });
+  reset_calls();
+  t.that(click_widget(world, ctx, cb), "checkbox click handled");
+  t.that(is_checked(world, cb) && kLastBool.load() == 1, "checkbox checked, on_change(true)");
+  let _ = click_widget(world, ctx, cb);
+  t.that(!is_checked(world, cb) && kLastBool.load() == 0, "checkbox unchecked, on_change(false)");
+  set_checked(world, ctx, cb, true);
+  t.that(is_checked(world, cb) && kCalls.load() == 2, "set_checked does not fire on_change");
+
+  // Radios: one group under one parent is exclusive; another group is not.
+  let parent = create_text(world, 0);
+  let r1 = create_radio(world, 0);
+  let r2 = create_radio(world, 0);
+  let r3 = create_radio(world, 0);
+  let other = create_checkbox(world, 0);
+  for (let r in [r1, r2, r3, other]) {
+    add_child(world, parent, r);
+  }
+  set_radio_group(world, r1, "a");
+  set_radio_group(world, r2, "a");
+  set_radio_group(world, r3, "b");
+  set_checked(world, ctx, other, true);
+  set_radio_change(world, r2, own fn(env: &var CallbackEnv, v: bool) {
+    let _ = kCalls.fetch_add(10);
+  });
+  reset_calls();
+  let _ = click_widget(world, ctx, r1);
+  let _ = click_widget(world, ctx, r3);
+  t.that(is_radio_selected(world, r1) && is_radio_selected(world, r3), "two groups both selected");
+  let _ = click_widget(world, ctx, r2);
+  t.that(is_radio_selected(world, r2) && !is_radio_selected(world, r1), "selecting r2 deselects r1");
+  t.that(is_radio_selected(world, r3), "the other group keeps its selection");
+  t.that(is_checked(world, other), "a non-radio sibling is left alone");
+  t.eq_u32(kCalls.load(), 10, "r2 on_change ran once");
+
+  // Toggle: a click flips and snaps the thumb.
+  let tg = create_toggle(world, 0);
+  let _ = click_widget(world, ctx, tg);
+  t.that(is_toggle_on(world, tg) && world.get(kToggleContent, tg)!.thumb_anim == 1.0, "toggle on, thumb snapped");
+  set_toggle_on(world, ctx, tg, false);
+  t.that(!is_toggle_on(world, tg) && world.get(kToggleContent, tg)!.thumb_anim == 0.0, "set_toggle_on(false)");
+  set_toggle_on(world, ctx, cb, false);
+  t.that(is_checked(world, cb), "set_toggle_on on a checkbox: no-op");
+}
+
+fn check_slider(var t&: Expect, var world&: World, var ctx&: WidgetContext, feed&: HostFeed) {
+  let sl = create_slider(world, 0);
+  set_slider_value(world, sl, 3.0);
+  t.that(slider_value(world, sl) == 1.0, "set_slider_value clamps to max");
+  set_slider_value(world, sl, -1.0);
+  t.that(slider_value(world, sl) == 0.0, "set_slider_value clamps to min");
+
+  layout(world, ctx, sl, Rect { x: 0.0, y: 0.0, w: 100.0, h: 20.0 });
+  feed_mouse(feed, ctx, Vec2 { x: 25.0, y: 5.0 });
+  let _ = click_widget(world, ctx, sl);
+  t.that(slider_value(world, sl) == 0.0, "detached slider ignores the pointer");
+
+  set_context(world, sl, true);
+  set_slider_change(world, sl, own fn(env: &var CallbackEnv, v: f32) {
+    let _ = kCalls.fetch_add(1);
+  });
+  reset_calls();
+  let _ = click_widget(world, ctx, sl);
+  t.that(slider_value(world, sl) == 0.25 && world.get(kSliderContent, sl)!.dragging, "click jumps and drags");
+  let _ = click_widget(world, ctx, sl);
+  t.eq_u32(kCalls.load(), 1, "on_change only when the value changes");
+  update_widget(world, ctx, sl, 0.016);
+  t.that(!world.get(kSliderContent, sl)!.dragging, "update without Pressed ends the drag");
+}
+
+fn check_dropdown(var t&: Expect, var world&: World, var ctx&: WidgetContext, feed&: HostFeed) {
+  let d = create_dropdown(world, 0);
+  set_dropdown_selected(world, d, 2);
+  t.that(dropdown_selected(world, d) == -1, "no options: -1");
+  var options: List<String> = List();
+  for (let o in ["Low", "Medium", "High"]) {
+    options.push(from_str(o));
+  }
+  set_dropdown_options(world, d, options.as_slice());
+  set_dropdown_selected(world, d, 7);
+  t.that(dropdown_selected(world, d) == 2 && dropdown_selected_text(world, d) == "High", "selected clamps high");
+  set_dropdown_selected(world, d, -3);
+  t.that(dropdown_selected(world, d) == 0, "selected clamps low");
+
+  set_context(world, d, true);
+  layout(world, ctx, d, Rect { x: 50.0, y: 40.0, w: 160.0, h: 30.0 });
+  // font_size 16 -> rows of 24 below y = 70.
+  let below = Vec2 { x: 60.0, y: 70.0 + 24.0 * 2.5 };
+  t.that(hit_test(world, ctx, d, below) == kNullWidget, "closed: the list area is not the dropdown");
+  t.that(click_widget(world, ctx, d) && world.get(kDropdownContent, d)!.open, "click opens");
+  t.that(hit_test(world, ctx, d, below) == d, "open: the list area hits the dropdown");
+
+  set_dropdown_change(world, d, own fn(env: &var CallbackEnv, i: i32, text: String) {
+    let _ = kCalls.fetch_add(1);
+    kLastIndex.store(i);
+    if (text == "Medium") {
+      let _ = kCalls.fetch_add(10);
+    }
+  });
+  reset_calls();
+  // No press this frame: stays open.
+  feed_mouse(feed, ctx, below);
+  update_widget(world, ctx, d, 0.016);
+  t.that(world.get(kDropdownContent, d)!.open, "no press: still open");
+  // A press on row 1 picks it and closes.
+  feed.push_mouse_move(Vec2 { x: 60.0, y: 70.0 + 24.0 * 1.5 });
+  feed.push_mouse_button(MouseButton::Left, true);
+  if (var p& = ctx.platform) {
+    p.poll_events();
+  }
+  update_widget(world, ctx, d, 0.016);
+  t.that(dropdown_selected(world, d) == 1 && !world.get(kDropdownContent, d)!.open, "row 1 picked, closed");
+  t.that(kCalls.load() == 11 && kLastIndex.load() == 1, "on_change(1, \"Medium\")");
+  // A press outside closes without a change.
+  let _ = click_widget(world, ctx, d);
+  feed.push_mouse_move(Vec2 { x: 400.0, y: 80.0 });
+  feed.push_mouse_button(MouseButton::Left, true);
+  if (var p& = ctx.platform) {
+    p.poll_events();
+  }
+  update_widget(world, ctx, d, 0.016);
+  t.that(dropdown_selected(world, d) == 1 && !world.get(kDropdownContent, d)!.open, "outside press closes only");
+  t.eq_u32(kCalls.load(), 11, "no on_change for an outside press");
+}
+
+fn text_of(world&: World, e: WidgetId): String => text_input_value(world, e);
+
+fn type_str(var world&: World, var ctx&: WidgetContext, e: WidgetId, s: str) {
+  for (let i in 0..#s) {
+    let _ = char_input_widget(world, ctx, e, s[i] as u32);
+  }
+}
+
+fn check_text_input(var t&: Expect, var world&: World, var ctx&: WidgetContext, feed&: HostFeed) {
+  let ti = create_text_input(world, 0);
+  set_context(world, ti, true);
+  t.that(consumes_text_input(world, ctx, ti), "text input consumes text");
+  set_text_input_change(world, ti, own fn(env: &var CallbackEnv, text: String) {
+    let _ = kCalls.fetch_add(1);
+  });
+  reset_calls();
+
+  type_str(world, ctx, ti, "ab");
+  let _ = char_input_widget(world, ctx, ti, 0xE9);     // é, 2 bytes
+  let _ = char_input_widget(world, ctx, ti, 0x20AC);   // €, 3 bytes
+  let _ = char_input_widget(world, ctx, ti, 0x1F600);  // 4 bytes
+  t.that(text_of(world, ti) == "abé€😀", "UTF-8 insertion");
+  t.eq_u32(world.get(kTextInputContent, ti)!.cursor, 11, "caret after 11 bytes");
+  t.eq_u32(kCalls.load(), 5, "on_change per character");
+
+  let _ = key_down_widget(world, ctx, ti, kKeyLeft, 0);
+  t.eq_u32(world.get(kTextInputContent, ti)!.cursor, 7, "left over a 4-byte code point");
+  let _ = key_down_widget(world, ctx, ti, kKeyLeft, 0);
+  t.eq_u32(world.get(kTextInputContent, ti)!.cursor, 4, "left over a 3-byte code point");
+  let _ = key_down_widget(world, ctx, ti, kKeyBackspace, 0);
+  t.that(text_of(world, ti) == "ab€😀" && world.get(kTextInputContent, ti)!.cursor == 2, "backspace removes é");
+  let _ = key_down_widget(world, ctx, ti, kKeyDelete, 0);
+  t.that(text_of(world, ti) == "ab😀", "delete removes €");
+  let _ = key_down_widget(world, ctx, ti, kKeyRight, 0);
+  t.eq_u32(world.get(kTextInputContent, ti)!.cursor, 6, "right over 4 bytes");
+  let _ = key_down_widget(world, ctx, ti, kKeyRight, 0);
+  t.eq_u32(world.get(kTextInputContent, ti)!.cursor, 6, "right at the end stays");
+
+  // Shift selection replaced by typing.
+  let _ = key_down_widget(world, ctx, ti, kKeyHome, 0);
+  let _ = key_down_widget(world, ctx, ti, kKeyRight, kModShift);
+  let _ = key_down_widget(world, ctx, ti, kKeyRight, kModShift);
+  let c& = world.get(kTextInputContent, ti)!;
+  t.that(c.sel_start == 0 && c.sel_end == 2 && c.cursor == 2, "shift extends the selection");
+  type_str(world, ctx, ti, "X");
+  t.that(text_of(world, ti) == "X😀", "typing replaces the selection");
+
+  // Clipboard.
+  let _ = key_down_widget(world, ctx, ti, kKeyA, kModControl);
+  let c2& = world.get(kTextInputContent, ti)!;
+  t.that(c2.sel_start == 0 && c2.sel_end == 5 && c2.cursor == 5, "ctrl+A selects all");
+  t.that(key_down_widget(world, ctx, ti, kKeyC, kModControl), "ctrl+C with a selection");
+  var clip = String();
+  if (var p& = ctx.platform) {
+    clip = from_str(p.clipboard_text());
+  }
+  t.that(clip == "X😀", "ctrl+C copies the selection");
+  t.that(key_down_widget(world, ctx, ti, kKeyX, kModControl) && text_of(world, ti) == "", "ctrl+X cuts");
+  t.that(!key_down_widget(world, ctx, ti, kKeyC, kModControl), "ctrl+C without a selection: not handled");
+  t.that(key_down_widget(world, ctx, ti, kKeyV, kModControl), "ctrl+V");
+  let _ = key_down_widget(world, ctx, ti, kKeyV, kModControl);
+  t.that(text_of(world, ti) == "X😀X😀" && world.get(kTextInputContent, ti)!.cursor == 10, "pasted twice");
+  t.that(!key_down_widget(world, ctx, ti, kKeyA, 0), "plain A key: not handled (chars come as char input)");
+  let _ = key_down_widget(world, ctx, ti, kKeyHome, 0);
+  let _ = key_down_widget(world, ctx, ti, kKeyEnd, kModShift);
+  let c3& = world.get(kTextInputContent, ti)!;
+  t.that(c3.sel_start == 0 && c3.sel_end == 10, "shift+End selects to the end");
+  let _ = key_down_widget(world, ctx, ti, kKeyBackspace, 0);
+  t.that(text_of(world, ti) == "", "backspace deletes the selection");
+
+  // A code point with no UTF-8 form inserts nothing.
+  let _ = char_input_widget(world, ctx, ti, 0xD800);
+  t.that(text_of(world, ti) == "" && world.get(kTextInputContent, ti)!.cursor == 0, "a surrogate inserts nothing");
+
+  // Submit, cancel, history.
+  t.that(!key_down_widget(world, ctx, ti, kKeyEnter, 0), "Enter without on_submit: not handled");
+  set_text_input_submit(world, ti, own fn(env: &var CallbackEnv, text: String) {
+    if (text == "go") {
+      let _ = kCalls.fetch_add(100);
+    }
+  });
+  set_text_input_cancel(world, ti, own fn(env: &var CallbackEnv) {
+    let _ = kCalls.fetch_add(1000);
+  });
+  set_text_input_history_prev(world, ti, own fn(env: &var CallbackEnv): String => from_str("previous"));
+  set_text_input_history_next(world, ti, own fn(env: &var CallbackEnv): String => String());
+  set_text_input_value(world, ti, "go");
+  reset_calls();
+  t.that(key_down_widget(world, ctx, ti, kKeyEnter, 0), "Enter submits");
+  t.that(key_down_widget(world, ctx, ti, kKeyEscape, 0), "Escape cancels");
+  t.eq_u32(kCalls.load(), 1100, "submit got the text, cancel ran");
+  reset_calls();
+  t.that(key_down_widget(world, ctx, ti, kKeyUp, 0) && text_of(world, ti) == "previous", "Up: history prev");
+  t.that(world.get(kTextInputContent, ti)!.cursor == 8 && kCalls.load() == 1, "caret at the end, on_change");
+  t.that(key_down_widget(world, ctx, ti, kKeyDown, 0) && text_of(world, ti) == "", "Down: history next");
+
+  // Caret blink while focused.
+  set_widget_state(world, ctx, ti, WidgetState::Focused);
+  update_widget(world, ctx, ti, 0.3);
+  t.that(world.get(kTextInputContent, ti)!.cursor_visible, "visible at 0.3 s");
+  update_widget(world, ctx, ti, 0.3);
+  t.that(!world.get(kTextInputContent, ti)!.cursor_visible, "hidden at 0.6 s");
+  update_widget(world, ctx, ti, 0.5);
+  t.that(world.get(kTextInputContent, ti)!.cursor_visible, "visible at 1.1 s");
+}
+
+fn check_scroll_view(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let sv = create_scroll_view(world, 0);
+  let child = create_text(world, 0);
+  add_child(world, sv, child);
+  layout(world, ctx, child, Rect { x: 0.0, y: 0.0, w: 100.0, h: 400.0 });
+  layout(world, ctx, sv, Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+  set_scroll_offset(world, sv, Vec2 { x: 0.0, y: 50.0 });
+  t.that(hit_test(world, ctx, sv, Vec2 { x: 10.0, y: 80.0 }) == child, "hit test reaches the child");
+  t.that(input_to_layout_point(world, child, Vec2 { x: 10.0, y: 80.0 }) == Vec2 { x: 10.0, y: 130.0 },
+         "input_to_layout_point adds the scroll offset");
+  scroll_by(world, sv, Vec2 { x: 0.0, y: 400.0 });
+  t.that(scroll_offset(world, sv).y == 450.0, "scroll_by adds, unclamped until layout");
+  layout(world, ctx, sv, Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+  t.that(scroll_offset(world, sv).y == 300.0, "layout clamps");
+  scroll_by(world, child, Vec2 { x: 0.0, y: 1.0 });
+  t.that(scroll_offset(world, child) == Vec2::zero(), "a text is no scroll view");
+}
+
+fn check_context_menu(var t&: Expect, var world&: World, var ctx&: WidgetContext, var overlays&: Overlays,
+                      feed&: HostFeed) {
+  let cm = create_context_menu(world, 0);
+  add_context_menu_item(world, cm, "One", own fn(env: &var CallbackEnv) {
+    let _ = kCalls.fetch_add(1);
+  });
+  add_context_menu_separator(world, cm);
+  add_context_menu_item(world, cm, "Two", own fn(env: &var CallbackEnv) {
+    let _ = kCalls.fetch_add(10);
+  });
+  t.that(world.get(kContextMenuContent, cm)!.items.len() == 3, "three items");
+
+  show_context_menu_at(world, ctx, overlays, cm, Vec2 { x: 30.0, y: 40.0 });
+  t.that(world.get(kContextMenuContent, cm)!.visible, "shown");
+  t.that(overlays.entries.len() == 1 && overlays.entries[0].widget == cm, "one overlay");
+  let s = world.get(kStyleC, cm)!.style;
+  t.that(s.font_size == 16.0, "a set font size stays");
+  t.that(s.margin.top == 40.0 && s.margin.left == 30.0, "placed by margin");
+  t.that(s.width.unit == LengthUnit::Px && s.width.value == 32.0, "width: no text, row padding only");
+  // Rows of 16 * 1.8 = 28.8, a separator of 9.
+  t.that(s.height.value == 28.8f32 + 9.0 + 28.8, "height: two rows and a separator");
+
+  layout(world, ctx, cm, Rect { x: 30.0, y: 40.0, w: 100.0, h: 66.6 });
+  reset_calls();
+  feed_mouse(feed, ctx, Vec2 { x: 50.0, y: 40.0 + 28.8 + 9.0 + 5.0 });
+  t.that(click_widget(world, ctx, cm), "click on Two");
+  feed_mouse(feed, ctx, Vec2 { x: 50.0, y: 40.0 + 30.0 });
+  t.that(click_widget(world, ctx, cm), "click on the separator is consumed");
+  feed_mouse(feed, ctx, Vec2 { x: 50.0, y: 45.0 });
+  let _ = click_widget(world, ctx, cm);
+  t.eq_u32(kCalls.load(), 11, "Two then One ran, the separator nothing");
+
+  dismiss_widget(world, ctx, cm);
+  t.that(!world.get(kContextMenuContent, cm)!.visible, "dismissed");
+  show_context_menu_at(world, ctx, overlays, cm, Vec2 { x: 1.0, y: 2.0 });
+  t.that(overlays.entries.len() == 1, "shown again: still one overlay");
+  hide_context_menu(world, ctx, overlays, cm);
+  t.that(overlays.entries.len() == 0 && !world.get(kContextMenuContent, cm)!.visible, "hidden");
+  clear_context_menu_items(world, cm);
+  t.that(!click_widget(world, ctx, cm), "no items: not handled");
+}
+
+fn check_modal(var t&: Expect, var world&: World, var ctx&: WidgetContext, var overlays&: Overlays) {
+  let m = create_modal(world, 0);
+  set_modal_dismiss(world, m, own fn(env: &var CallbackEnv) {
+    let _ = kCalls.fetch_add(1);
+  });
+  reset_calls();
+  show_modal(world, ctx, overlays, m);
+  t.that(modal_visible(world, m) && overlays.entries.len() == 2, "backdrop and modal shown");
+  let backdrop = world.get(kModalContent, m)!.backdrop;
+  t.that(overlays.entries[0].widget == backdrop && overlays.entries[1].widget == m, "backdrop below the modal");
+  t.that(world.get(kWidgetNode, backdrop)!.kind == WidgetKind::Panel, "backdrop is a panel");
+  t.that(world.get(kStyleC, backdrop)!.style.width.unit == LengthUnit::Vw, "backdrop spans the viewport");
+  show_modal(world, ctx, overlays, m);
+  t.that(overlays.entries.len() == 2, "show twice: no second backdrop");
+  hide_modal(world, ctx, overlays, m);
+  t.that(!modal_visible(world, m) && overlays.entries.len() == 0, "hidden");
+  t.that(!world.alive(backdrop) && !world.get(kModalContent, m)!.backdrop.valid(), "backdrop destroyed");
+  t.eq_u32(kCalls.load(), 1, "on_dismiss ran");
+}
+
+fn check_message_box(var t&: Expect, var world&: World, var ctx&: WidgetContext, var overlays&: Overlays) {
+  let mb = create_message_box(world, 0);
+  setup_message_box(world, mb, "Confirm", "Delete this entity?", MessageBoxButtons::YesNo);
+  let kids = world.get(kHierarchy, mb)!.children.clone();
+  t.that(kids.len() == 3, "title, message, button row");
+  t.that(world.get(kTextContent, kids[0])!.text == "Confirm", "title");
+  t.that(world.get(kTextContent, kids[1])!.text == "Delete this entity?", "message");
+  let buttons = world.get(kHierarchy, kids[2])!.children.clone();
+  t.that(buttons.len() == 2, "two buttons");
+  t.that(world.get(kButtonContent, buttons[0])!.label == "No" && world.get(kButtonContent, buttons[1])!.label == "Yes",
+         "No, then Yes");
+  t.that(world.get(kWidgetNode, buttons[1])!.tab_index == 0, "buttons are focusable");
+
+  set_message_box_result(world, mb, own fn(env: &var CallbackEnv, r: MessageBoxResult) {
+    kLastResult.store(r as u32);
+    let _ = kCalls.fetch_add(1);
+  });
+  reset_calls();
+  t.that(key_down_widget(world, ctx, mb, kKeyEscape, 0), "Escape handled");
+  t.that(kLastResult.load() == MessageBoxResult::Dismissed as u32, "Escape: Dismissed");
+  t.that(!key_down_widget(world, ctx, mb, kKeyEnter, 0), "other keys: not handled");
+  t.that(click_widget(world, ctx, buttons[1]), "Yes clicked");
+  t.that(kLastResult.load() == MessageBoxResult::Yes as u32, "Yes button: Yes");
+
+  if (var p& = ctx.platform) {
+    let _ = p.init(WindowConfig { width: 800, height: 600 });
+  }
+  show_message_box(world, ctx, overlays, mb);
+  let margin = world.get(kStyleC, mb)!.style.margin;
+  // No measure entry: the intrinsic size (0 x 0) is centered.
+  t.that(margin.left == 400.0 && margin.top == 300.0, "centered by margin");
+  t.that(overlays.entries.len() == 2, "shown as a modal");
+  dismiss_message_box(world, ctx, overlays, mb, MessageBoxResult::No);
+  t.that(kLastResult.load() == MessageBoxResult::No as u32 && overlays.entries.len() == 0, "dismissed with No");
+  t.eq_u32(kCalls.load(), 3, "three results");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var te = TextEngine();
+  var host = HostPlatform();
+  t.that(host.init(WindowConfig {}), "host init");
+  let feed = host.feed();
+  var world = World();
+  var overlays = Overlays();
+  {
+    var ctx = WidgetContext { text_engine: te, platform: DynPlatform::of(host) };
+    check_button_text_image(t, world, ctx);
+    check_toggles(t, world, ctx);
+    check_slider(t, world, ctx, feed);
+    check_dropdown(t, world, ctx, feed);
+    check_text_input(t, world, ctx, feed);
+    check_scroll_view(t, world, ctx);
+    check_context_menu(t, world, ctx, overlays, feed);
+    check_modal(t, world, ctx, overlays);
+    check_message_box(t, world, ctx, overlays);
+  }
+  return t.finish();
+}

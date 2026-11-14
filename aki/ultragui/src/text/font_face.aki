@@ -1,0 +1,219 @@
+// No C++ counterpart: the font engine behind TextEngine, in place of the
+// FreeType face and the HarfBuzz hb_ft font the C++ keeps per slot. It puts
+// together the aki modules that each reproduce one library part bit for bit
+// (see PORTING.md, "Text without FreeType and HarfBuzz"):
+//
+// - font::face: FT_Open_Face, FT_Set_Pixel_Sizes, FT_Load_Glyph of TrueType
+//   glyphs (bytecode or autohinter) and embedded bitmaps;
+// - font::cff: FT_Load_Glyph of CFF and CFF2 glyphs;
+// - font::raster: FT_Render_Glyph's smooth rasterizer;
+// - shape: hb_shape over an hb_ft font, whose font functions (advances and
+//   extents, unhinted, from FreeType) font::unhinted and this module answer.
+//
+// The calls mirror the C++'s: `set_pixel_size` is FT_Set_Pixel_Sizes and
+// `font_changed` hb_ft_font_changed (the C++ calls the second only when
+// shaping changes the size), `render` is FT_Load_Glyph(FT_LOAD_RENDER) and
+// the slot fields TextEngine reads, `shape` hb_buffer_add_utf8 +
+// hb_buffer_guess_segment_properties + hb_shape.
+
+module ultragui::text::font_face;
+
+import {List} from akikit::containers::list;
+import {CffFaceInfo, CffFont, CffGlyph} from ultragui::font::cff::cff;
+import {Face, SizeMetrics} from ultragui::font::face;
+import {GlyphFormat, Outline, kPixelModeGray} from ultragui::font::outline;
+import {Outline as RasterOutline, OutlinePoint} from ultragui::font::raster::outline;
+import {render_outline} from ultragui::font::raster::rasterizer;
+import {FontError, tag} from ultragui::font::sfnt;
+import {hb_extents, hb_h_advance} from ultragui::font::unhinted;
+import {ShapeFace} from ultragui::shape::face;
+import {GlyphExtents, ShapeFontFuncs} from ultragui::shape::font_funcs;
+import {ShapedGlyph, shape_utf8} from ultragui::shape::shape;
+
+// What TextEngine reads from the glyph slot after FT_Load_Glyph with
+// FT_LOAD_RENDER: the bitmap (any pixel mode, as FreeType hands it over),
+// bitmap_left/top and advance.x (26.6).
+pub struct GlyphImage {
+  pub var width: u32 = 0
+  pub var rows: u32 = 0
+  pub var pitch: i32 = 0
+  pub var pixel_mode: u8 = 0
+  pub var buffer: List<u8> = List()
+  pub var left: i32 = 0
+  pub var top: i32 = 0
+  pub var advance_x: i64 = 0
+}
+
+// The glyph source: the face, and for a CFF-flavored face the CFF loader.
+// It answers hb_ft's font functions for the shaper.
+pub struct GlyphSource : ShapeFontFuncs {
+  pub var face: Face
+  pub var cff: CffFont? = none
+
+  pub fn h_advance(var self&, glyph: u32): i32;
+  pub fn glyph_extents(var self&, glyph: u32): GlyphExtents?;
+}
+
+// hb_ft_get_glyph_h_advances: FT_Get_Advance without hinting reads 'hmtx'
+// for TrueType and CFF-in-sfnt alike.
+fn GlyphSource::h_advance(var self&, glyph: u32): i32 => hb_h_advance(self.face, glyph);
+
+// hb_ft_get_glyph_extents: the unhinted load's metrics, rounded in float.
+fn GlyphSource::glyph_extents(var self&, glyph: u32): GlyphExtents? {
+  if (var cff& = self.cff) {
+    let g = cff.load_glyph(glyph, false) else {
+      return none;
+    };
+    let x1 = g.hori_bearing_x as f32;
+    let y1 = g.hori_bearing_y as f32;
+    let x2 = x1 + (g.width as f32);
+    let y2 = y1 + (0 - g.height) as f32;
+    let xb = @round(x1);
+    let yb = @round(y1);
+    return GlyphExtents {
+      x_bearing: xb as i32, y_bearing: yb as i32, width: (@round(x2) - xb) as i32, height: (@round(y2) - yb) as i32,
+    };
+  }
+  let e = hb_extents(self.face, glyph) else {
+    return none;
+  };
+  return GlyphExtents { x_bearing: e.x_bearing, y_bearing: e.y_bearing, width: e.width, height: e.height };
+}
+
+pub struct FontFace {
+  pub var source: GlyphSource
+  var shaper: ShapeFace
+  // The hb_font scale hb_ft_font_changed last set (26.6 of the FT size).
+  var hb_x_scale: i32 = 0
+  var hb_y_scale: i32 = 0
+
+  // FT_Open_Face(face index 0) + hb_ft_font_create_referenced.
+  pub fn open(data: List<u8>): FontFace ! FontError;
+  // FT_Set_Pixel_Sizes(face, 0, px); errors are ignored, as the C++ does.
+  pub fn set_pixel_size(var self&, px: u32);
+  // hb_ft_font_changed: the hb scale from the face's current size.
+  pub fn font_changed(var self&);
+  // face->size->metrics.
+  pub fn size_metrics(self&): SizeMetrics => self.source.face.size_metrics();
+  // FT_Face::family_name: none when FreeType leaves it NULL.
+  pub fn family_name(self&): List<u8>?;
+  // FT_Load_Glyph(face, gid, FT_LOAD_RENDER); none where it fails.
+  pub fn render(var self&, gid: u32): GlyphImage?;
+  // hb_shape of the UTF-8 bytes with the guessed segment properties.
+  pub fn shape(var self&, text: &[u8]): List<ShapedGlyph>;
+}
+
+fn FontFace::open(data: List<u8>): FontFace ! FontError {
+  let face = try Face::open(data.clone(), 0);
+  var cff: CffFont? = none;
+  if (face.is_cff()) {
+    let hmtx_rec = face.dir.find(tag("hmtx")) else {
+      return fail FontError::HmtxTableMissing;
+    };
+    let info = CffFaceInfo {
+      units_per_em: face.units_per_em as u32,
+      ascender: face.ascender as i32,
+      descender: face.descender as i32,
+      height: face.height as i32,
+      max_advance: face.max_advance_width as i32,
+      horizontal_metrics: face.hhea.number_of_metrics as u32,
+    };
+    let start = hmtx_rec.offset as usize;
+    let end = start + hmtx_rec.length as usize;
+    if (end > face.data.len()) {
+      return fail FontError::InvalidTable;
+    }
+    let parsed = CffFont::parse(face.cff_table(), info, face.data.as_slice()[start..end]) else {
+      return fail FontError::InvalidFileFormat;
+    };
+    cff = parsed;
+  }
+  let shaper = ShapeFace::from_bytes(data, 0, face.num_glyphs);
+  var out = FontFace { source: GlyphSource { face, cff }, shaper };
+  out.font_changed();
+  return out;
+}
+
+fn FontFace::set_pixel_size(var self&, px: u32) {
+  if (let ok = self.source.face.set_pixel_size(px)) {
+    if (var cff& = self.source.cff) {
+      if (let c = cff.set_pixel_size(px)) {}
+    }
+  }
+}
+
+fn FontFace::font_changed(var self&) {
+  let m = self.source.face.size_metrics();
+  let upem = self.source.face.units_per_em as u64;
+  self.hb_x_scale = ((m.x_scale as u64 * upem + 0x8000) >> 16) as i32;
+  self.hb_y_scale = ((m.y_scale as u64 * upem + 0x8000) >> 16) as i32;
+}
+
+fn FontFace::family_name(self&): List<u8>? {
+  if (self.source.face.family_name.len() == 0) {
+    return none;
+  }
+  return self.source.face.family_name.clone();
+}
+
+fn to_raster(o&: Outline): RasterOutline {
+  var r = RasterOutline {};
+  r.points.reserve(o.points.len());
+  for (let p in o.points) {
+    r.points.push(OutlinePoint { x: p.x as i32, y: p.y as i32 });
+  }
+  r.tags = o.tags.clone();
+  for (let c in o.contours) {
+    r.contours.push(c as u32);
+  }
+  r.flags = o.flags as i32;
+  return r;
+}
+
+fn cff_to_raster(g&: CffGlyph): RasterOutline {
+  var r = RasterOutline {};
+  r.points.reserve(g.points.len());
+  for (let p in g.points) {
+    r.points.push(OutlinePoint { x: p.x, y: p.y });
+  }
+  r.tags = g.tags.clone();
+  for (let c in g.contours) {
+    r.contours.push(c as u32);
+  }
+  r.flags = g.flags;
+  return r;
+}
+
+fn rendered(outline&: RasterOutline, advance_x: i64): GlyphImage? {
+  let bmp = render_outline(outline) else {
+    return none;
+  };
+  return GlyphImage {
+    width: bmp.width, rows: bmp.rows, pitch: bmp.pitch, pixel_mode: kPixelModeGray, buffer: bmp.pixels,
+    left: bmp.left, top: bmp.top, advance_x,
+  };
+}
+
+fn FontFace::render(var self&, gid: u32): GlyphImage? {
+  if (var cff& = self.source.cff) {
+    let g = cff.load_glyph(gid, true) else {
+      return none;
+    };
+    let outline = cff_to_raster(g);
+    return rendered(outline, g.advance_x as i64);
+  }
+  let g = self.source.face.load_glyph(gid) else {
+    return none;
+  };
+  if (g.format is GlyphFormat::Bitmap) {
+    return GlyphImage {
+      width: g.bitmap.width, rows: g.bitmap.rows, pitch: g.bitmap.pitch, pixel_mode: g.bitmap.pixel_mode,
+      buffer: g.bitmap.buffer, left: g.bitmap_left, top: g.bitmap_top, advance_x: g.advance_x,
+    };
+  }
+  let outline = to_raster(g.outline);
+  return rendered(outline, g.advance_x);
+}
+
+fn FontFace::shape(var self&, text: &[u8]): List<ShapedGlyph> =>
+  shape_utf8(self.shaper, self.source, self.hb_x_scale, self.hb_y_scale, text);

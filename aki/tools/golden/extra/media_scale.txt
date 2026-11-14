@@ -1,0 +1,45 @@
+# hand-written: @media + scale_mode + ui_scale + tooltip dwell (see ../README.md)
+viewport 1280 720 1280 720
+scale_mode contain 1280 720
+font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+ui aki/tools/golden/extra/media_scale.ugui
+frames 3 0.016666
+move 296 360
+frames 40 0.016666
+move 134 60
+frames 35 0.016666
+move 134 100
+frames 35 0.016666
+move 134 140
+frames 35 0.016666
+move 134 180
+frames 35 0.016666
+move 600 200
+frames 40 0.016666
+viewport 800 720 800 720
+frames 3 0.016666
+move 40 415
+frames 40 0.016666
+move 100 60
+frames 35 0.016666
+move 100 90
+frames 35 0.016666
+viewport 1600 900 3200 1800
+frames 3 0.016666
+ui_scale 1.25
+frames 3 0.016666
+move 400 300
+down left
+frame
+up left
+frame
+key 65 0 1 0 0
+char 97
+key 65 0 0 0 0
+frames 2 0.016666
+ui_scale 0
+viewport 640 480 640 480
+frames 3 0.016666
+move 200 200
+scroll 0 -2
+frames 40 0.016666

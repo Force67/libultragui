@@ -1,0 +1,15 @@
+<svg width="128" height="128" xmlns="http://www.w3.org/2000/svg">
+  <g transform="translate(64 64)">
+    <rect x="-30" y="-30" width="60" height="60" fill="#277da1" transform="rotate(15)"/>
+    <rect x="-30" y="-30" width="60" height="60" fill="#f9c74f" fill-opacity="0.7" transform="rotate(45 10 10)"/>
+    <g transform="scale(0.5, 1.25) skewX(20)">
+      <circle cx="0" cy="0" r="25" fill="none" stroke="#f94144" stroke-width="3"/>
+    </g>
+    <g style="transform:skewY(-15) translate(5,5)">
+      <path d="M-40,-40 L-10,-40 L-25,-15 Z" fill="#90be6d"/>
+    </g>
+  </g>
+  <path d="M5,5 l20,0 l0,20 z" fill="#43aa8b" transform="matrix(1.2 0.3 -0.2 1 3 90)"/>
+  <rect x="100" y="100" width="20" height="20" fill="#577590" transform="scale(1.1) rotate(-30 110 110) translate(-2,-3)"/>
+  <rect x="1" y="1" width="10" height="10" fill="red" transform="bogus(1 2) translate(3) scale(2)"/>
+</svg>

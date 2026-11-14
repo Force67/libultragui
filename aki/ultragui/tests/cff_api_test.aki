@@ -1,0 +1,42 @@
+// The sfnt / CFF boundary: ownership, size setup, invalid gids, and the
+// FDSelect format FreeType 2.14.3 itself rejects at face-open time.
+module cff_api_test;
+
+import {List} from akikit::containers::list;
+import {read_bytes} from akikit::filesystem::file_util;
+import {CffFont, CffFaceInfo} from ultragui::font::cff::cff;
+import {CffError, Span, uint_at} from ultragui::font::cff::data;
+import {Expect} from ultragui_testing::expect;
+
+fn load(name: str): List<u8> {
+  let raw = read_bytes(f"{@package_dir()}/tests/data/cff/{name}".as_str())!;
+  var out = List::<u8>(); for (let b in raw) { out.push(b as u8); } return out;
+}
+fn cff_table(data&: [u8]): Span {
+  let n = uint_at(data, 4, 2)! as usize;
+  for (let i in 0..n) {
+    let p = 12 + i * 16; let tag = uint_at(data, p, 4)!;
+    if (tag == 0x43464620 || tag == 0x43464632) { return Span { start: uint_at(data, p + 8, 4)! as usize, size: uint_at(data, p + 12, 4)! as usize }; }
+  }
+  @stop("fixture has no CFF table");
+}
+
+pub fn main(): i32 {
+  var expect = Expect();
+  let rejected = load("fdselect4-cff2.otf"); let rejected_span = cff_table(rejected.as_slice());
+  if (let f = CffFont::parse(rejected.as_slice()[rejected_span.start..rejected_span.limit()], CffFaceInfo {}, [])) {
+    expect.that(false, "FreeType rejects FDSelect format 4");
+  } else (let e) { expect.that(e == CffError::InvalidFileFormat, "FDSelect format 4 error"); }
+  if (let f = CffFont::parse([], CffFaceInfo {}, [])) { expect.that(false, "empty CFF rejected"); }
+  else (let e) { expect.that(e == CffError::InvalidFileFormat, "empty table error"); }
+  let bytes = load("operators.otf"); let span = cff_table(bytes.as_slice());
+  var font = CffFont::parse(bytes.as_slice()[span.start..span.limit()], CffFaceInfo {}, [])!;
+  if (let glyph = font.load_glyph(0, true)) { expect.that(false, "size must be set before loading"); }
+  if (let ok = font.set_pixel_size(0)) {} else { expect.that(false, "zero pixel size maps to one"); }
+  expect.that(font.size_metrics().y_ppem == 1, "zero pixels means one");
+  if (let glyph = font.load_glyph(font.glyph_count(), false)) { expect.that(false, "out of range gid rejected"); }
+  else (let e) { expect.that(e == CffError::InvalidArgument, "invalid gid error"); }
+  if (let ok = font.set_pixel_size(65536)) { expect.that(false, "oversized ppem rejected"); }
+  else (let e) { expect.that(e == CffError::InvalidArgument, "invalid ppem error"); }
+  return expect.finish();
+}

@@ -1,0 +1,133 @@
+// ugui/widgets/modal.{h,cc}: a modal (WidgetKind::Modal), a generic widget
+// carrying a ModalContent (backdrop entity and color, shown flag,
+// on_dismiss). No vtable entries: paint and measure are the base widget's.
+// Other widgets (the message box) carry a ModalContent too and reuse the
+// lifecycle by composition; the functions gate on the component, not the
+// kind.
+//
+// Shape differences: ShowModal/HideModal take the World, the WidgetContext
+// and the overlay list where the C++ takes a UIContext* (widgets::overlays);
+// the other functions take the World first. on_dismiss is an Action.
+//
+// The backdrop is CreatePanel(0) written out (a widget tagged Panel and
+// nothing else), so this module does not wait on widgets::panel.
+
+module ultragui::widgets::modal;
+
+import {swap} from akikit::algorithm;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Length} from ultragui::style::property_types;
+import {Style} from ultragui::style::style;
+import {Action, CallbackEnv} from ultragui::widgets::callbacks;
+import {Overlays} from ultragui::widgets::overlays;
+import {WidgetKind, destroy_widget, kWidgetNode, set_style} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// Data for a modal widget.
+pub struct ModalContent {
+  pub var backdrop_color: Color = Color::rgba(0.0, 0.0, 0.0, 0.5)
+  pub var backdrop: WidgetId = kNullWidget
+  pub var visible: bool = false
+  pub var on_dismiss: Action? = none
+}
+
+pub static let kModalContent: ComponentKey<ModalContent> = ComponentKey();
+
+// CreateModal: a widget tagged Modal with a ModalContent.
+pub fn create_modal(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::Modal;
+  world.add(kModalContent, e, ModalContent {});
+  return e;
+}
+
+// ShowModal: a full-viewport backdrop overlay in the backdrop color, then
+// the widget on top of it. Works on any widget carrying a ModalContent.
+pub fn show_modal(var world&: World, var ctx&: WidgetContext, var overlays&: Overlays, e: WidgetId) {
+  let c& = world.get_var(kModalContent, e) else {
+    return;
+  };
+  if (c.visible) {
+    return;
+  }
+  c.visible = true;
+  let backdrop_color = c.backdrop_color;
+
+  // Full-viewport backdrop panel in the backdrop color (CreatePanel(0)).
+  let b = world.create(0);
+  world.get_var(kWidgetNode, b)!.kind = WidgetKind::Panel;
+  var bs = Style {};
+  bs.background = backdrop_color;
+  bs.width = Length::vw(100.0);
+  bs.height = Length::vh(100.0);
+  set_style(world, b, bs);
+  world.get_var(kModalContent, e)!.backdrop = b;
+
+  // Show backdrop first, then the modal content on top.
+  overlays.show(world, b, Vec2 { x: 0.0, y: 0.0 });
+  overlays.show(world, e, Vec2 { x: 0.0, y: 0.0 });
+}
+
+// HideModal: take the widget and backdrop out of the overlays, destroy the
+// backdrop, then on_dismiss.
+pub fn hide_modal(var world&: World, var ctx&: WidgetContext, var overlays&: Overlays, e: WidgetId) {
+  let c& = world.get_var(kModalContent, e) else {
+    return;
+  };
+  if (!c.visible) {
+    return;
+  }
+  c.visible = false;
+  let backdrop = c.backdrop;
+
+  overlays.hide(e);
+  if (backdrop.valid()) {
+    overlays.hide(backdrop);
+    destroy_widget(world, backdrop);
+    if (var mc& = world.get_var(kModalContent, e)) {
+      mc.backdrop = kNullWidget;
+    }
+  }
+
+  var slot: Action? = none;
+  if (var mc& = world.get_var(kModalContent, e)) {
+    swap(mc.on_dismiss, slot);
+  }
+  if (let handler = slot) {
+    {
+      var env = CallbackEnv { world, ctx };
+      handler(env);
+    }
+    if (var mc& = world.get_var(kModalContent, e)) {
+      if (mc.on_dismiss == none) {
+        mc.on_dismiss = handler;
+      }
+    }
+  }
+}
+
+// SetModalBackdropColor. No-op if `e` has no ModalContent.
+pub fn set_modal_backdrop_color(var world&: World, e: WidgetId, c: Color) {
+  if (var mc& = world.get_var(kModalContent, e)) {
+    mc.backdrop_color = c;
+  }
+}
+
+// SetModalDismiss: run from hide_modal. No-op if `e` has no ModalContent.
+pub fn set_modal_dismiss(var world&: World, e: WidgetId, handler: Action) {
+  if (var mc& = world.get_var(kModalContent, e)) {
+    mc.on_dismiss = handler;
+  }
+}
+
+// ModalVisible: whether the modal is shown.
+pub fn modal_visible(world&: World, e: WidgetId): bool {
+  if (let c& = world.get(kModalContent, e)) {
+    return c.visible;
+  }
+  return false;
+}

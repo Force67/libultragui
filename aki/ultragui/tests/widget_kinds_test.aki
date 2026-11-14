@@ -1,0 +1,331 @@
+// The widget kinds against values recorded from the C++
+// (tools/gen_widget_reference.cc, aarch64 Linux, DejaVuSans): measure of
+// every kind with a measure entry at ui scale 1 and 1.25 through the real
+// TextEngine, slider value math from the pointer, the toggle thumb slide,
+// scroll-view momentum and clamping, and the text-input caret under the
+// pointer. Each scenario builds the same widgets the generator builds.
+
+module widget_kinds_test;
+
+import {String, from_str} from akikit::strings::string;
+import {List} from akikit::containers::list;
+import {Color} from ultragui::core::color;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {EdgeInsets, Rect} from ultragui::core::rect;
+import {DynPlatform, WindowConfig} from ultragui::platform::platform;
+import {HostFeed, HostPlatform} from ultragui::platform::platform_host;
+import {FontWeight, TextTransform, WidgetState} from ultragui::style::enums;
+import {Style} from ultragui::style::style;
+import {TextEngine} from ultragui::text::text_engine;
+import {create_button, set_button_label} from ultragui::widgets::button;
+import {create_checkbox, set_checkbox_label} from ultragui::widgets::checkbox;
+import {add_context_menu_item, add_context_menu_separator, create_context_menu} from ultragui::widgets::context_menu;
+import {create_dropdown, set_dropdown_options} from ultragui::widgets::dropdown;
+import {create_radio, set_radio_label} from ultragui::widgets::radio;
+import {TextSpan, add_rich_text_span, create_rich_text} from ultragui::widgets::rich_text;
+import {kScrollViewContent, create_scroll_view, scroll_content_size, scroll_offset} from ultragui::widgets::scroll_view;
+import {create_slider, set_slider_max, set_slider_min, slider_value} from ultragui::widgets::slider;
+import {create_text, set_text} from ultragui::widgets::text;
+import {create_text_input, kTextInputContent, set_text_input_value} from ultragui::widgets::text_input;
+import {create_toggle, kToggleContent, set_toggle_on} from ultragui::widgets::toggle;
+import {
+  add_child, click_widget, layout_widget, measure_widget, scroll_widget, set_context, set_style, set_widget_state,
+  update_widget,
+} from ultragui::widgets::widget;
+import {CallbackEnv} from ultragui::widgets::callbacks;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {Expect} from ultragui_testing::expect;
+
+struct MeasureRef : Copy {
+  pub let tag: str
+  pub let w: u32
+  pub let h: u32
+}
+
+static let kMeasures: [MeasureRef; 32] = [
+  MeasureRef { tag: "s1_text", w: 0x42c14800, h: 0x41980000 },
+  MeasureRef { tag: "s1_text_upper", w: 0x4342a400, h: 0x41a80000 },
+  MeasureRef { tag: "s1_text_cap", w: 0x43219000, h: 0x41a80000 },
+  MeasureRef { tag: "s1_button", w: 0x4270d000, h: 0x42100000 },
+  MeasureRef { tag: "s1_button_empty", w: 0x00000000, h: 0x42080000 },
+  MeasureRef { tag: "s1_checkbox", w: 0x43076333, h: 0x4199999a },
+  MeasureRef { tag: "s1_checkbox_empty", w: 0x4199999a, h: 0x4199999a },
+  MeasureRef { tag: "s1_radio", w: 0x42b62800, h: 0x41900000 },
+  MeasureRef { tag: "s1_toggle", w: 0x42580000, h: 0x41f00000 },
+  MeasureRef { tag: "s1_slider", w: 0x43520000, h: 0x41f00000 },
+  MeasureRef { tag: "s1_dropdown", w: 0x430ed400, h: 0x42000000 },
+  MeasureRef { tag: "s1_dropdown_empty", w: 0x42d80000, h: 0x42000000 },
+  MeasureRef { tag: "s1_text_input", w: 0x42131000, h: 0x41d80000 },
+  MeasureRef { tag: "s1_text_input_empty", w: 0x4197c000, h: 0x41d80000 },
+  MeasureRef { tag: "s1_rich_text", w: 0x4303fc00, h: 0x41e00000 },
+  MeasureRef { tag: "s1_context_menu", w: 0x4320fc00, h: 0x42b66666 },
+  MeasureRef { tag: "s125_text", w: 0x42f18800, h: 0x41b80000 },
+  MeasureRef { tag: "s125_text_upper", w: 0x43787800, h: 0x41d80000 },
+  MeasureRef { tag: "s125_text_cap", w: 0x434e3800, h: 0x41d80000 },
+  MeasureRef { tag: "s125_button", w: 0x4283f000, h: 0x42240000 },
+  MeasureRef { tag: "s125_button_empty", w: 0x00000000, h: 0x42080000 },
+  MeasureRef { tag: "s125_checkbox", w: 0x43226733, h: 0x41b80000 },
+  MeasureRef { tag: "s125_checkbox_empty", w: 0x4199999a, h: 0x4199999a },
+  MeasureRef { tag: "s125_radio", w: 0x42d8f000, h: 0x41b00000 },
+  MeasureRef { tag: "s125_toggle", w: 0x42580000, h: 0x41f00000 },
+  MeasureRef { tag: "s125_slider", w: 0x43520000, h: 0x41f00000 },
+  MeasureRef { tag: "s125_dropdown", w: 0x43227c00, h: 0x42180000 },
+  MeasureRef { tag: "s125_dropdown_empty", w: 0x42d80000, h: 0x42180000 },
+  MeasureRef { tag: "s125_text_input", w: 0x422fd000, h: 0x41f80000 },
+  MeasureRef { tag: "s125_text_input_empty", w: 0x41ada000, h: 0x41f80000 },
+  MeasureRef { tag: "s125_rich_text", w: 0x4324f000, h: 0x420c0000 },
+  MeasureRef { tag: "s125_context_menu", w: 0x433c1000, h: 0x42d98000 },
+];
+
+static let kSlider: [u32; 6] = [0x4007c290, 0x410b0f5c, 0x418c0000, 0xc0a00000, 0xc0a00000, 0x418bfdb3];
+static let kToggle: [u32; 13] = [0x3e4cccce, 0x3eb851ec, 0x3ef9db24, 0x3f172475, 0x3f2c1d2b, 0x3f3ce422, 0x3f4a501b, 0x3f550ce2, 0x3f5da3e8, 0x3f648320, 0x3f6a0280, 0x3f6e6866, 0x3f800000];
+static let kScroll: [(u32, u32); 8] = [
+  (0x42300000, 0x43533333),
+  (0x423e147b, 0x4339db23),
+  (0x424a786c, 0x43238da4),
+  (0x42555fbb, 0x430fed49),
+  (0x425ef815, 0x42fd4fb4),
+  (0x426769ac, 0x42dee9fa),
+  (0x426ed7df, 0x42c42a0f),
+  (0x427561ce, 0x42ac9fe4),
+];
+comptime let kScrollSizeX: u32 = 0x42c80000;
+comptime let kScrollSizeY: u32 = 0x43af0000;
+comptime let kScrollClamp: u32 = 0x437a0000;
+static let kCaret: [u32; 6] = [0, 0, 1, 3, 7, 10];
+
+fn check_size(var t&: Expect, var world&: World, var ctx&: WidgetContext, e: WidgetId, tag: String) {
+  let (w, h) = measure_widget(world, ctx, e);
+  for (let m in kMeasures) {
+    if (m.tag == tag) {
+      t.bits(w, m.w, f"{tag} width");
+      t.bits(h, m.h, f"{tag} height");
+      return;
+    }
+  }
+  t.that(false, f"no reference for {tag}");
+}
+
+fn font_style(size: f32): Style {
+  var s = Style {};
+  s.font_size = size;
+  return s;
+}
+
+// Measures of the C++ generator, at the context's ui scale.
+fn measures(var t&: Expect, var world&: World, var ctx&: WidgetContext, p: str) {
+  let tx = create_text(world, 0);
+  set_context(world, tx, true);
+  set_text(world, tx, "Hello, World");
+  set_style(world, tx, font_style(16.0));
+  check_size(t, world, ctx, tx, f"{p}_text");
+
+  let tu = create_text(world, 0);
+  set_context(world, tu, true);
+  set_text(world, tu, "hello wide world");
+  var su = Style {};
+  su.font_size = 18.0;
+  su.letter_spacing = 0.5;
+  su.text_transform = TextTransform::Uppercase;
+  set_style(world, tu, su);
+  check_size(t, world, ctx, tu, f"{p}_text_upper");
+  su.text_transform = TextTransform::Capitalize;
+  set_style(world, tu, su);
+  check_size(t, world, ctx, tu, f"{p}_text_cap");
+
+  let b = create_button(world, 0);
+  set_context(world, b, true);
+  set_button_label(world, b, "OK");
+  var bs = Style {};
+  bs.font_size = 14.0;
+  bs.padding = EdgeInsets::symmetric(10.0, 20.0);
+  set_style(world, b, bs);
+  check_size(t, world, ctx, b, f"{p}_button");
+  let be = create_button(world, 0);
+  set_context(world, be, true);
+  set_style(world, be, bs);
+  check_size(t, world, ctx, be, f"{p}_button_empty");
+
+  let cb = create_checkbox(world, 0);
+  set_context(world, cb, true);
+  set_checkbox_label(world, cb, "Enable sound");
+  check_size(t, world, ctx, cb, f"{p}_checkbox");
+  let cbe = create_checkbox(world, 0);
+  set_context(world, cbe, true);
+  check_size(t, world, ctx, cbe, f"{p}_checkbox_empty");
+
+  let r = create_radio(world, 0);
+  set_context(world, r, true);
+  set_radio_label(world, r, "Option A");
+  set_style(world, r, font_style(15.0));
+  check_size(t, world, ctx, r, f"{p}_radio");
+
+  var ps = Style {};
+  ps.padding = EdgeInsets::symmetric(3.0, 5.0);
+  let tg = create_toggle(world, 0);
+  set_context(world, tg, true);
+  set_style(world, tg, ps);
+  check_size(t, world, ctx, tg, f"{p}_toggle");
+
+  let sl = create_slider(world, 0);
+  set_context(world, sl, true);
+  set_style(world, sl, ps);
+  check_size(t, world, ctx, sl, f"{p}_slider");
+
+  var ds = Style {};
+  ds.font_size = 16.0;
+  ds.padding = EdgeInsets::symmetric(4.0, 8.0);
+  let d = create_dropdown(world, 0);
+  set_context(world, d, true);
+  var options: List<String> = List();
+  options.push(from_str("Low"));
+  options.push(from_str("Medium"));
+  options.push(from_str("Ultra high"));
+  set_dropdown_options(world, d, options.as_slice());
+  set_style(world, d, ds);
+  check_size(t, world, ctx, d, f"{p}_dropdown");
+  let de = create_dropdown(world, 0);
+  set_context(world, de, true);
+  set_style(world, de, ds);
+  check_size(t, world, ctx, de, f"{p}_dropdown_empty");
+
+  var is = Style {};
+  is.font_size = 16.0;
+  is.padding = EdgeInsets::all(4.0);
+  let ti = create_text_input(world, 0);
+  set_context(world, ti, true);
+  set_text_input_value(world, ti, "abc");
+  set_style(world, ti, is);
+  check_size(t, world, ctx, ti, f"{p}_text_input");
+  let tie = create_text_input(world, 0);
+  set_context(world, tie, true);
+  set_style(world, tie, is);
+  check_size(t, world, ctx, tie, f"{p}_text_input_empty");
+
+  let rt = create_rich_text(world, 0);
+  set_context(world, rt, true);
+  add_rich_text_span(world, rt, TextSpan { text: from_str("Hello ") });
+  add_rich_text_span(world, rt, TextSpan { text: from_str("big"), font_size: 24.0, font_weight: FontWeight::Bold });
+  add_rich_text_span(world, rt, TextSpan { text: from_str(" world"), color: Color::red() });
+  set_style(world, rt, font_style(16.0));
+  check_size(t, world, ctx, rt, f"{p}_rich_text");
+
+  let cm = create_context_menu(world, 0);
+  set_context(world, cm, true);
+  add_context_menu_item(world, cm, "Copy", own fn(env: &var CallbackEnv) {});
+  add_context_menu_item(world, cm, "Paste", own fn(env: &var CallbackEnv) {});
+  add_context_menu_separator(world, cm);
+  add_context_menu_item(world, cm, "Delete everything", own fn(env: &var CallbackEnv) {});
+  var cs = Style {};
+  cs.font_size = 13.0;
+  cs.padding = EdgeInsets::all(6.0);
+  set_style(world, cm, cs);
+  check_size(t, world, ctx, cm, f"{p}_context_menu");
+}
+
+// Feed: a pointer move, then the platform's poll.
+fn feed_mouse(feed&: HostFeed, var ctx&: WidgetContext, pos: Vec2) {
+  feed.push_mouse_move(pos);
+  if (var p& = ctx.platform) {
+    p.poll_events();
+  }
+}
+
+fn check_slider(var t&: Expect, var world&: World, var ctx&: WidgetContext, feed&: HostFeed) {
+  let sl = create_slider(world, 0);
+  set_context(world, sl, true);
+  set_slider_min(world, sl, -5.0);
+  set_slider_max(world, sl, 17.5);
+  let r = Rect { x: 10.0, y: 5.0, w: 200.0, h: 24.0 };
+  layout_widget(world, ctx, sl, r, r);
+  let xs: [f32; 6] = [73.3, 131.7, 250.0, 2.0, 10.0, 209.99];
+  feed_mouse(feed, ctx, Vec2 { x: xs[0], y: 10.0 });
+  let _ = click_widget(world, ctx, sl);
+  t.bits(slider_value(world, sl), kSlider[0], "slider click");
+  set_widget_state(world, ctx, sl, WidgetState::Pressed);
+  for (let i in 1usize..6) {
+    feed_mouse(feed, ctx, Vec2 { x: xs[i], y: 10.0 });
+    update_widget(world, ctx, sl, 1.0 / 60.0);
+    t.bits(slider_value(world, sl), kSlider[i], f"slider drag {i}");
+  }
+}
+
+fn check_toggle(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let tg = create_toggle(world, 0);
+  set_context(world, tg, true);
+  let _ = click_widget(world, ctx, tg);
+  set_toggle_on(world, ctx, tg, false);
+  set_widget_state(world, ctx, tg, WidgetState::Checked);
+  for (let i in 0usize..12) {
+    update_widget(world, ctx, tg, 1.0 / 60.0);
+    t.bits(world.get(kToggleContent, tg)!.thumb_anim, kToggle[i], f"toggle slide {i}");
+  }
+  for (let _ in 0..40) {
+    update_widget(world, ctx, tg, 0.05);
+  }
+  t.bits(world.get(kToggleContent, tg)!.thumb_anim, kToggle[12], "toggle settles");
+}
+
+fn check_scroll(var t&: Expect, var world&: World, var ctx&: WidgetContext) {
+  let sv = create_scroll_view(world, 0);
+  set_context(world, sv, true);
+  let child = create_text(world, 0);
+  add_child(world, sv, child);
+  layout_widget(world, ctx, child, Rect { x: 0.0, y: 0.0, w: 100.0, h: 350.0 }, Rect { x: 0.0, y: 0.0, w: 100.0, h: 350.0 });
+  let view = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+  layout_widget(world, ctx, sv, view, view);
+  let size = scroll_content_size(world, sv);
+  t.bits(size.x, kScrollSizeX, "scroll content width");
+  t.bits(size.y, kScrollSizeY, "scroll content height");
+  let _ = scroll_widget(world, ctx, sv, Vec2 { x: 0.0, y: 40.0 });
+  for (let i in 0usize..8) {
+    update_widget(world, ctx, sv, 1.0 / 60.0);
+    let c& = world.get(kScrollViewContent, sv)!;
+    t.bits(c.offset.y, kScroll[i].0, f"scroll offset {i}");
+    t.bits(c.velocity.y, kScroll[i].1, f"scroll velocity {i}");
+  }
+  let _ = scroll_widget(world, ctx, sv, Vec2 { x: 0.0, y: 1000.0 });
+  layout_widget(world, ctx, sv, view, view);
+  t.bits(scroll_offset(world, sv).y, kScrollClamp, "scroll clamps to the content");
+}
+
+fn check_caret(var t&: Expect, var world&: World, var ctx&: WidgetContext, feed&: HostFeed) {
+  let ti = create_text_input(world, 0);
+  set_context(world, ti, true);
+  set_text_input_value(world, ti, "Hello wide");
+  set_style(world, ti, font_style(16.0));
+  let r = Rect { x: 20.0, y: 10.0, w: 200.0, h: 30.0 };
+  layout_widget(world, ctx, ti, r, r);
+  let xs: [f32; 6] = [0.0, 24.0, 31.0, 47.5, 80.0, 300.0];
+  for (let i in 0usize..6) {
+    feed_mouse(feed, ctx, Vec2 { x: xs[i], y: 20.0 });
+    let _ = click_widget(world, ctx, ti);
+    t.eq_u32(world.get(kTextInputContent, ti)!.cursor, kCaret[i], f"caret at x {xs[i]}");
+  }
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  var te = TextEngine();
+  t.that(te.init(), "text engine init");
+  let font = te.load_font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+  var host = HostPlatform();
+  t.that(host.init(WindowConfig {}), "host init");
+  let feed = host.feed();
+  var world = World();
+  {
+    var ctx = WidgetContext { text_engine: te, default_font: font, platform: DynPlatform::of(host) };
+    measures(t, world, ctx, "s1");
+    ctx.ui_scale = 1.25;
+    measures(t, world, ctx, "s125");
+    ctx.ui_scale = 1.0;
+    check_slider(t, world, ctx, feed);
+    check_toggle(t, world, ctx);
+    check_scroll(t, world, ctx);
+    check_caret(t, world, ctx, feed);
+  }
+  te.shutdown();
+  return t.finish();
+}

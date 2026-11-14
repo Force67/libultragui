@@ -1,0 +1,32 @@
+// ugui/ultragui_config.h: the compile-time feature switches.
+//
+// In the C++ each optional subsystem is a macro, 1 or 0. In aki the optional
+// subsystems are packages and seams, so a switch is a choice the program
+// makes, not a macro:
+//
+// | C++ macro                  | aki                                                      |
+// |----------------------------|----------------------------------------------------------|
+// | ULTRAGUI_LUA               | depend on ultragui_lua; UIContext<_, _, LuaRuntime>      |
+// | ULTRAGUI_AUDIO             | depend on ultragui_audio; UIContext::set_audio(box)      |
+// | ULTRAGUI_LOTTIE            | depend on ultragui_lottie                                |
+// | ULTRAGUI_VIDEO             | depend on ultragui_video                                 |
+// | ULTRAGUI_DEFAULT_OPEN_URL  | Platform::open_url's default body; define open_url in    |
+// |                            | the Platform type to route URLs elsewhere                |
+// | ULTRAGUI_BACKEND_*         | the Rhi type UIContext is instantiated with (NullRhi,    |
+// |                            | ultragui_vulkan's VulkanRhi, ...)                        |
+// | ULTRAGUI_PLATFORM_HOST     | the Platform type (HostPlatform or ultragui_glfw's)      |
+//
+// The constants below say what this package, the core, provides on its own,
+// for code ported from `#if ULTRAGUI_X` blocks: a block that only wires a
+// subsystem in moves to that subsystem's package; a block whose behavior the
+// core keeps either way (UIContext initializing the audio backend, silent
+// NullAudioBackend by default) loses its #if. core/config.h (container and
+// allocator types) has no counterpart: the port uses akikit's.
+
+module ultragui::ultragui_config;
+
+pub comptime let kLua: bool = false;
+pub comptime let kAudio: bool = false;
+pub comptime let kLottie: bool = false;
+pub comptime let kVideo: bool = false;
+pub comptime let kDefaultOpenUrl: bool = true;

@@ -1,0 +1,259 @@
+// D3d12Rhi against a real device: the texture slot rules, the frame sequence
+// and shutdown, as d3d12_rhi.cc has them. There is no C++ test for the RHI;
+// the expected values are what the C++ code computes by reading it (slot
+// order, the 256-texture limit, white_texture_ in slot 0, display_size from
+// the swapchain extent over the dpi scale), and tools/rhi_scene.cc /
+// examples/rhi_scene check the pixels.
+//
+// Needs a window and a Vulkan device (vkd3d runs D3D12 on it). Without a
+// display (GLFW fails to initialise, or the window or device cannot be made)
+// the test says so and passes; aki/tools/test_xvfb.sh ultragui_d3d12 runs it for real under Xvfb
+// on Mesa's software Vulkan.
+
+module rhi_test;
+
+import {List} from akikit::containers::list;
+import {println} from akikit::logging;
+import {from_str} from akikit::strings::string;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {Vertex2D, pack_color} from ultragui::render::vertex;
+import {RhiConfig} from ultragui::rhi::rhi;
+import {RhiFilter, RhiFormat, kInvalidTexture} from ultragui::rhi::rhi_types;
+import {D3d12Rhi} from ultragui_d3d12::d3d12_rhi;
+import {sleep, milliseconds} from akikit::time::time;
+import {glfw_create_window, glfw_destroy_window, glfw_init, glfw_poll_events, glfw_set_window_size, glfw_terminate, glfw_window_hint,
+  kGlfwClientApi, kGlfwFalse, kGlfwNoApi, kGlfwResizable} from ultragui_glfw::sys::glfw;
+import {Suite, check} from ultragui_testing::check;
+
+fn rgba(n: usize): List<u8> {
+  var px = List::<u8>();
+  for (let i in 0..n) {
+    px.push((i * 7 % 256) as u8);
+  }
+  return px;
+}
+
+fn quad(x: f32, y: f32, w: f32, h: f32, color: u32): (List<Vertex2D>, List<u32>) {
+  var v = List::<Vertex2D>();
+  let corners: [(f32, f32); 4] = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
+  let uvs: [(f32, f32); 4] = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+  for (let k in 0..4usize) {
+    v.push(Vertex2D {
+      pos: [corners[k].0, corners[k].1],
+      uv: [uvs[k].0, uvs[k].1],
+      color: color,
+      color2: color,
+      corner_radii: 0,
+      softness: 0.0,
+      half_size: [0.0, 0.0],
+      border_width: 0.0,
+      border_color: 0,
+    });
+  }
+  var i = List::<u32>();
+  let idx: [u32; 6] = [0, 1, 2, 0, 2, 3];
+  for (let k in idx) {
+    i.push(k);
+  }
+  return (v, i);
+}
+
+pub fn main(): i32 {
+  unsafe {
+    if (glfw_init() == 0) {
+      println("rhi_test: no GLFW (no display?): skipped");
+      return 0;
+    }
+    glfw_window_hint(kGlfwClientApi, kGlfwNoApi);
+    glfw_window_hint(kGlfwResizable, kGlfwFalse);
+  }
+  let window = unsafe glfw_create_window(320, 240, c"rhi_test", null, null);
+  if (window == null) {
+    println("rhi_test: no window: skipped");
+    unsafe { glfw_terminate(); }
+    return 0;
+  }
+
+  var suite = Suite();
+
+  // A directory with no shaders: Init fails where the C++ does (the quad
+  // shaders do not load) and Shutdown after it is safe.
+  {
+    var rhi = D3d12Rhi();
+    var rc = RhiConfig {};
+    rc.native_window = unsafe (window as *var u8);
+    rc.shader_dir = from_str("/nonexistent-shader-dir");
+    check(!rhi.init(rc), "initialization rejects missing shader files");
+    rhi.shutdown();
+  }
+  suite.pass("init fails without shaders");
+
+  var rhi = D3d12Rhi();
+  var rc = RhiConfig {};
+  rc.native_window = unsafe (window as *var u8);
+  if (!rhi.init(rc)) {
+    println("rhi_test: no Vulkan device for vkd3d: skipped");
+    unsafe {
+      glfw_destroy_window(window);
+      glfw_terminate();
+    }
+    return 0;
+  }
+
+  // display_size = swapchain extent / dpi scale.
+  {
+    let ds = rhi.display_size();
+    check(rhi.dpi_scale() > 0.0, "dpi scale positive");
+    check(ds.x > 0.0, "display width");
+    check(ds.y > 0.0, "display height");
+  }
+  suite.pass("display size");
+
+  // Textures: slot 0 is the white fallback, slots are handed out in order and
+  // reused, formats other than R8/RGBA8/BGRA8 are refused.
+  {
+    let px = rgba(4 * 4 * 4);
+    let a = rhi.create_texture(4, 4, RhiFormat::Rgba8Unorm, px.as_slice() as bytes, RhiFilter::Linear);
+    let b = rhi.create_texture(4, 4, RhiFormat::Bgra8Unorm, px.as_slice() as bytes, RhiFilter::Nearest);
+    let c = rhi.create_texture(8, 8, RhiFormat::R8Unorm, px.as_slice() as bytes, RhiFilter::Nearest);
+    check(a == 1, "first texture is slot 1");
+    check(b == 2, "second texture is slot 2");
+    check(c == 3, "third texture is slot 3");
+    check(rhi.create_texture(4, 4, RhiFormat::Rgba32Float, px.as_slice() as bytes, RhiFilter::Linear) == kInvalidTexture,
+      "float format refused");
+
+    rhi.update_texture(a, px.as_slice() as bytes);
+    rhi.update_texture(999, px.as_slice() as bytes);  // no such slot: ignored
+    rhi.destroy_texture(b);
+    check(rhi.create_texture(2, 2, RhiFormat::Rgba8Unorm, px.as_slice() as bytes, RhiFilter::Linear) == 2, "freed slot reused");
+    rhi.destroy_texture(kInvalidTexture);  // ignored
+    rhi.destroy_texture(2);
+    rhi.destroy_texture(c);
+    rhi.destroy_texture(a);
+  }
+  suite.pass("texture slots");
+
+  // Render targets share the slots; DestroyTexture routes to them.
+  {
+    let t = rhi.create_render_target(64, 32);
+    check(t == 1, "render target takes the first free slot");
+    check(!rhi.begin_offscreen(5, Color {}), "no offscreen on a free slot");
+    rhi.destroy_texture(t);
+    check(rhi.create_render_target(8, 8) == 1, "render target slot reused");
+    rhi.destroy_render_target(1);
+    rhi.destroy_render_target(1);  // already gone: ignored
+  }
+  suite.pass("render targets");
+
+  // The texture table holds 256 entries, the white one included.
+  {
+    let px = rgba(4);
+    var handles = List::<u32>();
+    while (true) {
+      let h = rhi.create_texture(1, 1, RhiFormat::Rgba8Unorm, px.as_slice() as bytes, RhiFilter::Nearest);
+      if (h == kInvalidTexture) {
+        break;
+      }
+      handles.push(h);
+    }
+    check(#handles == 255, "255 textures beside the white one");
+    check(handles[0] == 1 && handles[254] == 255, "slots in order");
+    check(rhi.create_render_target(4, 4) == kInvalidTexture, "no slot for a render target either");
+    for (let h in handles) {
+      rhi.destroy_texture(h);
+    }
+  }
+  suite.pass("texture limit");
+
+  // Frames: offscreen, video conversion, scissor, text and quad draws, with
+  // the same vertex array twice (the dedup) and enough vertices to grow the
+  // upload buffers on the first draw of a frame.
+  {
+    let target = rhi.create_render_target(64, 64);
+    let py = rgba(16 * 16);
+    let pc = rgba(8 * 8);
+    let y = rhi.create_texture(16, 16, RhiFormat::R8Unorm, py.as_slice() as bytes, RhiFilter::Linear);
+    let cb = rhi.create_texture(8, 8, RhiFormat::R8Unorm, pc.as_slice() as bytes, RhiFilter::Linear);
+    let cr = rhi.create_texture(8, 8, RhiFormat::R8Unorm, pc.as_slice() as bytes, RhiFilter::Linear);
+    let video = rhi.create_render_target(16, 16);
+    check(target != kInvalidTexture && video != kInvalidTexture, "targets created");
+
+    let (qv, qi) = quad(10.0, 10.0, 100.0, 80.0, pack_color(1.0, 0.5, 0.0, 1.0));
+    var big_v = List::<Vertex2D>();
+    var big_i = List::<u32>();
+    for (let n in 0..6000u32) {
+      let (v, i) = quad((n % 100) as f32 * 3.0, (n / 100) as f32 * 3.0, 2.0, 2.0, pack_color(0.2, 0.4, 0.8, 1.0));
+      for (let x in v) {
+        big_v.push(x);
+      }
+      for (let k in i) {
+        big_i.push(k + n * 4);
+      }
+    }
+
+    for (let frame in 0..4u32) {
+      check(rhi.acquire_frame(), "acquire");
+      check(rhi.acquire_frame(), "acquire again is a no-op");
+      rhi.convert_video_frame(video, y, cb, cr);
+      rhi.convert_video_frame(kInvalidTexture, y, cb, cr);  // not a render target: ignored
+      check(rhi.begin_offscreen(target, Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }), "begin offscreen");
+      let off_ds = rhi.display_size();
+      check(off_ds.x == 64.0 && off_ds.y == 64.0, "offscreen display size is the target's");
+      rhi.set_scissor(Rect { x: 0.0, y: 0.0, w: 32.0, h: 32.0 });
+      rhi.draw_triangles(qv.as_slice(), qi.as_slice(), kInvalidTexture);
+      rhi.reset_scissor();
+      rhi.end_offscreen(target);
+      check(rhi.begin_frame(Color { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }), "begin frame");
+      rhi.draw_triangles(qv.as_slice(), qi.as_slice()[0..3], target);
+      rhi.draw_triangles(qv.as_slice(), qi.as_slice()[3..6], video);
+      rhi.set_scissor(Rect { x: 5.0, y: 5.0, w: 50.0, h: 50.0 });
+      rhi.draw_text_triangles(qv.as_slice(), qi.as_slice(), y);
+      rhi.reset_scissor();
+      rhi.end_frame();
+      unsafe { glfw_poll_events(); }
+    }
+    // The first draw of a frame past the start capacity (16384 vertices, 32768
+    // indices) grows the upload buffers. Growing after other draws of the frame
+    // would free a buffer they use: the C++ quirk, see PORTING.md.
+    check(rhi.begin_frame(Color {}), "begin frame (growth)");
+    rhi.draw_triangles(big_v.as_slice(), big_i.as_slice(), kInvalidTexture);
+    rhi.end_frame();
+
+    rhi.destroy_render_target(target);
+    rhi.destroy_render_target(video);
+    rhi.destroy_texture(y);
+    rhi.destroy_texture(cb);
+    rhi.destroy_texture(cr);
+  }
+  suite.pass("frames");
+
+  // A resized window: the framebuffer-size callback flags it, EndFrame
+  // recreates the swapchain, and display_size follows the new extent.
+  {
+    unsafe { glfw_set_window_size(window, 400, 300); }
+    var ds = rhi.display_size();
+    var tries = 0u32;
+    while (ds.x != 400.0 && tries < 300) {
+      unsafe { glfw_poll_events(); }
+      if (rhi.begin_frame(Color {})) {
+        rhi.end_frame();
+      }
+      ds = rhi.display_size();
+      tries += 1;
+      sleep(milliseconds(10));
+    }
+    check(ds.x == 400.0 && ds.y == 300.0, "display size follows the window");
+    // And still renders.
+    check(rhi.begin_frame(Color { r: 0.0, g: 0.5, b: 0.0, a: 1.0 }), "frame after resize");
+    rhi.end_frame();
+  }
+  suite.pass("resize recreates the swapchain");
+
+  rhi.shutdown();
+  unsafe {
+    glfw_destroy_window(window);
+    glfw_terminate();
+  }
+  return suite.finish();
+}

@@ -1,0 +1,23 @@
+// ugui/core/handle.h: the generation-checked widget handle.
+//
+// A stale handle resolves to none through World::get instead of dangling:
+// releasing a widget bumps its slot's generation, invalidating outstanding
+// handles. Index 0 is the null handle. The full 8-byte handle keeps the
+// generation wide so it cannot alias under per-frame tree rebuilds.
+
+module ultragui::core::handle;
+
+pub struct WidgetId : Copy, Equal, Hash {
+  pub var index: u32 = 0
+  pub var generation: u32 = 0
+
+  pub fn valid(self&): bool => self.index != 0;
+  pub fn eq(self&, o&: WidgetId): bool => self.index == o.index && self.generation == o.generation;
+  // WidgetIdHash: (index << 32) ^ generation.
+  pub fn hash(self&): u64 => ((self.index as u64) << 32) ^ self.generation as u64;
+}
+
+// The preferred spelling for a widget handle.
+pub type wid = WidgetId;
+
+pub comptime let kNullWidget: WidgetId = WidgetId { index: 0, generation: 0 };

@@ -1,0 +1,251 @@
+// ugui/animation/animator.{h,cc}: style transitions, keyframe animations and
+// scroll-linked animations.
+//
+// The C++ callbacks are a function pointer plus `void* user_data`; here they
+// are function values, which capture what user_data carried. Evaluate's
+// `bool& done` out-parameter is the second element of the returned tuple.
+
+module ultragui::animation::animator;
+
+import {List} from akikit::containers::list;
+import {clamp_min_max_f32, erase_if, min} from ultragui::core::algorithm;
+import {Style} from ultragui::style::style;
+import {EasingType, Transition, eval_easing, eval_transition} from ultragui::style::transition;
+
+// Animates a single style property transition between two Style states.
+pub struct StyleTransition : Copy {
+  pub var widget_id: u32 = 0
+  pub var from: Style = Style {}
+  pub var to: Style = Style {}
+  pub var transition: Transition = Transition {}
+  pub var start_time: f64 = 0.0
+  pub var active: bool = false
+
+  // The interpolated style at current_time, and whether it has finished.
+  pub fn evaluate(self&, current_time: f64): (Style, bool);
+}
+
+fn StyleTransition::evaluate(self&, current_time: f64): (Style, bool) {
+  let elapsed = current_time - self.start_time - self.transition.delay as f64;
+  if (elapsed < 0.0) {
+    return (self.from, false);
+  }
+  let t: f32 = (self.transition.duration > 0.0) ? (elapsed / self.transition.duration as f64) as f32 : 1.0;
+  if (t >= 1.0) {
+    return (self.to, true);
+  }
+  let eased = eval_transition(self.transition, t);
+  return (Style::lerp(self.from, self.to, eased), false);
+}
+
+// Keyframe in a multi-stop animation.
+pub struct Keyframe : Copy {
+  pub var time: f32 = 0.0  // 0.0 to 1.0 (normalized within total duration)
+  pub var style: Style = Style {}
+}
+
+// Multi-keyframe animation sequence.
+pub struct KeyframeAnimation : Clone {
+  pub var widget_id: u32 = 0
+  pub var keyframes: List<Keyframe> = List()
+  pub var duration: f32 = 1.0  // total seconds
+  pub var delay: f32 = 0.0
+  pub var easing: EasingType = EasingType::Linear
+  pub var repeat_count: i32 = 1  // -1 = infinite
+  pub var alternate: bool = false  // ping-pong
+  pub var start_time: f64 = 0.0
+  pub var active: bool = false
+
+  // The interpolated style at current_time, and whether it has finished.
+  pub fn evaluate(self&, current_time: f64): (Style, bool);
+}
+
+fn KeyframeAnimation::evaluate(self&, current_time: f64): (Style, bool) {
+  let elapsed = current_time - self.start_time - self.delay as f64;
+  let n = self.keyframes.len();
+  if (elapsed < 0.0 || n < 2) {
+    return (n == 0 ? Style {} : self.keyframes[0].style, false);
+  }
+
+  let total_elapsed = elapsed as f32;
+  // static_cast<i32> of a float: aarch64 saturates out-of-range values (a
+  // zero duration gives inf) and turns NaN into 0, which this matches; in
+  // C++ it is undefined.
+  let iteration = @saturating_cast(i32, total_elapsed / self.duration);
+
+  if (self.repeat_count >= 0 && iteration >= self.repeat_count) {
+    return (self.keyframes[n - 1].style, true);
+  }
+
+  var local_t = (total_elapsed - iteration as f32 * self.duration) / self.duration;
+  local_t = clamp_min_max_f32(local_t, 0.0, 1.0);
+
+  if (self.alternate && (iteration % 2 == 1)) {
+    local_t = 1.0 - local_t;
+  }
+
+  let eased = eval_easing(self.easing, local_t);
+
+  // Find the two keyframes to interpolate between
+  var lo: usize = 0;
+  for (let i in 1..n) {
+    if (self.keyframes[i].time >= eased) {
+      lo = i - 1;
+      break;
+    }
+    lo = i;
+  }
+  let hi = min(lo + 1, n - 1);
+
+  if (lo == hi) {
+    return (self.keyframes[lo].style, false);
+  }
+
+  var segment_t = (eased - self.keyframes[lo].time) / (self.keyframes[hi].time - self.keyframes[lo].time);
+  segment_t = clamp_min_max_f32(segment_t, 0.0, 1.0);
+
+  return (Style::lerp(self.keyframes[lo].style, self.keyframes[hi].style, segment_t), false);
+}
+
+// Scroll-linked animation: style driven by scroll position instead of time.
+pub struct ScrollAnimation : Copy {
+  pub var widget_id: u32 = 0         // Widget being animated
+  pub var scroll_widget_id: u32 = 0  // ScrollView driving the animation
+  pub var scroll_start: f32 = 0.0    // Scroll offset (px) where animation begins
+  pub var scroll_end: f32 = 0.0      // Scroll offset (px) where animation ends
+  pub var from: Style = Style {}
+  pub var to: Style = Style {}
+}
+
+// Manages active transitions and animations for the UI.
+pub struct Animator {
+  var transitions: List<StyleTransition> = List()
+  var animations: List<KeyframeAnimation> = List()
+  var scroll_anims: List<ScrollAnimation> = List()
+
+  pub fn Animator(): Animator => Animator {};
+
+  // Start a property transition for a widget; cancels the widget's running
+  // transition.
+  pub fn start_transition(var self&, widget_id: u32, from&: Style, to&: Style, transition&: Transition, current_time: f64);
+
+  // Start a keyframe animation (a copy of `anim`, started now).
+  pub fn start_animation(var self&, anim&: KeyframeAnimation, current_time: f64);
+
+  // Add a scroll-linked animation.
+  pub fn add_scroll_animation(var self&, anim&: ScrollAnimation) {
+    self.scroll_anims.push(anim);
+  }
+
+  // Evaluate scroll-linked animations for a given scroll widget and offset;
+  // calls apply(widget_id, style) for each affected widget.
+  pub fn evaluate_scroll_animations(self&, scroll_widget_id: u32, scroll_y: f32, apply: fn(u32, &Style): ());
+
+  // Cancel all animations for a widget.
+  pub fn cancel(var self&, widget_id: u32);
+
+  // Tick all animations, applying each style through `apply`. `on_done` runs
+  // when a transition finishes, so the widget can clear its animation style
+  // and fall back to live resolve_style(). True if any are still active.
+  pub fn update(var self&, current_time: f64, apply: fn(u32, &Style): (), on_done: (fn(u32): ())? = none): bool;
+
+  // Whether a widget has active animations.
+  pub fn is_animating(self&, widget_id: u32): bool;
+}
+
+fn Animator::start_transition(var self&, widget_id: u32, from&: Style, to&: Style, transition&: Transition, current_time: f64) {
+  for (var t& in self.transitions) {
+    if (t.widget_id == widget_id) {
+      t.active = false;
+    }
+  }
+  self.transitions.push(StyleTransition { widget_id, from, to, transition, start_time: current_time, active: true });
+}
+
+fn Animator::start_animation(var self&, anim&: KeyframeAnimation, current_time: f64) {
+  var copy = anim.clone();
+  copy.start_time = current_time;
+  copy.active = true;
+  self.animations.push(copy);
+}
+
+fn Animator::cancel(var self&, widget_id: u32) {
+  for (var t& in self.transitions) {
+    if (t.widget_id == widget_id) {
+      t.active = false;
+    }
+  }
+  for (var a& in self.animations) {
+    if (a.widget_id == widget_id) {
+      a.active = false;
+    }
+  }
+}
+
+fn Animator::update(var self&, current_time: f64, apply: fn(u32, &Style): (), on_done: (fn(u32): ())?): bool {
+  var any_active = false;
+
+  for (var t& in self.transitions) {
+    if (!t.active) {
+      continue;
+    }
+    let (s, done) = t.evaluate(current_time);
+    apply(t.widget_id, s);
+    if (done) {
+      t.active = false;
+      // Let the widget clear its animation style so ComputedStyle() falls
+      // back to live ResolveStyle() for future state changes.
+      if (let f = on_done) {
+        f(t.widget_id);
+      }
+    } else {
+      any_active = true;
+    }
+  }
+
+  for (var a& in self.animations) {
+    if (!a.active) {
+      continue;
+    }
+    let (s, done) = a.evaluate(current_time);
+    apply(a.widget_id, s);
+    if (done) {
+      a.active = false;
+    } else {
+      any_active = true;
+    }
+  }
+
+  // Compact: remove inactive entries
+  erase_if(self.transitions, fn(t&: StyleTransition): bool => !t.active);
+  erase_if(self.animations, fn(a&: KeyframeAnimation): bool => !a.active);
+
+  return any_active;
+}
+
+fn Animator::is_animating(self&, widget_id: u32): bool {
+  for (let t in self.transitions) {
+    if (t.widget_id == widget_id && t.active) {
+      return true;
+    }
+  }
+  for (let a in self.animations) {
+    if (a.widget_id == widget_id && a.active) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn Animator::evaluate_scroll_animations(self&, scroll_widget_id: u32, scroll_y: f32, apply: fn(u32, &Style): ()) {
+  for (let sa in self.scroll_anims) {
+    if (sa.scroll_widget_id != scroll_widget_id) {
+      continue;
+    }
+    let range = sa.scroll_end - sa.scroll_start;
+    var t: f32 = (range > 0.001) ? (scroll_y - sa.scroll_start) / range : 0.0;
+    t = (t < 0.0) ? 0.0 : (t > 1.0) ? 1.0 : t;
+    let animated = Style::lerp(sa.from, sa.to, t);
+    apply(sa.widget_id, animated);
+  }
+}

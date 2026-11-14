@@ -1,0 +1,170 @@
+// ugui/input/input_queue.h: the platform-agnostic input event queue. Filled
+// by the platform backend (GLFW callbacks, the host platform's feed),
+// consumed by InputRouter::Process(). Each kind holds at most kMaxEvents per
+// frame; later events of a full kind are dropped, as in the C++.
+
+module ultragui::input::input_queue;
+
+import {Vec2} from ultragui::core::math;
+
+// Mouse button identifiers. Open, like the C++ enum class a host may cast any
+// number into (rx binds it as an open enum too).
+pub open enum MouseButton as u8 { Left = 0, Right = 1, Middle = 2 }
+
+// Gamepad button identifiers (standard gamepad layout)
+pub enum GamepadButton as u8 {
+  A = 0,
+  B = 1,
+  X = 2,
+  Y = 3,
+  LeftBumper = 4,
+  RightBumper = 5,
+  Back = 6,
+  Start = 7,
+  Guide = 8,
+  LeftThumb = 9,
+  RightThumb = 10,
+  DPadUp = 11,
+  DPadRight = 12,
+  DPadDown = 13,
+  DPadLeft = 14,
+  Count = 15,
+}
+
+// Gamepad axis identifiers
+pub enum GamepadAxis as u8 { LeftX = 0, LeftY = 1, RightX = 2, RightY = 3, LeftTrigger = 4, RightTrigger = 5, Count = 6 }
+
+pub struct MouseMoveEvent : Copy, Equal {
+  pub var position: Vec2 = Vec2 {}
+}
+
+pub struct MouseButtonEvent : Copy, Equal {
+  pub var button: MouseButton = MouseButton::Left
+  pub var pressed: bool = false
+  pub var position: Vec2 = Vec2 {}
+}
+
+pub struct MouseScrollEvent : Copy, Equal {
+  pub var delta: Vec2 = Vec2 {}
+  pub var position: Vec2 = Vec2 {}
+}
+
+pub struct KeyEvent : Copy, Equal {
+  pub var key: i32 = 0
+  pub var scancode: i32 = 0
+  pub var pressed: bool = false
+  pub var repeat: bool = false
+  pub var mods: i32 = 0
+}
+
+pub struct CharEvent : Copy, Equal {
+  pub var codepoint: u32 = 0
+}
+
+pub struct GamepadButtonEvent : Copy, Equal {
+  pub var button: GamepadButton = GamepadButton::A
+  pub var pressed: bool = false
+}
+
+pub struct GamepadAxisEvent : Copy, Equal {
+  pub var axis: GamepadAxis = GamepadAxis::LeftX
+  pub var value: f32 = 0.0  // -1.0 to 1.0 (sticks), 0.0 to 1.0 (triggers)
+}
+
+// InputQueue::kMaxEvents
+pub comptime let kMaxEvents: u32 = 64;
+
+pub struct InputQueue : Copy {
+  pub var move_events: [MouseMoveEvent; 64] = [MouseMoveEvent {}; 64]
+  pub var move_count: u32 = 0
+
+  pub var button_events: [MouseButtonEvent; 64] = [MouseButtonEvent {}; 64]
+  pub var button_count: u32 = 0
+
+  pub var scroll_events: [MouseScrollEvent; 64] = [MouseScrollEvent {}; 64]
+  pub var scroll_count: u32 = 0
+
+  pub var key_events: [KeyEvent; 64] = [KeyEvent {}; 64]
+  pub var key_count: u32 = 0
+
+  pub var char_events: [CharEvent; 64] = [CharEvent {}; 64]
+  pub var char_count: u32 = 0
+
+  pub var gamepad_button_events: [GamepadButtonEvent; 64] = [GamepadButtonEvent {}; 64]
+  pub var gamepad_button_count: u32 = 0
+
+  pub var gamepad_axis_events: [GamepadAxisEvent; 64] = [GamepadAxisEvent {}; 64]
+  pub var gamepad_axis_count: u32 = 0
+
+  pub var mouse_pos: Vec2 = Vec2 {}
+
+  pub fn push_move(var self&, pos: Vec2) {
+    if (self.move_count < kMaxEvents) {
+      self.move_events[self.move_count as usize] = MouseMoveEvent { position: pos };
+      self.move_count += 1;
+    }
+    self.mouse_pos = pos;
+  }
+
+  pub fn push_button(var self&, btn: MouseButton, pressed: bool) {
+    if (self.button_count < kMaxEvents) {
+      self.button_events[self.button_count as usize] = MouseButtonEvent { button: btn, pressed, position: self.mouse_pos };
+      self.button_count += 1;
+    }
+  }
+
+  pub fn push_scroll(var self&, delta: Vec2) {
+    if (self.scroll_count < kMaxEvents) {
+      self.scroll_events[self.scroll_count as usize] = MouseScrollEvent { delta, position: self.mouse_pos };
+      self.scroll_count += 1;
+    }
+  }
+
+  pub fn push_key(var self&, key: i32, scancode: i32, pressed: bool, repeat: bool, mods: i32) {
+    if (self.key_count < kMaxEvents) {
+      self.key_events[self.key_count as usize] = KeyEvent { key, scancode, pressed, repeat, mods };
+      self.key_count += 1;
+    }
+  }
+
+  pub fn push_char(var self&, codepoint: u32) {
+    if (self.char_count < kMaxEvents) {
+      self.char_events[self.char_count as usize] = CharEvent { codepoint };
+      self.char_count += 1;
+    }
+  }
+
+  pub fn push_gamepad_button(var self&, btn: GamepadButton, pressed: bool) {
+    if (self.gamepad_button_count < kMaxEvents) {
+      self.gamepad_button_events[self.gamepad_button_count as usize] = GamepadButtonEvent { button: btn, pressed };
+      self.gamepad_button_count += 1;
+    }
+  }
+
+  pub fn push_gamepad_axis(var self&, axis: GamepadAxis, value: f32) {
+    if (self.gamepad_axis_count < kMaxEvents) {
+      self.gamepad_axis_events[self.gamepad_axis_count as usize] = GamepadAxisEvent { axis, value };
+      self.gamepad_axis_count += 1;
+    }
+  }
+
+  // Empties every kind; mouse_pos stays.
+  pub fn clear(var self&) {
+    self.move_count = 0;
+    self.button_count = 0;
+    self.scroll_count = 0;
+    self.key_count = 0;
+    self.char_count = 0;
+    self.gamepad_button_count = 0;
+    self.gamepad_axis_count = 0;
+  }
+
+  // The events of each kind that were pushed, as slices.
+  pub fn moves(self&): &[MouseMoveEvent] => self.move_events[..self.move_count as usize];
+  pub fn buttons(self&): &[MouseButtonEvent] => self.button_events[..self.button_count as usize];
+  pub fn scrolls(self&): &[MouseScrollEvent] => self.scroll_events[..self.scroll_count as usize];
+  pub fn keys(self&): &[KeyEvent] => self.key_events[..self.key_count as usize];
+  pub fn chars(self&): &[CharEvent] => self.char_events[..self.char_count as usize];
+  pub fn gamepad_buttons(self&): &[GamepadButtonEvent] => self.gamepad_button_events[..self.gamepad_button_count as usize];
+  pub fn gamepad_axes(self&): &[GamepadAxisEvent] => self.gamepad_axis_events[..self.gamepad_axis_count as usize];
+}

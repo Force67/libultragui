@@ -1,0 +1,104 @@
+// The scene of scene.aki as draw data (ultragui::render::draw_data),
+// for the draw-data renderers (ugui_impl_*): the same geometry, with the
+// textures as host TextureIds. tools/draw_data_scene.cc is the C++ twin.
+
+module ultragui_scenes::draw_data_scene;
+
+import {List} from akikit::containers::list;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {DrawCmd, DrawData, TextureId, kFontTextureId} from ultragui::render::draw_data;
+import {rhi_handle_from_texture_id, texture_id_from_rhi_handle} from ultragui::render::texture_backend;
+import {FontHandle, TextEngine} from ultragui::text::text_engine;
+import {Geometry, build_main} from ultragui_scenes::scene;
+
+// The geometry and commands of one frame, owned here; `data()` lends them as a
+// DrawData.
+pub struct Frame {
+  pub var quads: Geometry = Geometry {}
+  pub var text: Geometry = Geometry {}
+  pub var commands: List<DrawCmd> = List()
+
+  pub fn data(self&): DrawData => DrawData {
+    quad_vertices: self.quads.vertices.as_slice(),
+    quad_indices: self.quads.indices.as_slice(),
+    text_vertices: self.text.vertices.as_slice(),
+    text_indices: self.text.indices.as_slice(),
+    commands: self.commands.as_slice(),
+    display_size: Vec2 { x: 640.0, y: 400.0 },
+    valid: true,
+  };
+}
+
+// Builds the frame for the three host textures (checker, ramp, the 128x96 one).
+pub fn build_frame(var te&: TextEngine, font: FontHandle, checker: TextureId, smooth: TextureId, big: TextureId): Frame {
+  var f = Frame {};
+  let full = Rect { x: 0.0, y: 0.0, w: 640.0, h: 400.0 };
+  build_main(f.quads, f.text, te, font, rhi_handle_from_texture_id(checker), rhi_handle_from_texture_id(smooth),
+    rhi_handle_from_texture_id(big), full);
+  for (let b& in f.quads.batches) {
+    f.commands.push(DrawCmd {
+      clip_rect: b.scissor,
+      texture_id: texture_id_from_rhi_handle(b.texture),
+      index_offset: b.index_offset,
+      elem_count: b.index_count,
+      is_text: false,
+    });
+  }
+  for (let b& in f.text.batches) {
+    f.commands.push(DrawCmd {
+      clip_rect: b.scissor,
+      texture_id: kFontTextureId,
+      index_offset: b.index_offset,
+      elem_count: b.index_count,
+      is_text: true,
+    });
+  }
+  return f;
+}
+
+// Pixels the scene's host textures use.
+pub fn checker_pixels(): [u8; 256] {
+  var px = [0u8; 256];
+  for (let y in 0..8usize) {
+    for (let x in 0..8usize) {
+      let on = (x + y) % 2 == 0;
+      let o = (y * 8 + x) * 4;
+      px[o] = on ? 240 : 40;
+      px[o + 1] = on ? 200 : 60;
+      px[o + 2] = on ? 60 : 160;
+      px[o + 3] = 255;
+    }
+  }
+  return px;
+}
+
+// 4x4 BGRA ramp.
+pub fn ramp_pixels(): [u8; 64] {
+  var ramp = [0u8; 64];
+  for (let y in 0..4usize) {
+    for (let x in 0..4usize) {
+      let o = (y * 4 + x) * 4;
+      ramp[o] = (x * 85) as u8;
+      ramp[o + 1] = (y * 85) as u8;
+      ramp[o + 2] = (255 - x * 60) as u8;
+      ramp[o + 3] = 255;
+    }
+  }
+  return ramp;
+}
+
+// 32x24 RGBA gradient standing in for the offscreen target.
+pub fn big_pixels(): [u8; 3072] {
+  var px = [0u8; 3072];
+  for (let y in 0..24usize) {
+    for (let x in 0..32usize) {
+      let o = (y * 32 + x) * 4;
+      px[o] = (x * 8) as u8;
+      px[o + 1] = (y * 10) as u8;
+      px[o + 2] = (200 - x * 4) as u8;
+      px[o + 3] = 255;
+    }
+  }
+  return px;
+}

@@ -1,0 +1,230 @@
+// ugui/widgets/widget_vtable.{h,cc}: per-kind behaviour, the
+// composition-lite replacement for per-widget virtual overrides.
+//
+// The C++ keeps a table of function pointers per WidgetKind. Here each
+// table entry is a function below that matches on the kind and calls that
+// kind's function directly; an arm left out (`_ => none`) is the C++ null
+// entry, "no custom behaviour", and the callers in widgets::widget fall back
+// as the C++ does. Why not a table of `static fn` values: every entry takes
+// two views, the World and the WidgetContext<'a>, and a `static fn` type
+// cannot name the lifetime that says the callee stores neither in the other,
+// so akiko rejects every call through one (see PORTING.md, pitfalls).
+// Direct calls carry the callee's own signature and need no such promise.
+//
+// The set is closed, like the C++ InstallBuiltins list; there is no
+// SetWidgetVTable (nothing outside the table file called it). Porting a
+// widget kind means adding its arms here, one per entry it had in its
+// <Kind>VTable(), e.g. for Button:
+//
+//   WidgetKind::Button => button_measure(world, ctx, e),
+//
+// Kinds with entries in the C++, all ported with their arms: Image, Text,
+// Button, Checkbox, Radio, Toggle, Slider, Dropdown, RichText, TextInput,
+// ScrollView, ContextMenu, MessageBox. Widget, Panel and Modal have none.
+
+module ultragui::widgets::widget_vtable;
+
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {button_click, button_draw, button_measure} from ultragui::widgets::button;
+import {checkbox_click, checkbox_draw, checkbox_measure} from ultragui::widgets::checkbox;
+import {context_menu_click, context_menu_dismiss, context_menu_draw, context_menu_measure} from ultragui::widgets::context_menu;
+import {
+  dropdown_click, dropdown_draw, dropdown_hit_test, dropdown_measure, dropdown_update,
+} from ultragui::widgets::dropdown;
+import {image_draw, image_measure} from ultragui::widgets::image;
+import {message_box_key_down} from ultragui::widgets::message_box;
+import {radio_click, radio_draw, radio_measure} from ultragui::widgets::radio;
+import {rich_text_draw, rich_text_measure} from ultragui::widgets::rich_text;
+import {
+  scroll_view_draw, scroll_view_hit_test, scroll_view_layout, scroll_view_scroll, scroll_view_update,
+} from ultragui::widgets::scroll_view;
+import {slider_click, slider_draw, slider_measure, slider_update} from ultragui::widgets::slider;
+import {text_draw, text_measure} from ultragui::widgets::text;
+import {
+  text_input_char_input, text_input_click, text_input_consumes_text, text_input_draw, text_input_key_down,
+  text_input_measure, text_input_update,
+} from ultragui::widgets::text_input;
+import {toggle_click, toggle_draw, toggle_measure, toggle_update} from ultragui::widgets::toggle;
+import {WidgetKind} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// WidgetVTable::custom_paint: paint_widget draws nothing itself and `draw`
+// paints the whole widget (kinds that fully own their visuals: slider,
+// toggle, scroll view).
+pub fn custom_paint(kind: WidgetKind): bool => match (kind) {
+  WidgetKind::Toggle => true,
+  WidgetKind::Slider => true,
+  WidgetKind::ScrollView => true,
+  _ => false,
+};
+
+// WidgetVTable::draw. False when the kind has no draw entry.
+pub fn vt_draw(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D): bool =>
+  match (kind) {
+    WidgetKind::Image => {
+      image_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Text => {
+      text_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Button => {
+      button_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Checkbox => {
+      checkbox_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Radio => {
+      radio_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Toggle => {
+      toggle_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Slider => {
+      slider_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::Dropdown => {
+      dropdown_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::RichText => {
+      rich_text_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::TextInput => {
+      text_input_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::ScrollView => {
+      scroll_view_draw(world, ctx, e, renderer);
+      true
+    },
+    WidgetKind::ContextMenu => {
+      context_menu_draw(world, ctx, e, renderer);
+      true
+    },
+    _ => false,
+  };
+
+// WidgetVTable::measure: (width, height), none without an entry.
+pub fn vt_measure(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32)? => match (kind) {
+  WidgetKind::Image => image_measure(world, ctx, e),
+  WidgetKind::Text => text_measure(world, ctx, e),
+  WidgetKind::Button => button_measure(world, ctx, e),
+  WidgetKind::Checkbox => checkbox_measure(world, ctx, e),
+  WidgetKind::Radio => radio_measure(world, ctx, e),
+  WidgetKind::Toggle => toggle_measure(world, ctx, e),
+  WidgetKind::Slider => slider_measure(world, ctx, e),
+  WidgetKind::Dropdown => dropdown_measure(world, ctx, e),
+  WidgetKind::RichText => rich_text_measure(world, ctx, e),
+  WidgetKind::TextInput => text_input_measure(world, ctx, e),
+  WidgetKind::ContextMenu => context_menu_measure(world, ctx, e),
+  _ => none,
+};
+
+// WidgetVTable::hit_test: the hit (possibly the null handle), none without an
+// entry.
+pub fn vt_hit_test(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, point: Vec2): WidgetId? =>
+  match (kind) {
+    WidgetKind::Dropdown => dropdown_hit_test(world, ctx, e, point),
+    WidgetKind::ScrollView => scroll_view_hit_test(world, ctx, e, point),
+    _ => none,
+  };
+
+// WidgetVTable::on_click
+pub fn vt_on_click(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): bool? => match (kind) {
+  WidgetKind::Button => button_click(world, ctx, e),
+  WidgetKind::Checkbox => checkbox_click(world, ctx, e),
+  WidgetKind::Radio => radio_click(world, ctx, e),
+  WidgetKind::Toggle => toggle_click(world, ctx, e),
+  WidgetKind::Slider => slider_click(world, ctx, e),
+  WidgetKind::Dropdown => dropdown_click(world, ctx, e),
+  WidgetKind::TextInput => text_input_click(world, ctx, e),
+  WidgetKind::ContextMenu => context_menu_click(world, ctx, e),
+  _ => none,
+};
+
+// WidgetVTable::on_update. False when the kind has no entry.
+pub fn vt_on_update(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, dt: f64): bool =>
+  match (kind) {
+    WidgetKind::Toggle => {
+      toggle_update(world, ctx, e, dt);
+      true
+    },
+    WidgetKind::Slider => {
+      slider_update(world, ctx, e, dt);
+      true
+    },
+    WidgetKind::Dropdown => {
+      dropdown_update(world, ctx, e, dt);
+      true
+    },
+    WidgetKind::TextInput => {
+      text_input_update(world, ctx, e, dt);
+      true
+    },
+    WidgetKind::ScrollView => {
+      scroll_view_update(world, ctx, e, dt);
+      true
+    },
+    _ => false,
+  };
+
+// WidgetVTable::on_scroll
+pub fn vt_on_scroll(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, delta: Vec2): bool? =>
+  match (kind) {
+    WidgetKind::ScrollView => scroll_view_scroll(world, ctx, e, delta),
+    _ => none,
+  };
+
+// WidgetVTable::on_layout, run after layout_widget stored the layout result.
+// False when the kind has no entry.
+pub fn vt_on_layout(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, rect: Rect,
+                    content_rect: Rect): bool => match (kind) {
+  WidgetKind::ScrollView => {
+    scroll_view_layout(world, ctx, e, rect, content_rect);
+    true
+  },
+  _ => false,
+};
+
+// WidgetVTable::on_key_down
+pub fn vt_on_key_down(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, key: i32, mods: i32): bool? =>
+  match (kind) {
+    WidgetKind::TextInput => text_input_key_down(world, ctx, e, key, mods),
+    WidgetKind::MessageBox => message_box_key_down(world, ctx, e, key, mods),
+    _ => none,
+  };
+
+// WidgetVTable::on_char_input
+pub fn vt_on_char_input(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId, codepoint: u32): bool? =>
+  match (kind) {
+    WidgetKind::TextInput => text_input_char_input(world, ctx, e, codepoint),
+    _ => none,
+  };
+
+// WidgetVTable::consumes_text_input
+pub fn vt_consumes_text_input(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): bool? =>
+  match (kind) {
+    WidgetKind::TextInput => text_input_consumes_text(world, ctx, e),
+    _ => none,
+  };
+
+// WidgetVTable::on_dismiss. False when the kind has no entry.
+pub fn vt_on_dismiss(kind: WidgetKind, var world&: World, var ctx&: WidgetContext, e: WidgetId): bool => match (kind) {
+  WidgetKind::ContextMenu => {
+    context_menu_dismiss(world, ctx, e);
+    true
+  },
+  _ => false,
+};

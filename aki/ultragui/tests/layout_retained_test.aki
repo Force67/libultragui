@@ -1,0 +1,322 @@
+// tests/test_layout_retained.cc, ported whole. LayoutEngine keeps its Yoga
+// tree between compute calls so Yoga can reuse the layouts it has already
+// solved. Everything here guards a way that can go wrong:
+//
+//   - a style written only under a condition keeps the last frame's value
+//     (`display: none` was the one that bit: a panel never came back),
+//   - a measure function's answer changes without Yoga being able to see it,
+//     so a node that re-shaped its text keeps its old size,
+//   - the tree changes shape and node indices no longer name the same widgets.
+//
+// Plus a check that the C++ suite does not have: a panel through the yoga
+// tree with padding/gap and the readback of content rects.
+
+module layout_retained_test;
+
+import {WidgetId} from ultragui::core::handle;
+import {Rect} from ultragui::core::rect;
+import {LayoutEngine, LayoutViewport} from ultragui::layout::layout;
+import {compute_widget_layout} from ultragui::layout::layout_tree;
+import {AlignItems, FlexDirection, Position, Visibility} from ultragui::style::enums;
+import {Length} from ultragui::style::property_types;
+import {Style} from ultragui::style::style;
+import {create_panel} from ultragui::widgets::panel;
+import {WidgetKind, add_child, destroy_widget, kStyleC, kTransform, kWidgetNode, mark_dirty, set_style} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {Expect} from ultragui_testing::expect;
+
+comptime let kViewport: LayoutViewport = LayoutViewport { width: 400.0, height: 400.0, scale: 1.0 };
+
+fn style_of(var world&: World, w: WidgetId): &var Style => world.get_var(kStyleC, w)!.style;
+
+fn rect_of(world&: World, w: WidgetId): Rect => world.get(kTransform, w)!.rect;
+
+// A leaf's content size. Widgets with no measure entry report whatever sits
+// in their Transform, which is how a text widget's shaped size reaches layout.
+fn set_intrinsic(var world&: World, w: WidgetId, width: f32, height: f32) {
+  var t& = world.get_var(kTransform, w)!;
+  t.intrinsic_w = width;
+  t.intrinsic_h = height;
+}
+
+// A column that leaves its children at their content size, so what the test
+// reads back is the measurement rather than a stretch.
+fn make_column_root(var world&: World, id: u32): WidgetId {
+  let root = world.create(id);
+  var s& = style_of(world, root);
+  s.flex_direction = FlexDirection::Column;
+  s.align_items = AlignItems::Start;
+  s.width = Length::px(400.0);
+  s.height = Length::px(400.0);
+  return root;
+}
+
+fn near(a: f32, b: f32): bool => @abs(a - b) < 0.01;
+
+// Change a style the way an application does: set_style marks the widget
+// dirty, a raw write does not.
+fn restyle(var world&: World, w: WidgetId, edit: fn(&var Style): ()) {
+  var s = world.get(kStyleC, w)!.style;
+  edit(s);
+  set_style(world, w, s);
+}
+
+fn layout(var world&: World, root: WidgetId, var engine&: LayoutEngine) {
+  var ctx = WidgetContext::detached();
+  compute_widget_layout(world, ctx, root, kViewport, engine);
+}
+
+// A node that re-measures has to be marked dirty by hand: Yoga caches what
+// the measure function returned and cannot tell that the answer moved.
+fn retained_tree_sees_intrinsic_size_change(var t&: Expect) {
+  var world = World();
+  let root = make_column_root(world, 1);
+  let leaf = world.create(2);
+  add_child(world, root, leaf);
+  set_intrinsic(world, leaf, 100.0, 20.0);
+
+  var engine = LayoutEngine();
+
+  layout(world, root, engine);
+  t.that(near(rect_of(world, leaf).h, 20.0), "intrinsic: first height");
+
+  set_intrinsic(world, leaf, 100.0, 50.0);
+  layout(world, root, engine);
+  t.that(near(rect_of(world, leaf).h, 50.0), "intrinsic: re-measured height");
+
+  destroy_widget(world, root);
+}
+
+// `display` showed why every style has to be written on every pass.
+fn retained_tree_uncollapses(var t&: Expect) {
+  var world = World();
+  let root = make_column_root(world, 1);
+  let panel = world.create(2);
+  add_child(world, root, panel);
+  style_of(world, panel).width = Length::px(120.0);
+  style_of(world, panel).height = Length::px(60.0);
+
+  var engine = LayoutEngine();
+
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 120.0), "uncollapse: width");
+
+  restyle(world, panel, fn(var s&: Style) { s.visibility = Visibility::Collapsed; });
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 0.0), "uncollapse: collapsed width");
+
+  restyle(world, panel, fn(var s&: Style) { s.visibility = Visibility::Visible; });
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 120.0), "uncollapse: width back");
+  t.that(near(rect_of(world, panel).h, 60.0), "uncollapse: height back");
+
+  destroy_widget(world, root);
+}
+
+// The rest of the conditionally-written properties: each is set, then taken
+// back off again.
+fn retained_tree_clears_optional_properties(var t&: Expect) {
+  var world = World();
+  let root = make_column_root(world, 1);
+  let panel = world.create(2);
+  add_child(world, root, panel);
+  style_of(world, panel).width = Length::px(100.0);
+  style_of(world, panel).height = Length::px(40.0);
+
+  var engine = LayoutEngine();
+
+  // A min-width wider than the width wins, then stops applying.
+  restyle(world, panel, fn(var s&: Style) { s.min_width = Length::px(200.0); });
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 200.0), "min-width applies");
+
+  restyle(world, panel, fn(var s&: Style) { s.min_width = Length::px(0.0); });
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 100.0), "min-width cleared");
+
+  // A max-height clamps, then stops applying.
+  restyle(world, panel, fn(var s&: Style) { s.max_height = Length::px(10.0); });
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).h, 10.0), "max-height applies");
+
+  restyle(world, panel, fn(var s&: Style) { s.max_height = Length::px(1e6); });
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).h, 40.0), "max-height cleared");
+
+  // An absolute offset moves the panel, then goes back to auto.
+  restyle(world, panel, fn(var s&: Style) {
+    s.position = Position::Absolute;
+    s.left_offset = Length::px(35.0);
+  });
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).x, 35.0), "left offset applies");
+
+  restyle(world, panel, fn(var s&: Style) { s.left_offset = Length::auto(); });
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).x, 0.0), "left offset cleared");
+
+  destroy_widget(world, root);
+}
+
+// Growing and shrinking the tree: the retained nodes are addressed by index,
+// so a changed shape has to be noticed and rebuilt rather than reused.
+fn retained_tree_rebuilds_on_shape_change(var t&: Expect) {
+  var world = World();
+  let root = make_column_root(world, 1);
+  let first = world.create(2);
+  add_child(world, root, first);
+  style_of(world, first).width = Length::px(50.0);
+  style_of(world, first).height = Length::px(30.0);
+
+  var engine = LayoutEngine();
+
+  layout(world, root, engine);
+  t.that(near(rect_of(world, first).y, 0.0), "shape: first at top");
+
+  let second = world.create(3);
+  add_child(world, root, second);
+  style_of(world, second).width = Length::px(50.0);
+  style_of(world, second).height = Length::px(30.0);
+
+  layout(world, root, engine);
+  t.that(near(rect_of(world, first).y, 0.0), "shape: first still at top");
+  t.that(near(rect_of(world, second).y, 30.0), "shape: second stacked under the first");
+  t.that(near(rect_of(world, second).w, 50.0), "shape: second width");
+
+  destroy_widget(world, second);
+  layout(world, root, engine);
+  t.that(near(rect_of(world, first).y, 0.0), "shape: first after removal");
+  t.that(near(rect_of(world, first).h, 30.0), "shape: first height after removal");
+
+  destroy_widget(world, root);
+}
+
+// Two trees through one engine (a document plus an overlay): they must not
+// evict each other's retained nodes.
+fn retained_trees_do_not_evict_each_other(var t&: Expect) {
+  var world = World();
+  let a_root = make_column_root(world, 1);
+  let a_child = world.create(2);
+  add_child(world, a_root, a_child);
+  style_of(world, a_child).width = Length::px(80.0);
+  style_of(world, a_child).height = Length::px(25.0);
+
+  let b_root = make_column_root(world, 3);
+  let b_child = world.create(4);
+  add_child(world, b_root, b_child);
+  style_of(world, b_child).width = Length::px(140.0);
+  style_of(world, b_child).height = Length::px(45.0);
+
+  var engine = LayoutEngine();
+
+  for (let pass in 0..3) {
+    layout(world, a_root, engine);
+    layout(world, b_root, engine);
+    t.that(near(rect_of(world, a_child).w, 80.0), "two trees: a width");
+    t.that(near(rect_of(world, a_child).h, 25.0), "two trees: a height");
+    t.that(near(rect_of(world, b_child).w, 140.0), "two trees: b width");
+    t.that(near(rect_of(world, b_child).h, 45.0), "two trees: b height");
+  }
+
+  destroy_widget(world, a_root);
+  destroy_widget(world, b_root);
+}
+
+// reset drops the retained trees; the next pass builds its own rather than
+// reading through a freed one.
+fn retained_tree_survives_reset(var t&: Expect) {
+  var world = World();
+  let root = make_column_root(world, 1);
+  let panel = world.create(2);
+  add_child(world, root, panel);
+  style_of(world, panel).width = Length::px(70.0);
+  style_of(world, panel).height = Length::px(35.0);
+
+  var engine = LayoutEngine();
+
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 70.0), "reset: width before");
+
+  engine.reset();
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 70.0), "reset: width after");
+  t.that(near(rect_of(world, panel).h, 35.0), "reset: height after");
+
+  destroy_widget(world, root);
+}
+
+// The contract damage tracking rests on: a style written straight into the
+// component is not picked up, and marking the widget dirty publishes it.
+fn layout_refreshes_only_widgets_marked_dirty(var t&: Expect) {
+  var world = World();
+  let root = make_column_root(world, 1);
+  let panel = world.create(2);
+  add_child(world, root, panel);
+  style_of(world, panel).width = Length::px(40.0);
+  style_of(world, panel).height = Length::px(40.0);
+
+  var engine = LayoutEngine();
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 40.0), "dirty: width");
+
+  // Written behind layout's back: ignored, by design.
+  style_of(world, panel).width = Length::px(90.0);
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 40.0), "dirty: raw write ignored");
+
+  // The same write, published.
+  mark_dirty(world, panel);
+  layout(world, root, engine);
+  t.that(near(rect_of(world, panel).w, 90.0), "dirty: published");
+
+  destroy_widget(world, root);
+}
+
+// Not in the C++ suite: padding, gap and content rects through create_panel.
+fn panel_row_with_padding_and_gap(var t&: Expect) {
+  var world = World();
+  let root = create_panel(world, 10);
+  t.that(world.get(kWidgetNode, root)!.kind == WidgetKind::Panel, "panel kind");
+  {
+    var s& = style_of(world, root);
+    s.flex_direction = FlexDirection::Row;
+    s.align_items = AlignItems::Start;
+    s.width = Length::px(300.0);
+    s.height = Length::px(100.0);
+    s.padding.left = 10.0;
+    s.padding.top = 5.0;
+    s.gap = 8.0;
+  }
+  let a = create_panel(world, 11);
+  let b = create_panel(world, 12);
+  add_child(world, root, a);
+  add_child(world, root, b);
+  style_of(world, a).width = Length::px(50.0);
+  style_of(world, a).height = Length::px(20.0);
+  style_of(world, b).width = Length::percent(10.0);
+  style_of(world, b).height = Length::px(30.0);
+
+  var engine = LayoutEngine();
+  layout(world, root, engine);
+  let ra = rect_of(world, a);
+  let rb = rect_of(world, b);
+  t.that(near(ra.x, 10.0) && near(ra.y, 5.0) && near(ra.w, 50.0) && near(ra.h, 20.0), "panel: first child rect");
+  t.that(near(rb.x, 68.0) && near(rb.y, 5.0) && near(rb.w, 29.0) && near(rb.h, 30.0), "panel: second child rect");
+  let cr = world.get(kTransform, root)!.content_rect;
+  t.that(near(cr.x, 10.0) && near(cr.y, 5.0) && near(cr.w, 290.0) && near(cr.h, 95.0), "panel: content rect");
+  destroy_widget(world, root);
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  retained_tree_sees_intrinsic_size_change(t);
+  retained_tree_uncollapses(t);
+  retained_tree_clears_optional_properties(t);
+  retained_tree_rebuilds_on_shape_change(t);
+  retained_trees_do_not_evict_each_other(t);
+  retained_tree_survives_reset(t);
+  layout_refreshes_only_widgets_marked_dirty(t);
+  panel_row_with_padding_and_gap(t);
+  return t.finish();
+}

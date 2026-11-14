@@ -1,0 +1,5 @@
+class c {
+  nested { }
+  a: b;
+}
+panel p { x: 1; }

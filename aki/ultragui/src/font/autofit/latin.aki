@@ -1,0 +1,325 @@
+// Normal-target Latin edge fitting, given analyzed per-style metrics.
+module ultragui::font::autofit::latin;
+
+import {Outline} from ultragui::font::outline;
+import {compute_segments, link_segments, compute_edges} from ultragui::font::autofit::features;
+import {mul_div, mul_fix, pix_round} from ultragui::font::fixed;
+import {Hints, abs, min, max, kNone, kRound, kSerif, kDone, kNeutral, kNoBlue} from ultragui::font::autofit::hints;
+import {LatinMetrics, kBlueActive, kBlueAdjustment, kBlueBottom, kBlueSmallBottom, kBlueTop, kBlueSubTop, kBlueNeutral} from ultragui::font::autofit::metrics;
+import {
+  align_tilde, compute_vertical_extrema, find_highest_contour, find_lowest_contour, find_second_highest_contour, find_second_lowest_contour,
+  kAdjustNoHeightCheck, kAdjustTildeBottom, kAdjustTildeBottom2, kAdjustTildeTop, kAdjustTildeTop2, kIgnoreCapitalBottom, kIgnoreCapitalTop,
+  kIgnoreSmallBottom, kIgnoreSmallTop, move_contours_down, move_contours_up, prevent_blue_alignment, stretch_tilde, vertical_separation,
+} from ultragui::font::autofit::adjust;
+
+pub fn blue_edges(var h&: Hints, m&: LatinMetrics) {
+  let major = h.axis[1].major_dir;
+  for (var e& in h.axis[1].edges) {
+    if ((e.flags & kNoBlue) != 0) { continue; }
+    var best = min(mul_fix(m.units_per_em / 40, m.axis[1].scale), 32);
+    var neutral = false;
+    for (let i in 0..m.axis[1].blues.len()) {
+      let b = m.axis[1].blues[i];
+      if ((b.flags & kBlueActive) == 0) { continue; }
+      let top = (b.flags & (kBlueTop | kBlueSubTop)) != 0;
+      let n = (b.flags & kBlueNeutral) != 0;
+      if ((top != (e.dir == major)) || n) {
+        var dist = mul_fix(abs(e.fpos - b.reference.org), m.axis[1].scale);
+        if (dist < best) { best = dist; e.blue = i; e.blue_shoot = false; neutral = n; }
+        if ((e.flags & kRound) != 0 && dist != 0 && !n && (top != (e.fpos < b.reference.org))) {
+          dist = mul_fix(abs(e.fpos - b.shoot.org), m.axis[1].scale);
+          if (dist < best) { best = dist; e.blue = i; e.blue_shoot = true; neutral = n; }
+        }
+      }
+    }
+    if (e.blue != kNone && neutral) { e.flags |= kNeutral; }
+  }
+}
+
+// Normal rendering uses smooth stem quantization on both axes.
+pub fn stem_width(m&: LatinMetrics, dim: usize, width: i64, base_delta: i64, base_flags: u32, stem_flags: u32): i64 {
+  if (m.axis[dim].extra_light) { return width; }
+  var dist = abs(width);
+  if (dim == 1 && (stem_flags & kSerif) != 0 && dist < 192) { return width; }
+  if ((base_flags & kRound) != 0) { if (dist < 80) { dist = 64; } }
+  else if (dist < 56) { dist = 56; }
+  if (m.axis[dim].widths.len() > 0) {
+    let standard = m.axis[dim].widths[0].cur;
+    if (abs(dist - standard) < 40) { dist = max(standard, 48); }
+    else if (dist < 192) {
+      let delta = dist & 63;
+      dist &= -64;
+      dist += delta < 10 ? delta : (delta < 32 ? 10 : (delta < 54 ? 54 : delta));
+    } else {
+      var correction: i64 = 0;
+      if ((width > 0 && base_delta > 0) || (width < 0 && base_delta < 0)) {
+        if (m.ppem < 10) { correction = base_delta; }
+        else if (m.ppem < 30) { correction = base_delta * (30 - m.ppem) as i64 / 20; }
+        correction = abs(correction);
+      }
+      dist = (dist - correction + 32) & -64;
+    }
+  }
+  return width < 0 ? -dist : dist;
+}
+
+fn align_link(var h&: Hints, m&: LatinMetrics, dim: usize, base: usize, stem: usize) {
+  let b = h.axis[dim].edges[base];
+  let s = h.axis[dim].edges[stem];
+  h.axis[dim].edges[stem].pos = b.pos + stem_width(m, dim, s.opos - b.opos, b.pos - b.opos, b.flags, s.flags);
+}
+
+fn center_position(center: i64, width: i64): i64 {
+  let rounded = pix_round(center);
+  let up: i64 = width <= 64 ? 32 : 38;
+  let down: i64 = width <= 64 ? 32 : 26;
+  return abs(center - (rounded - up)) < abs(center - (rounded + down)) ? rounded - up : rounded + down;
+}
+
+fn cross_extrema(h&: Hints, dim: usize, edge: usize): (i64, i64) {
+  let e = h.axis[dim].edges[edge];
+  let f = h.axis[dim].segments[e.first];
+  let l = h.axis[dim].segments[e.last];
+  let a = h.points[f.first].v; let b = h.points[f.last].v;
+  let c = h.points[l.first].v; let d = h.points[l.last].v;
+  return (min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
+}
+
+pub fn hint_edges(var h&: Hints, m&: LatinMetrics, dim: usize) {
+  let count = h.axis[dim].edges.len();
+  let descending = dim == 1 && m.top_to_bottom;
+  var anchor = kNone;
+  var has_non_stem = false;
+  if (dim == 1) {
+    for (let i in 0..count) {
+      if ((h.axis[dim].edges[i].flags & kDone) != 0) { continue; }
+      var a = kNone;
+      var b = h.axis[dim].edges[i].link;
+      if (h.axis[dim].edges[i].blue != kNone && b != kNone && h.axis[dim].edges[b].blue != kNone) {
+        if ((h.axis[dim].edges[b].flags & kNeutral) != 0) { h.axis[dim].edges[b].blue = kNone; h.axis[dim].edges[b].flags &= ~kNeutral; }
+        else if ((h.axis[dim].edges[i].flags & kNeutral) != 0) { h.axis[dim].edges[i].blue = kNone; h.axis[dim].edges[i].flags &= ~kNeutral; }
+      }
+      if (h.axis[dim].edges[i].blue != kNone) { a = i; }
+      else if (b != kNone && h.axis[dim].edges[b].blue != kNone) { a = b; b = i; }
+      if (a == kNone) { continue; }
+      let e = h.axis[dim].edges[a];
+      let blue = m.axis[1].blues[e.blue];
+      h.axis[dim].edges[a].pos = e.blue_shoot ? blue.shoot.fit : blue.reference.fit;
+      h.axis[dim].edges[a].flags |= kDone;
+      if (b != kNone && h.axis[dim].edges[b].blue == kNone) { align_link(h, m, dim, a, b); h.axis[dim].edges[b].flags |= kDone; }
+      if (anchor == kNone) { anchor = i; }
+    }
+  }
+  for (let i in 0..count) {
+    let e = h.axis[dim].edges[i];
+    if ((e.flags & kDone) != 0) { continue; }
+    let j = e.link;
+    if (j == kNone) { has_non_stem = true; continue; }
+    let other = h.axis[dim].edges[j];
+    if (other.blue != kNone) { align_link(h, m, dim, j, i); h.axis[dim].edges[i].flags |= kDone; continue; }
+    let length = other.opos - e.opos;
+    let fitted = stem_width(m, dim, length, 0, e.flags, other.flags);
+    if (anchor == kNone) {
+      if (fitted < 96) {
+        let center = center_position(e.opos + (length >> 1), fitted);
+        h.axis[dim].edges[i].pos = center - fitted / 2;
+        h.axis[dim].edges[j].pos = h.axis[dim].edges[i].pos + fitted;
+      } else { h.axis[dim].edges[i].pos = pix_round(e.opos); }
+      anchor = i;
+      h.axis[dim].edges[i].flags |= kDone;
+      align_link(h, m, dim, i, j);
+    } else {
+      let a = h.axis[dim].edges[anchor];
+      let org = a.pos + e.opos - a.opos;
+      let center = org + (length >> 1);
+      if ((other.flags & kDone) != 0) { h.axis[dim].edges[i].pos = other.pos - fitted; }
+      else if (fitted < 96) {
+        let pos = center_position(center, fitted);
+        h.axis[dim].edges[i].pos = pos - fitted / 2;
+        h.axis[dim].edges[j].pos = pos + fitted / 2;
+      } else {
+        let p1 = pix_round(org);
+        let p2 = pix_round(org + length) - fitted;
+        let pos = abs(p1 + (fitted >> 1) - center) < abs(p2 + (fitted >> 1) - center) ? p1 : p2;
+        h.axis[dim].edges[i].pos = pos;
+        h.axis[dim].edges[j].pos = pos + fitted;
+      }
+      h.axis[dim].edges[i].flags |= kDone;
+      h.axis[dim].edges[j].flags |= kDone;
+      if (i > 0) {
+        let prev = h.axis[dim].edges[i - 1].pos;
+        let pos = h.axis[dim].edges[i].pos;
+        if ((descending ? pos > prev : pos < prev) && abs(h.axis[dim].edges[j].pos - prev) > 16) { h.axis[dim].edges[i].pos = prev; }
+      }
+    }
+  }
+  if (dim == 0 && (count == 6 || count == 12)) {
+    let i: usize = count == 6 ? 0 : 1;
+    let j: usize = count == 6 ? 2 : 5;
+    let k: usize = count == 6 ? 4 : 9;
+    let a = h.axis[dim].edges[i]; let b = h.axis[dim].edges[j]; let c = h.axis[dim].edges[k];
+    if (abs((b.opos - a.opos) - (c.opos - b.opos)) < 8) {
+      let delta = c.pos - (2 * b.pos - a.pos);
+      h.axis[dim].edges[k].pos -= delta;
+      h.axis[dim].edges[k].flags |= kDone;
+      if (c.link != kNone) { h.axis[dim].edges[c.link].pos -= delta; h.axis[dim].edges[c.link].flags |= kDone; }
+      if (count == 12) { h.axis[dim].edges[8].pos -= delta; h.axis[dim].edges[11].pos -= delta; }
+    }
+  }
+  if (!has_non_stem && anchor != kNone) { return; }
+  for (let i in 0..count) {
+    let e = h.axis[dim].edges[i];
+    if ((e.flags & kDone) != 0) { continue; }
+    var delta: i64 = 1000;
+    if (e.serif != kNone) {
+      delta = abs(h.axis[dim].edges[e.serif].opos - e.opos);
+      let bottom = h.axis[dim].edges[e.serif].opos < e.opos ? e.serif : i;
+      let top = bottom == i ? e.serif : i;
+      if (delta < 96) {
+        let (a, b) = cross_extrema(h, dim, top);
+        let (c, d) = cross_extrema(h, dim, bottom);
+        let lo = min(a, c); let hi = max(b, d);
+        if (bottom < top) {
+          for (let j in bottom + 1..top) {
+            let (emin, emax) = cross_extrema(h, dim, j);
+            if (!((emin < lo && emax < lo) || (emin > hi && emax > hi))) { delta = 1000; break; }
+          }
+        }
+        if (delta == 1000) { continue; }
+      }
+    }
+    if (delta < 80) {
+      let base = h.axis[dim].edges[e.serif];
+      h.axis[dim].edges[i].pos = base.pos + e.opos - base.opos;
+    } else if (anchor == kNone) { h.axis[dim].edges[i].pos = pix_round(e.opos); anchor = i; }
+    else {
+      var before = kNone;
+      var after = kNone;
+      var j = i;
+      while (j > 0) { j -= 1; if ((h.axis[dim].edges[j].flags & kDone) != 0) { before = j; break; } }
+      for (let k in i + 1..count) { if ((h.axis[dim].edges[k].flags & kDone) != 0) { after = k; break; } }
+      if (before != kNone && after != kNone) {
+        let a = h.axis[dim].edges[before]; let b = h.axis[dim].edges[after];
+        h.axis[dim].edges[i].pos = a.opos == b.opos ? a.pos : a.pos + mul_div(e.opos - a.opos, b.pos - a.pos, b.opos - a.opos);
+      } else {
+        let a = h.axis[dim].edges[anchor];
+        h.axis[dim].edges[i].pos = a.pos + ((e.opos - a.opos + 16) & -32);
+      }
+    }
+    h.axis[dim].edges[i].flags |= kDone;
+    if (i > 0) {
+      let prev = h.axis[dim].edges[i - 1].pos;
+      if ((descending ? h.axis[dim].edges[i].pos > prev : h.axis[dim].edges[i].pos < prev) && e.link != kNone && abs(h.axis[dim].edges[e.link].pos - prev) > 16) { h.axis[dim].edges[i].pos = prev; }
+    }
+    if (i + 1 < count && (h.axis[dim].edges[i + 1].flags & kDone) != 0) {
+      let next = h.axis[dim].edges[i + 1].pos;
+      if ((descending ? h.axis[dim].edges[i].pos < next : h.axis[dim].edges[i].pos > next) && e.link != kNone && i > 0 && abs(h.axis[dim].edges[e.link].pos - h.axis[dim].edges[i - 1].pos) > 16) { h.axis[dim].edges[i].pos = next; }
+    }
+  }
+}
+
+// af_latin_hints_init + af_latin_hints_apply for the normal target: `adj` is
+// the afadjust flags of the glyph's code point (0 for none), `nonbase` the
+// glyph's AF_NONBASE flag; an italic face is not hinted horizontally.
+pub fn apply_latin(var h&: Hints, m&: LatinMetrics, var outline&: Outline, nonbase: bool = false, adj: u32 = 0) {
+  h.units_per_em = m.units_per_em;
+  h.x_scale = m.axis[0].scale; h.y_scale = m.axis[1].scale;
+  h.x_delta = m.axis[0].delta; h.y_delta = m.axis[1].delta;
+  h.reload(outline);
+  if (!m.italic) {
+    detect_features(h, m, 0);
+  }
+  var accent_height_limit: i64 = 0;
+  // Tildes: the inner ones first.
+  if ((adj & (kAdjustTildeTop | kAdjustTildeBottom | kAdjustTildeTop2 | kAdjustTildeBottom2)) != 0) {
+    compute_vertical_extrema(h);
+  }
+  if ((adj & kAdjustTildeTop2) != 0) {
+    let c = find_second_highest_contour(h);
+    var y_offset = stretch_tilde(h, c, true);
+    y_offset += align_tilde(h, c, true);
+    move_contours_up(h, h.contour_y_min[c], y_offset);
+  }
+  if ((adj & kAdjustTildeBottom2) != 0) {
+    let c = find_second_lowest_contour(h);
+    var y_offset = stretch_tilde(h, c, false);
+    y_offset -= align_tilde(h, c, false);
+    move_contours_down(h, h.contour_y_max[c], y_offset);
+  }
+  if ((adj & kAdjustTildeTop) != 0) {
+    let c = find_highest_contour(h);
+    let _ = stretch_tilde(h, c, true);
+    let _ = align_tilde(h, c, true);
+  }
+  if ((adj & kAdjustTildeBottom) != 0) {
+    let c = find_lowest_contour(h);
+    let _ = stretch_tilde(h, c, false);
+    let _ = align_tilde(h, c, false);
+  }
+  detect_features(h, m, 1);
+  let (cap_top, cap_bottom) = base_glyph_blues(m, true);
+  let (small_top, small_bottom) = base_glyph_blues(m, false);
+  let blues& = m.axis[1].blues;
+  if (adj != 0) {
+    if ((adj & kAdjustNoHeightCheck) == 0) {
+      if (small_top != kNone && small_bottom != kNone) {
+        accent_height_limit = 2 * (blues[small_top].shoot.cur - blues[small_bottom].shoot.cur) / 3;
+      } else if (cap_top != kNone && cap_bottom != kNone) {
+        accent_height_limit = (blues[cap_top].shoot.cur - blues[cap_bottom].shoot.cur) / 2;
+      } else {
+        accent_height_limit = mul_fix(m.units_per_em * 4 / 10, m.y_scale);
+      }
+    }
+  }
+  if (cap_top != kNone && cap_bottom != kNone) {
+    if ((adj & kIgnoreCapitalTop) != 0) { ignore_blues(h, m, cap_top, cap_bottom, true); }
+    if ((adj & kIgnoreCapitalBottom) != 0) { ignore_blues(h, m, cap_top, cap_bottom, false); }
+  }
+  if (small_top != kNone && small_bottom != kNone) {
+    if ((adj & kIgnoreSmallTop) != 0) { ignore_blues(h, m, small_top, small_bottom, true); }
+    if ((adj & kIgnoreSmallBottom) != 0) { ignore_blues(h, m, small_top, small_bottom, false); }
+  }
+  if (!nonbase) { blue_edges(h, m); }
+  for (let dim in 0usize..2) {
+    if (dim == 0 && m.italic) { continue; }
+    hint_edges(h, m, dim);
+    h.align_edges(dim); h.align_strong(dim); h.align_weak(dim);
+    if (dim == 1) { vertical_separation(h, adj, accent_height_limit); }
+  }
+  h.save(outline);
+}
+
+// af_latin_hints_detect_features
+fn detect_features(var h&: Hints, m&: LatinMetrics, dim: usize) {
+  compute_segments(h, dim);
+  let count = m.axis[dim].widths.len();
+  link_segments(h, dim, count == 0 ? 0 : m.axis[dim].widths[count - 1].org);
+  compute_edges(h, dim, m.axis[dim].edge_distance, dim == 1 && m.top_to_bottom);
+}
+
+// af_latin_get_base_glyph_blues: (top, bottom) blue indices (kNone: none).
+fn base_glyph_blues(m&: LatinMetrics, capital: bool): (usize, usize) {
+  let top_flag = (capital ? kBlueTop : kBlueAdjustment) | kBlueActive;
+  let bottom_flag = (capital ? kBlueBottom : kBlueSmallBottom) | kBlueActive;
+  var top = kNone;
+  var bottom = kNone;
+  for (let i in 0..m.axis[1].blues.len()) {
+    if ((m.axis[1].blues[i].flags & top_flag) == top_flag) { top = i; break; }
+  }
+  for (let i in 0..m.axis[1].blues.len()) {
+    if ((m.axis[1].blues[i].flags & bottom_flag) == bottom_flag) { bottom = i; break; }
+  }
+  return (top, bottom);
+}
+
+// af_latin_ignore_top / af_latin_ignore_bottom
+fn ignore_blues(var h&: Hints, m&: LatinMetrics, top: usize, bottom: usize, upper: bool) {
+  let t = m.axis[1].blues[top].shoot.cur;
+  let b = m.axis[1].blues[bottom].shoot.cur;
+  let base_glyph_height = t - b;
+  if (upper) {
+    prevent_blue_alignment(h, t + base_glyph_height / 7 + 16, true);
+  } else {
+    prevent_blue_alignment(h, b - base_glyph_height / 7 - 16, false);
+  }
+}

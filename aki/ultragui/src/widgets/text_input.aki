@@ -1,0 +1,764 @@
+// ugui/widgets/text_input.{h,cc}: an editable single-line text input
+// (WidgetKind::TextInput), a generic widget carrying a TextInputContent
+// (text, placeholder, caret/selection, horizontal scroll, caret blink, edit
+// callbacks); the focused flag is the widget's WidgetState::Focused bit.
+// Behaviour: the TextInput arms in widgets::widget_vtable (draw, measure,
+// click, key/char input, blink, text capture).
+//
+// Shape differences: the World comes first; the clipboard is the context's
+// platform; handlers get a CallbackEnv and an owned copy of the text
+// (widgets::callbacks). Offsets are byte offsets into the UTF-8 text, as in
+// the C++.
+//
+// One divergence: aki's String is always valid UTF-8, so a char event with
+// a codepoint that has no UTF-8 form (a surrogate, or above U+10FFFF)
+// inserts nothing; the C++ inserts the bytes its encoder makes of it.
+// Everything else (selection deleted, caret blink reset, dirty marking,
+// on_change) happens as in the C++.
+
+module ultragui::widgets::text_input;
+
+import {swap} from akikit::algorithm;
+import {String, from_str} from akikit::strings::string;
+import {max, min} from ultragui::core::algorithm;
+import {Color} from ultragui::core::color;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {WidgetState, has_state} from ultragui::style::enums;
+import {FontHandle, TextRun, kInvalidFont} from ultragui::text::text_engine;
+import {Action, CallbackEnv, TextHandler} from ultragui::widgets::callbacks;
+import {
+  WidgetKind, computed_style, has_widget_context, input_to_layout_point, kStyleC, kTransform, kWidgetNode, mark_dirty,
+  mark_paint_dirty, ui_scale, widget_context_of, widget_state_of,
+} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+
+// GLFW key codes (widget code does not depend on GLFW).
+pub comptime let kKeyEnter: i32 = 257;
+pub comptime let kKeyKpEnter: i32 = 335;
+pub comptime let kKeyEscape: i32 = 256;
+pub comptime let kKeyBackspace: i32 = 259;
+pub comptime let kKeyDelete: i32 = 261;
+pub comptime let kKeyRight: i32 = 262;
+pub comptime let kKeyLeft: i32 = 263;
+pub comptime let kKeyDown: i32 = 264;
+pub comptime let kKeyUp: i32 = 265;
+pub comptime let kKeyHome: i32 = 268;
+pub comptime let kKeyEnd: i32 = 269;
+pub comptime let kKeyA: i32 = 65;
+pub comptime let kKeyC: i32 = 67;
+pub comptime let kKeyV: i32 = 86;
+pub comptime let kKeyX: i32 = 88;
+pub comptime let kModShift: i32 = 0x0001;
+pub comptime let kModControl: i32 = 0x0002;
+
+// TextInputContent::HistoryHandler, Function<String()>: Up / Down return the
+// replacement text.
+pub type HistoryHandler = own fn(&var CallbackEnv): String;
+
+// Data for a text input widget.
+pub struct TextInputContent {
+  pub var text: String = String()
+  pub var placeholder: String = String()
+  pub var font: FontHandle = kInvalidFont  // override; kInvalidFont -> context default
+  pub var cursor: u32 = 0
+  pub var sel_start: u32 = 0
+  pub var sel_end: u32 = 0
+  pub var blink_timer: f64 = 0.0
+  pub var cursor_visible: bool = true
+  pub var scroll_x: f32 = 0.0
+  pub var on_change: TextHandler? = none
+  pub var on_submit: TextHandler? = none
+  pub var on_cancel: Action? = none
+  pub var on_history_prev: HistoryHandler? = none
+  pub var on_history_next: HistoryHandler? = none
+}
+
+pub static let kTextInputContent: ComponentKey<TextInputContent> = ComponentKey();
+
+// --- UTF-8 navigation -----------------------------------------------------------
+
+// InsertText: String::insert(pos, ptr, len).
+fn insert_text(var text&: String, pos: usize, data: str) {
+  var out = String();
+  out.push_str(text.as_str()[..pos]);
+  out.push_str(data);
+  out.push_str(text.as_str()[pos..]);
+  text = out;
+}
+
+// String::erase(pos, count).
+fn erase_text(var text&: String, pos: usize, count: usize) {
+  var out = String();
+  out.push_str(text.as_str()[..pos]);
+  out.push_str(text.as_str()[pos + count..]);
+  text = out;
+}
+
+// NextPos: the byte offset of the next code point (clamped to the end).
+pub fn next_pos(text: str, pos: u32): u32 {
+  let size = #text as u32;
+  if (pos >= size) {
+    return size;
+  }
+  let c = text[pos] as u8;
+  if (c < 0x80) {
+    return pos + 1;
+  }
+  if ((c & 0xE0) == 0xC0) {
+    return min(pos + 2, size);
+  }
+  if ((c & 0xF0) == 0xE0) {
+    return min(pos + 3, size);
+  }
+  return min(pos + 4, size);
+}
+
+// PrevPos: the byte offset of the previous code point.
+pub fn prev_pos(text: str, pos: u32): u32 {
+  if (pos == 0) {
+    return 0;
+  }
+  var p = pos - 1;
+  while (p > 0 && ((text[p] as u8) & 0xC0) == 0x80) {
+    p -= 1;
+  }
+  return p;
+}
+
+// --- Cursor <-> glyph mapping ---------------------------------------------------
+
+// CursorXFromPos: one glyph per code point, as the C++ assumes.
+pub fn cursor_x_from_pos(text: str, byte_pos: u32, run&: TextRun): f32 {
+  var x: f32 = 0.0;
+  var src_pos: u32 = 0;
+  let glyphs = run.glyphs();
+  var i: u32 = 0;
+  while (i < #glyphs as u32 && src_pos < byte_pos) {
+    x += glyphs[i].x_advance;
+    src_pos = next_pos(text, src_pos);
+    i += 1;
+  }
+  return x;
+}
+
+// PosFromX: the byte offset whose glyph midpoint is right of local_x.
+pub fn pos_from_x(text: str, local_x: f32, run&: TextRun): u32 {
+  var x: f32 = 0.0;
+  var src_pos: u32 = 0;
+  for (let g in run.glyphs()) {
+    let mid = x + g.x_advance * 0.5;
+    if (local_x < mid) {
+      return src_pos;
+    }
+    x += g.x_advance;
+    src_pos = next_pos(text, src_pos);
+  }
+  return #text as u32;
+}
+
+// --- Selection helpers ----------------------------------------------------------
+
+fn delete_selection(var c&: TextInputContent) {
+  if (c.sel_start == c.sel_end) {
+    return;
+  }
+  let lo = min(c.sel_start, c.sel_end);
+  let hi = max(c.sel_start, c.sel_end);
+  erase_text(c.text, lo as usize, (hi - lo) as usize);
+  c.cursor = lo;
+  c.sel_start = c.cursor;
+  c.sel_end = c.cursor;
+}
+
+fn reset_blink(var c&: TextInputContent) {
+  c.blink_timer = 0.0;
+  c.cursor_visible = true;
+}
+
+fn set_value(var c&: TextInputContent, text: str) {
+  c.text = from_str(text);
+  c.cursor = #c.text.as_str() as u32;
+  c.sel_start = c.cursor;
+  c.sel_end = c.cursor;
+}
+
+// --- Handlers -------------------------------------------------------------------
+
+// `if (c.on_change) c.on_change(c.text)`.
+fn fire_change(var world&: World, var ctx&: WidgetContext, e: WidgetId) {
+  var slot: TextHandler? = none;
+  var text = String();
+  if (var c& = world.get_var(kTextInputContent, e)) {
+    swap(c.on_change, slot);
+    text = c.text.clone();
+  }
+  let handler = slot else {
+    return;
+  };
+  {
+    var env = CallbackEnv { world, ctx };
+    handler(env, text);
+  }
+  if (var c& = world.get_var(kTextInputContent, e)) {
+    if (c.on_change == none) {
+      c.on_change = handler;
+    }
+  }
+}
+
+// `if (c.on_submit) { c.on_submit(c.text); return true; }`: false without
+// a handler.
+fn fire_submit(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool {
+  var slot: TextHandler? = none;
+  var text = String();
+  if (var c& = world.get_var(kTextInputContent, e)) {
+    swap(c.on_submit, slot);
+    text = c.text.clone();
+  }
+  let handler = slot else {
+    return false;
+  };
+  {
+    var env = CallbackEnv { world, ctx };
+    handler(env, text);
+  }
+  if (var c& = world.get_var(kTextInputContent, e)) {
+    if (c.on_submit == none) {
+      c.on_submit = handler;
+    }
+  }
+  return true;
+}
+
+// `if (c.on_cancel) { c.on_cancel(); return true; }`
+fn fire_cancel(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool {
+  var slot: Action? = none;
+  if (var c& = world.get_var(kTextInputContent, e)) {
+    swap(c.on_cancel, slot);
+  }
+  let handler = slot else {
+    return false;
+  };
+  {
+    var env = CallbackEnv { world, ctx };
+    handler(env);
+  }
+  if (var c& = world.get_var(kTextInputContent, e)) {
+    if (c.on_cancel == none) {
+      c.on_cancel = handler;
+    }
+  }
+  return true;
+}
+
+// The replacement text from on_history_prev (prev) or on_history_next,
+// none without a handler.
+fn call_history(var world&: World, var ctx&: WidgetContext, e: WidgetId, prev: bool): String? {
+  var slot: HistoryHandler? = none;
+  if (var c& = world.get_var(kTextInputContent, e)) {
+    if (prev) {
+      swap(c.on_history_prev, slot);
+    } else {
+      swap(c.on_history_next, slot);
+    }
+  }
+  let handler = slot else {
+    return none;
+  };
+  var repl = String();
+  {
+    var env = CallbackEnv { world, ctx };
+    repl = handler(env);
+  }
+  if (var c& = world.get_var(kTextInputContent, e)) {
+    if (prev) {
+      if (c.on_history_prev == none) {
+        c.on_history_prev = handler;
+      }
+    } else if (c.on_history_next == none) {
+      c.on_history_next = handler;
+    }
+  }
+  return repl;
+}
+
+// --- Event handlers -------------------------------------------------------------
+
+// TextInputCharInput: replace the selection with the code point.
+pub fn text_input_char_input(var world&: World, var ctx&: WidgetContext, e: WidgetId, codepoint: u32): bool {
+  let c& = world.get_var(kTextInputContent, e) else {
+    return false;
+  };
+
+  delete_selection(c);
+
+  var buf: [u8; 4] = [0; 4];
+  var len: u32 = 0;
+  if (codepoint < 0x80) {
+    buf[0] = codepoint as u8;
+    len = 1;
+  } else if (codepoint < 0x800) {
+    buf[0] = (0xC0 | (codepoint >> 6)) as u8;
+    buf[1] = (0x80 | (codepoint & 0x3F)) as u8;
+    len = 2;
+  } else if (codepoint < 0x10000) {
+    buf[0] = (0xE0 | (codepoint >> 12)) as u8;
+    buf[1] = (0x80 | ((codepoint >> 6) & 0x3F)) as u8;
+    buf[2] = (0x80 | (codepoint & 0x3F)) as u8;
+    len = 3;
+  } else {
+    buf[0] = ((0xF0 | (codepoint >> 18)) & 0xFF) as u8;
+    buf[1] = (0x80 | ((codepoint >> 12) & 0x3F)) as u8;
+    buf[2] = (0x80 | ((codepoint >> 6) & 0x3F)) as u8;
+    buf[3] = (0x80 | (codepoint & 0x3F)) as u8;
+    len = 4;
+  }
+
+  var piece = String();
+  if (!piece.push_utf8(buf[..len as usize] as bytes)) {
+    len = 0;  // no UTF-8 form: nothing to insert (see the module comment)
+  }
+  insert_text(c.text, c.cursor as usize, piece.as_str());
+  c.cursor += len;
+  c.sel_start = c.cursor;
+  c.sel_end = c.cursor;
+  reset_blink(c);
+  mark_dirty(world, e);
+  fire_change(world, ctx, e);
+  return true;
+}
+
+// The move_cursor lambda of TextInputKeyDown.
+fn move_cursor(var world&: World, e: WidgetId, new_pos: u32, shift: bool) {
+  var c& = world.get_var(kTextInputContent, e)!;
+  c.cursor = new_pos;
+  if (!shift) {
+    c.sel_start = c.cursor;
+    c.sel_end = c.cursor;
+  } else {
+    c.sel_end = c.cursor;
+  }
+  reset_blink(c);
+  mark_paint_dirty(world, e);
+}
+
+// The selected text, none when the selection is empty.
+fn selected_text(c&: TextInputContent): String? {
+  if (c.sel_start == c.sel_end) {
+    return none;
+  }
+  let lo = min(c.sel_start, c.sel_end);
+  let hi = max(c.sel_start, c.sel_end);
+  return from_str(c.text.as_str()[lo as usize..hi as usize]);
+}
+
+// TextInputKeyDown: editing, caret movement, clipboard, submit/cancel and
+// history keys.
+pub fn text_input_key_down(var world&: World, var ctx&: WidgetContext, e: WidgetId, key: i32, mods: i32): bool {
+  if (!world.has(kTextInputContent, e)) {
+    return false;
+  }
+
+  let shift = (mods & kModShift) != 0;
+  let ctrl = (mods & kModControl) != 0;
+  // ctx && ctx->platform
+  let has_platform = has_widget_context(world, e) && ctx.platform != none;
+
+  if (key == kKeyEnter || key == kKeyKpEnter) {
+    if (fire_submit(world, ctx, e)) {
+      return true;
+    }
+  } else if (key == kKeyEscape) {
+    if (fire_cancel(world, ctx, e)) {
+      return true;
+    }
+  } else if (key == kKeyUp) {
+    if (let repl = call_history(world, ctx, e, true)) {
+      var changed = false;
+      if (var c& = world.get_var(kTextInputContent, e)) {
+        if (repl.len() > 0 || repl != c.text) {
+          set_value(c, repl.as_str());
+          changed = true;
+        }
+      }
+      if (changed) {
+        mark_dirty(world, e);
+        fire_change(world, ctx, e);
+      }
+      return true;
+    }
+  } else if (key == kKeyDown) {
+    if (let repl = call_history(world, ctx, e, false)) {
+      if (var c& = world.get_var(kTextInputContent, e)) {
+        set_value(c, repl.as_str());
+      }
+      mark_dirty(world, e);
+      fire_change(world, ctx, e);
+      return true;
+    }
+  } else if (key == kKeyLeft) {
+    let c& = world.get(kTextInputContent, e)!;
+    let p = prev_pos(c.text.as_str(), c.cursor);
+    move_cursor(world, e, p, shift);
+    return true;
+  } else if (key == kKeyRight) {
+    let c& = world.get(kTextInputContent, e)!;
+    let p = next_pos(c.text.as_str(), c.cursor);
+    move_cursor(world, e, p, shift);
+    return true;
+  } else if (key == kKeyHome) {
+    move_cursor(world, e, 0, shift);
+    return true;
+  } else if (key == kKeyEnd) {
+    let size = world.get(kTextInputContent, e)!.text.len() as u32;
+    move_cursor(world, e, size, shift);
+    return true;
+  } else if (key == kKeyBackspace) {
+    var c& = world.get_var(kTextInputContent, e)!;
+    if (c.sel_start != c.sel_end) {
+      delete_selection(c);
+    } else if (c.cursor > 0) {
+      let prev = prev_pos(c.text.as_str(), c.cursor);
+      erase_text(c.text, prev as usize, (c.cursor - prev) as usize);
+      c.cursor = prev;
+      c.sel_start = c.cursor;
+      c.sel_end = c.cursor;
+    }
+    mark_dirty(world, e);
+    fire_change(world, ctx, e);
+    return true;
+  } else if (key == kKeyDelete) {
+    var c& = world.get_var(kTextInputContent, e)!;
+    if (c.sel_start != c.sel_end) {
+      delete_selection(c);
+    } else if ((c.cursor as usize) < c.text.len()) {
+      let next = next_pos(c.text.as_str(), c.cursor);
+      erase_text(c.text, c.cursor as usize, (next - c.cursor) as usize);
+      c.sel_start = c.cursor;
+      c.sel_end = c.cursor;
+    }
+    mark_dirty(world, e);
+    fire_change(world, ctx, e);
+    return true;
+  } else if (key == kKeyA) {
+    if (ctrl) {
+      var c& = world.get_var(kTextInputContent, e)!;
+      c.sel_start = 0;
+      c.cursor = c.text.len() as u32;
+      c.sel_end = c.cursor;
+      mark_paint_dirty(world, e);
+      return true;
+    }
+  } else if (key == kKeyC) {
+    if (ctrl && has_platform) {
+      if (let sel = selected_text(world.get(kTextInputContent, e)!)) {
+        if (var p& = ctx.platform) {
+          p.set_clipboard_text(sel.as_str());
+        }
+        return true;
+      }
+    }
+  } else if (key == kKeyX) {
+    if (ctrl && has_platform) {
+      if (let sel = selected_text(world.get(kTextInputContent, e)!)) {
+        if (var p& = ctx.platform) {
+          p.set_clipboard_text(sel.as_str());
+        }
+        delete_selection(world.get_var(kTextInputContent, e)!);
+        mark_dirty(world, e);
+        fire_change(world, ctx, e);
+        return true;
+      }
+    }
+  } else if (key == kKeyV) {
+    if (ctrl && has_platform) {
+      var clip = String();
+      if (var p& = ctx.platform) {
+        clip = from_str(p.clipboard_text());
+      }
+      if (!clip.is_empty()) {
+        var c& = world.get_var(kTextInputContent, e)!;
+        delete_selection(c);
+        let len = clip.len() as u32;
+        insert_text(c.text, c.cursor as usize, clip.as_str());
+        c.cursor += len;
+        c.sel_start = c.cursor;
+        c.sel_end = c.cursor;
+        mark_dirty(world, e);
+        fire_change(world, ctx, e);
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// TextInputClick: put the caret under the pointer.
+pub fn text_input_click(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool {
+  let c& = world.get(kTextInputContent, e) else {
+    return true;
+  };
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+
+  var run = TextRun();
+  {
+    let wc& = widget_context_of(world, ctx, e) else {
+      return true;
+    };
+    let fh = c.font != kInvalidFont ? c.font : wc.default_font;
+    var te& = wc.text_engine else {
+      return true;
+    };
+    if (fh == kInvalidFont) {
+      return true;
+    }
+    run = te.shape(fh, c.text.as_str(), s.font_size, s.letter_spacing, s.line_height_multiplier);
+  }
+
+  var mp = Vec2 { x: 0.0, y: 0.0 };
+  if (has_widget_context(world, e)) {
+    var mouse: Vec2? = none;
+    if (var p& = ctx.platform) {
+      mouse = p.input_queue().mouse_pos;
+    }
+    if (let m = mouse) {
+      mp = input_to_layout_point(world, e, m);
+    }
+  }
+  let content = world.get(kTransform, e)!.content_rect;
+  var cw& = world.get_var(kTextInputContent, e)!;
+  let local_x = mp.x - content.x + cw.scroll_x;
+  cw.cursor = pos_from_x(cw.text.as_str(), local_x, run);
+  cw.sel_start = cw.cursor;
+  cw.sel_end = cw.cursor;
+  reset_blink(cw);
+  mark_paint_dirty(world, e);
+  return true;
+}
+
+// TextInputConsumesText: a text input takes character input.
+pub fn text_input_consumes_text(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool => true;
+
+// --- Measure & paint ------------------------------------------------------------
+
+// TextInputMeasure: the text (or "X" when empty) plus padding.
+pub fn text_input_measure(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  let st& = world.get(kStyleC, e)!.style;
+  let fallback = (0.0f32, st.font_size + st.padding.vertical());
+  let c& = world.get(kTextInputContent, e) else {
+    return fallback;
+  };
+  let wc& = widget_context_of(world, ctx, e) else {
+    return fallback;
+  };
+  let fh = c.font != kInvalidFont ? c.font : wc.default_font;
+  let sc = wc.ui_scale;
+  var te& = wc.text_engine else {
+    return fallback;
+  };
+  if (fh == kInvalidFont) {
+    return fallback;
+  }
+
+  let run = te.shape(fh, c.text.is_empty() ? "X" : c.text.as_str(), st.font_size * sc, st.letter_spacing * sc,
+                     st.line_height_multiplier);
+  return (run.total_advance + st.padding.horizontal(), run.line_height + st.padding.vertical());
+}
+
+// TextInputUpdate: blink the caret while focused.
+pub fn text_input_update(var world&: World, var ctx&: WidgetContext, e: WidgetId, dt: f64) {
+  if (!has_state(widget_state_of(world, e), WidgetState::Focused)) {
+    return;
+  }
+  let c& = world.get_var(kTextInputContent, e) else {
+    return;
+  };
+  c.blink_timer += dt;
+  let was_visible = c.cursor_visible;
+  c.cursor_visible = @saturating_cast(i32, c.blink_timer * 2.0) % 2 == 0;
+  if (was_visible != c.cursor_visible) {
+    mark_paint_dirty(world, e);
+  }
+}
+
+// TextInputDraw. PaintWidget already drew background / shadow / border.
+pub fn text_input_draw(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  if (!world.has(kTextInputContent, e)) {
+    return;
+  }
+  var s = computed_style(world, e);
+  s.scale(ui_scale(world, ctx, e));
+  let alpha = s.opacity;
+  let focused = has_state(widget_state_of(world, e), WidgetState::Focused);
+  let content = world.get(kTransform, e)!.content_rect;
+
+  let wc& = widget_context_of(world, ctx, e) else {
+    return;
+  };
+  let c_font = world.get(kTextInputContent, e)!.font;
+  let fh = c_font != kInvalidFont ? c_font : wc.default_font;
+  var te& = wc.text_engine else {
+    return;
+  };
+  if (fh == kInvalidFont) {
+    return;
+  }
+
+  let show_placeholder = world.get(kTextInputContent, e)!.text.is_empty() &&
+                         !world.get(kTextInputContent, e)!.placeholder.is_empty();
+
+  let run = {
+    let c& = world.get(kTextInputContent, e)!;
+    let display = show_placeholder ? c.placeholder.as_str() : c.text.as_str();
+    te.shape(fh, display, s.font_size, s.letter_spacing, s.line_height_multiplier)
+  };
+
+  renderer.push_scissor(content);
+
+  let text_y = content.y + (content.h - run.line_height) * 0.5;
+
+  // Scroll to keep the caret visible.
+  if (focused && !show_placeholder) {
+    var c& = world.get_var(kTextInputContent, e)!;
+    let cursor_x = cursor_x_from_pos(c.text.as_str(), c.cursor, run);
+    let visible_w = content.w;
+    if (cursor_x - c.scroll_x > visible_w - 2.0) {
+      c.scroll_x = cursor_x - visible_w + 2.0;
+    }
+    if (cursor_x - c.scroll_x < 0.0) {
+      c.scroll_x = cursor_x;
+    }
+    if (c.scroll_x < 0.0) {
+      c.scroll_x = 0.0;
+    }
+  }
+
+  let c& = world.get(kTextInputContent, e)!;
+  let text_x = content.x - c.scroll_x;
+  let atlas = te.atlas_texture();
+
+  // Selection highlight.
+  if (focused && c.sel_start != c.sel_end && !show_placeholder) {
+    let text_run = te.shape(fh, c.text.as_str(), s.font_size, s.letter_spacing, s.line_height_multiplier);
+    let lo = min(c.sel_start, c.sel_end);
+    let hi = max(c.sel_start, c.sel_end);
+    let sel_x0 = cursor_x_from_pos(c.text.as_str(), lo, text_run);
+    let sel_x1 = cursor_x_from_pos(c.text.as_str(), hi, text_run);
+    let sel_color = Color::rgba(0.3, 0.5, 0.9, 0.4 * alpha);
+    renderer.draw_rect(Rect { x: text_x + sel_x0, y: text_y, w: sel_x1 - sel_x0, h: run.line_height }, sel_color);
+  }
+
+  let text_color = show_placeholder ? Color::rgba(0.5, 0.5, 0.5, 0.5 * alpha) : s.text_color.with_alpha(s.text_color.a * alpha);
+  renderer.draw_text(Vec2 { x: text_x, y: text_y }, run, text_color, atlas);
+
+  // Caret.
+  if (focused && c.cursor_visible && !show_placeholder) {
+    let text_run = te.shape(fh, c.text.as_str(), s.font_size, s.letter_spacing, s.line_height_multiplier);
+    let cx = text_x + cursor_x_from_pos(c.text.as_str(), c.cursor, text_run);
+    let cursor_color = s.text_color.with_alpha(s.text_color.a * alpha);
+    renderer.draw_rect(Rect { x: cx, y: text_y + 1.0, w: 1.5, h: run.line_height - 2.0 }, cursor_color);
+  }
+
+  renderer.pop_scissor();
+}
+
+// CreateTextInput: a widget tagged TextInput with a TextInputContent.
+pub fn create_text_input(var world&: World, id: u32): WidgetId {
+  let e = world.create(id);
+  world.get_var(kWidgetNode, e)!.kind = WidgetKind::TextInput;
+  world.add(kTextInputContent, e, TextInputContent {});
+  return e;
+}
+
+fn is_text_input(world&: World, e: WidgetId): bool {
+  if (let n& = world.get(kWidgetNode, e)) {
+    return n.kind == WidgetKind::TextInput;
+  }
+  return false;
+}
+
+// SetTextInputValue: the caret moves to the end, the selection collapses.
+// No-op if `e` is not a text input.
+pub fn set_text_input_value(var world&: World, e: WidgetId, text: str) {
+  if (!is_text_input(world, e)) {
+    return;
+  }
+  set_value(world.get_or_add(kTextInputContent, e, TextInputContent {}), text);
+  mark_dirty(world, e);
+}
+
+// TextInputValue: empty if `e` is not a text input.
+pub fn text_input_value(world&: World, e: WidgetId): String {
+  if (!is_text_input(world, e)) {
+    return String();
+  }
+  if (let c& = world.get(kTextInputContent, e)) {
+    return c.text.clone();
+  }
+  return String();
+}
+
+// SetTextInputPlaceholder: shown while the text is empty.
+pub fn set_text_input_placeholder(var world&: World, e: WidgetId, placeholder: str) {
+  if (!is_text_input(world, e)) {
+    return;
+  }
+  world.get_or_add(kTextInputContent, e, TextInputContent {}).placeholder = from_str(placeholder);
+  mark_paint_dirty(world, e);
+}
+
+// SetTextInputFont: kInvalidFont -> context default.
+pub fn set_text_input_font(var world&: World, e: WidgetId, font: FontHandle) {
+  if (!is_text_input(world, e)) {
+    return;
+  }
+  world.get_or_add(kTextInputContent, e, TextInputContent {}).font = font;
+  mark_dirty(world, e);
+}
+
+// SetTextInputChange: fired on every edit with the new text.
+pub fn set_text_input_change(var world&: World, e: WidgetId, handler: TextHandler) {
+  if (!is_text_input(world, e)) {
+    return;
+  }
+  world.get_or_add(kTextInputContent, e, TextInputContent {}).on_change = handler;
+}
+
+// SetTextInputSubmit: fired on Enter / Keypad Enter with the current text.
+pub fn set_text_input_submit(var world&: World, e: WidgetId, handler: TextHandler) {
+  if (!is_text_input(world, e)) {
+    return;
+  }
+  world.get_or_add(kTextInputContent, e, TextInputContent {}).on_submit = handler;
+}
+
+// SetTextInputCancel: fired on Escape.
+pub fn set_text_input_cancel(var world&: World, e: WidgetId, handler: Action) {
+  if (!is_text_input(world, e)) {
+    return;
+  }
+  world.get_or_add(kTextInputContent, e, TextInputContent {}).on_cancel = handler;
+}
+
+// SetTextInputHistoryPrev / Next: fired on Up / Down; the handler returns
+// the replacement text.
+pub fn set_text_input_history_prev(var world&: World, e: WidgetId, handler: HistoryHandler) {
+  if (!is_text_input(world, e)) {
+    return;
+  }
+  world.get_or_add(kTextInputContent, e, TextInputContent {}).on_history_prev = handler;
+}
+
+pub fn set_text_input_history_next(var world&: World, e: WidgetId, handler: HistoryHandler) {
+  if (!is_text_input(world, e)) {
+    return;
+  }
+  world.get_or_add(kTextInputContent, e, TextInputContent {}).on_history_next = handler;
+}

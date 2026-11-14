@@ -1,0 +1,507 @@
+// The font tables graphite2 1.3.15 reads, as it reads them: the table bytes
+// HarfBuzz hands it (hb_graphite2_get_table: the raw sfnt table, here from
+// the font's directory as FT_Load_Sfnt_Table finds it), Face::Table's checks
+// (TtfUtil::CheckTable) and LZ4 decompression (Face::Table::decompress,
+// Decompressor.cpp), and the TtfUtil readers graphite2 uses for glyph
+// metrics, bounding boxes and the cmap (TtfUtil.cpp).
+//
+// Reads past a table's end give zero (graphite2 reads raw memory there; no
+// valid font reaches those reads).
+
+module ultragui::shape::graphite::tables;
+
+import {List} from akikit::containers::list;
+
+pub fn be8(d: &[u8], o: usize): u32 => o < #d ? d[o] as u32 : 0;
+pub fn be16(d: &[u8], o: usize): u32 => o + 2 <= #d ? (d[o] as u32 << 8) | d[o + 1] as u32 : 0;
+pub fn bes16(d: &[u8], o: usize): i32 => (be16(d, o) as u16 as i16) as i32;
+pub fn be32(d: &[u8], o: usize): u32 => (be16(d, o) << 16) | be16(d, o + 2);
+
+// Table tags.
+pub comptime let kTagSilf: u32 = 0x53696C66;
+pub comptime let kTagGlat: u32 = 0x476C6174;
+pub comptime let kTagGloc: u32 = 0x476C6F63;
+pub comptime let kTagFeat: u32 = 0x46656174;
+pub comptime let kTagSill: u32 = 0x53696C6C;
+pub comptime let kTagCmap: u32 = 0x636D6170;
+pub comptime let kTagHead: u32 = 0x68656164;
+pub comptime let kTagHhea: u32 = 0x68686561;
+pub comptime let kTagHmtx: u32 = 0x686D7478;
+pub comptime let kTagGlyf: u32 = 0x676C7966;
+pub comptime let kTagLoca: u32 = 0x6C6F6361;
+pub comptime let kTagMaxp: u32 = 0x6D617870;
+
+// The raw bytes of the table `tag` of the sfnt at `sfnt` (the first directory
+// entry with that tag and a length; the end clamped to the file), or none.
+pub fn sfnt_table(data: &[u8], sfnt: usize, tag: u32): (usize, usize)? {
+  let num_tables = be16(data, sfnt + 4) as usize;
+  for (let i in 0..num_tables) {
+    let rec = sfnt + 12 + i * 16;
+    if (be32(data, rec) != tag) {
+      continue;
+    }
+    let start = be32(data, rec + 8) as usize;
+    let len = be32(data, rec + 12) as usize;
+    if (len == 0 || start >= #data) {
+      continue;
+    }
+    let end = start + len <= #data ? start + len : #data;
+    return (start, end);
+  }
+  return none;
+}
+
+// Sizes of the TtfTypes structures CheckTable compares with.
+comptime let kSizeofCmap: usize = 12;
+comptime let kSizeofHead: usize = 54;
+comptime let kSizeofHhea: usize = 36;
+comptime let kSizeofMaxp: usize = 32;
+comptime let kSizeofGlyph: usize = 10;
+
+// TtfUtil::CheckTable, for the tables graphite2 reads here (the others it
+// checks, post, OS/2 and name, are not read on this path).
+pub fn check_table(tag: u32, t: &[u8]): bool {
+  let n = #t;
+  if (n < 4) {
+    return false;
+  }
+  match (tag) {
+    kTagCmap => {
+      return n >= kSizeofCmap && be16(t, 0) == 0;
+    },
+    kTagHead => {
+      if (n < kSizeofHead) {
+        return false;
+      }
+      let loc = bes16(t, 50);
+      return be32(t, 0) == 0x10000 && be32(t, 12) == 0x5F0F3CF5 && bes16(t, 52) == 0 && (loc == 0 || loc == 1);
+    },
+    kTagHhea => {
+      return n >= kSizeofHhea && be32(t, 0) == 0x10000 && bes16(t, 32) == 0;
+    },
+    kTagMaxp => {
+      return n >= kSizeofMaxp && be32(t, 0) == 0x10000;
+    },
+    kTagGlyf => {
+      return n >= kSizeofGlyph;
+    },
+    _ => {
+      return true;
+    },
+  }
+}
+
+// Face::Table: the checked table, decompressed when its version is at least
+// `version` and its header names LZ4; empty when absent or rejected.
+pub fn face_table(data: &[u8], sfnt: usize, tag: u32, version: u32 = 0xFFFFFFFF): List<u8> {
+  var out: List<u8> = List();
+  let (start, end) = sfnt_table(data, sfnt, tag) else {
+    return out;
+  };
+  let t = data[start..end];
+  if (!check_table(tag, t)) {
+    return out;
+  }
+  if (be32(t, 0) >= version) {
+    // Face::Table::decompress
+    if (#t < 20) {
+      // E_BADSIZE: decompress returns early and the table stays as it is.
+      for (let b in t) {
+        out.push(b);
+      }
+      return out;
+    }
+    let hdr = be32(t, 4);
+    let scheme = hdr >> 27;
+    if (scheme == 0) {
+      for (let b in t) {
+        out.push(b);
+      }
+      return out;
+    }
+    if (scheme != 1) {
+      return out;
+    }
+    let size = (hdr & 0x07FFFFFF) as usize;
+    if (size < 4) {
+      return out;
+    }
+    var dst: List<u8> = List();
+    for (let i in 0..size) {
+      dst.push(0);
+    }
+    let got = lz4_decompress(t[8..], dst);
+    if (got != size as i64 || be32(dst.as_slice(), 0) != be32(t, 0)) {
+      return out;
+    }
+    return dst;
+  }
+  for (let b in t) {
+    out.push(b);
+  }
+  return out;
+}
+
+// lz4::decompress (Decompressor.cpp): the bytes written, or -1. The C++ copies
+// in machine words and may write past a literal before the next sequence
+// overwrites it; the bytes that remain are the same.
+fn lz4_decompress(src: &[u8], var out&: List<u8>): i64 {
+  let in_size = #src;
+  var out_size = out.len();
+  if (out_size <= in_size || in_size < 13) {
+    return -1;
+  }
+  var s = 0usize;
+  var d = 0usize;
+  var literal = 0usize;
+  var literal_len = 0usize;
+  while (true) {
+    // read_sequence
+    let token = src[s] as usize;
+    s += 1;
+    literal_len = read_literal(src, s, token >> 4);
+    literal = s;
+    s += literal_len;
+    if (s + 2 > in_size || s < literal) {
+      break;
+    }
+    let match_dist = src[s] as usize | (src[s + 1] as usize << 8);
+    s += 2;
+    let match_len = read_literal(src, s, token & 0xF) + 4;
+    if (s > in_size - 6) {
+      break;
+    }
+    if (literal_len != 0) {
+      if (((literal_len + 7) & ~7usize) > out_size) {
+        return -1;
+      }
+      for (let i in 0..literal_len) {
+        out[d + i] = src[literal + i];
+      }
+      d += literal_len;
+      out_size -= literal_len;
+    }
+    if (match_dist > d || out_size < 5 || match_len > out_size - 5 || match_dist == 0) {
+      return -1;
+    }
+    let from = d - match_dist;
+    for (let i in 0..match_len) {
+      out[d + i] = out[from + i];
+    }
+    d += match_len;
+    out_size -= match_len;
+  }
+  if (literal + literal_len > in_size || literal_len > out_size) {
+    return -1;
+  }
+  for (let i in 0..literal_len) {
+    out[d + i] = src[literal + i];
+  }
+  d += literal_len;
+  return d as i64;
+}
+
+// read_literal: a length of 15 continues in the following bytes. Advances `s`.
+fn read_literal(src: &[u8], var s&: usize, l0: usize): usize {
+  var l = l0;
+  if (l == 15 && s != #src) {
+    var b = 0usize;
+    while (true) {
+      b = src[s] as usize;
+      s += 1;
+      l += b;
+      if (!(b == 0xFF && s != #src)) {
+        break;
+      }
+    }
+  }
+  return l;
+}
+
+// TtfUtil::HorMetrics: the advance width, or none.
+pub fn hor_advance(gid: u32, hmtx: &[u8], hhea: &[u8]): u32? {
+  let long_metrics = be16(hhea, 34) as usize;
+  let g = gid as usize;
+  if (g < long_metrics) {
+    if ((g + 1) * 4 > #hmtx) {
+      return none;
+    }
+    return be16(hmtx, g * 4);
+  }
+  let lsb_offset = 4 * long_metrics + 2 * (g - long_metrics);
+  // lLsbOffset >= lHmtxSize - sizeof(int16), in size_t
+  let limit = #hmtx >= 2 ? #hmtx - 2 : 0xFFFFFFFFFFFFFFFFusize;
+  if (lsb_offset >= limit || long_metrics == 0) {
+    return none;
+  }
+  return be16(hmtx, (long_metrics - 1) * 4);
+}
+
+// TtfUtil::LocaLookup: the glyph's offset into glyf, -1 for an empty glyph,
+// -2 when the id is out of range.
+pub fn loca_lookup(gid: u32, loca: &[u8], head: &[u8]): i64 {
+  let format = bes16(head, 50);
+  let n = #loca;
+  let g = gid as usize;
+  if (format == 0) {
+    if (n > 1 && g + 1 < n >> 1) {
+      let res = (be16(loca, g * 2) as i64) << 1;
+      if (res == (be16(loca, g * 2 + 2) as i64) << 1) {
+        return -1;
+      }
+      return res;
+    }
+  } else if (format == 1) {
+    if (n > 3 && g + 1 < n >> 2) {
+      let res = be32(loca, g * 4) as i64;
+      if (res == be32(loca, g * 4 + 4) as i64) {
+        return -1;
+      }
+      return res;
+    }
+  }
+  return -2;
+}
+
+// TtfUtil::GlyfLookup + GlyfBox: the glyph header's bounding box.
+pub fn glyf_box(glyf: &[u8], offset: i64): (i32, i32, i32, i32)? {
+  if (offset < 0 || offset as usize >= #glyf - kSizeofGlyph) {
+    return none;
+  }
+  let o = offset as usize;
+  return (bes16(glyf, o + 2), bes16(glyf, o + 4), bes16(glyf, o + 6), bes16(glyf, o + 8));
+}
+
+// TtfUtil::FindCmapSubtable: the subtable's offset in the cmap, or none.
+pub fn find_cmap_subtable(cmap: &[u8], platform: u32, encoding: u32): usize? {
+  let n = be16(cmap, 2) as i64;
+  let length = #cmap as i64;
+  if (length != 0 && 12 + 8 * (n - 1) > length) {
+    return none;
+  }
+  for (let i in 0..n) {
+    let rec = 4 + i as usize * 8;
+    if (be16(cmap, rec) != platform || be16(cmap, rec + 2) != encoding) {
+      continue;
+    }
+    let offset = be32(cmap, rec + 4) as i64;
+    if (length != 0) {
+      if (offset > length - 2) {
+        return none;
+      }
+      let format = be16(cmap, offset as usize);
+      if (format == 4) {
+        if (offset > length - 4) {
+          return none;
+        }
+        let sub_len = be16(cmap, offset as usize + 2) as i64;
+        if (i + 1 == n) {
+          if (sub_len > length - offset) {
+            return none;
+          }
+        } else if (sub_len > be32(cmap, rec + 12) as i64) {
+          return none;
+        }
+      }
+      if (format == 12) {
+        if (offset > length - 6) {
+          return none;
+        }
+        // be::peek<uint32> right after the format: the reserved word and the
+        // length's high half.
+        let sub_len = be32(cmap, offset as usize + 2) as i64;
+        if (i + 1 == n) {
+          if (sub_len > length - offset) {
+            return none;
+          }
+        } else if (sub_len > be32(cmap, rec + 12) as i64) {
+          return none;
+        }
+      }
+    }
+    return offset as usize;
+  }
+  return none;
+}
+
+// TtfUtil::CheckCmapSubtable4 (the subtable runs to the end of the cmap).
+pub fn check_cmap4(cmap: &[u8], at: usize?): bool {
+  let t = at else {
+    return false;
+  };
+  if (t > #cmap) {
+    return false;
+  }
+  let table_len = #cmap - t;
+  if (table_len < 6 || be16(cmap, t) != 4) {
+    return false;
+  }
+  if (table_len < 16) {
+    return false;
+  }
+  let length = be16(cmap, t + 2) as usize;
+  if (length > table_len || length < 16) {
+    return false;
+  }
+  let n = (be16(cmap, t + 6) >> 1) as usize;
+  if (n == 0 || length < 16 + 8 * n) {
+    return false;
+  }
+  return be16(cmap, t + 14 + 2 * (n - 1)) == 0xFFFF;
+}
+
+// TtfUtil::CmapSubtable4Lookup. Word indices are relative to the subtable.
+pub fn cmap4_lookup(cmap: &[u8], t: usize, u: u32, range_key: i32): u32 {
+  let w = fn(i: usize): u32 => be16(cmap, t + 2 * i);
+  let n_seg = (w(3) >> 1) as usize;
+  var mid = 0usize;
+  var ch_end = 0u32;
+  if (range_key != 0) {
+    mid = 7 + range_key as usize;
+    ch_end = w(mid);
+  } else {
+    var left = 7usize;
+    var n = n_seg;
+    while (n > 0) {
+      let c = n >> 1;
+      mid = left + c;
+      ch_end = w(mid);
+      if (u <= ch_end) {
+        if (c == 0 || u > w(mid - 1)) {
+          break;
+        }
+        n = c;
+      } else {
+        left = mid + 1;
+        n -= c + 1;
+      }
+    }
+    if (n == 0) {
+      return 0;
+    }
+  }
+  mid += n_seg + 1;
+  let ch_start = w(mid);
+  if (ch_end >= u && u >= ch_start) {
+    mid += n_seg;
+    let delta = w(mid);
+    mid += n_seg;
+    let range_offset = w(mid);
+    if (range_offset == 0) {
+      return (delta +% u) & 0xFFFF;
+    }
+    let offset = (u - ch_start) as usize + (range_offset >> 1) as usize + mid;
+    if (offset * 2 + 1 >= w(1) as usize) {
+      return 0;
+    }
+    let g = w(offset);
+    return g != 0 ? (g +% delta) & 0xFFFF : 0;
+  }
+  return 0;
+}
+
+// TtfUtil::CmapSubtable4NextCodepoint.
+pub fn cmap4_next(cmap: &[u8], t: usize, u: u32, var range_key&: i32): u32 {
+  let w = fn(i: usize): u32 => be16(cmap, t + 2 * i);
+  let n_range = (w(3) >> 1) as i32;
+  let start_code = 7 + n_range as usize + 1;
+  var prev = u;
+  if (prev == 0) {
+    range_key = 0;
+    return w(start_code);
+  } else if (prev >= 0xFFFF) {
+    range_key = n_range - 1;
+    return 0xFFFF;
+  }
+  var i = range_key;
+  while (i > 0 && w(start_code + i as usize) > prev) {
+    i -= 1;
+  }
+  while (i < n_range - 1 && w(7 + i as usize) < prev) {
+    i += 1;
+  }
+  let s = w(start_code + i as usize);
+  let e = w(7 + i as usize);
+  if (s > prev) {
+    prev = s - 1;
+  }
+  if (e > prev) {
+    range_key = i;
+    return prev + 1;
+  }
+  range_key = i + 1;
+  return i + 1 >= n_range ? 0xFFFF : w(start_code + i as usize + 1);
+}
+
+// TtfUtil::CheckCmapSubtable12.
+pub fn check_cmap12(cmap: &[u8], at: usize?): bool {
+  let t = at else {
+    return false;
+  };
+  if (t > #cmap) {
+    return false;
+  }
+  let table_len = #cmap - t;
+  if (table_len < 6 || be16(cmap, t) != 12) {
+    return false;
+  }
+  if (table_len < 28) {
+    return false;
+  }
+  let length = be32(cmap, t + 4) as usize;
+  if (length > table_len || length < 28) {
+    return false;
+  }
+  let groups = be32(cmap, t + 12) as usize;
+  // (num_groups - 1) wraps for an empty table, and the length never matches.
+  return groups != 0 && !(groups > 0x10000000 || length != 28 + (groups - 1) * 12);
+}
+
+// TtfUtil::CmapSubtable12Lookup.
+pub fn cmap12_lookup(cmap: &[u8], t: usize, u: u32, range_key: i32): u32 {
+  let groups = be32(cmap, t + 12);
+  var i = range_key as u32;
+  while (i < groups) {
+    let g = t + 16 + i as usize * 12;
+    let s = be32(cmap, g);
+    let e = be32(cmap, g + 4);
+    if (u >= s && u <= e) {
+      return (be32(cmap, g + 8) +% (u - s)) & 0xFFFF;
+    }
+    i += 1;
+  }
+  return 0;
+}
+
+// TtfUtil::CmapSubtable12NextCodepoint.
+pub fn cmap12_next(cmap: &[u8], t: usize, u: u32, var range_key&: i32): u32 {
+  let n_range = be32(cmap, t + 12) as i32;
+  let start = fn(i: i32): u32 => be32(cmap, t + 16 + i as usize * 12);
+  let end = fn(i: i32): u32 => be32(cmap, t + 20 + i as usize * 12);
+  var prev = u;
+  if (prev == 0) {
+    range_key = 0;
+    return start(0);
+  } else if (prev >= 0x10FFFF) {
+    range_key = n_range;
+    return 0x10FFFF;
+  }
+  var i = range_key;
+  while (i > 0 && start(i) > prev) {
+    i -= 1;
+  }
+  while (i < n_range - 1 && end(i) < prev) {
+    i += 1;
+  }
+  let s = start(i);
+  let e = end(i);
+  if (s > prev) {
+    prev = s - 1;
+  }
+  if (e > prev) {
+    range_key = i;
+    return prev + 1;
+  }
+  range_key = i + 1;
+  return i + 1 >= n_range ? 0x10FFFF : start(i + 1);
+}

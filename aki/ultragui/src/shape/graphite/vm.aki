@@ -1,0 +1,661 @@
+// graphite2's rule machine (direct_machine.cpp, opcodes.h, Machine.h, the
+// SlotMap of Rule.h): runs a decoded constraint or action program over the
+// slot map, with the C++'s stack (and its guard check after each
+// instruction), its slot-reference bounds, its "die" exits and the
+// positioning a position read triggers.
+//
+// Differences in shape: `map` is an index into the slot map (the C++ keeps a
+// pointer); a null `is` slot, which the C++ would dereference, makes the
+// instruction do nothing.
+
+module ultragui::shape::graphite::vm;
+
+import {swap} from akikit::algorithm;
+import {List, filled} from akikit::containers::list;
+import {
+  Code, kOpAdd, kOpAnd, kOpAssoc, kOpAttrAdd, kOpAttrSet, kOpAttrSetSlot, kOpAttrSub, kOpBitAnd, kOpBitNot, kOpBitOr, kOpBitSet, kOpCntxtItem, kOpCond,
+  kOpCopyNext, kOpDelete, kOpDiv, kOpEqual, kOpGtr, kOpGtrEq, kOpIattrAdd, kOpIattrSet, kOpIattrSetSlot, kOpIattrSub, kOpInsert, kOpLess, kOpLessEq,
+  kOpMaximum, kOpMinimum, kOpMul, kOpNeg, kOpNext, kOpNop, kOpNot, kOpNotEq, kOpOr, kOpPopRet, kOpPushAttToGattrObs, kOpPushAttToGlyphAttr,
+  kOpPushAttToGlyphMetric, kOpPushByte, kOpPushByteU, kOpPushFeat, kOpPushGlyphAttr, kOpPushGlyphAttrObs, kOpPushGlyphMetric, kOpPushIslotAttr,
+  kOpPushLong, kOpPushProcState, kOpPushShort, kOpPushShortU, kOpPushSlotAttr, kOpPushVersion, kOpPutCopy, kOpPutGlyph, kOpPutGlyph8bitObs,
+  kOpPutSubs, kOpPutSubs8bitObs, kOpRetTrue, kOpRetZero, kOpSetFeat, kOpSub, kOpTempCopy, kOpTrunc16, kOpTrunc8,
+} from ultragui::shape::graphite::code;
+import {GrFace} from ultragui::shape::graphite::grface;
+import {Segment, kNone, kSlatAttTo, kSlatPosX, kSlatPosY, kSlotCopied, kSlotDeleted} from ultragui::shape::graphite::segment;
+
+// Machine::status_t
+pub comptime let kFinished: u32 = 0;
+pub comptime let kStackUnderflow: u32 = 1;
+pub comptime let kStackNotEmpty: u32 = 2;
+pub comptime let kStackOverflow: u32 = 3;
+pub comptime let kSlotOffsetOutBounds: u32 = 4;
+pub comptime let kDiedEarly: u32 = 5;
+
+pub comptime let kMaxSlots: u32 = 64;  // SlotMap::MAX_SLOTS
+comptime let kStackMax: i64 = 1024;     // Machine::STACK_MAX
+
+// SlotMap: map[0] is the slot before the first entry, entry n is map[n + 1].
+pub struct SlotMap {
+  pub var map: List<u32> = filled(kMaxSlots as usize + 8, kNone)
+  pub var size: u32 = 0
+  pub var precontext: u32 = 0
+  pub var highwater: u32 = kNone
+  pub var max_size: i64 = 0
+  pub var dir: u32 = 0
+  pub var highpassed: bool = false
+  pub var stack: List<i32> = filled(2300, 0i32)  // Machine::_stack, kept for the whole run
+
+  pub fn at(self&, n: i64): u32 => n + 1 >= 0 && (n + 1) < self.map.len() as i64 ? self.map[(n + 1) as usize] : kNone;
+  pub fn set_highwater(var self&, s: u32) {
+    self.highwater = s;
+    self.highpassed = false;
+  }
+  pub fn reset(var self&, prev: u32, ctxt: u32) {
+    self.size = 0;
+    self.precontext = ctxt;
+    self.map[0] = prev;
+  }
+  pub fn push(var self&, s: u32) {
+    self.size += 1;
+    if ((self.size as usize) < self.map.len()) {
+      self.map[self.size as usize] = s;
+    }
+  }
+}
+
+// The machine's registers.
+struct Regs {
+  pub var ip: usize = 0
+  pub var dp: usize = 0
+  pub var sp: i64 = 0
+  pub var is: u32 = kNone
+  pub var map: i64 = 0
+  pub var positioned: bool = false
+}
+
+comptime let kStackBase: i64 = 1100;
+
+// Machine::Code::run: runs `code` with the map position `map` (an index into
+// smap.map), which it moves; the program's result. A failure sets `status`.
+pub fn run_code(gf&: GrFace, code&: Code, var seg&: Segment, var smap&: SlotMap, var map&: usize, var status&: u32): i32 {
+  let probe = code.max_ref as i64 + smap.precontext as i64;
+  if (smap.size as i64 <= probe || smap.at(probe) == kNone) {
+    status = kSlotOffsetOutBounds;
+    return 1;
+  }
+  var stack: List<i32> = List();
+  swap(stack, smap.stack);
+  var r = Regs { sp: kStackBase, map: map as i64 };
+  r.is = smap.map[map];
+  execute(gf, code, seg, smap, r, stack, status);
+  swap(stack, smap.stack);
+  // end: __map = map; *__map = is;
+  if (r.map >= 0 && (r.map as usize) < smap.map.len()) {
+    map = r.map as usize;
+    smap.map[map] = r.is;
+  }
+  // Machine::run + check_final_stack
+  var sp = r.sp;
+  var ret = 0i32;
+  if (sp == kStackBase + 1) {
+    ret = smap.stack[sp as usize];
+    sp -= 1;
+  }
+  if (status == kFinished) {
+    if (sp < kStackBase) {
+      status = kStackUnderflow;
+    } else if (sp >= kStackBase + kStackMax) {
+      status = kStackOverflow;
+    } else if (sp != kStackBase) {
+      status = kStackNotEmpty;
+    }
+  }
+  return ret;
+}
+
+fn s8(b: u8): i32 => (b as i8) as i32;
+
+fn push(var r&: Regs, var stack&: List<i32>, v: i32) {
+  r.sp += 1;
+  if (r.sp >= 0 && (r.sp as usize) < stack.len()) {
+    stack[r.sp as usize] = v;
+  }
+}
+
+fn pop(var r&: Regs, stack&: List<i32>): i32 {
+  let v = r.sp >= 0 && (r.sp as usize) < stack.len() ? stack[r.sp as usize] : 0;
+  r.sp -= 1;
+  return v;
+}
+
+fn top(r&: Regs, stack&: List<i32>): i32 => r.sp >= 0 && (r.sp as usize) < stack.len() ? stack[r.sp as usize] : 0;
+
+fn set_top(r&: Regs, var stack&: List<i32>, v: i32) {
+  if (r.sp >= 0 && (r.sp as usize) < stack.len()) {
+    stack[r.sp as usize] = v;
+  }
+}
+
+// slotat(x): the slot at map + x, or kNone (and slot_offset_out_bounds).
+fn slotat(r&: Regs, smap&: SlotMap, x: i32, var status&: u32): u32 {
+  let at = r.map + x as i64;
+  if (at >= 0 && at < smap.size as i64 + 1) {
+    return smap.map[at as usize];
+  }
+  status = kSlotOffsetOutBounds;
+  return kNone;
+}
+
+// seg.positionSlots(0, *smap.begin(), *(smap.end()-1), seg.currdir()), once
+// per run, before a position is read or changed.
+fn ensure_positioned(gf&: GrFace, var seg&: Segment, smap&: SlotMap, var r&: Regs, slat: u32) {
+  if ((slat == kSlatPosX || slat == kSlatPosY) && !r.positioned) {
+    let silf& = gf.silfs[0];
+    let first = smap.map[1];
+    let last = smap.map[smap.size as usize];
+    let rtl = seg.currdir();
+    let _ = seg.position_slots(silf, gf.glyphs, first, last, rtl);
+    r.positioned = true;
+  }
+}
+
+fn map_view(smap&: SlotMap): &[u32] => smap.map.as_slice()[0..(smap.size as usize + 1 < smap.map.len() ? smap.size as usize + 1 : smap.map.len())];
+
+// The instructions from r.ip until an exit, or until the stack runs a
+// STACK_MAX past its base.
+fn execute(gf&: GrFace, code&: Code, var seg&: Segment, var smap&: SlotMap, var r&: Regs, var stack&: List<i32>, var status&: u32) {
+  let silf& = gf.silfs[0];
+  let glyphs& = gf.glyphs;
+  let data = code.data.as_slice();
+  let mapb = 1 + smap.precontext as i64;
+  let dir = smap.dir;
+  while (r.ip < code.instrs.len()) {
+    let op = code.instrs[r.ip] as u32;
+    let pm = r.dp;
+    let p = fn(i: usize): u8 => pm + i < #data ? data[pm + i] : 0;
+    var exit = false;
+    var exit_value = 0i32;
+    var die = false;
+    match (op) {
+      kOpNop => {},
+      kOpPushByte => {
+        r.dp += 1;
+        push(r, stack, s8(p(0)));
+      },
+      kOpPushByteU => {
+        r.dp += 1;
+        push(r, stack, p(0) as i32);
+      },
+      kOpPushShort => {
+        r.dp += 2;
+        push(r, stack, (((p(0) as u32) << 8 | p(1) as u32) as u16 as i16) as i32);
+      },
+      kOpPushShortU => {
+        r.dp += 2;
+        push(r, stack, ((p(0) as u32) << 8 | p(1) as u32) as i32);
+      },
+      kOpPushLong => {
+        r.dp += 4;
+        push(r, stack, ((p(0) as u32) << 24 | (p(1) as u32) << 16 | (p(2) as u32) << 8 | p(3) as u32) as i32);
+      },
+      kOpAdd => {
+        let a = pop(r, stack) as u32;
+        set_top(r, stack, (top(r, stack) as u32 +% a) as i32);
+      },
+      kOpSub => {
+        let a = pop(r, stack) as u32;
+        set_top(r, stack, (top(r, stack) as u32 -% a) as i32);
+      },
+      kOpMul => {
+        let a = pop(r, stack) as u32;
+        set_top(r, stack, (top(r, stack) as u32 *% a) as i32);
+      },
+      kOpDiv => {
+        let b = pop(r, stack);
+        let a = top(r, stack);
+        if (b == 0 || (a == -2147483648 && b == -1)) {
+          die = true;
+        } else {
+          set_top(r, stack, a / b);
+        }
+      },
+      kOpMinimum => {
+        let a = pop(r, stack);
+        if (a < top(r, stack)) {
+          set_top(r, stack, a);
+        }
+      },
+      kOpMaximum => {
+        let a = pop(r, stack);
+        if (a > top(r, stack)) {
+          set_top(r, stack, a);
+        }
+      },
+      kOpNeg => {
+        set_top(r, stack, (0u32 -% (top(r, stack) as u32)) as i32);
+      },
+      kOpTrunc8 => {
+        set_top(r, stack, (top(r, stack) as u32 & 0xFF) as i32);
+      },
+      kOpTrunc16 => {
+        set_top(r, stack, (top(r, stack) as u32 & 0xFFFF) as i32);
+      },
+      kOpCond => {
+        let f = pop(r, stack);
+        let t = pop(r, stack);
+        let c = pop(r, stack);
+        push(r, stack, c != 0 ? t : f);
+      },
+      kOpAnd => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) != 0 && a != 0 ? 1 : 0);
+      },
+      kOpOr => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) != 0 || a != 0 ? 1 : 0);
+      },
+      kOpNot => {
+        set_top(r, stack, top(r, stack) == 0 ? 1 : 0);
+      },
+      kOpEqual => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) == a ? 1 : 0);
+      },
+      kOpNotEq => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) != a ? 1 : 0);
+      },
+      kOpLess => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) < a ? 1 : 0);
+      },
+      kOpGtr => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) > a ? 1 : 0);
+      },
+      kOpLessEq => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) <= a ? 1 : 0);
+      },
+      kOpGtrEq => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) >= a ? 1 : 0);
+      },
+      kOpNext | kOpCopyNext => {
+        // map - &smap[0] >= int(smap.size())
+        if (r.map - 1 >= smap.size as i64) {
+          die = true;
+        } else {
+          if (r.is != kNone) {
+            if (r.is == smap.highwater) {
+              smap.highpassed = true;
+            }
+            r.is = seg.slots[r.is as usize].next;
+          }
+          r.map += 1;
+        }
+      },
+      kOpPutGlyph8bitObs => {
+        r.dp += 1;
+        if (r.is != kNone) {
+          seg.set_glyph(silf, glyphs, r.is, silf.class_glyph(p(0) as u32, 0));
+        }
+      },
+      kOpPutSubs8bitObs => {
+        r.dp += 3;
+        let slot = slotat(r, smap, s8(p(0)), status);
+        if (slot != kNone && r.is != kNone) {
+          let index = silf.find_class_index(p(1) as u32, seg.slots[slot as usize].glyphid);
+          seg.set_glyph(silf, glyphs, r.is, silf.class_glyph(p(2) as u32, index));
+        }
+      },
+      kOpPutCopy => {
+        r.dp += 1;
+        if (r.is != kNone && !seg.slots[r.is as usize].is_deleted()) {
+          let rf = slotat(r, smap, s8(p(0)), status);
+          if (rf != kNone && rf != r.is) {
+            let me = seg.slots[r.is as usize];
+            if (me.parent != kNone || me.child != kNone) {
+              die = true;
+            } else {
+              for (let k in 0..seg.num_user) {
+                seg.user_attrs[r.is as usize * seg.num_user + k] = seg.user_attrs[rf as usize * seg.num_user + k];
+              }
+              var copy = seg.slots[rf as usize];
+              copy.child = kNone;
+              copy.sibling = kNone;
+              copy.next = me.next;
+              copy.prev = me.prev;
+              seg.slots[r.is as usize] = copy;
+              if (copy.parent != kNone) {
+                let _ = seg.add_child(copy.parent, r.is);
+              }
+            }
+          }
+          if (!die) {
+            seg.slots[r.is as usize].flags &= ~(kSlotCopied | kSlotDeleted);
+          }
+        }
+      },
+      kOpInsert => {
+        smap.max_size -= 1;
+        if (smap.max_size <= 0) {
+          die = true;
+        } else {
+          let ns = seg.new_slot();
+          if (ns == kNone) {
+            die = true;
+          } else {
+            var iss = r.is;
+            while (iss != kNone && seg.slots[iss as usize].is_deleted()) {
+              iss = seg.slots[iss as usize].next;
+            }
+            if (iss == kNone) {
+              if (seg.last != kNone) {
+                let l = seg.last;
+                seg.slots[l as usize].next = ns;
+                seg.slots[ns as usize].prev = l;
+                seg.slots[ns as usize].before = seg.slots[l as usize].before;
+                seg.last = ns;
+              } else {
+                seg.first = ns;
+                seg.last = ns;
+              }
+            } else if (seg.slots[iss as usize].prev != kNone) {
+              let pv = seg.slots[iss as usize].prev;
+              seg.slots[pv as usize].next = ns;
+              seg.slots[ns as usize].prev = pv;
+              seg.slots[ns as usize].before = seg.slots[pv as usize].after;
+            } else {
+              seg.slots[ns as usize].prev = kNone;
+              seg.slots[ns as usize].before = seg.slots[iss as usize].before;
+              seg.first = ns;
+            }
+            seg.slots[ns as usize].next = iss;
+            if (iss != kNone) {
+              seg.slots[iss as usize].prev = ns;
+              seg.slots[ns as usize].original = seg.slots[iss as usize].original;
+              seg.slots[ns as usize].after = seg.slots[iss as usize].before;
+            } else if (seg.slots[ns as usize].prev != kNone) {
+              let pv = seg.slots[ns as usize].prev;
+              seg.slots[ns as usize].original = seg.slots[pv as usize].original;
+              seg.slots[ns as usize].after = seg.slots[pv as usize].after;
+            } else {
+              seg.slots[ns as usize].original = seg.default_original;
+            }
+            if (r.is == smap.highwater) {
+              smap.highpassed = false;
+            }
+            r.is = ns;
+            seg.num_glyphs += 1;
+            if (r.map != 0) {
+              r.map -= 1;
+            }
+          }
+        }
+      },
+      kOpDelete => {
+        if (r.is == kNone || seg.slots[r.is as usize].is_deleted()) {
+          die = true;
+        } else {
+          let me = r.is;
+          seg.slots[me as usize].flags |= kSlotDeleted;
+          let pv = seg.slots[me as usize].prev;
+          let nx = seg.slots[me as usize].next;
+          if (pv != kNone) {
+            seg.slots[pv as usize].next = nx;
+          } else {
+            seg.first = nx;
+          }
+          if (nx != kNone) {
+            seg.slots[nx as usize].prev = pv;
+          } else {
+            seg.last = pv;
+          }
+          if (me == smap.highwater) {
+            smap.set_highwater(nx);
+          }
+          if (pv != kNone) {
+            r.is = pv;
+          }
+          seg.num_glyphs -= 1;
+        }
+      },
+      kOpAssoc => {
+        let num = p(0) as usize;
+        r.dp += 1 + num;
+        var mx = -1i32;
+        var mn = -1i32;
+        for (let k in 0..num) {
+          let ts = slotat(r, smap, s8(p(1 + k)), status);
+          if (ts != kNone) {
+            let b = seg.slots[ts as usize].before;
+            let a = seg.slots[ts as usize].after;
+            if (mn == -1 || b < mn) {
+              mn = b;
+            }
+            if (a > mx) {
+              mx = a;
+            }
+          }
+        }
+        if (mn > -1 && r.is != kNone) {
+          seg.slots[r.is as usize].before = mn;
+          seg.slots[r.is as usize].after = mx;
+        }
+      },
+      kOpCntxtItem => {
+        r.dp += 3;
+        let is_arg = s8(p(0)) as i64;
+        if (mapb + is_arg != r.map) {
+          r.ip += p(1) as usize;
+          r.dp += p(2) as usize;
+          push(r, stack, 1);
+        }
+      },
+      kOpAttrSet => {
+        r.dp += 1;
+        let val = pop(r, stack);
+        if (r.is != kNone) {
+          seg.set_attr(silf, glyphs, r.is, p(0) as u32, 0, val, map_view(smap), dir);
+        }
+      },
+      kOpAttrAdd | kOpAttrSub | kOpIattrAdd | kOpIattrSub => {
+        let indexed = op == kOpIattrAdd || op == kOpIattrSub;
+        r.dp += indexed ? 2 : 1;
+        let slat = p(0) as u32;
+        let idx: u32 = indexed ? p(1) as u32 : 0;
+        let val = pop(r, stack) as u32;
+        ensure_positioned(gf, seg, smap, r, slat);
+        if (r.is != kNone) {
+          let res = seg.get_attr(silf, glyphs, r.is, slat, idx) as u32;
+          let v = op == kOpAttrAdd || op == kOpIattrAdd ? val +% res : res -% val;
+          seg.set_attr(silf, glyphs, r.is, slat, idx, v as i32, map_view(smap), dir);
+        }
+      },
+      kOpAttrSetSlot => {
+        r.dp += 1;
+        let slat = p(0) as u32;
+        let offset = slat == kSlatAttTo ? (r.map - 1) as i32 : 0;
+        let val = pop(r, stack) +% offset;
+        if (r.is != kNone) {
+          seg.set_attr(silf, glyphs, r.is, slat, offset as u32 & 0xFF, val, map_view(smap), dir);
+        }
+      },
+      kOpIattrSetSlot => {
+        r.dp += 2;
+        let slat = p(0) as u32;
+        let idx = p(1) as u32;
+        let val = pop(r, stack) +% (slat == kSlatAttTo ? (r.map - 1) as i32 : 0);
+        if (r.is != kNone) {
+          seg.set_attr(silf, glyphs, r.is, slat, idx, val, map_view(smap), dir);
+        }
+      },
+      kOpPushSlotAttr | kOpPushIslotAttr => {
+        let indexed = op == kOpPushIslotAttr;
+        r.dp += indexed ? 3 : 2;
+        let slat = p(0) as u32;
+        ensure_positioned(gf, seg, smap, r, slat);
+        let slot = slotat(r, smap, s8(p(1)), status);
+        if (slot != kNone) {
+          push(r, stack, seg.get_attr(silf, glyphs, slot, slat, indexed ? p(2) as u32 : 0));
+        }
+      },
+      kOpPushGlyphAttrObs | kOpPushAttToGattrObs => {
+        r.dp += 2;
+        var slot = slotat(r, smap, s8(p(1)), status);
+        if (slot != kNone) {
+          if (op == kOpPushAttToGattrObs && seg.slots[slot as usize].parent != kNone) {
+            slot = seg.slots[slot as usize].parent;
+          }
+          push(r, stack, glyphs.glyph_attr(seg.slots[slot as usize].glyphid, p(0) as u32));
+        }
+      },
+      kOpPushGlyphMetric | kOpPushAttToGlyphMetric => {
+        r.dp += 3;
+        var slot = slotat(r, smap, s8(p(1)), status);
+        if (slot != kNone) {
+          if (op == kOpPushAttToGlyphMetric && seg.slots[slot as usize].parent != kNone) {
+            slot = seg.slots[slot as usize].parent;
+          }
+          push(r, stack, seg.glyph_metric(glyphs, slot, p(0) as u32, p(2) as u32, dir != 0));
+        }
+      },
+      kOpPushFeat => {
+        r.dp += 2;
+        let slot = slotat(r, smap, s8(p(1)), status);
+        if (slot != kNone) {
+          let fid = seg.charinfo[seg.slots[slot as usize].original as usize].fid as usize;
+          var v = 0u32;
+          let fi = p(0) as usize;
+          if (fi < gf.features.feats.len()) {
+            v = gf.features.feats[fi].value(seg.feats[fid]);
+          }
+          push(r, stack, v as i32);
+        }
+      },
+      kOpSetFeat => {
+        r.dp += 2;
+        let slot = slotat(r, smap, s8(p(1)), status);
+        if (slot != kNone) {
+          let fid = seg.charinfo[seg.slots[slot as usize].original as usize].fid as usize;
+          var val = pop(r, stack) as u32;
+          let fi = p(0) as usize;
+          if (fi < gf.features.feats.len()) {
+            let f = gf.features.feats[fi];
+            if (val > f.max) {
+              val = f.max;
+            }
+            let _ = f.apply(val, seg.feats[fid]);
+          }
+        }
+      },
+      kOpPopRet => {
+        exit_value = pop(r, stack);
+        exit = true;
+      },
+      kOpRetZero => {
+        exit_value = 0;
+        exit = true;
+      },
+      kOpRetTrue => {
+        exit_value = 1;
+        exit = true;
+      },
+      kOpIattrSet => {
+        r.dp += 2;
+        let val = pop(r, stack);
+        if (r.is != kNone) {
+          seg.set_attr(silf, glyphs, r.is, p(0) as u32, p(1) as u32, val, map_view(smap), dir);
+        }
+      },
+      kOpPushProcState => {
+        r.dp += 1;
+        push(r, stack, 1);
+      },
+      kOpPushVersion => {
+        push(r, stack, 0x00030000);
+      },
+      kOpPutSubs => {
+        r.dp += 5;
+        let slot = slotat(r, smap, s8(p(0)), status);
+        if (slot != kNone && r.is != kNone) {
+          let input = (p(1) as u32) << 8 | p(2) as u32;
+          let output = (p(3) as u32) << 8 | p(4) as u32;
+          let index = silf.find_class_index(input, seg.slots[slot as usize].glyphid);
+          seg.set_glyph(silf, glyphs, r.is, silf.class_glyph(output, index));
+        }
+      },
+      kOpPutGlyph => {
+        r.dp += 2;
+        if (r.is != kNone) {
+          seg.set_glyph(silf, glyphs, r.is, silf.class_glyph((p(0) as u32) << 8 | p(1) as u32, 0));
+        }
+      },
+      kOpPushGlyphAttr | kOpPushAttToGlyphAttr => {
+        r.dp += 3;
+        var slot = slotat(r, smap, s8(p(2)), status);
+        if (slot != kNone) {
+          if (op == kOpPushAttToGlyphAttr && seg.slots[slot as usize].parent != kNone) {
+            slot = seg.slots[slot as usize].parent;
+          }
+          push(r, stack, glyphs.glyph_attr(seg.slots[slot as usize].glyphid, (p(0) as u32) << 8 | p(1) as u32));
+        }
+      },
+      kOpTempCopy => {
+        let ns = seg.new_slot();
+        if (ns == kNone || r.is == kNone) {
+          die = true;
+        } else {
+          for (let k in 0..seg.num_user) {
+            seg.user_attrs[ns as usize * seg.num_user + k] = seg.user_attrs[r.is as usize * seg.num_user + k];
+          }
+          var copy = seg.slots[r.is as usize];
+          copy.flags |= kSlotCopied;
+          seg.slots[ns as usize] = copy;
+          if (r.map >= 0 && (r.map as usize) < smap.map.len()) {
+            smap.map[r.map as usize] = ns;
+          }
+        }
+      },
+      kOpBitAnd => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) & a);
+      },
+      kOpBitOr => {
+        let a = pop(r, stack);
+        set_top(r, stack, top(r, stack) | a);
+      },
+      kOpBitNot => {
+        set_top(r, stack, ~top(r, stack));
+      },
+      kOpBitSet => {
+        r.dp += 4;
+        let m = (p(0) as u32) << 8 | p(1) as u32;
+        let v = (p(2) as u32) << 8 | p(3) as u32;
+        set_top(r, stack, ((top(r, stack) as u32 & ~m) | v) as i32);
+      },
+      _ => {
+        // NEXT_N, PUSH_IGLYPH_ATTR, PUT_SUBS2/3: the decoder rejects them.
+        exit = true;
+      },
+    }
+    if (die) {
+      // DIE: is = seg.last(); status = died_early; EXIT(1)
+      r.is = seg.last;
+      status = kDiedEarly;
+      push(r, stack, 1);
+      return;
+    }
+    if (exit) {
+      push(r, stack, exit_value);
+      return;
+    }
+    // ENDOP: leave when the stack has moved STACK_MAX from its base.
+    let depth = r.sp - kStackBase;
+    if (depth >= kStackMax || depth <= -kStackMax) {
+      return;
+    }
+    r.ip += 1;
+  }
+}

@@ -1,0 +1,38 @@
+// Font loader / rasterizer boundary. Coordinates are signed 26.6 pixels;
+// tags and flags retain FreeType's numeric values, including unused bits.
+module ultragui::font::raster::outline;
+
+import {List} from akikit::containers::list;
+
+pub comptime let kConic: u8 = 0;
+pub comptime let kOnCurve: u8 = 1;
+pub comptime let kCubic: u8 = 2;
+pub comptime let kEvenOddFill: i32 = 2;
+pub comptime let kReverseFill: i32 = 4;
+pub comptime let kOverlap: i32 = 64;
+pub comptime let kHighPrecision: i32 = 256;
+
+pub struct OutlinePoint : Copy, Equal {
+  pub var x: i32 = 0
+  pub var y: i32 = 0
+}
+
+pub struct Outline : Clone {
+  pub var points: List<OutlinePoint> = List()
+  pub var tags: List<u8> = List()
+  // Inclusive last point index of each contour.
+  pub var contours: List<u32> = List()
+  pub var flags: i32 = 0
+}
+
+pub struct GrayBitmap {
+  pub var width: u32 = 0
+  pub var rows: u32 = 0
+  pub var pitch: i32 = 0
+  pub var left: i32 = 0
+  pub var top: i32 = 0
+  // Top row first, tightly packed, 256 gray levels.
+  pub var pixels: List<u8> = List()
+}
+
+pub enum RasterError { InvalidOutline, RasterOverflow }

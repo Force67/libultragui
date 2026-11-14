@@ -1,0 +1,25 @@
+// Hand-written for the golden comparison (see ../README.md, "Extra
+// scenarios"): text in many scripts and sizes, so a scenario per font
+// compares every glyph the text engine rasterizes and every position the
+// shaper returns against the C++ (FreeType + HarfBuzz).
+panel root {
+  width: 100%; height: 100%; padding: 12; gap: 4; background: #101018;
+  layout: column; overflow: scroll;
+
+  text t6  { text: "Tiny 6px: The quick brown fox jumps over the lazy dog 0123456789"; font-size: 6; color: #ffffff; }
+  text t8  { text: "8px: Sphinx of black quartz, judge my vow. fi fl ffi ffl AV To Wa"; font-size: 8; color: #ffffff; }
+  text t9  { text: "9px: Pack my box with five dozen liquor jugs! (){}[]<>@#$%^&*"; font-size: 9; color: #e0e0ff; }
+  text t11 { text: "11px: Grüße aus Köln, ½ € £ ¥ © ® ™ — “quotes” ‘single’ … •"; font-size: 11; color: #e0e0ff; }
+  text t13 { text: "13px: Ελληνικά: Ξεσκεπάζω την ψυχοφθόρα βδελυγμία. Кириллица: Съешь же ещё этих мягких французских булок."; font-size: 13; color: #ffe0e0; }
+  text t14 { text: "14px: combining: é ä ñ ộ Å Ǻ ǻ ḉ ṩ ẫ — Tiếng Việt: Chữ Quốc ngữ"; font-size: 14; color: #e0ffe0; }
+  text t16 { text: "16px: العربية: نص حكيم له سر قاطع وذو شأن عظيم مكتوب على ثوب أخضر"; font-size: 16; color: #ffffff; }
+  text t17 { text: "17px: עברית: דג סקרן שט בים מאוכזב ולפתע מצא חברה"; font-size: 17; color: #ffffff; }
+  text t18 { text: "18px: हिन्दी: ऋषियों को सताने वाले दुष्ट राक्षसों के राजा रावण का सर्वनाश करने वाले"; font-size: 18; color: #ffffd0; }
+  text t20 { text: "20px: ไทย: เป็นมนุษย์สุดประเสริฐเลิศคุณค่า ខ្មែរ: ខ្ញុំអាចញ៉ាំកញ្ចក់បាន"; font-size: 20; color: #d0ffff; }
+  text t22 { text: "22px: 中文：我能吞下玻璃而不伤身体。日本語：いろはにほへと ちりぬるを 한국어: 다람쥐 헌 쳇바퀴에 타고파"; font-size: 22; color: #ffffff; }
+  text t24 { text: "24px Wrapped paragraph text that is long enough to wrap over several lines inside a narrow box, with kerning pairs like AVA, Yo, Te, LT and P."; font-size: 24; color: #c0c0ff; width: 600; }
+  text t32 { text: "32px: Hamburgefonstiv ÆØÅ æøå ß ŒœŸ"; font-size: 32; color: #ffffff; letter-spacing: 1.5; }
+  text t48 { text: "48px Ag Ŵ ğ ǅ ﬁ"; font-size: 48; color: #ffd080; }
+  text t72 { text: "72 Qg@&"; font-size: 72; color: #80ffd0; text-transform: uppercase; }
+  text-input name { placeholder: "Type here — ünïcödé"; width: 500; font-size: 15; }
+}

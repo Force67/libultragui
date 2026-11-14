@@ -1,0 +1,253 @@
+// input::input: the InputRouter over a HostPlatform's queue, driven the way
+// UIContext drives it (events fed through the host, poll_events, process).
+// Hover chain and cursor, press/click, drag-to-move through a DragHandle,
+// scroll bubbling, the Tab ring, spatial arrow navigation and wrap,
+// shortcuts, Enter activation, gamepad navigation, reset_state. The C++ has
+// no input test suite; the expectations follow input.cc step by step.
+
+module input_test;
+
+import {Atomic} from akikit::threading::atomic;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Rect} from ultragui::core::rect;
+import {InputRouter} from ultragui::input::input;
+import {GamepadButton, MouseButton} from ultragui::input::input_queue;
+import {DynPlatform} from ultragui::platform::platform;
+import {HostPlatform} from ultragui::platform::platform_host;
+import {Cursor, Position, WidgetState} from ultragui::style::enums;
+import {LengthUnit} from ultragui::style::property_types;
+import {DragHandle, Movable, kDragHandle, kMovable} from ultragui::widgets::components;
+import {add_child, kStyleC, kTransform, kWidgetNode, set_context, widget_state_of} from ultragui::widgets::widget;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {Expect} from ultragui_testing::expect;
+
+static let kClicks: Atomic<u32> = Atomic::<u32>(0);
+static let kLastClicked: Atomic<u32> = Atomic::<u32>(0);
+static let kShortcuts: Atomic<u32> = Atomic::<u32>(0);
+static let kBacks: Atomic<u32> = Atomic::<u32>(0);
+static let kDragX: Atomic<u32> = Atomic::<u32>(0);
+
+fn place(var world&: World, e: WidgetId, r: Rect) {
+  world.get_var(kTransform, e)!.rect = r;
+}
+
+fn has_state(world&: World, e: WidgetId, s: WidgetState): bool => widget_state_of(world, e).has(s);
+
+// root (0,0,400,400) > row (0,0,400,100) > a (10,10,80,80), b (110,10,80,80)
+//                    > c (10,200,80,80)
+struct Scene {
+  pub var root: WidgetId
+  pub var row: WidgetId
+  pub var a: WidgetId
+  pub var b: WidgetId
+  pub var c: WidgetId
+}
+
+fn build(var world&: World): Scene {
+  let root = world.create(1);
+  let row = world.create(2);
+  let a = world.create(3);
+  let b = world.create(4);
+  let c = world.create(5);
+  add_child(world, root, row);
+  add_child(world, row, a);
+  add_child(world, row, b);
+  add_child(world, root, c);
+  set_context(world, root, true);
+  place(world, root, Rect::new(0.0, 0.0, 400.0, 400.0));
+  place(world, row, Rect::new(0.0, 0.0, 400.0, 100.0));
+  place(world, a, Rect::new(10.0, 10.0, 80.0, 80.0));
+  place(world, b, Rect::new(110.0, 10.0, 80.0, 80.0));
+  place(world, c, Rect::new(10.0, 200.0, 80.0, 80.0));
+  world.get_var(kStyleC, b)!.style.cursor = Cursor::Pointer;
+  return Scene { root, row, a, b, c };
+}
+
+fn frame(var router&: InputRouter, var world&: World, var ctx&: WidgetContext, root: WidgetId): bool {
+  if (var p& = ctx.platform) {
+    p.poll_events();
+  }
+  return router.process(world, ctx, root);
+}
+
+fn check_hover_and_click(var t&: Expect) {
+  var world = World();
+  let sc = build(world);
+  var host = HostPlatform();
+  let feed = host.feed();
+  var ctx = WidgetContext { platform: DynPlatform::of(host) };
+  var router = InputRouter();
+  router.set_on_click(own fn(w: WidgetId, b: MouseButton) {
+    let _ = kClicks.fetch_add(1);
+    kLastClicked.store(w.index);
+  });
+
+  feed.push_mouse_move(Vec2::new(120.0, 20.0));
+  t.that(frame(router, world, ctx, sc.root), "hover change is consumed");
+  t.that(router.hovered_widget() == sc.b, "hovered leaf");
+  t.that(has_state(world, sc.b, WidgetState::Hovered) && has_state(world, sc.row, WidgetState::Hovered) &&
+           has_state(world, sc.root, WidgetState::Hovered), "hover lights the ancestor chain");
+  t.that(feed.requested_cursor() == Cursor::Pointer, "cursor from the hovered leaf");
+
+  feed.push_mouse_move(Vec2::new(20.0, 20.0));
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.hovered_widget() == sc.a, "hover moves");
+  t.that(!has_state(world, sc.b, WidgetState::Hovered), "old leaf loses hover");
+  t.that(has_state(world, sc.row, WidgetState::Hovered), "common ancestor keeps hover");
+  t.that(feed.requested_cursor() == Cursor::Auto, "cursor back to auto");
+
+  feed.push_mouse_button(MouseButton::Left, true);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.pressed_widget() == sc.a && has_state(world, sc.a, WidgetState::Pressed), "press");
+  t.that(router.focused_widget() == sc.a && has_state(world, sc.a, WidgetState::Focused), "press focuses");
+  feed.push_mouse_button(MouseButton::Left, false);
+  let clicks = kClicks.load();
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(kClicks.load() == clicks + 1 && kLastClicked.load() == sc.a.index, "release on the same widget clicks");
+  t.that(!has_state(world, sc.a, WidgetState::Pressed) && router.pressed_widget() == kNullWidget, "release clears press");
+
+  // Press on a, release on b: no click.
+  feed.push_mouse_button(MouseButton::Left, true);
+  feed.push_mouse_move(Vec2::new(120.0, 20.0));
+  feed.push_mouse_button(MouseButton::Left, false);
+  let clicks2 = kClicks.load();
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(kClicks.load() == clicks2, "press and release on different widgets: no click");
+
+  router.reset_state(world, ctx);
+  t.that(router.hovered_widget() == kNullWidget && router.focused_widget() == kNullWidget, "reset clears handles");
+  t.that(!has_state(world, sc.root, WidgetState::Hovered) && !has_state(world, sc.b, WidgetState::Focused) &&
+           !has_state(world, sc.a, WidgetState::Focused), "reset clears states");
+
+  t.that(!router.process(world, ctx, kNullWidget), "null root: nothing");
+  var detached = WidgetContext::detached();
+  t.that(!router.process(world, detached, sc.root), "no platform: nothing");
+}
+
+fn check_drag(var t&: Expect) {
+  var world = World();
+  let sc = build(world);
+  // row is a movable panel, a its drag handle.
+  world.add(kMovable, sc.row, Movable { on_drag: own fn(p: Vec2) { kDragX.store(@bit_cast(u32, p.x)); } });
+  world.add(kDragHandle, sc.a, DragHandle {});
+  var host = HostPlatform();
+  let feed = host.feed();
+  var ctx = WidgetContext { platform: DynPlatform::of(host) };
+  var router = InputRouter();
+  let clicks = kClicks.load();
+  router.set_on_click(own fn(w: WidgetId, b: MouseButton) { let _ = kClicks.fetch_add(1); });
+
+  feed.push_mouse_move(Vec2::new(20.0, 20.0));
+  feed.push_mouse_button(MouseButton::Left, true);
+  let _ = frame(router, world, ctx, sc.root);
+  feed.push_mouse_move(Vec2::new(22.0, 21.0));  // under the threshold
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(!router.is_dragging(), "no drag under the threshold");
+  feed.push_mouse_move(Vec2::new(50.0, 60.0));
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.is_dragging(), "drag past the threshold");
+  let s = world.get(kStyleC, sc.row)!.style;
+  t.that(s.position == Position::Absolute, "drag pins the movable absolute");
+  t.that(s.left_offset.unit == LengthUnit::Px && s.left_offset.value == 30.0 && s.top.value == 40.0,
+         "drag offsets the movable, not the handle");
+  t.that(s.right_offset.unit == LengthUnit::Auto && s.bottom.unit == LengthUnit::Auto, "drag clears right/bottom");
+  t.that(@bit_cast(f32, kDragX.load()) == 30.0, "on_drag gets the new top-left");
+  feed.push_mouse_button(MouseButton::Left, false);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(!router.is_dragging() && kClicks.load() == clicks, "release after a drag ends it without a click");
+}
+
+fn check_focus_navigation(var t&: Expect) {
+  var world = World();
+  let sc = build(world);
+  var host = HostPlatform();
+  let feed = host.feed();
+  var ctx = WidgetContext { platform: DynPlatform::of(host) };
+  var router = InputRouter();
+  router.register_shortcut(83, 2, own fn() { let _ = kShortcuts.fetch_add(1); });  // Ctrl+S
+  router.set_on_gamepad_back(own fn() { let _ = kBacks.fetch_add(1); });
+
+  // Implicit ring: only b (cursor: pointer).
+  feed.push_key(258, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.b, "implicit ring: tab focuses the pointer widget");
+
+  // Explicit tab indices: c=0, a=1, b=1 (tie broken by entity index).
+  world.get_var(kWidgetNode, sc.c)!.tab_index = 0;
+  world.get_var(kWidgetNode, sc.a)!.tab_index = 1;
+  world.get_var(kWidgetNode, sc.b)!.tab_index = 1;
+  router.set_focus(world, ctx, kNullWidget);
+  feed.push_key(258, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.c, "tab: lowest index first");
+  feed.push_key(258, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.a, "tab: next");
+  feed.push_key(258, 0, true, false, 0);
+  feed.push_key(258, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.c, "tab wraps to the front");
+  feed.push_key(258, 0, true, false, 1);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.b, "shift-tab from the front wraps to the back");
+
+  // Arrows: geometry. From b (150,50): left -> a; down from a -> c; down from
+  // c wraps up to the farthest above (a or b level: a straight above wins
+  // the wrap by distance; both are 190 back, the first in ring order stays).
+  feed.push_key(263, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.a, "left arrow");
+  feed.push_key(264, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.c, "down arrow");
+  feed.push_key(264, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.a, "down wraps to the top (first of the tie in ring order)");
+  feed.push_key(263, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.b, "left wraps to the far right");
+
+  router.set_keyboard_navigation(false);
+  feed.push_key(263, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.b, "arrows off");
+  router.set_keyboard_navigation(true);
+
+  // Shortcut, then Enter activates the focused widget.
+  let shortcuts = kShortcuts.load();
+  feed.push_key(83, 0, true, false, 2 | 1);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(kShortcuts.load() == shortcuts + 1, "shortcut fires with extra mods held");
+  let clicks = kClicks.load();
+  router.set_on_click(own fn(w: WidgetId, b: MouseButton) {
+    let _ = kClicks.fetch_add(1);
+    kLastClicked.store(w.index);
+  });
+  feed.push_key(257, 0, true, false, 0);
+  let _ = frame(router, world, ctx, sc.root);
+  t.that(kClicks.load() == clicks + 1 && kLastClicked.load() == sc.b.index, "enter clicks the focused widget");
+
+  // Gamepad: d-pad navigates, A clicks, B goes back.
+  if (var p& = ctx.platform) {
+    p.input_queue().push_gamepad_button(GamepadButton::DPadLeft, true);
+  }
+  let _ = router.process(world, ctx, sc.root);
+  t.that(router.focused_widget() == sc.a && router.gamepad_nav_active(), "d-pad left");
+  if (var p& = ctx.platform) {
+    p.input_queue().push_gamepad_button(GamepadButton::A, true);
+    p.input_queue().push_gamepad_button(GamepadButton::B, true);
+  }
+  let backs = kBacks.load();
+  let _ = router.process(world, ctx, sc.root);
+  t.that(kLastClicked.load() == sc.a.index && kBacks.load() == backs + 1, "gamepad A clicks, B goes back");
+}
+
+pub fn main(): i32 {
+  var t = Expect();
+  check_hover_and_click(t);
+  check_drag(t);
+  check_focus_navigation(t);
+  return t.finish();
+}

@@ -1,0 +1,493 @@
+// ugui/layout/layout.{h,cc}: runs flexbox layout on a tree of LayoutNodes,
+// retaining the layout tree between calls. The C++ hands the tree to yoga;
+// here it goes to layout::flex_tree, an engine that gives yoga's results bit
+// for bit for everything this file can write (PORTING.md, "The layout
+// engine"). It is driven the way the C++ drives yoga: the same setters in the
+// same order, each comparing before it dirties a node, a measure "function"
+// that reports the node's intrinsic size, MarkDirty when that size changes.
+//
+// Differences in shape:
+// * `Compute(LayoutNode* nodes, u32 count, vp)` takes a slice. Because a
+//   NodeStore lives inside the engine, `compute(store_for(id).nodes, ...)`
+//   would lend the engine twice; `compute_store(root_id, vp)` runs Compute on
+//   the store for `root_id` (what ComputeWidgetLayout does).
+// * The C++ `Retained*` (created on first use, deleted by Reset) is the
+//   engine's own fields: the retained trees and the node stores. reset()
+//   empties them. A retained tree is a FlexTree whose node i is LayoutNode i
+//   (the C++ keeps a YGNodeRef per index); there is no config to create.
+// * The measure function's context pointer, re-pointed at the caller's
+//   LayoutNode on every compute, is the intrinsic size copied into the flex
+//   node on every compute (set_intrinsic), which is what the C++ measure
+//   function reads through it.
+// * apply_style's setter function pointers are an axis enum dispatched by
+//   match (set_px / set_pct / set_auto below).
+
+module ultragui::layout::layout;
+
+import {HashMap} from akikit::containers::hash_map;
+import {List} from akikit::containers::list;
+import {max_f32} from ultragui::core::algorithm;
+import {Vec2} from ultragui::core::math;
+import {EdgeInsets, Rect} from ultragui::core::rect;
+import {AlignContent, AlignItems, AlignSelf, FlexDirection, FlexWrap, JustifyContent, Overflow, Position, Visibility} from ultragui::style::enums;
+import {Length, LengthUnit} from ultragui::style::property_types;
+import {Style} from ultragui::style::style;
+import {
+  FlexAlign, FlexDir, FlexDisplay, FlexJustify, FlexOverflow, FlexPositionType, FlexWrapMode, StyleLength, kBottom, kGutterAll,
+  kGutterColumn, kGutterRow, kHeight, kLeft, kRight, kTop, kUndefined, kWidth,
+} from ultragui::layout::flex_style;
+import {FlexTree} from ultragui::layout::flex_tree;
+
+// ~0u: no node (parent / first_child / next_sibling).
+pub comptime let kNoNode: u32 = 0xFFFF_FFFF;
+
+// A node in the layout tree. Each node has a Style and produces a computed
+// Rect. This is the input/output structure for the layout algorithm.
+pub struct LayoutNode : Copy {
+  // Input
+  pub var style: Style = Style {}
+  pub var id: u32 = 0  // Widget ID for mapping back
+
+  // Intrinsic content size (e.g. text bounding box, image size)
+  pub var intrinsic_width: f32 = 0.0
+  pub var intrinsic_height: f32 = 0.0
+
+  // Tree structure (indices into the node array)
+  pub var parent: u32 = kNoNode
+  pub var first_child: u32 = kNoNode
+  pub var next_sibling: u32 = kNoNode
+  pub var child_count: u32 = 0
+
+  // Output (computed by layout)
+  pub var computed_rect: Rect = Rect {}          // Final position + size in absolute coords
+  pub var content_rect: Rect = Rect {}           // Inner rect (after padding + border)
+  pub var computed_margin: EdgeInsets = EdgeInsets {}   // Resolved margins
+  pub var computed_padding: EdgeInsets = EdgeInsets {}  // Resolved padding
+
+  // Dirty tracking
+  pub var layout_dirty: bool = true
+  // Refreshed from the widget this frame, rather than carried over from the
+  // last one. Only a node whose inputs moved needs its style re-applied.
+  pub var dirty: bool = true
+}
+
+// Viewport info needed for resolving vw/vh/frac units
+pub struct LayoutViewport : Copy {
+  pub var width: f32 = 1280.0
+  pub var height: f32 = 720.0
+  pub var scale: f32 = 1.0  // Viewport scale factor applied to all px values
+}
+
+// The retained node array for a root. Kept across frames so a frame only has
+// to refresh the entries whose widgets changed; `widget_keys` is the widget id
+// per index, to spot a changed tree.
+pub struct NodeStore {
+  pub var nodes: List<LayoutNode> = List()
+  pub var widget_keys: List<u32> = List()
+}
+
+// --- Helpers: map ugui Style -> flex node style ----------------------------------
+
+// The length properties set_yoga_length_{w,h} write (the C++ passes the
+// setter function pointers).
+enum LengthProp as u8 { Width, Height, MinWidth, MinHeight, MaxWidth, MaxHeight }
+
+fn set_length(var tree&: FlexTree, n: u32, prop: LengthProp, l: StyleLength) {
+  match (prop) {
+    LengthProp::Width => tree.set_dimension(n, kWidth, l),
+    LengthProp::Height => tree.set_dimension(n, kHeight, l),
+    LengthProp::MinWidth => tree.set_min_dimension(n, kWidth, l),
+    LengthProp::MinHeight => tree.set_min_dimension(n, kHeight, l),
+    LengthProp::MaxWidth => tree.set_max_dimension(n, kWidth, l),
+    LengthProp::MaxHeight => tree.set_max_dimension(n, kHeight, l),
+  };
+}
+
+// YGNodeStyleSet{Width,...}(v): points, undefined when v is NaN or infinite.
+fn set_px(var tree&: FlexTree, n: u32, prop: LengthProp, v: f32) => set_length(tree, n, prop, StyleLength::points(v));
+
+fn set_pct(var tree&: FlexTree, n: u32, prop: LengthProp, v: f32) => set_length(tree, n, prop, StyleLength::percent(v));
+
+// Only width and height have an auto setter (the C++ passes nullptr for the
+// min/max ones).
+fn set_auto(var tree&: FlexTree, n: u32, prop: LengthProp) {
+  match (prop) {
+    LengthProp::Width | LengthProp::Height => set_length(tree, n, prop, StyleLength::of_auto()),
+    _ => {},
+  };
+}
+
+// set_yoga_length_w / set_yoga_length_h: `height_axis` picks which viewport
+// side a frac resolves against.
+fn set_yoga_length(var tree&: FlexTree, n: u32, len&: Length, vw: f32, vh: f32, scale: f32, prop: LengthProp, height_axis: bool) {
+  match (len.unit) {
+    LengthUnit::Px => set_px(tree, n, prop, len.value * scale),
+    LengthUnit::Percent => set_pct(tree, n, prop, len.value),
+    LengthUnit::Vw => set_px(tree, n, prop, len.value * 0.01 * vw),
+    LengthUnit::Vh => set_px(tree, n, prop, len.value * 0.01 * vh),
+    LengthUnit::Frac => set_px(tree, n, prop, len.value * (height_axis ? vh : vw)),
+    LengthUnit::Auto => set_auto(tree, n, prop),
+  };
+}
+
+fn map_flex_direction(d: FlexDirection): FlexDir => match (d) {
+  FlexDirection::Row => FlexDir::Row,
+  FlexDirection::Column => FlexDir::Column,
+  FlexDirection::RowReverse => FlexDir::RowReverse,
+  FlexDirection::ColumnReverse => FlexDir::ColumnReverse,
+};
+
+fn map_justify(j: JustifyContent): FlexJustify => match (j) {
+  JustifyContent::Start => FlexJustify::FlexStart,
+  JustifyContent::End => FlexJustify::FlexEnd,
+  JustifyContent::Center => FlexJustify::Center,
+  JustifyContent::SpaceBetween => FlexJustify::SpaceBetween,
+  JustifyContent::SpaceAround => FlexJustify::SpaceAround,
+  JustifyContent::SpaceEvenly => FlexJustify::SpaceEvenly,
+};
+
+fn map_align_items(a: AlignItems): FlexAlign => match (a) {
+  AlignItems::Start => FlexAlign::FlexStart,
+  AlignItems::End => FlexAlign::FlexEnd,
+  AlignItems::Center => FlexAlign::Center,
+  AlignItems::Stretch => FlexAlign::Stretch,
+  AlignItems::Baseline => FlexAlign::Baseline,
+};
+
+fn map_align_self(a: AlignSelf): FlexAlign => match (a) {
+  AlignSelf::Auto => FlexAlign::Auto,
+  AlignSelf::Start => FlexAlign::FlexStart,
+  AlignSelf::End => FlexAlign::FlexEnd,
+  AlignSelf::Center => FlexAlign::Center,
+  AlignSelf::Stretch => FlexAlign::Stretch,
+};
+
+fn map_align_content(a: AlignContent): FlexAlign => match (a) {
+  AlignContent::Start => FlexAlign::FlexStart,
+  AlignContent::End => FlexAlign::FlexEnd,
+  AlignContent::Center => FlexAlign::Center,
+  AlignContent::Stretch => FlexAlign::Stretch,
+  AlignContent::SpaceBetween => FlexAlign::SpaceBetween,
+  AlignContent::SpaceAround => FlexAlign::SpaceAround,
+  AlignContent::SpaceEvenly => FlexAlign::SpaceEvenly,
+};
+
+fn map_wrap(w: FlexWrap): FlexWrapMode => match (w) {
+  FlexWrap::NoWrap => FlexWrapMode::NoWrap,
+  FlexWrap::Wrap => FlexWrapMode::Wrap,
+  FlexWrap::WrapReverse => FlexWrapMode::WrapReverse,
+};
+
+fn map_overflow(o: Overflow): FlexOverflow => match (o) {
+  Overflow::Visible => FlexOverflow::Visible,
+  Overflow::Hidden => FlexOverflow::Hidden,
+  Overflow::Scroll => FlexOverflow::Scroll,
+};
+
+// Sticky participates in normal flow like relative; the clamping to the
+// scroll parent's visible area is handled after layout in layout_tree's
+// apply_layout_results.
+fn map_position(p: Position): FlexPositionType => match (p) {
+  Position::Relative => FlexPositionType::Relative,
+  Position::Absolute => FlexPositionType::Absolute,
+  Position::Sticky => FlexPositionType::Relative,
+};
+
+// Write a Style onto flex node `n`.
+//
+// Every property is written on every pass, including the ones the style does
+// not constrain (cleared to undefined instead of being left alone). The nodes
+// are retained between frames, so a property only written under a condition
+// keeps whatever the last frame that met the condition put there. The
+// setters compare before they mark a node dirty.
+fn apply_style(var tree&: FlexTree, n: u32, s&: Style, vp&: LayoutViewport) {
+  let vw = vp.width;
+  let vh = vp.height;
+  let sc = vp.scale;
+
+  tree.set_flex_direction(n, map_flex_direction(s.flex_direction));
+  tree.set_justify_content(n, map_justify(s.justify_content));
+  tree.set_align_items(n, map_align_items(s.align_items));
+  tree.set_align_self(n, map_align_self(s.align_self));
+  tree.set_align_content(n, map_align_content(s.align_content));
+  tree.set_flex_wrap(n, map_wrap(s.flex_wrap));
+  tree.set_overflow(n, map_overflow(s.overflow));
+  tree.set_position_type(n, map_position(s.position));
+
+  tree.set_display(n, s.visibility == Visibility::Collapsed ? FlexDisplay::None : FlexDisplay::Flex);
+
+  // Flex
+  tree.set_flex_grow(n, s.flex_grow);
+  tree.set_flex_shrink(n, s.flex_shrink);
+  match (s.flex_basis.unit) {
+    LengthUnit::Auto => tree.set_flex_basis(n, StyleLength::of_auto()),
+    LengthUnit::Percent => tree.set_flex_basis(n, StyleLength::percent(s.flex_basis.value)),
+    // px/vw/vh/fr resolve to pixels along the main axis
+    _ => tree.set_flex_basis(
+      n,
+      StyleLength::points(
+        s.flex_basis.resolve(0.0, vw, vh, s.flex_direction == FlexDirection::Column || s.flex_direction == FlexDirection::ColumnReverse) * sc)),
+  };
+
+  // Sizing
+  set_yoga_length(tree, n, s.width, vw, vh, sc, LengthProp::Width, false);
+  set_yoga_length(tree, n, s.height, vw, vh, sc, LengthProp::Height, true);
+
+  // Min/max: the defaults (min 0, max 1e6) mean "unconstrained", which is
+  // undefined rather than a number the engine would have to honour.
+  if (s.min_width.value > 0.0) {
+    set_yoga_length(tree, n, s.min_width, vw, vh, sc, LengthProp::MinWidth, false);
+  } else {
+    set_px(tree, n, LengthProp::MinWidth, kUndefined);
+  }
+  if (s.min_height.value > 0.0) {
+    set_yoga_length(tree, n, s.min_height, vw, vh, sc, LengthProp::MinHeight, true);
+  } else {
+    set_px(tree, n, LengthProp::MinHeight, kUndefined);
+  }
+  if (s.max_width.value < 1e5) {
+    set_yoga_length(tree, n, s.max_width, vw, vh, sc, LengthProp::MaxWidth, false);
+  } else {
+    set_px(tree, n, LengthProp::MaxWidth, kUndefined);
+  }
+  if (s.max_height.value < 1e5) {
+    set_yoga_length(tree, n, s.max_height, vw, vh, sc, LengthProp::MaxHeight, true);
+  } else {
+    set_px(tree, n, LengthProp::MaxHeight, kUndefined);
+  }
+
+  // Margin (pixel values: scale them)
+  tree.set_margin(n, kTop, s.margin.top * sc);
+  tree.set_margin(n, kRight, s.margin.right * sc);
+  tree.set_margin(n, kBottom, s.margin.bottom * sc);
+  tree.set_margin(n, kLeft, s.margin.left * sc);
+
+  // Padding (pixel values: scale them)
+  tree.set_padding(n, kTop, s.padding.top * sc);
+  tree.set_padding(n, kRight, s.padding.right * sc);
+  tree.set_padding(n, kBottom, s.padding.bottom * sc);
+  tree.set_padding(n, kLeft, s.padding.left * sc);
+
+  // Gap: uniform, with optional per-axis overrides. A negative per-axis
+  // value means "defer to the uniform gap" (undefined).
+  tree.set_gap(n, kGutterAll, s.gap > 0.0 ? s.gap * sc : kUndefined);
+  tree.set_gap(n, kGutterRow, s.row_gap >= 0.0 ? s.row_gap * sc : kUndefined);
+  tree.set_gap(n, kGutterColumn, s.column_gap >= 0.0 ? s.column_gap * sc : kUndefined);
+
+  // Aspect ratio
+  tree.set_aspect_ratio(n, s.aspect_ratio > 0.0 ? s.aspect_ratio : kUndefined);
+
+  // Position offsets (resolve, then scale the px result)
+  tree.set_position(n, kTop, !s.top.is_auto() ? s.top.resolve(0.0, vw, vh, true) * sc : kUndefined);
+  tree.set_position(n, kRight, !s.right_offset.is_auto() ? s.right_offset.resolve(0.0, vw, vh, false) * sc : kUndefined);
+  tree.set_position(n, kBottom, !s.bottom.is_auto() ? s.bottom.resolve(0.0, vw, vh, true) * sc : kUndefined);
+  tree.set_position(n, kLeft, !s.left_offset.is_auto() ? s.left_offset.resolve(0.0, vw, vh, false) * sc : kUndefined);
+}
+
+// --- Readback: layout results -> LayoutNode ------------------------------------------
+
+fn readback_results(tree&: FlexTree, var nodes&: [LayoutNode], node_index: u32, offset_x: f32, offset_y: f32) {
+  let x = tree.layout_left(node_index) + offset_x;
+  let y = tree.layout_top(node_index) + offset_y;
+  let w = tree.layout_width(node_index);
+  let h = tree.layout_height(node_index);
+
+  var node& = nodes[node_index as usize];
+  node.computed_rect = Rect { x, y, w, h };
+
+  node.computed_padding = EdgeInsets {
+    top: tree.layout_padding(node_index, kTop),
+    right: tree.layout_padding(node_index, kRight),
+    bottom: tree.layout_padding(node_index, kBottom),
+    left: tree.layout_padding(node_index, kLeft),
+  };
+
+  node.computed_margin = EdgeInsets {
+    top: tree.layout_margin(node_index, kTop),
+    right: tree.layout_margin(node_index, kRight),
+    bottom: tree.layout_margin(node_index, kBottom),
+    left: tree.layout_margin(node_index, kLeft),
+  };
+
+  node.content_rect = Rect {
+    x: x + node.computed_padding.left,
+    y: y + node.computed_padding.top,
+    w: max_f32(w - node.computed_padding.horizontal(), 0.0),
+    h: max_f32(h - node.computed_padding.vertical(), 0.0),
+  };
+
+  node.layout_dirty = false;
+
+  // Recurse children: positions are relative to the parent's border box
+  // (padding is already in the child's position), so pass only the parent's
+  // absolute origin. Flex node i is LayoutNode i, so the C++ walk over the
+  // yoga children in step with the sibling links is the sibling links alone.
+  var child_idx = node.first_child;
+  while (child_idx != kNoNode) {
+    readback_results(tree, nodes, child_idx, x, y);
+    child_idx = nodes[child_idx as usize].next_sibling;
+  }
+}
+
+// --- Main entry point ---------------------------------------------------------------
+
+// What the retained tree was built for. compute rebuilds when any of this
+// stops matching: the flex nodes are addressed by index, so a tree of a
+// different shape would pair widgets with someone else's node.
+struct RetainedShape : Copy, Equal {
+  pub var id: u32 = 0
+  pub var parent: u32 = kNoNode
+  pub var first_child: u32 = kNoNode
+  pub var next_sibling: u32 = kNoNode
+  pub var measured: bool = false
+}
+
+fn shape_of(n&: LayoutNode): RetainedShape => RetainedShape {
+  id: n.id,
+  parent: n.parent,
+  first_child: n.first_child,
+  next_sibling: n.next_sibling,
+  // A leaf with intrinsic content measures itself.
+  measured: n.first_child == kNoNode && (n.intrinsic_width > 0.0 || n.intrinsic_height > 0.0),
+};
+
+// One retained tree.
+struct RetainedTree {
+  pub var tree: FlexTree = FlexTree()
+  pub var shape: List<RetainedShape> = List()
+  // The style last written to each node. apply_style is a pure function of
+  // (style, viewport), so a node whose style has not moved can skip it.
+  pub var applied: List<Style> = List()
+  pub var applied_viewport: LayoutViewport = LayoutViewport { width: 0.0, height: 0.0, scale: 0.0 }
+  // Last intrinsic size handed to each measured node. The engine caches what
+  // a measurement gave, so a re-shaped node is marked dirty by hand.
+  pub var intrinsic: List<Vec2> = List()
+}
+
+// Runs flexbox layout on a tree of LayoutNodes.
+//
+// The flex tree is retained between calls, so only the subtrees that changed
+// are solved again. compute notices when the shape it is handed no longer
+// matches the tree it holds and rebuilds. One engine serves several trees
+// (the main root, each overlay, each offscreen pass), keyed by root widget id
+// so they do not evict one another.
+pub struct LayoutEngine {
+  var trees: HashMap<u32, RetainedTree> = HashMap()
+  var stores: HashMap<u32, NodeStore> = HashMap()
+
+  pub fn LayoutEngine(): LayoutEngine => LayoutEngine {};
+
+  // StoreFor: the retained node array for a root.
+  pub fn store_for(var self&, root_id: u32): &var NodeStore => self.stores.get_or_insert(root_id, NodeStore {});
+
+  // Compute layout for all nodes. The root node fills the viewport.
+  pub fn compute(var self&, var nodes&: [LayoutNode], viewport&: LayoutViewport);
+
+  // Compute on store_for(root_id).nodes.
+  pub fn compute_store(var self&, root_id: u32, viewport&: LayoutViewport);
+
+  // Drop the retained trees (and stores). Only needed to release the memory
+  // early; a changed tree is detected and rebuilt by compute on its own.
+  pub fn reset(var self&);
+}
+
+fn LayoutEngine::reset(var self&) {
+  self.trees = HashMap();
+  self.stores = HashMap();
+}
+
+fn LayoutEngine::compute_store(var self&, root_id: u32, viewport&: LayoutViewport) {
+  var store& = self.stores.get_or_insert(root_id, NodeStore {});
+  if (store.nodes.len() == 0) {
+    return;
+  }
+  compute_tree(self.trees, store.nodes.as_slice_var(), viewport);
+}
+
+fn LayoutEngine::compute(var self&, var nodes&: [LayoutNode], viewport&: LayoutViewport) {
+  if (#nodes == 0) {
+    return;
+  }
+  compute_tree(self.trees, nodes, viewport);
+}
+
+fn compute_tree(var trees&: HashMap<u32, RetainedTree>, var nodes&: [LayoutNode], viewport&: LayoutViewport) {
+  let node_count = #nodes;
+  if (node_count == 0) {
+    return;
+  }
+  var r& = trees.get_or_insert(nodes[0].id, RetainedTree {});
+
+  var same_tree = r.shape.len() == node_count;
+  if (same_tree) {
+    for (let i in 0..node_count) {
+      if (!(r.shape[i] == shape_of(nodes[i]))) {
+        same_tree = false;
+        break;
+      }
+    }
+  }
+
+  if (!same_tree) {
+    r.tree = FlexTree();
+    r.shape.clear();
+    r.intrinsic.clear();
+    r.applied.clear();
+    r.applied_viewport = LayoutViewport { width: 0.0, height: 0.0, scale: 0.0 };  // force the first write
+    for (let i in 0..node_count) {
+      let n = r.tree.add_node();
+      let shape = shape_of(nodes[i]);
+      r.shape.push(shape);
+      r.intrinsic.push(Vec2 {});
+      r.applied.push(Style {});
+      if (shape.measured) {
+        r.tree.set_measured(n);
+      }
+    }
+    for (let i in 0..node_count) {
+      var child_idx = nodes[i].first_child;
+      var insert_pos: usize = 0;
+      while (child_idx != kNoNode) {
+        r.tree.insert_child(i as u32, child_idx, insert_pos);
+        child_idx = nodes[child_idx as usize].next_sibling;
+        insert_pos += 1;
+      }
+    }
+  }
+
+  // A resize changes what every vw/vh/scaled px resolves to, so nothing can be
+  // skipped on the pass that first sees a new viewport.
+  let viewport_moved = !(r.applied_viewport.width == viewport.width && r.applied_viewport.height == viewport.height &&
+                         r.applied_viewport.scale == viewport.scale);
+  r.applied_viewport = viewport;
+
+  for (let i in 0..node_count) {
+    let n = i as u32;
+    // The node array is the caller's scratch and moves between frames; the
+    // measure function reports this frame's intrinsic size.
+    if (r.shape[i].measured) {
+      r.tree.set_intrinsic(n, nodes[i].intrinsic_width, nodes[i].intrinsic_height);
+    }
+    // A node the caller did not refresh still holds last frame's style;
+    // a resize re-applies everything.
+    if (viewport_moved || (nodes[i].dirty && !(r.applied[i] == nodes[i].style))) {
+      apply_style(r.tree, n, nodes[i].style, viewport);
+      r.applied[i] = nodes[i].style;
+    }
+
+    if (r.shape[i].measured) {
+      let intrinsic = Vec2 { x: nodes[i].intrinsic_width, y: nodes[i].intrinsic_height };
+      if (intrinsic.x != r.intrinsic[i].x || intrinsic.y != r.intrinsic[i].y) {
+        r.intrinsic[i] = intrinsic;
+        r.tree.mark_dirty(n);
+      }
+    }
+  }
+
+  // Clean nodes whose available size is unchanged come straight out of the
+  // layout cache.
+  r.tree.calculate_layout(0, viewport.width, viewport.height);
+
+  // Read back results into LayoutNodes (parent-relative -> absolute)
+  readback_results(r.tree, nodes, 0, 0.0, 0.0);
+}

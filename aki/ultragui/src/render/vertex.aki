@@ -1,0 +1,48 @@
+// ugui/render/vertex.h: per-vertex data for 2D UI rendering.
+//
+// The fragment shader uses half_size + corner_radii to compute an SDF for
+// crisp rounded rectangles at any resolution. color2 enables linear
+// gradients; softness controls shadow blur. The layout is the GPU's, so this
+// is an extern struct: C's layout, 48 bytes, always Copy.
+
+module ultragui::render::vertex;
+
+pub extern struct Vertex2D {
+  pub var pos: [f32; 2]        // Screen-space position (pixels)
+  pub var uv: [f32; 2]         // Texture UV (0-1)
+  pub var color: u32           // Packed ABGR8 (primary / gradient start)
+  pub var color2: u32          // Packed ABGR8 (gradient end, or same as color for solid)
+  pub var corner_radii: u32    // Packed: TL | (TR << 8) | (BR << 16) | (BL << 24)
+  pub var softness: f32        // Shadow blur (0 = crisp edge, >0 = soft falloff)
+  pub var half_size: [f32; 2]  // Rect half-extents for SDF (0,0 = no SDF)
+  pub var border_width: f32    // Border thickness (0 = no border)
+  pub var border_color: u32    // Packed ABGR8
+}
+
+comptime let kVertexSize: usize = check_vertex_size(@size_of(Vertex2D));
+
+fn check_vertex_size(n: usize): usize {
+  if (n != 48) {
+    @stop("Vertex2D must be 48 bytes");
+  }
+  return n;
+}
+
+// static_cast<u32>(float): undefined in C++ outside the u32 range; aarch64
+// saturates (negative values and NaN to 0), which @saturating_cast matches.
+fn to_u8_color(v: f32): u64 => @saturating_cast(u32, v * 255.0 + 0.5) as u64;
+
+// Vertex2D::PackColor. A channel past 1.0 spills into the next byte up, as
+// the C++ shifts and ORs do; the u64 holds the spill and the cast drops what
+// a u32 shift would.
+pub fn pack_color(r: f32, g: f32, b: f32, a: f32): u32 =>
+  ((to_u8_color(a) << 24) | (to_u8_color(b) << 16) | (to_u8_color(g) << 8) | to_u8_color(r)) as u32;
+
+fn to_u8_radius(v: f32): u32 => @saturating_cast(u32, v + 0.5) & 0xFF;
+
+// Vertex2D::PackRadii(tl, tr, br, bl): 4 per-corner radii into one u32.
+pub fn pack_radii(tl: f32, tr: f32, br: f32, bl: f32): u32 =>
+  to_u8_radius(tl) | (to_u8_radius(tr) << 8) | (to_u8_radius(br) << 16) | (to_u8_radius(bl) << 24);
+
+// Vertex2D::PackRadii(r): a uniform radius for all 4 corners.
+pub fn pack_radii_uniform(r: f32): u32 => pack_radii(r, r, r, r);

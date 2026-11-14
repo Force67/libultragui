@@ -1,0 +1,45 @@
+// ugui/core/color.h: linear RGBA floats.
+
+module ultragui::core::color;
+
+import {Vec4, lerp} from ultragui::core::math;
+
+pub struct Color : Copy, Equal {
+  pub var r: f32 = 0.0
+  pub var g: f32 = 0.0
+  pub var b: f32 = 0.0
+  pub var a: f32 = 1.0
+
+  // Color(r, g, b, a = 1).
+  pub fn rgba(r: f32, g: f32, b: f32, a: f32 = 1.0): Color => Color { r, g, b, a };
+
+  pub fn to_vec4(self&): Vec4 => Vec4 { x: self.r, y: self.g, z: self.b, w: self.a };
+  pub fn from_vec4(v: Vec4): Color => Color { r: v.x, g: v.y, b: v.z, a: v.w };
+
+  // From 0xRRGGBB; the alpha comes from `alpha`, not from the value.
+  pub fn from_hex(hex: u32, alpha: f32 = 1.0): Color => Color {
+    r: ((hex >> 16) & 0xFF) as f32 / 255.0,
+    g: ((hex >> 8) & 0xFF) as f32 / 255.0,
+    b: (hex & 0xFF) as f32 / 255.0,
+    a: alpha,
+  };
+
+  pub fn from_rgba8(r: u8, g: u8, b: u8, a: u8 = 255): Color =>
+    Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: a as f32 / 255.0 };
+
+  pub fn with_alpha(self&, alpha: f32): Color => Color { r: self.r, g: self.g, b: self.b, a: alpha };
+
+  pub fn eq(self&, rhs&: Color): bool => self.r == rhs.r && self.g == rhs.g && self.b == rhs.b && self.a == rhs.a;
+
+  // Common colors.
+  pub fn white(): Color => Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+  pub fn black(): Color => Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+  pub fn transparent(): Color => Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+  pub fn red(): Color => Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+  pub fn green(): Color => Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 };
+  pub fn blue(): Color => Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+}
+
+// Lerp(Color, Color, f32).
+pub fn lerp_color(a: Color, b: Color, t: f32): Color =>
+  Color { r: lerp(a.r, b.r, t), g: lerp(a.g, b.g, t), b: lerp(a.b, b.b, t), a: lerp(a.a, b.a, t) };

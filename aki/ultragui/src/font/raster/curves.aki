@@ -1,0 +1,183 @@
+// Outline decomposition and deterministic curve sampling. No C dependency.
+// The segment endpoints deliberately retain the smooth renderer's 24.8
+// quantization, quadratic forward differences, and cubic split rounding.
+module ultragui::font::raster::curves;
+
+import {List} from akikit::containers::list;
+import {Outline, RasterError} from ultragui::font::raster::outline;
+
+// Internal coordinates: 26.6 during decomposition, 24.8 in segments.
+pub struct Point : Copy {
+  pub var x: i64 = 0
+  pub var y: i64 = 0
+}
+
+pub struct Segment : Copy {
+  pub var a: Point
+  pub var b: Point
+}
+
+fn up(p: Point): Point => Point { x: p.x * 4, y: p.y * 4 };
+fn middle(a: Point, b: Point): Point => Point { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+fn line(var segments&: List<Segment>, var current&: Point, to: Point) {
+  if (current.y != to.y) {
+    segments.push(Segment { a: current, b: to });
+  }
+  current = to;
+}
+
+fn conic(var segments&: List<Segment>, var current&: Point, control: Point, to: Point) {
+  let c = up(control);
+  let b = up(to);
+  let bx = c.x - current.x;
+  let by = c.y - current.y;
+  let ax = b.x - c.x - bx;
+  let ay = b.y - c.y - by;
+  var deviation = @abs(ax) > @abs(ay) ? @abs(ax) : @abs(ay);
+  var power: i64 = 0;
+  while (deviation > 64) {
+    deviation >>= 2;
+    power += 1;
+  }
+  if (power == 0) {
+    line(segments, current, b);
+    return;
+  }
+  let rx = ax << (33 - 2 * power);
+  let ry = ay << (33 - 2 * power);
+  var qx = (bx << (33 - power)) + (rx >> 1);
+  var qy = (by << (33 - power)) + (ry >> 1);
+  var px = current.x << 32;
+  var py = current.y << 32;
+  for (let i in 0i64..(1i64 << power)) {
+    px += qx;
+    py += qy;
+    qx += rx;
+    qy += ry;
+    line(segments, current, Point { x: px >> 32, y: py >> 32 });
+  }
+}
+
+struct Cubic : Copy {
+  pub var a: Point
+  pub var b: Point
+  pub var c: Point
+  pub var d: Point
+}
+
+fn cubic(var segments&: List<Segment>, var current&: Point, c1: Point, c2: Point, to: Point) {
+  var stack: List<Cubic> = List();
+  stack.push(Cubic { a: current, b: up(c1), c: up(c2), d: up(to) });
+  while (let curve = stack.pop()) {
+    let a = curve.a;
+    let b = curve.b;
+    let c = curve.c;
+    let d = curve.d;
+    if (@abs(2 * d.x - 3 * c.x + a.x) <= 128 &&
+        @abs(2 * d.y - 3 * c.y + a.y) <= 128 &&
+        @abs(d.x - 3 * b.x + 2 * a.x) <= 128 &&
+        @abs(d.y - 3 * b.y + 2 * a.y) <= 128) {
+      line(segments, current, d);
+      continue;
+    }
+    // Compute sums before shifting: averaging already rounded midpoints
+    // changes the last coverage bit. Splits are evaluated start to end.
+    let ab = Point { x: a.x + b.x, y: a.y + b.y };
+    let bc = Point { x: b.x + c.x, y: b.y + c.y };
+    let cd = Point { x: c.x + d.x, y: c.y + d.y };
+    let left = Point { x: (ab.x + bc.x) >> 2, y: (ab.y + bc.y) >> 2 };
+    let right = Point { x: (bc.x + cd.x) >> 2, y: (bc.y + cd.y) >> 2 };
+    let mid = Point { x: (ab.x + 2 * bc.x + cd.x) >> 3, y: (ab.y + 2 * bc.y + cd.y) >> 3 };
+    stack.push(Cubic { a: mid, b: right, c: Point { x: cd.x >> 1, y: cd.y >> 1 }, d });
+    stack.push(Cubic { a, b: Point { x: ab.x >> 1, y: ab.y >> 1 }, c: left, d: mid });
+  }
+}
+
+fn point(outline&: Outline, i: i64, x_origin: i64, y_origin: i64, scale: i64): Point {
+  let p = outline.points[i as usize];
+  return Point { x: (p.x as i64 - x_origin) * scale, y: (p.y as i64 - y_origin) * scale };
+}
+fn tag(outline&: Outline, i: i64): u8 => outline.tags[i as usize] & 3;
+
+// Origin subtraction precedes implicit-point averaging, just as it does
+// when the glyph slot translates an outline into its bitmap's coordinates.
+pub fn flatten(outline&: Outline, x_origin: i64, y_origin: i64, scale: i64): List<Segment> ! RasterError {
+  var segments: List<Segment> = List();
+  if (outline.points.is_empty() || outline.contours.is_empty()) {
+    return segments;
+  }
+  if (outline.tags.len() != outline.points.len() ||
+      outline.contours[outline.contours.len() - 1] as usize + 1 != outline.points.len()) {
+    return fail RasterError::InvalidOutline;
+  }
+  var first: i64 = 0;
+  for (let contour_end in outline.contours) {
+    let last = contour_end as i64;
+    if (last < first || last >= outline.points.len() as i64) {
+      return fail RasterError::InvalidOutline;
+    }
+    var start = point(outline, first, x_origin, y_origin, scale);
+    var limit = last;
+    var i = first;
+    if (tag(outline, first) == 2) {
+      return fail RasterError::InvalidOutline;
+    }
+    if (tag(outline, first) == 0) {
+      let finish = point(outline, last, x_origin, y_origin, scale);
+      if (tag(outline, last) == 1) {
+        start = finish;
+        limit -= 1;
+      } else {
+        start = middle(start, finish);
+      }
+      i -= 1;
+    }
+    var current = up(start);
+    var closed = false;
+    while (i < limit) {
+      i += 1;
+      let t = tag(outline, i);
+      let p = point(outline, i, x_origin, y_origin, scale);
+      if (t == 1) {
+        line(segments, current, up(p));
+      } else if (t == 0) {
+        var control = p;
+        while (true) {
+          if (i == limit) {
+            conic(segments, current, control, start);
+            closed = true;
+            break;
+          }
+          i += 1;
+          let next = point(outline, i, x_origin, y_origin, scale);
+          if (tag(outline, i) == 1) {
+            conic(segments, current, control, next);
+            break;
+          }
+          if (tag(outline, i) != 0) {
+            return fail RasterError::InvalidOutline;
+          }
+          conic(segments, current, control, middle(control, next));
+          control = next;
+        }
+      } else {
+        if (i + 1 > limit || tag(outline, i + 1) != 2) {
+          return fail RasterError::InvalidOutline;
+        }
+        let c2 = point(outline, i + 1, x_origin, y_origin, scale);
+        i += 2;
+        if (i <= limit) {
+          cubic(segments, current, p, c2, point(outline, i, x_origin, y_origin, scale));
+        } else {
+          cubic(segments, current, p, c2, start);
+          closed = true;
+        }
+      }
+    }
+    if (!closed) {
+      line(segments, current, up(start));
+    }
+    first = last + 1;
+  }
+  return segments;
+}

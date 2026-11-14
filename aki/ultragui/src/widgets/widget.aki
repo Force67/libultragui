@@ -1,0 +1,587 @@
+// ugui/widgets/widget.{h,cc}: the widget entity's core components and the
+// free functions over them.
+//
+// A widget is a plain entity id (wid) in a component World; data is read
+// with world.get(kTransform, e) and friends, behaviour and tree operations
+// are the functions here. Every function takes the World first; those that
+// reach a subsystem (animator, clock, ui scale) take the WidgetContext too
+// (widgets::widget_context explains why it is an argument).
+//
+// All of widget.cc: the data, the tree, style/state, dirty marking,
+// tooltips, hit testing, the vtable dispatch, paint (PaintWidget's two
+// overloads are paint_widget and paint_widget_styled), InputToLayoutPoint and
+// the layout node bridge (PopulateLayoutNode, ApplyLayoutResult).
+//
+// Where the C++ dereferences a component it assumes is there
+// (world.Get<StyleC>(e)->style), the port stops with `!` on the same
+// handles: a dead or foreign handle crashes both.
+
+module ultragui::widgets::widget;
+
+import {List, to_list} from akikit::containers::list;
+import {String, from_str} from akikit::strings::string;
+import {Atomic} from akikit::threading::atomic;
+import {index_of} from ultragui::core::algorithm;
+import {ComponentKey} from ultragui::core::component_store;
+import {WidgetId, kNullWidget} from ultragui::core::handle;
+import {Vec2} from ultragui::core::math;
+import {Color} from ultragui::core::color;
+import {Rect} from ultragui::core::rect;
+import {LayoutNode} from ultragui::layout::layout;
+import {Renderer2D} from ultragui::render::renderer2d;
+import {pack_radii, pack_radii_uniform} from ultragui::render::vertex;
+import {GradientType, PointerEvents, Visibility, WidgetState} from ultragui::style::enums;
+import {Style, StyleOverride, resolve_style} from ultragui::style::style;
+import {Transition} from ultragui::style::transition;
+import {AnimStyle, StateStyle, StateTransitionRule, Tooltip, kAnimStyle, kStateStyle, kTooltip} from ultragui::widgets::components;
+import {scroll_offset} from ultragui::widgets::scroll_view;
+import {WidgetContext} from ultragui::widgets::widget_context;
+import {World} from ultragui::widgets::widget_registry;
+import {
+  custom_paint, vt_draw, vt_consumes_text_input, vt_hit_test, vt_measure, vt_on_char_input, vt_on_click, vt_on_dismiss, vt_on_key_down,
+  vt_on_layout, vt_on_scroll, vt_on_update,
+} from ultragui::widgets::widget_vtable;
+
+// Stable type tag for every widget, used for per-kind vtable dispatch. Lives
+// in the WidgetNode component. WidgetKind::kCount is kWidgetKindCount.
+pub enum WidgetKind as u8 {
+  Widget,
+  Panel,
+  Text,
+  Button,
+  Image,
+  Checkbox,
+  Radio,
+  Toggle,
+  Slider,
+  Dropdown,
+  TextInput,
+  ScrollView,
+  ContextMenu,
+  Modal,
+  RichText,
+  MessageBox,
+}
+
+// WidgetKind::kCount: the number of kinds.
+pub comptime let kWidgetKindCount: usize = 16;
+
+// Geometry + dirty flags (written by layout, read by paint/hit-testing).
+pub struct Transform : Copy, Equal {
+  pub var rect: Rect = Rect {}
+  pub var content_rect: Rect = Rect {}
+  pub var intrinsic_w: f32 = 0.0
+  pub var intrinsic_h: f32 = 0.0
+  pub var layout_dirty: bool = true
+  pub var paint_dirty: bool = true
+  // The opacity this widget inherits from its ancestors, folded in by
+  // computed_style. Written by the paint walk; 1 until one has run.
+  pub var inherited_opacity: f32 = 1.0
+}
+
+// Tree links, stored as stable handles.
+pub struct Hierarchy : Clone {
+  pub var parent: WidgetId = kNullWidget
+  pub var children: List<WidgetId> = List()
+}
+
+// Base style and current interaction-state bitset. State overrides and the
+// animation override live in the StateStyle / AnimStyle components.
+//
+// Write `style` through set_style(), or call mark_dirty() after writing it
+// in place: layout refreshes a widget's node only when the widget is dirty.
+pub struct StyleC : Copy {
+  pub var style: Style = Style {}
+  pub var state: WidgetState = WidgetState::None
+}
+
+// Identity + misc per-widget metadata. `has_context` is the C++ non-null
+// `context` pointer (see widgets::widget_context).
+pub struct WidgetNode : Clone {
+  pub var id: u32 = 0
+  pub var kind: WidgetKind = WidgetKind::Widget
+  pub var name: String = String()
+  pub var tab_index: i32 = -1  // -1 = not focusable via tab, 0+ = tab order
+  pub var has_context: bool = false
+}
+
+pub static let kWidgetNode: ComponentKey<WidgetNode> = ComponentKey();
+pub static let kTransform: ComponentKey<Transform> = ComponentKey();
+pub static let kHierarchy: ComponentKey<Hierarchy> = ComponentKey();
+pub static let kStyleC: ComponentKey<StyleC> = ComponentKey();
+
+static let kWidgetIdCounter: Atomic<u32> = Atomic::<u32>(1);  // 0 is reserved / sentinel
+
+// NextWidgetId: a unique widget id, process-wide (one counter for every
+// World, as the C++ function static).
+pub fn next_widget_id(): u32 => kWidgetIdCounter.fetch_add(1);
+
+// Counts every call that says something about the tree changed. One counter
+// for the process rather than one per World: a second UIContext bumping it
+// only causes an unnecessary rebuild, never a stale frame.
+static let kWidgetRevision: Atomic<u64> = Atomic::<u64>(1);
+
+// WidgetRevision: bumped by every mark_dirty/mark_paint_dirty. Unchanged
+// between two frames means nothing asked for a redraw in between.
+pub fn widget_revision(): u64 => kWidgetRevision.load();
+
+// --- Lifetime ------------------------------------------------------------------
+
+// Release a widget and everything under it. The caller has already unhooked
+// the top of the subtree, and every parent below it is going away too.
+fn release_subtree(var world&: World, e: WidgetId) {
+  if (!world.alive(e)) {
+    return;
+  }
+  if (let h& = world.get(kHierarchy, e)) {
+    let kids = to_list(h.children.as_slice());  // copy: release mutates the stores
+    for (let c in kids) {
+      release_subtree(world, c);
+    }
+  }
+  world.release(e);
+}
+
+// DestroyWidget: recursively destroy a widget subtree, releasing the entity
+// and all its descendants (and their components).
+pub fn destroy_widget(var world&: World, e: WidgetId) {
+  if (!world.alive(e)) {
+    return;
+  }
+  // Unhook from the parent first: releasing the entity does not take it out
+  // of the parent's child list, and tree walks that do not check liveness
+  // (layout's among them) would follow the dead handle.
+  var parent = kNullWidget;
+  if (let h& = world.get(kHierarchy, e)) {
+    parent = h.parent;
+  }
+  if (parent.valid()) {
+    remove_child(world, parent, e);
+  }
+  release_subtree(world, e);
+}
+
+// --- Tree --------------------------------------------------------------------
+
+pub fn remove_child(var world&: World, parent: WidgetId, child: WidgetId) {
+  let ph& = world.get(kHierarchy, parent) else {
+    return;
+  };
+  let index = index_of(ph.children.as_slice(), child) else {
+    return;
+  };
+  if (var ch& = world.get_var(kHierarchy, child)) {
+    ch.parent = kNullWidget;
+  }
+  let _ = world.get_var(kHierarchy, parent)!.children.remove(index);
+  mark_dirty(world, parent);
+}
+
+pub fn add_child(var world&: World, parent: WidgetId, child: WidgetId) {
+  if (!parent.valid() || !child.valid()) {
+    return;
+  }
+  let ch& = world.get(kHierarchy, child) else {
+    return;
+  };
+  let old_parent = ch.parent;
+  if (!world.has(kHierarchy, parent)) {
+    return;
+  }
+  if (old_parent.valid()) {
+    remove_child(world, old_parent, child);
+  }
+  world.get_var(kHierarchy, child)!.parent = parent;
+  world.get_var(kHierarchy, parent)!.children.push(child);
+  if (world.get(kWidgetNode, parent)!.has_context) {
+    set_context(world, child, true);
+  }
+  mark_dirty(world, parent);
+}
+
+// SetContext(e, ctx): attach (true) or detach (false, the C++ nullptr) the
+// subtree from the driving context.
+pub fn set_context(var world&: World, e: WidgetId, attached: bool) {
+  let n& = world.get_var(kWidgetNode, e) else {
+    return;
+  };
+  n.has_context = attached;
+  let kids = to_list(world.get(kHierarchy, e)!.children.as_slice());  // copy: recursion safe
+  for (let c in kids) {
+    set_context(world, c, attached);
+  }
+}
+
+// Whether the widget has a context (the C++ WidgetContextOf != nullptr).
+pub fn has_widget_context(world&: World, e: WidgetId): bool {
+  if (let n& = world.get(kWidgetNode, e)) {
+    return n.has_context;
+  }
+  return false;
+}
+
+// WidgetContextOf: `ctx` when the widget has a context, none where the C++
+// returns nullptr.
+pub fn widget_context_of<'c, 'a>(world&: World, ctx: &'c var WidgetContext<'a>, e: WidgetId): (&'c var WidgetContext<'a>)? {
+  if (has_widget_context(world, e)) {
+    return ctx;
+  }
+  return none;
+}
+
+// UiScale
+pub fn ui_scale(world&: World, ctx&: WidgetContext, e: WidgetId): f32 => has_widget_context(world, e) ? ctx.ui_scale : 1.0;
+
+// --- Tooltip -------------------------------------------------------------------
+
+pub fn set_tooltip(var world&: World, e: WidgetId, text: str) {
+  world.add(kTooltip, e, Tooltip { text: from_str(text) });
+}
+
+// TooltipText: empty when the widget has none.
+pub fn tooltip_text<'w>(world: &'w World, e: WidgetId): str<'w> {
+  if (let t& = world.get(kTooltip, e)) {
+    return t.text.as_str();
+  }
+  return "";
+}
+
+// --- Style / state ---------------------------------------------------------------
+
+pub fn set_style(var world&: World, e: WidgetId, s&: Style) {
+  world.get_var(kStyleC, e)!.style = s;
+  mark_dirty(world, e);
+}
+
+pub fn widget_state_of(world&: World, e: WidgetId): WidgetState => world.get(kStyleC, e)!.state;
+
+pub fn add_state_override(var world&: World, e: WidgetId, state: WidgetState, override_style&: Style, mask: u64) {
+  world.get_or_add(kStateStyle, e, StateStyle {}).overrides.push(StyleOverride { state, style: override_style, mask });
+}
+
+pub fn add_state_transition(var world&: World, e: WidgetId, state: WidgetState, transition&: Transition) {
+  world.get_or_add(kStateStyle, e, StateStyle {}).transitions.push(StateTransitionRule { state, transition });
+}
+
+// SetWidgetState: a state change starts the first relevant non-instant
+// state transition through the context's animator (when the widget has a
+// context with an animator and a clock).
+pub fn set_widget_state(var world&: World, var ctx&: WidgetContext, e: WidgetId, state: WidgetState) {
+  var sc& = world.get_var(kStyleC, e)!;
+  if (sc.state == state) {
+    return;
+  }
+  let old_state = sc.state;
+  sc.state = state;
+  let base = sc.style;
+
+  let attached = world.get(kWidgetNode, e)!.has_context;
+  let widget_id = world.get(kWidgetNode, e)!.id;
+  if (attached) {
+    if (var animator& = ctx.animator) {
+      if (let now = ctx.current_time) {
+        if (let ss& = world.get(kStateStyle, e)) {
+          if (ss.transitions.len() != 0) {
+            let from = resolve_style(base, ss.overrides.as_slice(), old_state);
+            let to = resolve_style(base, ss.overrides.as_slice(), state);
+            for (let stc in ss.transitions) {
+              let activated = state.without(old_state);
+              let deactivated = old_state.without(state);
+              let relevant = stc.state.has(activated.with(deactivated));
+              if (relevant && !stc.transition.is_instant()) {
+                animator.start_transition(widget_id, from, to, stc.transition, now);
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  mark_paint_dirty(world, e);
+}
+
+pub fn set_selected(var world&: World, var ctx&: WidgetContext, e: WidgetId, v: bool) {
+  var s = widget_state_of(world, e);
+  if (v) {
+    s = s.with(WidgetState::Selected);
+  } else {
+    s = s.without(WidgetState::Selected);
+  }
+  set_widget_state(world, ctx, e, s);
+}
+
+pub fn set_animation_style(var world&: World, e: WidgetId, s&: Style) {
+  world.add(kAnimStyle, e, AnimStyle { style: s });
+  mark_paint_dirty(world, e);
+}
+
+pub fn clear_animation_style(var world&: World, e: WidgetId) {
+  world.remove(kAnimStyle, e);
+  mark_paint_dirty(world, e);
+}
+
+// ComputedStyle: the animation style when one is active, else the base style
+// resolved against the state overrides; opacity then folds in what the
+// widget inherits (a faded container fades everything it holds).
+pub fn computed_style(world&: World, e: WidgetId): Style {
+  var out = Style {};
+  if (let a& = world.get(kAnimStyle, e)) {
+    out = a.style;
+  } else {
+    let sc& = world.get(kStyleC, e)!;
+    if (let ss& = world.get(kStateStyle, e)) {
+      if (ss.overrides.len() == 0) {
+        out = sc.style;
+      } else {
+        out = resolve_style(sc.style, ss.overrides.as_slice(), sc.state);
+      }
+    } else {
+      out = sc.style;
+    }
+  }
+  if (let t& = world.get(kTransform, e)) {
+    out.opacity *= t.inherited_opacity;
+  }
+  return out;
+}
+
+// --- Dirty / hit-testing -----------------------------------------------------------
+
+// MarkDirty: layout and paint dirty, up to the root.
+pub fn mark_dirty(var world&: World, e: WidgetId) {
+  let t& = world.get_var(kTransform, e) else {
+    return;
+  };
+  let _ = kWidgetRevision.fetch_add(1);
+  t.layout_dirty = true;
+  t.paint_dirty = true;
+  let p = world.get(kHierarchy, e)!.parent;
+  if (p.valid()) {
+    mark_dirty(world, p);
+  }
+}
+
+pub fn mark_paint_dirty(var world&: World, e: WidgetId) {
+  let _ = kWidgetRevision.fetch_add(1);
+  if (var t& = world.get_var(kTransform, e)) {
+    t.paint_dirty = true;
+  }
+}
+
+// InputToLayoutPoint: a point in screen space moved into e's layout space,
+// adding the offset of every scroll view above it.
+pub fn input_to_layout_point(world&: World, e: WidgetId, point: Vec2): Vec2 {
+  var out = point;
+  var p = world.get(kHierarchy, e)!.parent;
+  while (p.valid()) {
+    out = out + scroll_offset(world, p);  // (0,0) for non-scroll-view ancestors
+    p = world.get(kHierarchy, p)!.parent;
+  }
+  return out;
+}
+
+// HitTest: the topmost widget under `point` in e's subtree, or the null
+// handle. Hidden, collapsed and pointer-events: none widgets take no hits,
+// and neither does anything under them.
+pub fn hit_test(var world&: World, var ctx&: WidgetContext, e: WidgetId, point: Vec2): WidgetId {
+  if (computed_style(world, e).pointer_events == PointerEvents::None) {
+    return kNullWidget;
+  }
+  if (let hit = vt_hit_test(kind_of(world, e), world, ctx, e, point)) {
+    return hit;
+  }
+
+  if (!world.get(kTransform, e)!.rect.contains(point)) {
+    return kNullWidget;
+  }
+  // A collapsed subtree keeps the rects it was last laid out at; paint skips
+  // it, and so must hit testing.
+  let vis = computed_style(world, e).visibility;
+  if (vis == Visibility::Hidden || vis == Visibility::Collapsed) {
+    return kNullWidget;
+  }
+  // The C++ walks the live child list in reverse; hit testing changes no
+  // tree, so a copy walks the same handles.
+  let kids = to_list(world.get(kHierarchy, e)!.children.as_slice());
+  var i = kids.len();
+  while (i > 0) {
+    i -= 1;
+    let hit = hit_test(world, ctx, kids[i], point);
+    if (hit.valid()) {
+      return hit;
+    }
+  }
+  return e;
+}
+
+// --- Lifecycle dispatch ------------------------------------------------------------
+
+fn kind_of(world&: World, e: WidgetId): WidgetKind => world.get(kWidgetNode, e)!.kind;
+
+// LayoutWidget: store the layout result, then the kind's on_layout.
+pub fn layout_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId, rect: Rect, content_rect: Rect) {
+  var t& = world.get_var(kTransform, e)!;
+  t.rect = rect;
+  t.content_rect = content_rect;
+  t.layout_dirty = false;
+  let _ = vt_on_layout(kind_of(world, e), world, ctx, e, rect, content_rect);
+}
+
+pub fn update_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId, dt: f64) {
+  let _ = vt_on_update(kind_of(world, e), world, ctx, e, dt);
+}
+
+pub fn scroll_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId, delta: Vec2): bool =>
+  vt_on_scroll(kind_of(world, e), world, ctx, e, delta) ?? false;
+
+pub fn key_down_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId, key: i32, mods: i32): bool =>
+  vt_on_key_down(kind_of(world, e), world, ctx, e, key, mods) ?? false;
+
+pub fn char_input_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId, codepoint: u32): bool =>
+  vt_on_char_input(kind_of(world, e), world, ctx, e, codepoint) ?? false;
+
+pub fn consumes_text_input(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool =>
+  vt_consumes_text_input(kind_of(world, e), world, ctx, e) ?? false;
+
+pub fn dismiss_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId) {
+  let _ = vt_on_dismiss(kind_of(world, e), world, ctx, e);
+}
+
+pub fn click_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId): bool =>
+  vt_on_click(kind_of(world, e), world, ctx, e) ?? false;
+
+// MeasureWidget: the kind's measure, else the intrinsic size.
+pub fn measure_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId): (f32, f32) {
+  if (let size = vt_measure(kind_of(world, e), world, ctx, e)) {
+    return size;
+  }
+  let t& = world.get(kTransform, e)!;
+  return (t.intrinsic_w, t.intrinsic_h);
+}
+
+// --- Paint -----------------------------------------------------------------------
+
+// Packed per-corner radii from a resolved style.
+fn style_corner_radii(s&: Style): u32 {
+  if (s.corner_radius_tl > 0.0 || s.corner_radius_tr > 0.0 || s.corner_radius_br > 0.0 || s.corner_radius_bl > 0.0) {
+    return pack_radii(s.corner_radius_tl, s.corner_radius_tr, s.corner_radius_br, s.corner_radius_bl);
+  }
+  return pack_radii_uniform(s.corner_radius);
+}
+
+// The radii inside a border of width `bw` (corners smaller than the border
+// become square).
+fn inner_radii(radii: u32, bw: f32): u32 {
+  let tl = (radii & 0xFF) as f32;
+  let tr = ((radii >> 8) & 0xFF) as f32;
+  let br = ((radii >> 16) & 0xFF) as f32;
+  let bl = ((radii >> 24) & 0xFF) as f32;
+  return pack_radii(tl > bw ? tl - bw : 0.0, tr > bw ? tr - bw : 0.0, br > bw ? br - bw : 0.0, bl > bw ? bl - bw : 0.0);
+}
+
+// PaintWidget(world, e, renderer)
+pub fn paint_widget(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D) {
+  let computed = computed_style(world, e);
+  paint_widget_styled(world, ctx, e, renderer, computed);
+}
+
+// PaintWidget(world, e, renderer, computed): paint with a style the caller has
+// already resolved (the tree walk computes one to decide visibility).
+pub fn paint_widget_styled(var world&: World, var ctx&: WidgetContext, e: WidgetId, var renderer&: Renderer2D, computed&: Style) {
+  let kind = kind_of(world, e);
+  if (custom_paint(kind)) {
+    let _ = vt_draw(kind, world, ctx, e, renderer);
+    return;
+  }
+
+  let rect = world.get(kTransform, e)!.rect;
+  var s = computed;
+  s.scale(ui_scale(world, ctx, e));
+  let alpha = s.opacity;
+  let radii = style_corner_radii(s);
+
+  if (s.has_shadow() && !s.shadow.inset) {
+    let sc = s.shadow.color.with_alpha(s.shadow.color.a * alpha);
+    renderer.draw_shadow(rect, sc, s.shadow.blur, s.shadow.spread, s.shadow.offset, radii);
+  }
+
+  if (s.backdrop_blur > 0.0) {
+    // A quad flagged with the blur radius; a backend with a blurred copy of
+    // the scene fills it (frosted glass). Backends without one skip it.
+    renderer.set_next_blur(s.backdrop_blur);
+    renderer.draw_rect(rect, Color { r: 1.0, g: 1.0, b: 1.0, a: alpha }, radii);
+    renderer.set_next_blur(0.0);
+  }
+
+  if (s.background.a > 0.0 || s.border_width > 0.0 || s.has_multi_stop_gradient()) {
+    let bg = s.background.with_alpha(s.background.a * alpha);
+
+    if (s.border_width > 0.0 && s.border_color.a > 0.0) {
+      let bc = s.border_color.with_alpha(s.border_color.a * alpha);
+      if (s.has_multi_stop_gradient()) {
+        renderer.draw_bordered_rect(rect, Color::transparent(), bc, s.border_width, radii);
+        let inner = rect.shrunk(s.border_width);
+        renderer.draw_multi_stop_gradient(inner, s.gradient_stops[..s.gradient_stop_count as usize], s.gradient_type, s.gradient_angle, inner_radii(radii, s.border_width));
+      } else if (s.has_gradient()) {
+        renderer.draw_bordered_rect(rect, Color::transparent(), bc, s.border_width, radii);
+        let inner = rect.shrunk(s.border_width);
+        let ir = inner_radii(radii, s.border_width);
+        let bg2 = s.background_end.with_alpha(s.background_end.a * alpha);
+        if (s.gradient_type == GradientType::Radial) {
+          renderer.draw_radial_gradient(inner, bg, bg2, ir);
+        } else {
+          renderer.draw_rect_gradient(inner, bg, bg2, ir, s.gradient_angle);
+        }
+      } else {
+        renderer.draw_bordered_rect(rect, bg, bc, s.border_width, radii);
+      }
+    } else if (s.has_multi_stop_gradient()) {
+      renderer.draw_multi_stop_gradient(rect, s.gradient_stops[..s.gradient_stop_count as usize], s.gradient_type, s.gradient_angle, radii);
+    } else if (s.has_gradient()) {
+      let bg2 = s.background_end.with_alpha(s.background_end.a * alpha);
+      if (s.gradient_type == GradientType::Radial) {
+        renderer.draw_radial_gradient(rect, bg, bg2, radii);
+      } else {
+        renderer.draw_rect_gradient(rect, bg, bg2, radii, s.gradient_angle);
+      }
+    } else {
+      renderer.draw_rect(rect, bg, radii);
+    }
+  }
+
+  if (s.has_shadow() && s.shadow.inset) {
+    let sc = s.shadow.color.with_alpha(s.shadow.color.a * alpha);
+    renderer.push_scissor(rect);
+    renderer.draw_inset_shadow(rect, sc, s.shadow.blur, s.shadow.spread, s.shadow.offset, radii);
+    renderer.pop_scissor();
+  }
+
+  if (widget_state_of(world, e).has(WidgetState::Focused) && world.get(kWidgetNode, e)!.tab_index >= 0) {
+    let sc = ui_scale(world, ctx, e);
+    let focus_rect = Rect { x: rect.x - 2.0 * sc, y: rect.y - 2.0 * sc, w: rect.w + 4.0 * sc, h: rect.h + 4.0 * sc };
+    let base = s.border_color.a > 0.1 ? s.border_color : (s.text_color.a > 0.1 ? s.text_color : Color { r: 0.6, g: 0.6, b: 0.7, a: 1.0 });
+    let focus_color = base.with_alpha(0.5 * alpha);
+    renderer.draw_bordered_rect(focus_rect, Color::transparent(), focus_color, 2.0 * sc, radii);
+  }
+
+  let _ = vt_draw(kind, world, ctx, e, renderer);
+}
+
+// --- Layout bridge -----------------------------------------------------------------
+
+pub fn populate_layout_node(world&: World, e: WidgetId, var node&: LayoutNode) {
+  let t& = world.get(kTransform, e)!;
+  node.style = world.get(kStyleC, e)!.style;
+  node.id = world.get(kWidgetNode, e)!.id;
+  node.intrinsic_width = t.intrinsic_w;
+  node.intrinsic_height = t.intrinsic_h;
+}
+
+pub fn apply_layout_result(var world&: World, e: WidgetId, node&: LayoutNode) {
+  var t& = world.get_var(kTransform, e)!;
+  t.rect = node.computed_rect;
+  t.content_rect = node.content_rect;
+  t.layout_dirty = false;
+  t.paint_dirty = true;
+}

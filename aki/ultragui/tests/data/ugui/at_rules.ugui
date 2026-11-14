@@ -1,0 +1,43 @@
+panel animated_card {
+  opacity: 1;
+  @keyframes pulse {
+    duration: 2s;
+    loop: true;
+    alternate: true;
+    easing: ease-in-out;
+    0% { opacity: 0.5; scale: 1; }
+    50% { opacity: 1; scale: 1.1 }
+    100% { opacity: 0.5 }
+    12.5% { color: #fff; }
+  }
+  @keyframes unnamed { 0% { x: 0px; } 100% { x: 100px; } }
+  @media (min-width: 800px) {
+    layout: row;
+    gap: 24;
+  }
+  @media (max-width: 600) { layout: column; }
+  @media max-height : 300.5px { padding: 4; }
+  @media (orientation) { x: y; }
+  :hover { background: #e94560; transition: 100ms; }
+  :pressed {
+    background: #c03050;
+    scale: 0.98;
+  }
+  :focused { border-width: 2 }
+  button inner_btn {
+    text: "Go";
+    @media (min-width: 400px) { width: 200px; }
+    @keyframes wiggle { 50% { rotate: 5deg; } }
+    :hover { color: white; }
+    panel deep {
+      label x {
+        @media (max-width: 100) { visible: false; }
+      }
+    }
+  }
+  text { content: "anonymous child"; }
+  spacer
+  {
+    flex: 1;
+  }
+}

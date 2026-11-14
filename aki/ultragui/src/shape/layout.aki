@@ -1,0 +1,1581 @@
+// Applying GSUB and GPOS lookups: HarfBuzz's hb_ot_apply_context_t, its
+// skipping iterator and matcher, match_input / ligate_input / backtrack /
+// lookahead, nested lookup application (apply_lookup), the contextual and
+// chained-contextual subtables, every GSUB subtable (types 1-8) and every
+// GPOS subtable (types 1-9), with HarfBuzz's exact semantics
+// (hb-ot-layout-gsubgpos.hh, OT/Layout/GSUB, OT/Layout/GPOS).
+//
+// Positions in GPOS use the hb_ft font's scale with no ppem: device tables
+// and anchor contour points never apply (hb_ft leaves ppem at 0) and the font
+// is at its default instance, so variation deltas are 0.
+//
+// Not here: the per-subtable caches and set digests (they only skip work that
+// would not match), the fast paths of RuleSet/LigatureSet (they pick the same
+// rule), glyph flags, the 24-bit "beyond 64K" formats.
+
+module ultragui::shape::layout;
+
+import {List} from akikit::containers::list;
+import {Buffer, GlyphInfo, GlyphPos, kScratchHasGposAttachment} from ultragui::shape::buffer;
+import {
+  Gdef, GsubGpos, class_of, coverage_index, gdef_glyph_props, gdef_mark_set_covers, gdef_sanitize_lookup_props,
+  kLookupIgnoreFlags, kLookupMarkAttachmentType, kLookupRightToLeft, kLookupUseMarkFilteringSet, kNotCovered, kNull,
+  kPropsBaseGlyph, kPropsLigated, kPropsLigature, kPropsMark, kPropsMultiplied, kPropsPreserve, kPropsSubstituted,
+  lookup_count, lookup_offset, lookup_props, lookup_subtable, lookup_subtable_count, lookup_type, off16, off32, rd16,
+  rds16,
+} from ultragui::shape::otl;
+import {dir_is_horizontal, kDirBtt, kDirLtr, kDirRtl, kDirTtb, kGcNonSpacingMark, kGcOtherLetter} from ultragui::shape::ucd;
+
+comptime let kMaxNestingLevel: u32 = 64;
+comptime let kMaxContextLength: u32 = 64;
+
+// ATTACH_TYPE_*
+pub comptime let kAttachTypeMark: u32 = 1;
+pub comptime let kAttachTypeCursive: u32 = 2;
+
+// --- Glyph property helpers (hb-ot-layout.hh) -----------------------------------------------
+
+pub fn is_default_ignorable(g&: GlyphInfo): bool => (g.unicode_props & 0x20) != 0 && (g.glyph_props & kPropsSubstituted) == 0;
+pub fn is_hidden(g&: GlyphInfo): bool => (g.unicode_props & 0x40) != 0;
+pub fn general_category(g&: GlyphInfo): u32 => g.unicode_props & 0x1F;
+pub fn is_zwnj(g&: GlyphInfo): bool => general_category(g) == 1 && (g.unicode_props & 0x200) != 0;
+pub fn is_zwj(g&: GlyphInfo): bool => general_category(g) == 1 && (g.unicode_props & 0x100) != 0;
+pub fn is_mark(g&: GlyphInfo): bool => (g.glyph_props & kPropsMark) != 0;
+pub fn is_base_glyph(g&: GlyphInfo): bool => (g.glyph_props & kPropsBaseGlyph) != 0;
+pub fn is_ligature(g&: GlyphInfo): bool => (g.glyph_props & kPropsLigature) != 0;
+pub fn is_multiplied(g&: GlyphInfo): bool => (g.glyph_props & kPropsMultiplied) != 0;
+pub fn is_ligated(g&: GlyphInfo): bool => (g.glyph_props & kPropsLigated) != 0;
+
+pub fn lig_id(g&: GlyphInfo): u32 => g.lig_props >> 5;
+fn ligated_internal(g&: GlyphInfo): bool => (g.lig_props & 0x10) != 0;
+pub fn lig_comp(g&: GlyphInfo): u32 => ligated_internal(g) ? 0 : g.lig_props & 0x0F;
+pub fn lig_num_comps(g&: GlyphInfo): u32 =>
+  (g.glyph_props & kPropsLigature) != 0 && ligated_internal(g) ? g.lig_props & 0x0F : 1;
+pub fn set_lig_props_for_ligature(var g&: GlyphInfo, id: u32, num_comps: u32) {
+  g.lig_props = ((id << 5) | 0x10 | (num_comps & 0x0F)) & 0xFF;
+}
+pub fn set_lig_props_for_mark(var g&: GlyphInfo, id: u32, comp: u32) {
+  g.lig_props = ((id << 5) | (comp & 0x0F)) & 0xFF;
+}
+
+// _hb_allocate_lig_id
+fn allocate_lig_id(var buf&: Buffer): u32 {
+  var id = buf.next_serial() & 0x07;
+  while (id == 0) {
+    id = buf.next_serial() & 0x07;
+  }
+  return id;
+}
+
+// HarfBuzz's roundf (hb-algs.hh redefines it): floorf (x + .5f), in float.
+pub fn roundf(x: f32): i32 => @floor(x + 0.5f32) as i32;
+
+// --- The font's scale (hb_font_t's em_scale / em_fscale) ------------------------------------
+
+pub struct Scale : Copy {
+  pub var x_scale: i32 = 0
+  pub var y_scale: i32 = 0
+  pub var x_mult: i64 = 0
+  pub var y_mult: i64 = 0
+  pub var x_multf: f32 = 0.0
+  pub var y_multf: f32 = 0.0
+
+  // hb_font_t::changed
+  pub fn of(x_scale: i32, y_scale: i32, upem: u32): Scale {
+    let u = upem as f32;
+    let xm = x_scale < 0 ? -((-(x_scale as i64) << 16) as f32 / u) : ((x_scale as i64) << 16) as f32 / u;
+    let ym = y_scale < 0 ? -((-(y_scale as i64) << 16) as f32 / u) : ((y_scale as i64) << 16) as f32 / u;
+    return Scale {
+      x_scale, y_scale, x_mult: @saturating_cast(i64, xm), y_mult: @saturating_cast(i64, ym), x_multf: x_scale as f32 / u,
+      y_multf: y_scale as f32 / u,
+    };
+  }
+
+  pub fn em_x(self&, v: i32): i32 => ((v as i64 * self.x_mult + 32768) >> 16) as i32;
+  pub fn em_y(self&, v: i32): i32 => ((v as i64 * self.y_mult + 32768) >> 16) as i32;
+  pub fn emf_x(self&, v: i32): f32 {
+    let r = v as f32 * self.x_multf;
+    return r;
+  }
+  pub fn emf_y(self&, v: i32): f32 {
+    let r = v as f32 * self.y_multf;
+    return r;
+  }
+}
+
+// --- The matcher and the skipping iterator ----------------------------------------------------
+
+// What a sequence is matched against (match_glyph / match_class / match_coverage).
+pub enum MatchKind { None, Glyph, Class, Coverage }
+
+pub comptime let kSkipNo: u32 = 0;
+pub comptime let kSkipYes: u32 = 1;
+pub comptime let kSkipMaybe: u32 = 2;
+
+comptime let kMatch: u32 = 0;
+comptime let kNotMatch: u32 = 1;
+comptime let kSkip: u32 = 2;
+
+pub struct SkipIter : Copy {
+  pub var idx: usize = 0
+  pub var end: usize = 0
+  pub var lookup_props: u32 = 0
+  pub var mask: u32 = 0xFFFFFFFF
+  pub var ignore_zwnj: bool = false
+  pub var ignore_zwj: bool = false
+  pub var ignore_hidden: bool = false
+  pub var per_syllable: bool = false
+  pub var syllable: u32 = 0
+  pub var kind: MatchKind = MatchKind::None
+  pub var data: usize = kNull        // the ClassDef, or the base of Coverage offsets
+  pub var glyph_data: usize = kNull  // the u16 array being matched, or kNull
+}
+
+// --- The apply context ------------------------------------------------------------------------
+
+pub struct ApplyCtx<'a> {
+  pub let t: &'a [u8]          // GSUB or GPOS
+  pub let gdef_t: &'a [u8]
+  pub let gdef: Gdef
+  pub let gg: GsubGpos
+  pub let table_index: u32     // 0 GSUB, 1 GPOS
+  pub let scale: Scale
+  pub var direction: u32 = 0
+  pub var lookup_mask: u32 = 1
+  pub var lookup_index: u32 = 0xFFFFFFFF
+  pub var lookup_props: u32 = 0
+  pub var nesting_level_left: u32 = kMaxNestingLevel
+  pub var has_glyph_classes: bool = false
+  pub var auto_zwnj: bool = true
+  pub var auto_zwj: bool = true
+  pub var per_syllable: bool = false
+  pub var random: bool = false
+  pub var new_syllables: i32 = -1
+  pub var last_base: i64 = -1
+  pub var last_base_until: usize = 0
+  pub var match_positions: List<u32> = List()
+  pub var iter_input: SkipIter = SkipIter {}
+  pub var iter_context: SkipIter = SkipIter {}
+}
+
+pub fn new_ctx<'a>(t: &'a [u8], gdef_t: &'a [u8], gdef: Gdef, gg: GsubGpos, table_index: u32, scale: Scale, var buf&: Buffer): ApplyCtx<'a> {
+  var c = ApplyCtx { t, gdef_t, gdef, gg, table_index, scale };
+  c.direction = buf.direction;
+  c.has_glyph_classes = gdef.glyph_class_def < kNull;
+  init_iters(c, buf);
+  return c;
+}
+
+fn matcher_init(var c&: ApplyCtx, var it&: SkipIter, context_match: bool, var buf&: Buffer) {
+  it.end = buf.len();
+  it.glyph_data = kNull;
+  it.kind = MatchKind::None;
+  it.data = kNull;
+  it.lookup_props = c.lookup_props;
+  it.ignore_zwnj = c.table_index == 1 || (context_match && c.auto_zwnj);
+  it.ignore_zwj = context_match || c.auto_zwj;
+  it.ignore_hidden = c.table_index == 1;
+  it.mask = context_match ? 0xFFFFFFFF : c.lookup_mask;
+  it.per_syllable = c.table_index == 0 && c.per_syllable;
+  it.syllable = 0;
+}
+
+pub fn init_iters(var c&: ApplyCtx, var buf&: Buffer) {
+  var a = c.iter_input;
+  matcher_init(c, a, false, buf);
+  c.iter_input = a;
+  var b = c.iter_context;
+  matcher_init(c, b, true, buf);
+  c.iter_context = b;
+}
+
+pub fn set_lookup_mask(var c&: ApplyCtx, mask: u32) {
+  c.lookup_mask = mask;
+  c.last_base = -1;
+  c.last_base_until = 0;
+}
+
+pub fn set_lookup_props(var c&: ApplyCtx, var buf&: Buffer, props: u32) {
+  c.lookup_props = gdef_sanitize_lookup_props(c.gdef, props);
+  init_iters(c, buf);
+}
+
+// match_properties_mark + check_glyph_property
+pub fn check_glyph_property(c&: ApplyCtx, g&: GlyphInfo, match_props: u32): bool {
+  let glyph_props = g.glyph_props;
+  if ((glyph_props & match_props & kLookupIgnoreFlags) != 0) {
+    return false;
+  }
+  if ((glyph_props & kPropsMark) != 0) {
+    if ((match_props & kLookupUseMarkFilteringSet) != 0) {
+      return gdef_mark_set_covers(c.gdef_t, c.gdef, match_props >> 16, g.codepoint);
+    }
+    if ((match_props & kLookupMarkAttachmentType) != 0) {
+      return (match_props & kLookupMarkAttachmentType) == (glyph_props & kLookupMarkAttachmentType);
+    }
+  }
+  return true;
+}
+
+pub fn may_skip(c&: ApplyCtx, it&: SkipIter, g&: GlyphInfo): u32 {
+  if (!check_glyph_property(c, g, it.lookup_props)) {
+    return kSkipYes;
+  }
+  if (is_default_ignorable(g) && (it.ignore_zwnj || !is_zwnj(g)) && (it.ignore_zwj || !is_zwj(g)) &&
+      (it.ignore_hidden || !is_hidden(g))) {
+    return kSkipMaybe;
+  }
+  return kSkipNo;
+}
+
+// The matcher's match function on a glyph against a value.
+fn match_value(c&: ApplyCtx, kind: MatchKind, data: usize, g&: GlyphInfo, value: u32): bool => match (kind) {
+  MatchKind::Glyph => g.codepoint == value,
+  MatchKind::Class => class_of(c.t, data, g.codepoint) == value,
+  MatchKind::Coverage => coverage_index(c.t, value == 0 ? kNull : data + value as usize, g.codepoint) != kNotCovered,
+  MatchKind::None => true,
+};
+
+// 0 MATCH_NO, 1 MATCH_YES, 2 MATCH_MAYBE
+fn may_match(c&: ApplyCtx, it&: SkipIter, g&: GlyphInfo): u32 {
+  if ((g.mask & it.mask) == 0 || (it.per_syllable && it.syllable != 0 && it.syllable != g.syllable)) {
+    return 0;
+  }
+  if (it.kind != MatchKind::None) {
+    let value = it.glyph_data < kNull ? rd16(c.t, it.glyph_data) : 0;
+    return match_value(c, it.kind, it.data, g, value) ? 1 : 0;
+  }
+  return 2;
+}
+
+fn iter_match(c&: ApplyCtx, it&: SkipIter, g&: GlyphInfo): u32 {
+  let skip = may_skip(c, it, g);
+  if (skip == kSkipYes) {
+    return kSkip;
+  }
+  let m = may_match(c, it, g);
+  if (m == 1 || (m == 2 && skip == kSkipNo)) {
+    return kMatch;
+  }
+  if (skip == kSkipNo) {
+    return kNotMatch;
+  }
+  return kSkip;
+}
+
+fn advance_glyph_data(var it&: SkipIter) {
+  if (it.glyph_data < kNull) {
+    it.glyph_data += 2;
+  }
+}
+
+// skipping_iterator_t::next: (matched, unsafe_to)
+pub fn iter_next(c&: ApplyCtx, var it&: SkipIter, buf&: Buffer): bool {
+  let stop = it.end as i64 - 1;
+  while ((it.idx as i64) < stop) {
+    it.idx += 1;
+    let r = iter_match(c, it, buf.info[it.idx]);
+    if (r == kMatch) {
+      advance_glyph_data(it);
+      return true;
+    }
+    if (r == kNotMatch) {
+      return false;
+    }
+  }
+  return false;
+}
+
+// skipping_iterator_t::prev, over the out-buffer (the buffer itself when there is no output).
+pub fn iter_prev(c&: ApplyCtx, var it&: SkipIter, buf&: Buffer): bool {
+  while (it.idx > 0) {
+    it.idx -= 1;
+    let g = buf.have_output ? buf.out_info[it.idx] : buf.info[it.idx];
+    let r = iter_match(c, it, g);
+    if (r == kMatch) {
+      advance_glyph_data(it);
+      return true;
+    }
+    if (r == kNotMatch) {
+      return false;
+    }
+  }
+  return false;
+}
+
+// --- Glyph classes after substitution ------------------------------------------------------
+
+// hb_ot_apply_context_t::_set_glyph_class on the current glyph.
+fn set_glyph_class(var c&: ApplyCtx, var buf&: Buffer, glyph_index: u32, class_guess: u32, ligature: bool, component: bool) {
+  let i = buf.idx;
+  if (c.new_syllables >= 0) {
+    buf.info[i].syllable = c.new_syllables as u32;
+  }
+  var props = buf.info[i].glyph_props;
+  props |= kPropsSubstituted;
+  if (ligature) {
+    props |= kPropsLigated;
+    props &= ~kPropsMultiplied;
+  }
+  if (component) {
+    props |= kPropsMultiplied;
+  }
+  if (c.has_glyph_classes) {
+    props &= kPropsPreserve;
+    buf.info[i].glyph_props = props | gdef_glyph_props(c.gdef_t, c.gdef, glyph_index);
+  } else if (class_guess != 0) {
+    props &= kPropsPreserve;
+    buf.info[i].glyph_props = props | class_guess;
+  } else {
+    buf.info[i].glyph_props = props;
+  }
+}
+
+pub fn replace_glyph(var c&: ApplyCtx, var buf&: Buffer, g: u32) {
+  set_glyph_class(c, buf, g, 0, false, false);
+  buf.replace_glyph(g);
+}
+
+fn replace_glyph_inplace(var c&: ApplyCtx, var buf&: Buffer, g: u32) {
+  set_glyph_class(c, buf, g, 0, false, false);
+  buf.info[buf.idx].codepoint = g;
+}
+
+fn replace_glyph_with_ligature(var c&: ApplyCtx, var buf&: Buffer, g: u32, class_guess: u32) {
+  set_glyph_class(c, buf, g, class_guess, true, false);
+  buf.replace_glyph(g);
+}
+
+fn output_glyph_for_component(var c&: ApplyCtx, var buf&: Buffer, g: u32, class_guess: u32) {
+  set_glyph_class(c, buf, g, class_guess, false, true);
+  buf.output_glyph(g);
+}
+
+// --- Sequence matching --------------------------------------------------------------------------
+
+fn set_match_position(var c&: ApplyCtx, i: usize, v: u32) {
+  while (c.match_positions.len() <= i) {
+    c.match_positions.push(0);
+  }
+  c.match_positions[i] = v;
+}
+
+// match_input: (matched, end_position, total_component_count)
+fn match_input(var c&: ApplyCtx, var buf&: Buffer, count: u32, input: usize, kind: MatchKind, data: usize): (bool, usize, u32) {
+  if (count == 1) {
+    set_match_position(c, 0, buf.idx as u32);
+    return (true, buf.idx + 1, lig_num_comps(buf.info[buf.idx]));
+  }
+  if (count > kMaxContextLength) {
+    return (false, 0, 0);
+  }
+  var it = c.iter_input;
+  it.idx = buf.idx;
+  it.end = buf.len();
+  it.syllable = buf.info[buf.idx].syllable;
+  it.kind = kind;
+  it.data = data;
+  it.glyph_data = input;
+
+  var total_component_count = 0u32;
+  let first_lig_id = lig_id(buf.info[buf.idx]);
+  let first_lig_comp = lig_comp(buf.info[buf.idx]);
+  var ligbase = 0u32;  // 0 not checked, 1 may not skip, 2 may skip
+
+  for (let i in 1..count) {
+    if (!iter_next(c, it, buf)) {
+      c.iter_input = it;
+      return (false, 0, 0);
+    }
+    set_match_position(c, i as usize, it.idx as u32);
+    let this_lig_id = lig_id(buf.info[it.idx]);
+    let this_lig_comp = lig_comp(buf.info[it.idx]);
+    if (first_lig_id != 0 && first_lig_comp != 0) {
+      if (first_lig_id != this_lig_id || first_lig_comp != this_lig_comp) {
+        if (ligbase == 0) {
+          var found = false;
+          var j = buf.out_len();
+          while (j > 0 && lig_id(buf.out_info[j - 1]) == first_lig_id) {
+            if (lig_comp(buf.out_info[j - 1]) == 0) {
+              j -= 1;
+              found = true;
+              break;
+            }
+            j -= 1;
+          }
+          // out[j] when nothing was found: out_info[j], as HarfBuzz reads it.
+          let g = j < buf.out_len() ? buf.out_info[j] : (buf.len() > j ? buf.info[j] : GlyphInfo {});
+          if (found && may_skip(c, it, g) == kSkipYes) {
+            ligbase = 2;
+          } else {
+            ligbase = 1;
+          }
+        }
+        if (ligbase == 1) {
+          c.iter_input = it;
+          return (false, 0, 0);
+        }
+      }
+    } else {
+      if (this_lig_id != 0 && this_lig_comp != 0 && this_lig_id != first_lig_id) {
+        c.iter_input = it;
+        return (false, 0, 0);
+      }
+    }
+    total_component_count += lig_num_comps(buf.info[it.idx]);
+  }
+  let end = it.idx + 1;
+  c.iter_input = it;
+  total_component_count += lig_num_comps(buf.info[buf.idx]);
+  set_match_position(c, 0, buf.idx as u32);
+  return (true, end, total_component_count);
+}
+
+// ligate_input
+fn ligate_input(var c&: ApplyCtx, var buf&: Buffer, count: u32, match_end: usize, lig_glyph: u32, total_component_count: u32) {
+  buf.merge_clusters(buf.idx, match_end);
+
+  var is_base_ligature = is_base_glyph(buf.info[c.match_positions[0] as usize]);
+  var is_mark_ligature = is_mark(buf.info[c.match_positions[0] as usize]);
+  for (let i in 1..count) {
+    if (!is_mark(buf.info[c.match_positions[i as usize] as usize])) {
+      is_base_ligature = false;
+      is_mark_ligature = false;
+      break;
+    }
+  }
+  let is_lig = !is_base_ligature && !is_mark_ligature;
+  let klass = is_lig ? kPropsLigature : 0;
+  let lig_id_new = is_lig ? allocate_lig_id(buf) : 0;
+  var last_lig_id = lig_id(buf.info[buf.idx]);
+  var last_num_components = lig_num_comps(buf.info[buf.idx]);
+  var components_so_far = last_num_components;
+
+  if (is_lig) {
+    let cur = buf.idx;
+    set_lig_props_for_ligature(buf.info[cur], lig_id_new, total_component_count);
+    if (general_category(buf.info[cur]) == kGcNonSpacingMark) {
+      buf.info[cur].unicode_props = kGcOtherLetter | (buf.info[cur].unicode_props & (0xFF & ~0x1Fu32));
+    }
+  }
+  replace_glyph_with_ligature(c, buf, lig_glyph, klass);
+
+  for (let i in 1..count) {
+    while (buf.idx < c.match_positions[i as usize] as usize && buf.successful) {
+      if (is_lig) {
+        var this_comp = lig_comp(buf.info[buf.idx]);
+        if (this_comp == 0) {
+          this_comp = last_num_components;
+        }
+        let new_lig_comp = components_so_far - last_num_components + (this_comp < last_num_components ? this_comp : last_num_components);
+        let cur = buf.idx;
+        set_lig_props_for_mark(buf.info[cur], lig_id_new, new_lig_comp);
+      }
+      buf.next_glyph();
+    }
+    last_lig_id = lig_id(buf.info[buf.idx]);
+    last_num_components = lig_num_comps(buf.info[buf.idx]);
+    components_so_far += last_num_components;
+    // Skip the base glyph
+    buf.idx += 1;
+  }
+
+  if (!is_mark_ligature && last_lig_id != 0) {
+    // Re-adjust components for any marks following.
+    for (let i in buf.idx..buf.len()) {
+      if (last_lig_id != lig_id(buf.info[i])) {
+        break;
+      }
+      let this_comp = lig_comp(buf.info[i]);
+      if (this_comp == 0) {
+        break;
+      }
+      let new_lig_comp = components_so_far - last_num_components + (this_comp < last_num_components ? this_comp : last_num_components);
+      set_lig_props_for_mark(buf.info[i], lig_id_new, new_lig_comp);
+    }
+  }
+}
+
+// match_backtrack: (matched, start)
+fn match_backtrack(var c&: ApplyCtx, var buf&: Buffer, count: u32, backtrack: usize, kind: MatchKind, data: usize): bool {
+  if (count == 0) {
+    return true;
+  }
+  var it = c.iter_context;
+  it.idx = buf.backtrack_len();
+  it.syllable = buf.info[buf.idx].syllable;
+  it.kind = kind;
+  it.data = data;
+  it.glyph_data = backtrack;
+  for (let i in 0..count) {
+    if (!iter_prev(c, it, buf)) {
+      c.iter_context = it;
+      return false;
+    }
+  }
+  c.iter_context = it;
+  return true;
+}
+
+// match_lookahead from start_index: (matched, end)
+fn match_lookahead(var c&: ApplyCtx, var buf&: Buffer, count: u32, lookahead: usize, kind: MatchKind, data: usize, start_index: usize): bool {
+  if (count == 0) {
+    return true;
+  }
+  var it = c.iter_context;
+  it.idx = start_index - 1;
+  it.end = buf.len();
+  it.syllable = buf.info[buf.idx].syllable;
+  it.kind = kind;
+  it.data = data;
+  it.glyph_data = lookahead;
+  for (let i in 0..count) {
+    if (!iter_next(c, it, buf)) {
+      c.iter_context = it;
+      return false;
+    }
+  }
+  c.iter_context = it;
+  return true;
+}
+
+// hb_ot_apply_context_t::recurse
+fn recurse(var c&: ApplyCtx, var buf&: Buffer, sub_lookup_index: u32): bool {
+  if (c.nesting_level_left == 0) {
+    buf.successful = false;
+    return false;
+  }
+  buf.max_ops -= 1;
+  if (buf.max_ops < 0) {
+    buf.successful = false;
+    return false;
+  }
+  c.nesting_level_left -= 1;
+  // SubstLookup / PosLookup::dispatch_recurse_func
+  let saved_props = c.lookup_props;
+  let saved_index = c.lookup_index;
+  c.lookup_index = sub_lookup_index;
+  var ret = false;
+  if (sub_lookup_index < lookup_count(c.t, c.gg)) {
+    let l = lookup_offset(c.t, c.gg, sub_lookup_index);
+    set_lookup_props(c, buf, lookup_props(c.t, l));
+    var saved_positions: List<u32> = List();
+    swap_positions(c, saved_positions);
+    ret = apply_lookup_subtables(c, buf, l);
+    c.lookup_index = saved_index;
+    set_lookup_props(c, buf, saved_props);
+    swap_positions(c, saved_positions);
+  }
+  c.nesting_level_left += 1;
+  return ret;
+}
+
+fn swap_positions(var c&: ApplyCtx, var other&: List<u32>) {
+  var tmp: List<u32> = List();
+  for (let v in c.match_positions) {
+    tmp.push(v);
+  }
+  c.match_positions.clear();
+  for (let v in other) {
+    c.match_positions.push(v);
+  }
+  other.clear();
+  for (let v in tmp) {
+    other.push(v);
+  }
+}
+
+// apply_lookup: the nested lookups of a matched context.
+fn apply_lookup(var c&: ApplyCtx, var buf&: Buffer, count_: u32, lookup_count_: u32, lookup_records: usize, match_end: usize) {
+  var count = count_;
+  var end: i64 = 0;
+  {
+    let bl = buf.backtrack_len() as i64;
+    end = bl + match_end as i64 - buf.idx as i64;
+    let delta = bl - buf.idx as i64;
+    for (let j in 0..count) {
+      c.match_positions[j as usize] = (c.match_positions[j as usize] as i64 + delta) as u32;
+    }
+  }
+  var i = 0u32;
+  while (i < lookup_count_ && buf.successful) {
+    let rec = lookup_records + i as usize * 4;
+    let idx = rd16(c.t, rec);
+    let lookup_list_index = rd16(c.t, rec + 2);
+    i += 1;
+    if (idx >= count) {
+      continue;
+    }
+    let orig_len = (buf.backtrack_len() + buf.lookahead_len()) as i64;
+    if (c.match_positions[idx as usize] as i64 >= orig_len) {
+      continue;
+    }
+    if (!buf.move_to(c.match_positions[idx as usize] as usize)) {
+      break;
+    }
+    if (buf.max_ops <= 0) {
+      break;
+    }
+    if (!recurse(c, buf, lookup_list_index)) {
+      continue;
+    }
+    let new_len = (buf.backtrack_len() + buf.lookahead_len()) as i64;
+    var delta = new_len - orig_len;
+    if (delta == 0) {
+      continue;
+    }
+    end += delta;
+    let mp = c.match_positions[idx as usize] as i64;
+    if (end < mp) {
+      delta += mp - end;
+      end = mp;
+    }
+    var next = idx as i64 + 1;
+    if (delta > 0) {
+      if (delta + count as i64 > kMaxContextLength as i64) {
+        break;
+      }
+    } else {
+      delta = delta > next - count as i64 ? delta : next - count as i64;
+      next -= delta;
+    }
+    // Shift!
+    let n = count as i64 - next;
+    let new_count = (count as i64 + delta) as usize;
+    while (c.match_positions.len() < new_count) {
+      c.match_positions.push(0);
+    }
+    if (delta > 0) {
+      var k = n - 1;
+      while (k >= 0) {
+        c.match_positions[(next + delta + k) as usize] = c.match_positions[(next + k) as usize];
+        k -= 1;
+      }
+    } else {
+      for (let k in 0..n) {
+        c.match_positions[(next + delta + k) as usize] = c.match_positions[(next + k) as usize];
+      }
+    }
+    next += delta;
+    count = (count as i64 + delta) as u32;
+    // Fill in new entries.
+    var j = idx as i64 + 1;
+    while (j < next) {
+      c.match_positions[j as usize] = c.match_positions[(j - 1) as usize] + 1;
+      j += 1;
+    }
+    // And fixup the rest.
+    while (next < count as i64) {
+      c.match_positions[next as usize] = (c.match_positions[next as usize] as i64 + delta) as u32;
+      next += 1;
+    }
+  }
+  buf.move_to(end as usize);
+}
+
+// --- Contextual subtables --------------------------------------------------------------------
+
+// context_apply_lookup over a rule's input and lookup records.
+fn context_apply(var c&: ApplyCtx, var buf&: Buffer, input_count: u32, input: usize, lookup_count_: u32, records: usize, kind: MatchKind, data: usize): bool {
+  if (input_count > kMaxContextLength) {
+    return false;
+  }
+  let (ok, match_end, _) = match_input(c, buf, input_count, input, kind, data);
+  if (ok) {
+    apply_lookup(c, buf, input_count, lookup_count_, records, match_end);
+    return true;
+  }
+  return false;
+}
+
+// chain_context_apply_lookup
+fn chain_context_apply(var c&: ApplyCtx, var buf&: Buffer, backtrack_count: u32, backtrack: usize, input_count: u32, input: usize,
+                       lookahead_count: u32, lookahead: usize, lookup_count_: u32, records: usize, kinds: (MatchKind, MatchKind, MatchKind),
+                       datas: (usize, usize, usize)): bool {
+  if (input_count > kMaxContextLength) {
+    return false;
+  }
+  let (ok, match_end, _) = match_input(c, buf, input_count, input, kinds.1, datas.1);
+  if (!ok) {
+    return false;
+  }
+  if (!match_lookahead(c, buf, lookahead_count, lookahead, kinds.2, datas.2, match_end)) {
+    return false;
+  }
+  if (!match_backtrack(c, buf, backtrack_count, backtrack, kinds.0, datas.0)) {
+    return false;
+  }
+  apply_lookup(c, buf, input_count, lookup_count_, records, match_end);
+  return true;
+}
+
+// RuleSet::apply (ContextFormat1/2): rules in order, the first that applies.
+fn rule_set_apply(var c&: ApplyCtx, var buf&: Buffer, rs: usize, kind: MatchKind, data: usize): bool {
+  let t = c.t;
+  let n = rd16(t, rs);
+  for (let i in 0..n) {
+    let r = off16(t, rs, rs + 2 + i as usize * 2);
+    let input_count = rd16(t, r);
+    let lookup_count_ = rd16(t, r + 2);
+    let input = r + 4;
+    let records = input + (input_count > 0 ? input_count - 1 : 0) as usize * 2;
+    if (context_apply(c, buf, input_count, input, lookup_count_, records, kind, data)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn chain_rule_set_apply(var c&: ApplyCtx, var buf&: Buffer, rs: usize, kinds: (MatchKind, MatchKind, MatchKind), datas: (usize, usize, usize)): bool {
+  let t = c.t;
+  let n = rd16(t, rs);
+  for (let i in 0..n) {
+    let r = off16(t, rs, rs + 2 + i as usize * 2);
+    let backtrack_count = rd16(t, r);
+    let backtrack = r + 2;
+    let ip = backtrack + backtrack_count as usize * 2;
+    let input_count = rd16(t, ip);
+    let input = ip + 2;
+    let lp = input + (input_count > 0 ? input_count - 1 : 0) as usize * 2;
+    let lookahead_count = rd16(t, lp);
+    let lookahead = lp + 2;
+    let rp = lookahead + lookahead_count as usize * 2;
+    let lookup_count_ = rd16(t, rp);
+    if (chain_context_apply(c, buf, backtrack_count, backtrack, input_count, input, lookahead_count, lookahead, lookup_count_, rp + 2,
+                            kinds, datas)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn context_subtable_apply(var c&: ApplyCtx, var buf&: Buffer, s: usize): bool {
+  let t = c.t;
+  let format = rd16(t, s);
+  let gid = buf.info[buf.idx].codepoint;
+  if (format == 1) {
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let rs = index < rd16(t, s + 4) ? off16(t, s, s + 6 + index as usize * 2) : kNull;
+    return rule_set_apply(c, buf, rs, MatchKind::Glyph, kNull);
+  }
+  if (format == 2) {
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let class_def = off16(t, s, s + 4);
+    let klass = class_of(t, class_def, gid);
+    let rs = klass < rd16(t, s + 6) ? off16(t, s, s + 8 + klass as usize * 2) : kNull;
+    return rule_set_apply(c, buf, rs, MatchKind::Class, class_def);
+  }
+  if (format == 3) {
+    let glyph_count = rd16(t, s + 2);
+    let lookup_count_ = rd16(t, s + 4);
+    let index = coverage_index(t, off16(t, s, s + 6), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let records = s + 6 + glyph_count as usize * 2;
+    return context_apply(c, buf, glyph_count, s + 8, lookup_count_, records, MatchKind::Coverage, s);
+  }
+  return false;
+}
+
+fn chain_context_subtable_apply(var c&: ApplyCtx, var buf&: Buffer, s: usize): bool {
+  let t = c.t;
+  let format = rd16(t, s);
+  let gid = buf.info[buf.idx].codepoint;
+  if (format == 1) {
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let rs = index < rd16(t, s + 4) ? off16(t, s, s + 6 + index as usize * 2) : kNull;
+    return chain_rule_set_apply(c, buf, rs, (MatchKind::Glyph, MatchKind::Glyph, MatchKind::Glyph), (kNull, kNull, kNull));
+  }
+  if (format == 2) {
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let backtrack_cd = off16(t, s, s + 4);
+    let input_cd = off16(t, s, s + 6);
+    let lookahead_cd = off16(t, s, s + 8);
+    let klass = class_of(t, input_cd, gid);
+    let rs = klass < rd16(t, s + 10) ? off16(t, s, s + 12 + klass as usize * 2) : kNull;
+    return chain_rule_set_apply(c, buf, rs, (MatchKind::Class, MatchKind::Class, MatchKind::Class), (backtrack_cd, input_cd, lookahead_cd));
+  }
+  if (format == 3) {
+    let backtrack_count = rd16(t, s + 2);
+    let backtrack = s + 4;
+    let ip = backtrack + backtrack_count as usize * 2;
+    let input_count = rd16(t, ip);
+    let input = ip + 2;
+    let index = coverage_index(t, off16(t, s, input), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let lp = input + input_count as usize * 2;
+    let lookahead_count = rd16(t, lp);
+    let lookahead = lp + 2;
+    let rp = lookahead + lookahead_count as usize * 2;
+    let lookup_count_ = rd16(t, rp);
+    return chain_context_apply(c, buf, backtrack_count, backtrack, input_count, input + 2, lookahead_count, lookahead, lookup_count_,
+                               rp + 2, (MatchKind::Coverage, MatchKind::Coverage, MatchKind::Coverage), (s, s, s));
+  }
+  return false;
+}
+
+// --- GSUB subtables ------------------------------------------------------------------------------
+
+fn gsub_subtable_apply(var c&: ApplyCtx, var buf&: Buffer, type_: u32, s: usize): bool {
+  let t = c.t;
+  let gid = buf.info[buf.idx].codepoint;
+  if (type_ == 1) {
+    let format = rd16(t, s);
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    if (format == 1) {
+      let d = rd16(t, s + 4);
+      replace_glyph(c, buf, (gid + d) & 0xFFFF);
+      return true;
+    }
+    if (format == 2) {
+      if (index >= rd16(t, s + 4)) {
+        return false;
+      }
+      replace_glyph(c, buf, rd16(t, s + 6 + index as usize * 2));
+      return true;
+    }
+    return false;
+  }
+  if (type_ == 2) {
+    if (rd16(t, s) != 1) {
+      return false;
+    }
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let seq = index < rd16(t, s + 4) ? off16(t, s, s + 6 + index as usize * 2) : kNull;
+    let count = rd16(t, seq);
+    if (count == 1) {
+      replace_glyph(c, buf, rd16(t, seq + 2));
+      return true;
+    }
+    if (count == 0) {
+      buf.delete_glyph();
+      return true;
+    }
+    let klass = is_ligature(buf.info[buf.idx]) ? kPropsBaseGlyph : 0;
+    let lid = lig_id(buf.info[buf.idx]);
+    for (let i in 0..count) {
+      if (lid == 0) {
+        let cur = buf.idx;
+        set_lig_props_for_mark(buf.info[cur], 0, i);
+      }
+      output_glyph_for_component(c, buf, rd16(t, seq + 2 + i as usize * 2), klass);
+    }
+    buf.skip_glyph();
+    return true;
+  }
+  if (type_ == 3) {
+    if (rd16(t, s) != 1) {
+      return false;
+    }
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let set = index < rd16(t, s + 4) ? off16(t, s, s + 6 + index as usize * 2) : kNull;
+    let count = rd16(t, set);
+    if (count == 0) {
+      return false;
+    }
+    let glyph_mask = buf.info[buf.idx].mask;
+    let lookup_mask = c.lookup_mask;
+    let shift = @trailing_zeros(lookup_mask);
+    var alt_index = (lookup_mask & glyph_mask) >> shift;
+    if (alt_index == 255 && c.random) {
+      buf.random_state = (buf.random_state *% 48271) % 2147483647;  // uint32_t arithmetic
+      alt_index = buf.random_state % count + 1;
+    }
+    if (alt_index > count || alt_index == 0) {
+      return false;
+    }
+    replace_glyph(c, buf, rd16(t, set + 2 + (alt_index - 1) as usize * 2));
+    return true;
+  }
+  if (type_ == 4) {
+    if (rd16(t, s) != 1) {
+      return false;
+    }
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let set = index < rd16(t, s + 4) ? off16(t, s, s + 6 + index as usize * 2) : kNull;
+    let n = rd16(t, set);
+    for (let i in 0..n) {
+      let lig = off16(t, set, set + 2 + i as usize * 2);
+      let lig_glyph = rd16(t, lig);
+      let count = rd16(t, lig + 2);
+      if (count == 0) {
+        continue;
+      }
+      if (count == 1) {
+        replace_glyph(c, buf, lig_glyph);
+        return true;
+      }
+      if (count > kMaxContextLength) {
+        continue;
+      }
+      let (ok, match_end, total) = match_input(c, buf, count, lig + 4, MatchKind::Glyph, kNull);
+      if (!ok) {
+        continue;
+      }
+      ligate_input(c, buf, count, match_end, lig_glyph, total);
+      return true;
+    }
+    return false;
+  }
+  if (type_ == 5) {
+    return context_subtable_apply(c, buf, s);
+  }
+  if (type_ == 6) {
+    return chain_context_subtable_apply(c, buf, s);
+  }
+  if (type_ == 8) {
+    if (rd16(t, s) != 1) {
+      return false;
+    }
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    if (c.nesting_level_left != kMaxNestingLevel) {
+      return false;  // No chaining to this type
+    }
+    let backtrack_count = rd16(t, s + 4);
+    let backtrack = s + 6;
+    let lp = backtrack + backtrack_count as usize * 2;
+    let lookahead_count = rd16(t, lp);
+    let lookahead = lp + 2;
+    let sp = lookahead + lookahead_count as usize * 2;
+    if (index >= rd16(t, sp)) {
+      return false;
+    }
+    if (match_backtrack(c, buf, backtrack_count, backtrack, MatchKind::Coverage, s) &&
+        match_lookahead(c, buf, lookahead_count, lookahead, MatchKind::Coverage, s, buf.idx + 1)) {
+      replace_glyph_inplace(c, buf, rd16(t, sp + 2 + index as usize * 2));
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+// --- GPOS subtables --------------------------------------------------------------------------------
+
+fn value_len(format: u32): u32 => @pop_count(format & 0xFF);
+
+// ValueFormat::apply_value: whether any value is nonzero.
+fn apply_value(c&: ApplyCtx, format: u32, values: usize, var p&: GlyphPos): bool {
+  if (format == 0) {
+    return false;
+  }
+  let t = c.t;
+  let horizontal = dir_is_horizontal(c.direction);
+  var ret = false;
+  var v = values;
+  if ((format & 0x1) != 0) {
+    let x = rds16(t, v);
+    ret = ret || x != 0;
+    p.x_offset += c.scale.em_x(x);
+    v += 2;
+  }
+  if ((format & 0x2) != 0) {
+    let y = rds16(t, v);
+    ret = ret || y != 0;
+    p.y_offset += c.scale.em_y(y);
+    v += 2;
+  }
+  if ((format & 0x4) != 0) {
+    let x = rds16(t, v);
+    ret = ret || x != 0;
+    if (horizontal) {
+      p.x_advance += c.scale.em_x(x);
+    }
+    v += 2;
+  }
+  if ((format & 0x8) != 0) {
+    let y = rds16(t, v);
+    ret = ret || y != 0;
+    if (!horizontal) {
+      p.y_advance -= c.scale.em_y(y);
+    }
+    v += 2;
+  }
+  // Device tables apply nothing at ppem 0 and the default coordinates.
+  return ret;
+}
+
+// Anchor::get_anchor in font units scaled to floats.
+fn anchor(c&: ApplyCtx, a: usize): (f32, f32) {
+  let t = c.t;
+  let format = rd16(t, a);
+  if (format == 1 || format == 2 || format == 3) {
+    return (c.scale.emf_x(rds16(t, a + 2)), c.scale.emf_y(rds16(t, a + 4)));
+  }
+  return (0.0, 0.0);
+}
+
+// MarkArray::apply
+fn mark_array_apply(var c&: ApplyCtx, var buf&: Buffer, mark_array: usize, mark_index: u32, glyph_index: u32, anchors: usize, class_count: u32,
+                    glyph_pos: usize): bool {
+  let t = c.t;
+  // Out of range: a Null record, class 0 and a Null anchor (as HarfBuzz reads it).
+  let in_range = mark_index < rd16(t, mark_array);
+  let rec = mark_array + 2 + mark_index as usize * 4;
+  let mark_class = in_range ? rd16(t, rec) : 0;
+  let mark_anchor = in_range ? off16(t, mark_array, rec + 2) : kNull;
+  // AnchorMatrix::get_anchor
+  let rows = rd16(t, anchors);
+  if (glyph_index >= rows || mark_class >= class_count) {
+    return false;
+  }
+  let o = anchors + 2 + (glyph_index * class_count + mark_class) as usize * 2;
+  if (rd16(t, o) == 0) {
+    return false;
+  }
+  let glyph_anchor = off16(t, anchors, o);
+  let (mark_x, mark_y) = anchor(c, mark_anchor);
+  let (base_x, base_y) = anchor(c, glyph_anchor);
+  let chain = glyph_pos as i64 - buf.idx as i64;
+  let i = buf.idx;
+  if (chain >= -32768 && chain <= 32767) {
+    buf.pos[i].attach_chain = chain as i32;
+    buf.pos[i].attach_type = kAttachTypeMark;
+    buf.pos[i].x_offset = roundf(base_x - mark_x);
+    buf.pos[i].y_offset = roundf(base_y - mark_y);
+    buf.scratch_flags |= kScratchHasGposAttachment;
+  }
+  buf.idx += 1;
+  return true;
+}
+
+// MarkBasePosFormat1::accept
+fn mark_base_accept(buf&: Buffer, idx: usize): bool {
+  let g = buf.info[idx];
+  return !is_multiplied(g) || lig_comp(g) == 0 ||
+         (idx == 0 || is_mark(buf.info[idx - 1]) || !is_multiplied(buf.info[idx - 1]) || lig_id(g) != lig_id(buf.info[idx - 1]) ||
+          lig_comp(g) != lig_comp(buf.info[idx - 1]) + 1);
+}
+
+// reverse_cursive_minor_offset
+fn reverse_cursive_minor_offset(var buf&: Buffer, i: usize, direction: u32, new_parent: usize) {
+  let chain = buf.pos[i].attach_chain;
+  let type_ = buf.pos[i].attach_type;
+  if (chain == 0 || (type_ & kAttachTypeCursive) == 0) {
+    return;
+  }
+  buf.pos[i].attach_chain = 0;
+  let j = (i as i64 + chain as i64) as usize;
+  if (j == new_parent) {
+    return;
+  }
+  reverse_cursive_minor_offset(buf, j, direction, new_parent);
+  if (dir_is_horizontal(direction)) {
+    buf.pos[j].y_offset = -buf.pos[i].y_offset;
+  } else {
+    buf.pos[j].x_offset = -buf.pos[i].x_offset;
+  }
+  buf.pos[j].attach_chain = -chain;
+  buf.pos[j].attach_type = type_;
+}
+
+fn gpos_subtable_apply(var c&: ApplyCtx, var buf&: Buffer, type_: u32, s: usize): bool {
+  let t = c.t;
+  let gid = buf.info[buf.idx].codepoint;
+  if (type_ == 1) {
+    let format = rd16(t, s);
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    let vf = rd16(t, s + 4);
+    let i = buf.idx;
+    if (format == 1) {
+      var p = buf.pos[i];
+      apply_value(c, vf, s + 6, p);
+      buf.pos[i] = p;
+      buf.idx += 1;
+      return true;
+    }
+    if (format == 2) {
+      if (index >= rd16(t, s + 6)) {
+        return false;
+      }
+      var p = buf.pos[i];
+      apply_value(c, vf, s + 8 + (index * value_len(vf)) as usize * 2, p);
+      buf.pos[i] = p;
+      buf.idx += 1;
+      return true;
+    }
+    return false;
+  }
+  if (type_ == 2) {
+    let format = rd16(t, s);
+    let index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (index == kNotCovered) {
+      return false;
+    }
+    var it = c.iter_input;
+    it.idx = buf.idx;
+    let found = iter_next(c, it, buf);
+    c.iter_input = it;
+    if (!found) {
+      return false;
+    }
+    let second = it.idx;
+    let vf1 = rd16(t, s + 4);
+    let vf2 = rd16(t, s + 6);
+    let len1 = value_len(vf1);
+    let len2 = value_len(vf2);
+    if (format == 1) {
+      let ps = index < rd16(t, s + 8) ? off16(t, s, s + 10 + index as usize * 2) : kNull;
+      let record_size = (1 + len1 + len2) as usize * 2;
+      let count = rd16(t, ps) as i64;
+      var lo: i64 = 0;
+      var hi: i64 = count - 1;
+      let g2 = buf.info[second].codepoint;
+      while (lo <= hi) {
+        let mid = (lo + hi) / 2;
+        let r = ps + 2 + mid as usize * record_size;
+        let v = rd16(t, r);
+        if (g2 < v) {
+          hi = mid - 1;
+        } else if (g2 > v) {
+          lo = mid + 1;
+        } else {
+          let i = buf.idx;
+          if (len1 != 0) {
+            var p = buf.pos[i];
+            apply_value(c, vf1, r + 2, p);
+            buf.pos[i] = p;
+          }
+          if (len2 != 0) {
+            var p = buf.pos[second];
+            apply_value(c, vf2, r + 2 + len1 as usize * 2, p);
+            buf.pos[second] = p;
+          }
+          buf.idx = len2 != 0 ? second + 1 : second;
+          return true;
+        }
+      }
+      return false;
+    }
+    if (format == 2) {
+      let class1 = class_of(t, off16(t, s, s + 8), gid);
+      let class2 = class_of(t, off16(t, s, s + 10), buf.info[second].codepoint);
+      let class1_count = rd16(t, s + 12);
+      let class2_count = rd16(t, s + 14);
+      if (class1 >= class1_count || class2 >= class2_count) {
+        return false;
+      }
+      let record_len = len1 + len2;
+      let v = s + 16 + (record_len * (class1 * class2_count + class2)) as usize * 2;
+      let i = buf.idx;
+      if (len1 != 0) {
+        var p = buf.pos[i];
+        apply_value(c, vf1, v, p);
+        buf.pos[i] = p;
+      }
+      if (len2 != 0) {
+        var p = buf.pos[second];
+        apply_value(c, vf2, v + len1 as usize * 2, p);
+        buf.pos[second] = p;
+      }
+      buf.idx = len2 != 0 ? second + 1 : second;
+      return true;
+    }
+    return false;
+  }
+  if (type_ == 3) {
+    if (rd16(t, s) != 1) {
+      return false;
+    }
+    let cov = off16(t, s, s + 2);
+    let count = rd16(t, s + 4);
+    let this_index = coverage_index(t, cov, gid);
+    // entryExitRecord[index]: a Null record when out of range.
+    let entry = this_index < count ? rd16(t, s + 6 + this_index as usize * 4) : 0;
+    if (entry == 0) {
+      return false;
+    }
+    var it = c.iter_input;
+    it.idx = buf.idx;
+    let found = iter_prev(c, it, buf);
+    c.iter_input = it;
+    if (!found) {
+      return false;
+    }
+    let i = it.idx;
+    let j = buf.idx;
+    let prev_index = coverage_index(t, cov, buf.info[i].codepoint);
+    let exit = prev_index < count ? rd16(t, s + 6 + prev_index as usize * 4 + 2) : 0;
+    if (exit == 0) {
+      return false;
+    }
+    let (exit_x, exit_y) = anchor(c, s + exit as usize);
+    let (entry_x, entry_y) = anchor(c, s + entry as usize);
+    var d = 0i32;
+    if (c.direction == kDirLtr) {
+      buf.pos[i].x_advance = roundf(exit_x) + buf.pos[i].x_offset;
+      d = roundf(entry_x) + buf.pos[j].x_offset;
+      buf.pos[j].x_advance -= d;
+      buf.pos[j].x_offset -= d;
+    } else if (c.direction == kDirRtl) {
+      d = roundf(exit_x) + buf.pos[i].x_offset;
+      buf.pos[i].x_advance -= d;
+      buf.pos[i].x_offset -= d;
+      buf.pos[j].x_advance = roundf(entry_x) + buf.pos[j].x_offset;
+    } else if (c.direction == kDirTtb) {
+      buf.pos[i].y_advance = roundf(exit_y) + buf.pos[i].y_offset;
+      d = roundf(entry_y) + buf.pos[j].y_offset;
+      buf.pos[j].y_advance -= d;
+      buf.pos[j].y_offset -= d;
+    } else if (c.direction == kDirBtt) {
+      d = roundf(exit_y) + buf.pos[i].y_offset;
+      buf.pos[i].y_advance -= d;
+      buf.pos[i].y_offset -= d;
+      buf.pos[j].y_advance = roundf(entry_y);
+    }
+    var child = i;
+    var parent = j;
+    var x_offset = roundf(entry_x - exit_x);
+    var y_offset = roundf(entry_y - exit_y);
+    if ((c.lookup_props & kLookupRightToLeft) == 0) {
+      let k = child;
+      child = parent;
+      parent = k;
+      x_offset = -x_offset;
+      y_offset = -y_offset;
+    }
+    reverse_cursive_minor_offset(buf, child, c.direction, parent);
+    let chain = parent as i64 - child as i64;
+    if (chain >= -32768 && chain <= 32767) {
+      buf.pos[child].attach_chain = chain as i32;
+      buf.pos[child].attach_type = kAttachTypeCursive;
+      buf.scratch_flags |= kScratchHasGposAttachment;
+      if (dir_is_horizontal(c.direction)) {
+        buf.pos[child].y_offset = y_offset;
+      } else {
+        buf.pos[child].x_offset = x_offset;
+      }
+      if (buf.pos[parent].attach_chain == -buf.pos[child].attach_chain) {
+        buf.pos[parent].attach_chain = 0;
+        if (dir_is_horizontal(c.direction)) {
+          buf.pos[parent].y_offset = 0;
+        } else {
+          buf.pos[parent].x_offset = 0;
+        }
+      }
+    }
+    buf.idx += 1;
+    return true;
+  }
+  if (type_ == 4 || type_ == 5) {
+    if (rd16(t, s) != 1) {
+      return false;
+    }
+    let mark_index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (mark_index == kNotCovered) {
+      return false;
+    }
+    let base_cov = off16(t, s, s + 4);
+    var it = c.iter_input;
+    it.lookup_props = 0x8;  // IgnoreMarks
+    if (c.last_base_until > buf.idx) {
+      c.last_base_until = 0;
+      c.last_base = -1;
+    }
+    var j = buf.idx;
+    while (j > c.last_base_until) {
+      var m = iter_match(c, it, buf.info[j - 1]);
+      if (type_ == 4 && m == kMatch) {
+        if (!mark_base_accept(buf, j - 1) && coverage_index(t, base_cov, buf.info[j - 1].codepoint) == kNotCovered) {
+          m = kSkip;
+        }
+      }
+      if (m == kMatch) {
+        c.last_base = j as i64 - 1;
+        break;
+      }
+      j -= 1;
+    }
+    c.iter_input = it;
+    c.last_base_until = buf.idx;
+    if (c.last_base == -1) {
+      return false;
+    }
+    let idx = c.last_base as usize;
+    let base_index = coverage_index(t, base_cov, buf.info[idx].codepoint);
+    if (base_index == kNotCovered) {
+      return false;
+    }
+    let class_count = rd16(t, s + 6);
+    let mark_array = off16(t, s, s + 8);
+    let base_array = off16(t, s, s + 10);
+    if (type_ == 4) {
+      return mark_array_apply(c, buf, mark_array, mark_index, base_index, base_array, class_count, idx);
+    }
+    // LigatureArray: the LigatureAttach of the ligature.
+    let lig_attach = base_index < rd16(t, base_array) ? off16(t, base_array, base_array + 2 + base_index as usize * 2) : kNull;
+    let comp_count = rd16(t, lig_attach);
+    if (comp_count == 0) {
+      return false;
+    }
+    let lid = lig_id(buf.info[idx]);
+    let mark_id = lig_id(buf.info[buf.idx]);
+    let mark_comp = lig_comp(buf.info[buf.idx]);
+    var comp_index = 0u32;
+    if (lid != 0 && lid == mark_id && mark_comp > 0) {
+      comp_index = (comp_count < mark_comp ? comp_count : mark_comp) - 1;
+    } else {
+      comp_index = comp_count - 1;
+    }
+    return mark_array_apply(c, buf, mark_array, mark_index, comp_index, lig_attach, class_count, idx);
+  }
+  if (type_ == 6) {
+    if (rd16(t, s) != 1) {
+      return false;
+    }
+    let mark1_index = coverage_index(t, off16(t, s, s + 2), gid);
+    if (mark1_index == kNotCovered) {
+      return false;
+    }
+    var it = c.iter_input;
+    it.idx = buf.idx;
+    it.lookup_props = c.lookup_props & ~kLookupIgnoreFlags;
+    let found = iter_prev(c, it, buf);
+    c.iter_input = it;
+    if (!found) {
+      return false;
+    }
+    let j = it.idx;
+    if (!is_mark(buf.info[j])) {
+      return false;
+    }
+    let id1 = lig_id(buf.info[buf.idx]);
+    let id2 = lig_id(buf.info[j]);
+    let comp1 = lig_comp(buf.info[buf.idx]);
+    let comp2 = lig_comp(buf.info[j]);
+    var good = false;
+    if (id1 == id2) {
+      good = id1 == 0 || comp1 == comp2;
+    } else {
+      good = (id1 > 0 && comp1 == 0) || (id2 > 0 && comp2 == 0);
+    }
+    if (!good) {
+      return false;
+    }
+    let mark2_index = coverage_index(t, off16(t, s, s + 4), buf.info[j].codepoint);
+    if (mark2_index == kNotCovered) {
+      return false;
+    }
+    let class_count = rd16(t, s + 6);
+    return mark_array_apply(c, buf, off16(t, s, s + 8), mark1_index, mark2_index, off16(t, s, s + 10), class_count, j);
+  }
+  if (type_ == 7) {
+    return context_subtable_apply(c, buf, s);
+  }
+  if (type_ == 8) {
+    return chain_context_subtable_apply(c, buf, s);
+  }
+  return false;
+}
+
+// The extension type and its subtable; (type, subtable) of an ordinary one.
+fn resolve_subtable(t: &[u8], type_: u32, s: usize, extension_type: u32): (u32, usize) {
+  if (type_ == extension_type) {
+    if (rd16(t, s) != 1) {
+      return (0, kNull);
+    }
+    return (rd16(t, s + 2), off32(t, s, s + 4));
+  }
+  return (type_, s);
+}
+
+// hb_ot_layout_lookup_accelerator_t::apply: the subtables in order, the first that applies.
+pub fn apply_lookup_subtables(var c&: ApplyCtx, var buf&: Buffer, l: usize): bool {
+  let t = c.t;
+  let type_ = lookup_type(t, l);
+  let n = lookup_subtable_count(t, l);
+  let ext = c.table_index == 0 ? 7u32 : 9;
+  for (let i in 0..n) {
+    let (st, s) = resolve_subtable(t, type_, lookup_subtable(t, l, i), ext);
+    if (s >= kNull) {
+      continue;
+    }
+    let ok = c.table_index == 0 ? gsub_subtable_apply(c, buf, st, s) : gpos_subtable_apply(c, buf, st, s);
+    if (ok) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// SubstLookup::is_reverse
+fn lookup_is_reverse(t: &[u8], l: usize, table_index: u32): bool {
+  if (table_index != 0) {
+    return false;
+  }
+  var type_ = lookup_type(t, l);
+  if (type_ == 7) {
+    let s = lookup_subtable(t, l, 0);
+    type_ = rd16(t, s) == 1 ? rd16(t, s + 2) : 0;
+  }
+  return type_ == 8;
+}
+
+// apply_string for one lookup of the map.
+pub fn apply_string(var c&: ApplyCtx, var buf&: Buffer, lookup_index: u32) {
+  if (buf.len() == 0 || c.lookup_mask == 0) {
+    return;
+  }
+  if (lookup_index >= lookup_count(c.t, c.gg)) {
+    return;
+  }
+  let l = lookup_offset(c.t, c.gg, lookup_index);
+  set_lookup_props(c, buf, lookup_props(c.t, l));
+  if (!lookup_is_reverse(c.t, l, c.table_index)) {
+    if (c.table_index == 0) {
+      buf.clear_output();
+    }
+    buf.idx = 0;
+    while (buf.successful) {
+      // Skip glyphs the lookup cannot touch.
+      var j = buf.idx;
+      while (j < buf.len() && !((buf.info[j].mask & c.lookup_mask) != 0 && check_glyph_property(c, buf.info[j], c.lookup_props))) {
+        j += 1;
+      }
+      if (j > buf.idx) {
+        buf.next_glyphs(j - buf.idx);
+      }
+      if (buf.idx >= buf.len()) {
+        break;
+      }
+      if (!apply_lookup_subtables(c, buf, l)) {
+        buf.next_glyph();
+      }
+    }
+    if (c.table_index == 0) {
+      buf.sync();
+    }
+  } else {
+    var i = buf.len() as i64 - 1;
+    buf.idx = i as usize;
+    while (i >= 0) {
+      buf.idx = i as usize;
+      let g = buf.info[buf.idx];
+      if ((g.mask & c.lookup_mask) != 0 && check_glyph_property(c, g, c.lookup_props)) {
+        apply_lookup_subtables(c, buf, l);
+      }
+      i = buf.idx as i64 - 1;
+    }
+  }
+}
+
+// The lookup state hb_ot_map_t::apply sets before each lookup.
+pub fn set_lookup(var c&: ApplyCtx, lookup_index: u32, mask: u32, auto_zwj: bool, auto_zwnj: bool, random: bool, per_syllable: bool) {
+  c.lookup_index = lookup_index;
+  set_lookup_mask(c, mask);
+  c.auto_zwj = auto_zwj;
+  c.auto_zwnj = auto_zwnj;
+  c.random = random;
+  c.per_syllable = per_syllable;
+}
+
+// GPOS::position_finish_offsets: propagate_attachment_offsets
+fn propagate_attachment_offsets(var buf&: Buffer, i: usize, direction: u32, nesting_level: u32) {
+  let chain = buf.pos[i].attach_chain;
+  let type_ = buf.pos[i].attach_type;
+  buf.pos[i].attach_chain = 0;
+  let len = buf.pos.len();
+  let jj = i as i64 + chain as i64;
+  if (jj < 0 || jj as usize >= len) {
+    return;
+  }
+  let j = jj as usize;
+  if (nesting_level == 0) {
+    return;
+  }
+  if (buf.pos[j].attach_chain != 0) {
+    propagate_attachment_offsets(buf, j, direction, nesting_level - 1);
+  }
+  if ((type_ & kAttachTypeCursive) != 0) {
+    if (dir_is_horizontal(direction)) {
+      buf.pos[i].y_offset += buf.pos[j].y_offset;
+    } else {
+      buf.pos[i].x_offset += buf.pos[j].x_offset;
+    }
+  } else {
+    buf.pos[i].x_offset += buf.pos[j].x_offset;
+    buf.pos[i].y_offset += buf.pos[j].y_offset;
+    let forward = (direction & ~2u32) == 4;
+    if (j < i) {
+      if (forward) {
+        for (let k in j..i) {
+          buf.pos[i].x_offset -= buf.pos[k].x_advance;
+          buf.pos[i].y_offset -= buf.pos[k].y_advance;
+        }
+      } else {
+        for (let k in j + 1..i + 1) {
+          buf.pos[i].x_offset += buf.pos[k].x_advance;
+          buf.pos[i].y_offset += buf.pos[k].y_advance;
+        }
+      }
+    } else {
+      if (forward) {
+        for (let k in i..j) {
+          buf.pos[i].x_offset += buf.pos[k].x_advance;
+          buf.pos[i].y_offset += buf.pos[k].y_advance;
+        }
+      } else {
+        for (let k in i + 1..j + 1) {
+          buf.pos[i].x_offset -= buf.pos[k].x_advance;
+          buf.pos[i].y_offset -= buf.pos[k].y_advance;
+        }
+      }
+    }
+  }
+}
+
+pub fn position_finish_offsets(var buf&: Buffer) {
+  if ((buf.scratch_flags & kScratchHasGposAttachment) == 0) {
+    return;
+  }
+  let len = buf.pos.len();
+  let direction = buf.direction;
+  if ((direction & ~2u32) == 4) {
+    for (let i in 0..len) {
+      if (buf.pos[i].attach_chain != 0) {
+        propagate_attachment_offsets(buf, i, direction, kMaxNestingLevel);
+      }
+    }
+  } else {
+    var i = len;
+    while (i > 0) {
+      i -= 1;
+      if (buf.pos[i].attach_chain != 0) {
+        propagate_attachment_offsets(buf, i, direction, kMaxNestingLevel);
+      }
+    }
+  }
+}

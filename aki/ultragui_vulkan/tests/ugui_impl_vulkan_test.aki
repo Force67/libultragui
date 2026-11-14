@@ -1,0 +1,32 @@
+// VulkanBackend without a device: what the C++ free functions do before
+// Init or after Shutdown (no-ops, kNullTextureId), and the backend as a
+// TextureBackend through the seam. Drawing with a device is compared against
+// the C++ by examples/embed_scene.
+
+module ugui_impl_vulkan_test;
+
+import {DrawData, kNullTextureId} from ultragui::render::draw_data;
+import {DynTextureBackend} from ultragui::render::texture_backend;
+import {RhiFilter, RhiFormat} from ultragui::rhi::rhi_types;
+import {VulkanBackend} from ultragui_vulkan::ugui_impl_vulkan;
+import {Expect} from ultragui_testing::expect;
+
+pub fn main(): i32 {
+  var t = Expect();
+  var backend = VulkanBackend();
+  let px = [0xFFu8; 16];
+  t.that(backend.create_texture(2, 2, RhiFormat::Rgba8Unorm, px[..] as bytes, RhiFilter::Linear) == kNullTextureId,
+    "create_texture before init is kNullTextureId");
+  backend.update_texture(1, px[..] as bytes);
+  backend.destroy_texture(1);
+  backend.new_frame();
+  backend.render_draw_data(DrawData {}, null);  // invalid draw data: nothing recorded
+  {
+    var tb = DynTextureBackend::of(backend);
+    t.that(tb.create_texture(1, 1, RhiFormat::R8Unorm, px[..] as bytes, RhiFilter::Nearest) == kNullTextureId,
+      "through the seam too");
+    tb.destroy_texture(7);
+  }
+  backend.shutdown();  // no device: nothing to destroy
+  return t.finish();
+}

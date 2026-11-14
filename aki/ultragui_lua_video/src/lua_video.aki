@@ -1,0 +1,202 @@
+// ugui/scripting/lua_video.{h,cc}: the video Lua bindings (ugui.load_video,
+// ugui.video_play, ...).
+//
+// Shape differences from the C++ (behavior is the C++'s):
+//
+// * RegisterVideoLua's `Function` parameters are `own fn` hooks that also
+//   get the LuaCall (see ultragui_lua::lua_anim): `loader` is
+//   UIContext::LoadVideo, `find_widget` UIContext::FindWidgetEntity.
+// * The C++ VideoPlayer keeps the RHI it was loaded with, and Stop() and
+//   Seek() decode and upload through it. The aki VideoPlayer takes the Rhi
+//   per call (ultragui_video), which the binding cannot reach, so
+//   ugui.video_stop and ugui.video_seek call the hooks `stop` and `seek`,
+//   which run `vid.stop(rhi)` / `vid.seek(seconds, rhi)` with the host's Rhi.
+// * A player reaches Lua as a light userdata of the address the loader
+//   returned; the host keeps the VideoPlayer there (boxed) while scripts may
+//   hold it, as in the C++.
+
+module ultragui_lua_video::lua_video;
+
+import {String} from akikit::strings::string;
+import {texture_id_from_rhi_handle} from ultragui::render::texture_backend;
+import {set_image_texture} from ultragui::widgets::image;
+import {VideoPlayer} from ultragui_video::video;
+import {LuaCall, LuaRaise} from ultragui_lua::lua_call;
+import {LuaRuntime} from ultragui_lua::lua_runtime;
+import {FindWidget} from ultragui_lua::lua_anim;
+import {host_find_widget} from ultragui_lua::lua_ui_context;
+import {Platform} from ultragui::platform::platform;
+import {Rhi} from ultragui::rhi::rhi;
+import {UIContext} from ultragui::ui_context;
+import {VideoPlayers, kVideoPlayers, load_video_in, video_ptr_in, video_seek_in, video_stop_in} from ultragui_video::video_ui;
+
+// Function<VideoPlayer*(const char*)>: a loaded player the host owns, or null.
+pub type VideoLoader = own fn(&var LuaCall, String): *var VideoPlayer;
+// VideoPlayer::Stop() through the host's Rhi.
+pub type VideoStop = own fn(&var LuaCall, *var VideoPlayer): ();
+// VideoPlayer::Seek(seconds) through the host's Rhi.
+pub type VideoSeek = own fn(&var LuaCall, *var VideoPlayer, f64): ();
+
+fn video_at(call&: LuaCall, arg: i32): *var VideoPlayer => unsafe (call.to_userdata(arg) as *var VideoPlayer);
+
+// RegisterVideoLua
+pub fn register_video_lua(var rt&: LuaRuntime, loader: VideoLoader, find_widget: FindWidget, stop: VideoStop, seek: VideoSeek) {
+  // ugui.load_video(path) -> video lightuserdata
+  rt.register_function("load_video", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let path = try call.check_string(1);
+    let vid = loader(call, path);
+    if (vid != null) {
+      call.push_light_userdata(unsafe (vid as *var u8));
+    } else {
+      call.push_nil();
+    }
+    return 1;
+  });
+
+  // ugui.video_play(vid)
+  rt.register_function("video_play", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    if (v != null) {
+      unsafe (*v).play();
+    }
+    return 0;
+  });
+
+  // ugui.video_pause(vid)
+  rt.register_function("video_pause", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    if (v != null) {
+      unsafe (*v).pause();
+    }
+    return 0;
+  });
+
+  // ugui.video_stop(vid)
+  rt.register_function("video_stop", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    if (v != null) {
+      stop(call, v);
+    }
+    return 0;
+  });
+
+  // ugui.video_seek(vid, seconds)
+  rt.register_function("video_seek", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    if (v != null) {
+      let s = try call.check_number(2);
+      seek(call, v, s);
+    }
+    return 0;
+  });
+
+  // ugui.video_loop(vid, bool)
+  rt.register_function("video_loop", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    if (v != null) {
+      unsafe (*v).set_loop(call.to_boolean(2));
+    }
+    return 0;
+  });
+
+  // ugui.video_speed(vid, speed)
+  rt.register_function("video_speed", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    if (v != null) {
+      let s = (try call.check_number(2)) as f32;
+      unsafe (*v).set_speed(s);
+    }
+    return 0;
+  });
+
+  // ugui.video_volume(vid, volume)
+  rt.register_function("video_volume", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    if (v != null) {
+      let vol = (try call.check_number(2)) as f32;
+      unsafe (*v).set_volume(vol);
+    }
+    return 0;
+  });
+
+  // ugui.video_mute(vid, bool)
+  rt.register_function("video_mute", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    if (v != null) {
+      unsafe (*v).set_muted(call.to_boolean(2));
+    }
+    return 0;
+  });
+
+  // ugui.video_playing(vid) -> bool
+  rt.register_function("video_playing", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    call.push_boolean(v != null && unsafe (*v).is_playing());
+    return 1;
+  });
+
+  // ugui.video_finished(vid) -> bool
+  rt.register_function("video_finished", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    call.push_boolean(v != null && unsafe (*v).is_finished());
+    return 1;
+  });
+
+  // ugui.video_position(vid) -> number (seconds)
+  rt.register_function("video_position", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    call.push_number(v != null ? unsafe (*v).position() : 0.0);
+    return 1;
+  });
+
+  // ugui.video_duration(vid) -> number (seconds)
+  rt.register_function("video_duration", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    call.push_number(v != null ? unsafe (*v).duration() : 0.0);
+    return 1;
+  });
+
+  // ugui.video_attach(vid, "widget_name") -- set texture on an Image widget
+  rt.register_function("video_attach", own fn(call: &var LuaCall): i32 ! LuaRaise {
+    let v = video_at(call, 1);
+    let name = try call.check_string(2);
+    if (v != null) {
+      let w = find_widget(call, name);
+      if (w.valid()) {
+        let (tex, vw, vh) = unsafe ((*v).texture(), (*v).width(), (*v).height());
+        set_image_texture(call.world, w, texture_id_from_rhi_handle(tex), vw as f32, vh as f32);
+      }
+    }
+    return 0;
+  });
+}
+
+// UIContext::Init's RegisterVideoLua for `ui` (registered for its init,
+// right after the runtime's), with the hooks going through the running
+// call's script host: LoadVideo, FindWidgetEntity, Stop/Seek through the Rhi.
+// Adds the video players extension now (after any Lottie players: add
+// add_lottie_lua first, as the C++ updates lottie_anims_ first).
+pub fn add_video_lua<P: Platform, R: Rhi>(var ui&: UIContext<P, R, LuaRuntime>) {
+  if (ui.find_extension(kVideoPlayers) == none) {
+    let _ = ui.add_extension(kVideoPlayers, VideoPlayers());
+  }
+  ui.add_script_init(own fn(rt: &var LuaRuntime) {
+    register_video_lua(rt, own fn(call: &var LuaCall, path: String): *var VideoPlayer {
+      var host& = call.ctx.host else {
+        return null;
+      };
+      let id = load_video_in(host, path.as_str()) else {
+        return null;
+      };
+      return video_ptr_in(host, id);
+    }, host_find_widget(), own fn(call: &var LuaCall, v: *var VideoPlayer) {
+      if (var host& = call.ctx.host) {
+        video_stop_in(host, v);
+      }
+    }, own fn(call: &var LuaCall, v: *var VideoPlayer, s: f64) {
+      if (var host& = call.ctx.host) {
+        video_seek_in(host, v, s);
+      }
+    });
+  });
+}

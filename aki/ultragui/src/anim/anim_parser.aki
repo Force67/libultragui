@@ -1,0 +1,323 @@
+// ugui/anim/anim_parser.cc: .uganim JSON into an AnimDocument.
+//
+// Differences in shape: `parse_anim_data` and `parse_anim_file` take text
+// (`str`); a file that is not UTF-8 is a JSON parse error here (the C++
+// parses any bytes). The two failure messages go to stderr as in the C++.
+
+module ultragui::anim::anim_parser;
+
+import {eprintln} from akikit::logging;
+import {read_bytes} from akikit::filesystem::file_util;
+import {utf8_view} from akikit::text::code_point_validation;
+import {from_str} from akikit::strings::string;
+import {AnimDocument, AnimKeyframe, AnimLayer, AnimProperty, AnimPropertyTrack, AnimShapeType} from ultragui::anim::anim_types;
+import {JsonKind, JsonValue, parse_json} from ultragui::anim::json;
+import {Color} from ultragui::core::color;
+import {from_chars_u32} from ultragui::core::from_chars;
+import {EasingType} from ultragui::style::transition;
+import {CText} from ultragui::sys::c_text;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn parse_anim_color(s: str): Color {
+  if (#s == 0) {
+    return Color::transparent();
+  }
+  if (s[0] == '#') {
+    var hex: u32 = 0;
+    from_chars_u32(s[1..], hex, 16);
+    if (#s == 7) {
+      return Color::from_hex(hex);
+    }
+    if (#s == 9) {
+      let rgb = hex >> 8;
+      let alpha = (hex & 0xFF) as f32 / 255.0;
+      return Color::from_hex(rgb, alpha);
+    }
+  }
+  if (s == "none" || s == "transparent") {
+    return Color::transparent();
+  }
+  if (s == "white") {
+    return Color::white();
+  }
+  if (s == "black") {
+    return Color::black();
+  }
+  return Color::transparent();
+}
+
+fn parse_anim_easing(s: str): EasingType {
+  if (s == "ease-in-out") {
+    return EasingType::EaseInOut;
+  }
+  if (s == "ease-in") {
+    return EasingType::EaseIn;
+  }
+  if (s == "ease-out") {
+    return EasingType::EaseOut;
+  }
+  return EasingType::Linear;
+}
+
+fn parse_shape_type(s: str): AnimShapeType {
+  if (s == "rect") {
+    return AnimShapeType::Rect;
+  }
+  if (s == "circle") {
+    return AnimShapeType::Circle;
+  }
+  if (s == "ellipse") {
+    return AnimShapeType::Ellipse;
+  }
+  if (s == "path") {
+    return AnimShapeType::Path;
+  }
+  if (s == "group") {
+    return AnimShapeType::Group;
+  }
+  return AnimShapeType::Rect;
+}
+
+fn parse_property_name(s: str): AnimProperty {
+  if (s == "x") {
+    return AnimProperty::X;
+  }
+  if (s == "y") {
+    return AnimProperty::Y;
+  }
+  if (s == "w" || s == "width") {
+    return AnimProperty::W;
+  }
+  if (s == "h" || s == "height") {
+    return AnimProperty::H;
+  }
+  if (s == "r") {
+    return AnimProperty::R;
+  }
+  if (s == "cx") {
+    return AnimProperty::Cx;
+  }
+  if (s == "cy") {
+    return AnimProperty::Cy;
+  }
+  if (s == "rx") {
+    return AnimProperty::Rx;
+  }
+  if (s == "ry") {
+    return AnimProperty::Ry;
+  }
+  if (s == "rotation") {
+    return AnimProperty::Rotation;
+  }
+  if (s == "scale-x") {
+    return AnimProperty::ScaleX;
+  }
+  if (s == "scale-y") {
+    return AnimProperty::ScaleY;
+  }
+  if (s == "opacity") {
+    return AnimProperty::Opacity;
+  }
+  if (s == "stroke-width") {
+    return AnimProperty::StrokeWidth;
+  }
+  if (s == "corner-radius") {
+    return AnimProperty::CornerRadius;
+  }
+  if (s == "fill") {
+    return AnimProperty::Fill;
+  }
+  if (s == "stroke") {
+    return AnimProperty::Stroke;
+  }
+  return AnimProperty::Opacity;  // fallback
+}
+
+fn is_color_property(p: AnimProperty): bool => p == AnimProperty::Fill || p == AnimProperty::Stroke;
+
+// ---------------------------------------------------------------------------
+// Parse keyframes
+// ---------------------------------------------------------------------------
+
+fn parse_track(prop_name: str, arr&: JsonValue): AnimPropertyTrack {
+  var track = AnimPropertyTrack {};
+  // The C++ passes the stored key's c_str(), not its full byte length.
+  let name = CText(prop_name);
+  track.property = parse_property_name(name.as_str());
+  let is_color = is_color_property(track.property);
+
+  for (let kf_val& in arr.array_val) {
+    var kf = AnimKeyframe {};
+    if (let t = kf_val.get("t")) {
+      kf.t = t.as_float();
+    }
+    if (is_color) {
+      if (let v = kf_val.get("v")) {
+        kf.color = parse_anim_color(v.as_string());
+      }
+    } else {
+      if (let v = kf_val.get("v")) {
+        kf.value = v.as_float();
+      }
+    }
+    if (let e = kf_val.get("ease")) {
+      kf.easing = parse_anim_easing(e.as_string());
+    }
+    track.keyframes.push(kf);
+  }
+  return track;
+}
+
+// ---------------------------------------------------------------------------
+// Parse layer
+// ---------------------------------------------------------------------------
+
+fn parse_layer(obj&: JsonValue): AnimLayer {
+  var layer = AnimLayer {};
+
+  if (let v = obj.get("name")) {
+    layer.name = from_str(v.as_string());
+  }
+  if (let v = obj.get("shape")) {
+    layer.shape_type = parse_shape_type(v.as_string());
+  }
+
+  // Static properties
+  if (let v = obj.get("x")) {
+    layer.x = v.as_float();
+  }
+  if (let v = obj.get("y")) {
+    layer.y = v.as_float();
+  }
+  if (let v = obj.get("w")) {
+    layer.w = v.as_float();
+  }
+  if (let v = obj.get("h")) {
+    layer.h = v.as_float();
+  }
+  if (let v = obj.get("r")) {
+    layer.r = v.as_float();
+  }
+  if (let v = obj.get("cx")) {
+    layer.cx = v.as_float();
+  }
+  if (let v = obj.get("cy")) {
+    layer.cy = v.as_float();
+  }
+  if (let v = obj.get("rx")) {
+    layer.rx = v.as_float();
+  }
+  if (let v = obj.get("ry")) {
+    layer.ry = v.as_float();
+  }
+  if (let v = obj.get("corner-radius")) {
+    layer.corner_radius = v.as_float();
+  }
+  if (let v = obj.get("rotation")) {
+    layer.rotation = v.as_float();
+  }
+  if (let v = obj.get("scale-x")) {
+    layer.scale_x = v.as_float(1.0);
+  }
+  if (let v = obj.get("scale-y")) {
+    layer.scale_y = v.as_float(1.0);
+  }
+  if (let v = obj.get("opacity")) {
+    layer.opacity = v.as_float(1.0);
+  }
+  if (let v = obj.get("stroke-width")) {
+    layer.stroke_width = v.as_float(1.0);
+  }
+
+  if (let v = obj.get("d")) {
+    layer.path_data = from_str(v.as_string());
+  }
+  if (let v = obj.get("fill")) {
+    layer.fill_str = from_str(v.as_string("none"));
+  }
+  if (let v = obj.get("stroke")) {
+    layer.stroke_str = from_str(v.as_string("none"));
+  }
+  if (let v = obj.get("mask")) {
+    layer.mask_layer = from_str(v.as_string());
+  }
+
+  // Keyframes
+  if (let kf = obj.get("keyframes")) {
+    for (let i in 0..kf.object_keys.len()) {
+      if (kf.object_vals[i].kind == JsonKind::Array) {
+        layer.tracks.push(parse_track(kf.object_keys[i].as_str(), kf.object_vals[i]));
+      }
+    }
+  }
+
+  // Children (for groups)
+  if (let children = obj.get("children")) {
+    for (let child& in children.array_val) {
+      layer.children.push(parse_layer(child));
+    }
+  }
+
+  return layer;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+pub fn parse_anim_document(root&: JsonValue, var out&: AnimDocument): bool {
+  if (root.kind != JsonKind::Object) {
+    return false;
+  }
+
+  if (let v = root.get("version")) {
+    out.version = @saturating_cast(u32, v.as_number(1.0));  // static_cast<u32>(f64), as aarch64
+  }
+  if (let v = root.get("width")) {
+    out.width = v.as_float();
+  }
+  if (let v = root.get("height")) {
+    out.height = v.as_float();
+  }
+  if (let v = root.get("duration")) {
+    out.duration = v.as_float(1.0);
+  }
+  if (let v = root.get("loop")) {
+    out.looping = v.as_bool(false);
+  }
+
+  // Layers
+  if (let layers = root.get("layers")) {
+    for (let layer_val& in layers.array_val) {
+      out.layers.push(parse_layer(layer_val));
+    }
+  }
+
+  return !out.layers.is_empty();
+}
+
+pub fn parse_anim_file(path: str, var out&: AnimDocument): bool {
+  let bytes = read_bytes(path) else {
+    eprintln(f"ugui/anim: failed to open '{path}'");
+    return false;
+  };
+  var root = JsonValue {};
+  let text = utf8_view(bytes.as_slice());
+  if (text == none || !parse_json(text!, root)) {
+    eprintln(f"ugui/anim: JSON parse error in '{path}'");
+    return false;
+  }
+
+  return parse_anim_document(root, out);
+}
+
+pub fn parse_anim_data(json_data: str, var out&: AnimDocument): bool {
+  var root = JsonValue {};
+  if (!parse_json(json_data, root)) {
+    return false;
+  }
+  return parse_anim_document(root, out);
+}

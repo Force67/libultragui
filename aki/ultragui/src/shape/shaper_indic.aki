@@ -1,0 +1,987 @@
+// The Indic shaper (hb-ot-shaper-indic.cc) for Bengali, Devanagari,
+// Gujarati, Gurmukhi, Kannada, Malayalam, Oriya, Tamil and Telugu with their
+// own GSUB script tags (old and new spec), and the Khmer shaper
+// (hb-ot-shaper-khmer.cc). Syllables come from HarfBuzz's machines
+// (ultragui::shape::syllabic); the reorderings, masks and per-script
+// configuration follow HarfBuzz step by step.
+
+module ultragui::shape::shaper_indic;
+
+import {List} from akikit::containers::list;
+import {Buffer, GlyphInfo} from ultragui::shape::buffer;
+import {ShapeFace} from ultragui::shape::face;
+import {MapBuilder, OtMap, kFGlobal, kFGlobalManualJoiners, kFManualJoiners, kFPerSyllable} from ultragui::shape::map;
+import {
+  kIndicActStart, kIndicActionStart, kIndicEofTrans, kIndicFromStateActions, kIndicIndexOffsets, kIndicIndicies, kIndicKeySpans, kIndicOps,
+  kIndicStart, kIndicToStateActions, kIndicTransActions, kIndicTransKeys, kIndicTransTargs, kKhmerActStart, kKhmerActionStart, kKhmerEofTrans,
+  kKhmerFromStateActions, kKhmerIndexOffsets, kKhmerIndicies, kKhmerKeySpans, kKhmerOps, kKhmerStart, kKhmerToStateActions, kKhmerTransActions,
+  kKhmerTransKeys, kKhmerTransTargs,
+} from ultragui::shape::machines;
+import {gc_of} from ultragui::shape::props;
+import {Digest, Machine, find_syllables, insert_dotted_circles, lookup_digest, preprocess_vowel_constraints, would_substitute} from ultragui::shape::syllabic;
+import {compose, decompose, gc_is_mark, general_category, indic_categories, tag} from ultragui::shape::ucd;
+
+// Pause functions.
+pub comptime let kPauseIndicSetupSyllables: u32 = 20;
+pub comptime let kPauseIndicInitialReordering: u32 = 21;
+pub comptime let kPauseIndicFinalReordering: u32 = 22;
+pub comptime let kPauseClearSyllables: u32 = 23;
+pub comptime let kPauseKhmerSetupSyllables: u32 = 24;
+pub comptime let kPauseKhmerReorder: u32 = 25;
+
+// The OT categories (indic_syllable_machine_ex_*).
+pub comptime let kCatX: u32 = 0;
+pub comptime let kCatC: u32 = 1;
+pub comptime let kCatV: u32 = 2;
+pub comptime let kCatN: u32 = 3;
+pub comptime let kCatH: u32 = 4;
+pub comptime let kCatZwnj: u32 = 5;
+pub comptime let kCatZwj: u32 = 6;
+pub comptime let kCatM: u32 = 7;
+pub comptime let kCatSm: u32 = 8;
+pub comptime let kCatA: u32 = 9;
+pub comptime let kCatPlaceholder: u32 = 10;
+pub comptime let kCatDottedCircle: u32 = 11;
+pub comptime let kCatRs: u32 = 12;
+pub comptime let kCatMPst: u32 = 13;
+pub comptime let kCatRepha: u32 = 14;
+pub comptime let kCatRa: u32 = 15;
+pub comptime let kCatCm: u32 = 16;
+pub comptime let kCatSymbol: u32 = 17;
+pub comptime let kCatCs: u32 = 18;
+pub comptime let kCatVAbv: u32 = 20;
+pub comptime let kCatVBlw: u32 = 21;
+pub comptime let kCatVPre: u32 = 22;
+pub comptime let kCatVPst: u32 = 23;
+
+// ot_position_t
+pub comptime let kPosStart: u32 = 0;
+pub comptime let kPosRaToBecomeReph: u32 = 1;
+pub comptime let kPosPreM: u32 = 2;
+pub comptime let kPosPreC: u32 = 3;
+pub comptime let kPosBaseC: u32 = 4;
+pub comptime let kPosAfterMain: u32 = 5;
+pub comptime let kPosAboveC: u32 = 6;
+pub comptime let kPosBeforeSub: u32 = 7;
+pub comptime let kPosBelowC: u32 = 8;
+pub comptime let kPosAfterSub: u32 = 9;
+pub comptime let kPosBeforePost: u32 = 10;
+pub comptime let kPosPostC: u32 = 11;
+pub comptime let kPosAfterPost: u32 = 12;
+pub comptime let kPosSmvd: u32 = 13;
+pub comptime let kPosEnd: u32 = 14;
+
+fn flag(c: u32): u32 => c < 32 ? 1u32 << c : 0;
+
+// --- Indic configuration ----------------------------------------------------------------------
+
+comptime let kRephModeImplicit: u32 = 0;
+comptime let kRephModeExplicit: u32 = 1;
+comptime let kRephModeLogRepha: u32 = 2;
+comptime let kBlwfPreAndPost: u32 = 0;
+comptime let kBlwfPostOnly: u32 = 1;
+
+struct IndicConfig : Copy {
+  pub var script: str
+  pub var has_old_spec: bool
+  pub var virama: u32
+  pub var reph_pos: u32
+  pub var reph_mode: u32
+  pub var blwf_mode: u32
+}
+
+static let kIndicConfigs: [IndicConfig; 10] = [
+  IndicConfig { script: "    ", has_old_spec: false, virama: 0, reph_pos: kPosBeforePost, reph_mode: kRephModeImplicit, blwf_mode: kBlwfPreAndPost },
+  IndicConfig { script: "Deva", has_old_spec: true, virama: 0x094D, reph_pos: kPosBeforePost, reph_mode: kRephModeImplicit, blwf_mode: kBlwfPreAndPost },
+  IndicConfig { script: "Beng", has_old_spec: true, virama: 0x09CD, reph_pos: kPosAfterSub, reph_mode: kRephModeImplicit, blwf_mode: kBlwfPreAndPost },
+  IndicConfig { script: "Guru", has_old_spec: true, virama: 0x0A4D, reph_pos: kPosBeforeSub, reph_mode: kRephModeImplicit, blwf_mode: kBlwfPreAndPost },
+  IndicConfig { script: "Gujr", has_old_spec: true, virama: 0x0ACD, reph_pos: kPosBeforePost, reph_mode: kRephModeImplicit, blwf_mode: kBlwfPreAndPost },
+  IndicConfig { script: "Orya", has_old_spec: true, virama: 0x0B4D, reph_pos: kPosAfterMain, reph_mode: kRephModeImplicit, blwf_mode: kBlwfPreAndPost },
+  IndicConfig { script: "Taml", has_old_spec: true, virama: 0x0BCD, reph_pos: kPosAfterPost, reph_mode: kRephModeImplicit, blwf_mode: kBlwfPreAndPost },
+  IndicConfig { script: "Telu", has_old_spec: true, virama: 0x0C4D, reph_pos: kPosAfterPost, reph_mode: kRephModeExplicit, blwf_mode: kBlwfPostOnly },
+  IndicConfig { script: "Knda", has_old_spec: true, virama: 0x0CCD, reph_pos: kPosAfterPost, reph_mode: kRephModeImplicit, blwf_mode: kBlwfPostOnly },
+  IndicConfig { script: "Mlym", has_old_spec: true, virama: 0x0D4D, reph_pos: kPosAfterMain, reph_mode: kRephModeLogRepha, blwf_mode: kBlwfPreAndPost },
+];
+
+// indic_features: (tag, flags)
+static let kIndicFeatureTags: [str; 17] = [
+  "nukt", "akhn", "rphf", "rkrf", "pref", "blwf", "abvf", "half", "pstf", "vatu", "cjct", "init", "pres", "abvs", "blws", "psts", "haln",
+];
+static let kIndicFeatureFlags: [u32; 17] = [
+  kFGlobalManualJoiners | kFPerSyllable, kFGlobalManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable,
+  kFGlobalManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable,
+  kFManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable, kFGlobalManualJoiners | kFPerSyllable,
+  kFGlobalManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable, kFGlobalManualJoiners | kFPerSyllable,
+  kFGlobalManualJoiners | kFPerSyllable, kFGlobalManualJoiners | kFPerSyllable, kFGlobalManualJoiners | kFPerSyllable,
+  kFGlobalManualJoiners | kFPerSyllable,
+];
+comptime let kIndicRphf: usize = 2;
+comptime let kIndicPref: usize = 4;
+comptime let kIndicBlwf: usize = 5;
+comptime let kIndicAbvf: usize = 6;
+comptime let kIndicHalf: usize = 7;
+comptime let kIndicPstf: usize = 8;
+comptime let kIndicInit: usize = 11;
+comptime let kIndicBasicFeatures: usize = 11;
+
+// hb_indic_would_substitute_feature_t: the lookups of the feature's stage.
+pub struct WouldSubstitute {
+  pub var lookups: List<u32> = List()
+  pub var digests: List<Digest> = List()
+  pub var zero_context: bool = false
+}
+
+fn would_sub_init(map&: OtMap, face&: ShapeFace, feature: str, zero_context: bool): WouldSubstitute {
+  var w = WouldSubstitute { zero_context };
+  let stage = map.feature_stage(0, tag(feature));
+  let n = map.stages0.len();
+  if (stage == 0xFFFFFFFF || stage as usize > n) {
+    return w;
+  }
+  let s = stage as usize;
+  let start = s > 0 ? map.stages0[s - 1].last_lookup : 0;
+  let end = s < n ? map.stages0[s].last_lookup : map.lookups0.len();
+  let t = face.gsub_t();
+  for (let i in start..end) {
+    let li = map.lookups0[i].index;
+    w.lookups.push(li);
+    w.digests.push(lookup_digest(t, face.gsub, li));
+  }
+  return w;
+}
+
+fn would_sub(w&: WouldSubstitute, face&: ShapeFace, glyphs: &[u32]): bool {
+  let t = face.gsub_t();
+  for (let i in 0..w.lookups.len()) {
+    if (would_substitute(t, face.gsub, w.lookups[i], w.digests[i], glyphs, w.zero_context)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+pub struct IndicPlan {
+  pub var config: u32 = 0
+  pub var is_old_spec: bool = false
+  pub var virama_glyph: u32 = 0
+  pub var rphf: WouldSubstitute = WouldSubstitute {}
+  pub var pref: WouldSubstitute = WouldSubstitute {}
+  pub var blwf: WouldSubstitute = WouldSubstitute {}
+  pub var pstf: WouldSubstitute = WouldSubstitute {}
+  pub var vatu: WouldSubstitute = WouldSubstitute {}
+  pub var mask_array: [u32; 17] = [0u32; 17]
+}
+
+// collect_features_indic
+pub fn collect_features_indic(var b&: MapBuilder) {
+  b.add_gsub_pause(kPauseIndicSetupSyllables);
+  b.enable_feature(tag("locl"), kFPerSyllable);
+  b.enable_feature(tag("ccmp"), kFPerSyllable);
+  b.add_gsub_pause(kPauseIndicInitialReordering);
+  var i = 0usize;
+  while (i < kIndicBasicFeatures) {
+    b.add_feature(tag(kIndicFeatureTags[i]), kIndicFeatureFlags[i]);
+    b.add_gsub_pause(0);
+    i += 1;
+  }
+  b.add_gsub_pause(kPauseIndicFinalReordering);
+  while (i < 17) {
+    b.add_feature(tag(kIndicFeatureTags[i]), kIndicFeatureFlags[i]);
+    i += 1;
+  }
+}
+
+pub fn override_features_indic(var b&: MapBuilder) {
+  b.disable_feature(tag("liga"));
+  b.add_gsub_pause(kPauseClearSyllables);
+}
+
+// data_create_indic (with the virama glyph HarfBuzz loads on first use)
+pub fn plan_indic(map&: OtMap, face&: ShapeFace, script: u32): IndicPlan {
+  var p = IndicPlan {};
+  for (let i in 1..10) {
+    if (tag(kIndicConfigs[i].script) == script) {
+      p.config = i as u32;
+      break;
+    }
+  }
+  let cfg = kIndicConfigs[p.config as usize];
+  p.is_old_spec = cfg.has_old_spec && (map.chosen_script0 & 0xFF) != 0x32;
+  let zero_context = !p.is_old_spec && script != tag("Mlym");
+  p.rphf = would_sub_init(map, face, "rphf", zero_context);
+  p.pref = would_sub_init(map, face, "pref", zero_context);
+  p.blwf = would_sub_init(map, face, "blwf", zero_context);
+  p.pstf = would_sub_init(map, face, "pstf", zero_context);
+  p.vatu = would_sub_init(map, face, "vatu", zero_context);
+  for (let i in 0..17) {
+    p.mask_array[i] = (kIndicFeatureFlags[i] & kFGlobal) != 0 ? 0 : map.get_1_mask(tag(kIndicFeatureTags[i]));
+  }
+  p.virama_glyph = cfg.virama != 0 ? (face.nominal_glyph(cfg.virama) ?? 0) : 0;
+  return p;
+}
+
+fn is_one_of(g&: GlyphInfo, flags: u32): bool {
+  if ((g.glyph_props & 0x20) != 0) {
+    return false;  // ligated: all bets are off
+  }
+  return (flag(g.category) & flags) != 0;
+}
+
+fn consonant_flags(): u32 =>
+  flag(kCatC) | flag(kCatCs) | flag(kCatRa) | flag(kCatCm) | flag(kCatV) | flag(kCatPlaceholder) | flag(kCatDottedCircle);
+fn joiner_flags(): u32 => flag(kCatZwj) | flag(kCatZwnj);
+fn is_consonant(g&: GlyphInfo): bool => is_one_of(g, consonant_flags());
+fn is_joiner(g&: GlyphInfo): bool => is_one_of(g, joiner_flags());
+fn is_halant(g&: GlyphInfo): bool => is_one_of(g, flag(kCatH));
+
+// setup_masks_indic: the categories and positions.
+pub fn setup_masks_indic(var buf&: Buffer) {
+  for (var g& in buf.info) {
+    let t = indic_categories(g.codepoint);
+    g.category = t & 0xFF;
+    g.aux = t >> 8;
+  }
+}
+
+fn indic_machine(): Machine<'static> => Machine {
+  start: kIndicStart, trans_keys: kIndicTransKeys[..], key_spans: kIndicKeySpans[..], index_offsets: kIndicIndexOffsets[..],
+  indicies: kIndicIndicies[..], trans_targs: kIndicTransTargs[..], trans_actions: kIndicTransActions[..],
+  to_state_actions: kIndicToStateActions[..], from_state_actions: kIndicFromStateActions[..], eof_trans: kIndicEofTrans[..],
+  ops: kIndicOps[..], action_start: kIndicActionStart[..], act_start: kIndicActStart[..],
+};
+
+fn khmer_machine(): Machine<'static> => Machine {
+  start: kKhmerStart, trans_keys: kKhmerTransKeys[..], key_spans: kKhmerKeySpans[..], index_offsets: kKhmerIndexOffsets[..],
+  indicies: kKhmerIndicies[..], trans_targs: kKhmerTransTargs[..], trans_actions: kKhmerTransActions[..],
+  to_state_actions: kKhmerToStateActions[..], from_state_actions: kKhmerFromStateActions[..], eof_trans: kKhmerEofTrans[..],
+  ops: kKhmerOps[..], action_start: kKhmerActionStart[..], act_start: kKhmerActStart[..],
+};
+
+fn run_machine(m&: Machine, var buf&: Buffer) {
+  var cats: List<u8> = List();
+  var orig: List<usize> = List();
+  for (let i in 0..buf.len()) {
+    cats.push(buf.info[i].category as u8);
+    orig.push(i);
+  }
+  find_syllables(m, cats, orig, buf);
+}
+
+pub fn setup_syllables_indic(var buf&: Buffer) {
+  run_machine(indic_machine(), buf);
+}
+
+// consonant_position_from_face
+fn consonant_position_from_face(ip&: IndicPlan, face&: ShapeFace, consonant: u32, virama: u32): u32 {
+  let glyphs = [virama, consonant, virama];
+  if (would_sub(ip.blwf, face, glyphs[0..2]) || would_sub(ip.blwf, face, glyphs[1..3]) || would_sub(ip.vatu, face, glyphs[0..2]) ||
+      would_sub(ip.vatu, face, glyphs[1..3])) {
+    return kPosBelowC;
+  }
+  if (would_sub(ip.pstf, face, glyphs[0..2]) || would_sub(ip.pstf, face, glyphs[1..3])) {
+    return kPosPostC;
+  }
+  if (would_sub(ip.pref, face, glyphs[0..2]) || would_sub(ip.pref, face, glyphs[1..3])) {
+    return kPosPostC;
+  }
+  return kPosBaseC;
+}
+
+fn update_consonant_positions_indic(ip&: IndicPlan, face&: ShapeFace, var buf&: Buffer) {
+  let virama = ip.virama_glyph;
+  if (virama == 0) {
+    return;
+  }
+  for (let i in 0..buf.len()) {
+    if (buf.info[i].aux == kPosBaseC) {
+      let c = buf.info[i].codepoint;
+      buf.info[i].aux = consonant_position_from_face(ip, face, c, virama);
+    }
+  }
+}
+
+fn move_info(var buf&: Buffer, from: usize, to: usize) {
+  // info[from] goes to `to`, what lies between shifts by one.
+  let t = buf.info[from];
+  if (from < to) {
+    for (let k in from..to) {
+      buf.info[k] = buf.info[k + 1];
+    }
+  } else {
+    var k = from;
+    while (k > to) {
+      buf.info[k] = buf.info[k - 1];
+      k -= 1;
+    }
+  }
+  buf.info[to] = t;
+}
+
+// initial_reordering_consonant_syllable
+fn initial_reordering_consonant_syllable(ip&: IndicPlan, face&: ShapeFace, script: u32, var buf&: Buffer, start: usize, end: usize) {
+  let cfg = kIndicConfigs[ip.config as usize];
+  if (script == tag("Knda") && start + 3 <= end && is_one_of(buf.info[start], flag(kCatRa)) && is_one_of(buf.info[start + 1], flag(kCatH)) &&
+      is_one_of(buf.info[start + 2], flag(kCatZwj))) {
+    buf.merge_clusters(start + 1, start + 3);
+    buf.info.swap(start + 1, start + 2);
+  }
+
+  // 1. Find base consonant
+  var base = end;
+  var has_reph = false;
+  {
+    var limit = start;
+    if (ip.mask_array[kIndicRphf] != 0 && start + 3 <= end &&
+        ((cfg.reph_mode == kRephModeImplicit && !is_joiner(buf.info[start + 2])) ||
+         (cfg.reph_mode == kRephModeExplicit && buf.info[start + 2].category == kCatZwj))) {
+      let glyphs = [buf.info[start].codepoint, buf.info[start + 1].codepoint,
+                    cfg.reph_mode == kRephModeExplicit ? buf.info[start + 2].codepoint : 0];
+      if (would_sub(ip.rphf, face, glyphs[0..2]) || (cfg.reph_mode == kRephModeExplicit && would_sub(ip.rphf, face, glyphs[0..3]))) {
+        limit += 2;
+        while (limit < end && is_joiner(buf.info[limit])) {
+          limit += 1;
+        }
+        base = start;
+        has_reph = true;
+      }
+    } else if (cfg.reph_mode == kRephModeLogRepha && buf.info[start].category == kCatRepha) {
+      limit += 1;
+      while (limit < end && is_joiner(buf.info[limit])) {
+        limit += 1;
+      }
+      base = start;
+      has_reph = true;
+    }
+    {
+      var i = end;
+      var seen_below = false;
+      while (true) {
+        i -= 1;
+        if (is_consonant(buf.info[i])) {
+          if (buf.info[i].aux != kPosBelowC && (buf.info[i].aux != kPosPostC || seen_below)) {
+            base = i;
+            break;
+          }
+          if (buf.info[i].aux == kPosBelowC) {
+            seen_below = true;
+          }
+          base = i;
+        } else {
+          if (start < i && buf.info[i].category == kCatZwj && buf.info[i - 1].category == kCatH) {
+            break;
+          }
+        }
+        if (!(i > limit)) {
+          break;
+        }
+      }
+    }
+    if (has_reph && base == start && limit - base <= 2) {
+      has_reph = false;
+    }
+  }
+
+  // Reorder characters
+  for (let i in start..base) {
+    let p = buf.info[i].aux;
+    buf.info[i].aux = p < kPosPreC ? p : kPosPreC;
+  }
+  if (base < end) {
+    buf.info[base].aux = kPosBaseC;
+  }
+  if (has_reph) {
+    buf.info[start].aux = kPosRaToBecomeReph;
+  }
+  if (ip.is_old_spec) {
+    let disallow_double_halants = script == tag("Knda");
+    for (let i in base + 1..end) {
+      if (buf.info[i].category == kCatH) {
+        var j = end - 1;
+        while (j > i) {
+          if (is_consonant(buf.info[j]) || (disallow_double_halants && buf.info[j].category == kCatH)) {
+            break;
+          }
+          j -= 1;
+        }
+        if (buf.info[j].category != kCatH && j > i) {
+          move_info(buf, i, j);
+        }
+        break;
+      }
+    }
+  }
+
+  // Attach misc marks to previous char to move with them.
+  {
+    var last_pos = kPosStart;
+    for (let i in start..end) {
+      let cat = buf.info[i].category;
+      if ((flag(cat) & (joiner_flags() | flag(kCatN) | flag(kCatRs) | flag(kCatCm) | flag(kCatH))) != 0) {
+        buf.info[i].aux = last_pos;
+        if (cat == kCatH && buf.info[i].aux == kPosPreM) {
+          var j = i;
+          while (j > start) {
+            if (buf.info[j - 1].aux != kPosPreM) {
+              buf.info[i].aux = buf.info[j - 1].aux;
+              break;
+            }
+            j -= 1;
+          }
+        }
+      } else if (buf.info[i].aux != kPosSmvd) {
+        if (cat == kCatMPst && i > start && buf.info[i - 1].category == kCatSm) {
+          buf.info[i - 1].aux = buf.info[i].aux;
+        }
+        last_pos = buf.info[i].aux;
+      }
+    }
+  }
+  // For post-base consonants let them own anything before them since the last consonant or matra.
+  {
+    var last = base;
+    for (let i in base + 1..end) {
+      if (is_consonant(buf.info[i])) {
+        for (let j in last + 1..i) {
+          if (buf.info[j].aux < kPosSmvd) {
+            buf.info[j].aux = buf.info[i].aux;
+          }
+        }
+        last = i;
+      } else if ((flag(buf.info[i].category) & (flag(kCatM) | flag(kCatMPst))) != 0) {
+        last = i;
+      }
+    }
+  }
+  {
+    let syllable = buf.info[start].syllable;
+    for (let i in start..end) {
+      buf.info[i].syllable = (i - start) as u32 & 0xFF;
+    }
+    // hb_stable_sort by position
+    for (let i in start + 1..end) {
+      let x = buf.info[i];
+      var j = i;
+      while (j > start && buf.info[j - 1].aux > x.aux) {
+        buf.info[j] = buf.info[j - 1];
+        j -= 1;
+      }
+      buf.info[j] = x;
+    }
+    var first_left_matra = end;
+    var last_left_matra = end;
+    base = end;
+    for (let i in start..end) {
+      if (buf.info[i].aux == kPosBaseC) {
+        base = i;
+        break;
+      } else if (buf.info[i].aux == kPosPreM) {
+        if (first_left_matra == end) {
+          first_left_matra = i;
+        }
+        last_left_matra = i;
+      }
+    }
+    if (first_left_matra < last_left_matra) {
+      buf.reverse_range(first_left_matra, last_left_matra + 1);
+      var i = first_left_matra;
+      for (let j in first_left_matra..last_left_matra + 1) {
+        if ((flag(buf.info[j].category) & (flag(kCatM) | flag(kCatMPst))) != 0) {
+          buf.reverse_range(i, j + 1);
+          i = j + 1;
+        }
+      }
+    }
+    if (ip.is_old_spec || end - start > 127) {
+      buf.merge_clusters(base, end);
+    } else {
+      for (let i in base..end) {
+        if (buf.info[i].syllable != 255) {
+          var min = i;
+          var max = i;
+          var j = start + buf.info[i].syllable as usize;
+          while (j != i) {
+            min = min < j ? min : j;
+            max = max > j ? max : j;
+            let next = start + buf.info[j].syllable as usize;
+            buf.info[j].syllable = 255;
+            j = next;
+          }
+          buf.merge_clusters(base > min ? base : min, max + 1);
+        }
+      }
+    }
+    for (let i in start..end) {
+      buf.info[i].syllable = syllable;
+    }
+  }
+
+  // Setup masks now
+  {
+    var i = start;
+    while (i < end && buf.info[i].aux == kPosRaToBecomeReph) {
+      buf.info[i].mask |= ip.mask_array[kIndicRphf];
+      i += 1;
+    }
+    var mask = ip.mask_array[kIndicHalf];
+    if (!ip.is_old_spec && cfg.blwf_mode == kBlwfPreAndPost) {
+      mask |= ip.mask_array[kIndicBlwf];
+    }
+    for (let k in start..base) {
+      buf.info[k].mask |= mask;
+    }
+    let post = ip.mask_array[kIndicBlwf] | ip.mask_array[kIndicAbvf] | ip.mask_array[kIndicPstf];
+    for (let k in base + 1..end) {
+      buf.info[k].mask |= post;
+    }
+  }
+  if (ip.is_old_spec && script == tag("Deva")) {
+    var i = start;
+    while (i + 1 < base) {
+      if (buf.info[i].category == kCatRa && buf.info[i + 1].category == kCatH && (i + 2 == base || buf.info[i + 2].category != kCatZwj)) {
+        buf.info[i].mask |= ip.mask_array[kIndicBlwf];
+        buf.info[i + 1].mask |= ip.mask_array[kIndicBlwf];
+      }
+      i += 1;
+    }
+  }
+  let pref_len = 2usize;
+  if (ip.mask_array[kIndicPref] != 0 && base + pref_len < end) {
+    var i = base + 1;
+    while (i + pref_len - 1 < end) {
+      let glyphs = [buf.info[i].codepoint, buf.info[i + 1].codepoint];
+      if (would_sub(ip.pref, face, glyphs[..])) {
+        for (let j in 0..pref_len) {
+          buf.info[i + j].mask |= ip.mask_array[kIndicPref];
+        }
+        break;
+      }
+      i += 1;
+    }
+  }
+  // Apply ZWJ/ZWNJ effects
+  for (let i in start + 1..end) {
+    if (is_joiner(buf.info[i])) {
+      let non_joiner = buf.info[i].category == kCatZwnj;
+      var j = i;
+      while (true) {
+        j -= 1;
+        if (non_joiner) {
+          buf.info[j].mask &= ~ip.mask_array[kIndicHalf];
+        }
+        if (!(j > start && !is_consonant(buf.info[j]))) {
+          break;
+        }
+      }
+    }
+  }
+}
+
+// initial_reordering_indic
+pub fn initial_reordering_indic(ip&: IndicPlan, face&: ShapeFace, script: u32, var buf&: Buffer): bool {
+  update_consonant_positions_indic(ip, face, buf);
+  let ret = insert_dotted_circles(face, buf, 4, kCatDottedCircle, kCatRepha as i32, kPosEnd as i32);
+  var start = 0usize;
+  let n = buf.len();
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    let t = buf.info[start].syllable & 0x0F;
+    // consonant (0), vowel (1), standalone (2), broken (4)
+    if (t == 0 || t == 1 || t == 2 || t == 4) {
+      initial_reordering_consonant_syllable(ip, face, script, buf, start, end);
+    }
+    start = end;
+  }
+  return ret;
+}
+
+fn ligated_and_didnt_multiply(g&: GlyphInfo): bool => (g.glyph_props & 0x20) != 0 && (g.glyph_props & 0x40) == 0;
+
+// final_reordering_syllable_indic
+fn final_reordering_syllable_indic(ip&: IndicPlan, script: u32, var buf&: Buffer, start: usize, end: usize) {
+  let cfg = kIndicConfigs[ip.config as usize];
+  let virama_glyph = ip.virama_glyph;
+  if (virama_glyph != 0) {
+    for (let i in start..end) {
+      if (buf.info[i].codepoint == virama_glyph && (buf.info[i].glyph_props & 0x20) != 0 && (buf.info[i].glyph_props & 0x40) != 0) {
+        buf.info[i].category = kCatH;
+        buf.info[i].glyph_props &= ~0x60u32;
+      }
+    }
+  }
+
+  var try_pref = ip.mask_array[kIndicPref] != 0;
+  var base = start;
+  while (base < end) {
+    if (buf.info[base].aux >= kPosBaseC) {
+      if (try_pref && base + 1 < end) {
+        for (let i in base + 1..end) {
+          if ((buf.info[i].mask & ip.mask_array[kIndicPref]) != 0) {
+            if (!((buf.info[i].glyph_props & 0x10) != 0 && ligated_and_didnt_multiply(buf.info[i]))) {
+              base = i;
+              while (base < end && is_halant(buf.info[base])) {
+                base += 1;
+              }
+              if (base < end) {
+                buf.info[base].aux = kPosBaseC;
+              }
+              try_pref = false;
+            }
+            break;
+          }
+        }
+        if (base == end) {
+          break;
+        }
+      }
+      if (script == tag("Mlym")) {
+        var i = base + 1;
+        while (i < end) {
+          while (i < end && is_joiner(buf.info[i])) {
+            i += 1;
+          }
+          if (i == end || !is_halant(buf.info[i])) {
+            break;
+          }
+          i += 1;
+          while (i < end && is_joiner(buf.info[i])) {
+            i += 1;
+          }
+          if (i < end && is_consonant(buf.info[i]) && buf.info[i].aux == kPosBelowC) {
+            base = i;
+            buf.info[base].aux = kPosBaseC;
+          }
+          i += 1;
+        }
+      }
+      if (start < base && buf.info[base].aux > kPosBaseC) {
+        base -= 1;
+      }
+      break;
+    }
+    base += 1;
+  }
+  if (base == end && start < base && is_one_of(buf.info[base - 1], flag(kCatZwj))) {
+    base -= 1;
+  }
+  if (base < end) {
+    while (start < base && is_one_of(buf.info[base], flag(kCatN) | flag(kCatH))) {
+      base -= 1;
+    }
+  }
+
+  // Reorder matras
+  if (start + 1 < end && start < base) {
+    var new_pos = base == end ? base - 2 : base - 1;
+    if (script != tag("Mlym") && script != tag("Taml")) {
+      while (true) {
+        while (new_pos > start && !is_one_of(buf.info[new_pos], flag(kCatM) | flag(kCatMPst) | flag(kCatH))) {
+          new_pos -= 1;
+        }
+        if (is_halant(buf.info[new_pos]) && buf.info[new_pos].aux != kPosPreM) {
+          if (new_pos + 1 < end) {
+            if (buf.info[new_pos + 1].category == kCatZwj) {
+              if (new_pos > start) {
+                new_pos -= 1;
+                continue;
+              }
+            }
+          }
+        } else {
+          new_pos = start;
+        }
+        break;
+      }
+    }
+    if (start < new_pos && buf.info[new_pos].aux != kPosPreM) {
+      var i = new_pos;
+      while (i > start) {
+        if (buf.info[i - 1].aux == kPosPreM) {
+          let old_pos = i - 1;
+          if (old_pos < base && base <= new_pos) {
+            base -= 1;
+          }
+          move_info(buf, old_pos, new_pos);
+          let m = end < base + 1 ? end : base + 1;
+          buf.merge_clusters(new_pos, m);
+          new_pos -= 1;
+        }
+        i -= 1;
+      }
+    } else {
+      for (let i in start..base) {
+        if (buf.info[i].aux == kPosPreM) {
+          let m = end < base + 1 ? end : base + 1;
+          buf.merge_clusters(i, m);
+          break;
+        }
+      }
+    }
+  }
+
+  // Reorder reph
+  if (start + 1 < end && buf.info[start].aux == kPosRaToBecomeReph &&
+      ((buf.info[start].category == kCatRepha) != ligated_and_didnt_multiply(buf.info[start]))) {
+    var new_reph_pos = 0usize;
+    let reph_pos = cfg.reph_pos;
+    var found = false;
+    // 2.
+    if (reph_pos != kPosAfterPost) {
+      new_reph_pos = start + 1;
+      while (new_reph_pos < base && !is_halant(buf.info[new_reph_pos])) {
+        new_reph_pos += 1;
+      }
+      if (new_reph_pos < base && is_halant(buf.info[new_reph_pos])) {
+        if (new_reph_pos + 1 < base && is_joiner(buf.info[new_reph_pos + 1])) {
+          new_reph_pos += 1;
+        }
+        found = true;
+      }
+      // 3.
+      if (!found && reph_pos == kPosAfterMain) {
+        new_reph_pos = base;
+        while (new_reph_pos + 1 < end && buf.info[new_reph_pos + 1].aux <= kPosAfterMain) {
+          new_reph_pos += 1;
+        }
+        if (new_reph_pos < end) {
+          found = true;
+        }
+      }
+      // 4.
+      if (!found && reph_pos == kPosAfterSub) {
+        new_reph_pos = base;
+        while (new_reph_pos + 1 < end &&
+               (flag(buf.info[new_reph_pos + 1].aux) & (flag(kPosPostC) | flag(kPosAfterPost) | flag(kPosSmvd))) == 0) {
+          new_reph_pos += 1;
+        }
+        if (new_reph_pos < end) {
+          found = true;
+        }
+      }
+    }
+    // 5.
+    if (!found) {
+      new_reph_pos = start + 1;
+      while (new_reph_pos < base && !is_halant(buf.info[new_reph_pos])) {
+        new_reph_pos += 1;
+      }
+      if (new_reph_pos < base && is_halant(buf.info[new_reph_pos])) {
+        if (new_reph_pos + 1 < base && is_joiner(buf.info[new_reph_pos + 1])) {
+          new_reph_pos += 1;
+        }
+        found = true;
+      }
+    }
+    // 6.
+    if (!found) {
+      new_reph_pos = end - 1;
+      while (new_reph_pos > start && buf.info[new_reph_pos].aux == kPosSmvd) {
+        new_reph_pos -= 1;
+      }
+      if (is_halant(buf.info[new_reph_pos])) {
+        for (let i in base + 1..new_reph_pos) {
+          if ((flag(buf.info[i].category) & (flag(kCatM) | flag(kCatMPst))) != 0) {
+            new_reph_pos -= 1;
+          }
+        }
+      }
+    }
+    // reph_move
+    buf.merge_clusters(start, new_reph_pos + 1);
+    move_info(buf, start, new_reph_pos);
+    if (start < base && base <= new_reph_pos) {
+      base -= 1;
+    }
+  }
+
+  // Reorder pre-base-reordering consonants
+  if (try_pref && base + 1 < end) {
+    for (let i in base + 1..end) {
+      if ((buf.info[i].mask & ip.mask_array[kIndicPref]) != 0) {
+        if (ligated_and_didnt_multiply(buf.info[i])) {
+          var new_pos = base;
+          if (script != tag("Mlym") && script != tag("Taml")) {
+            while (new_pos > start && !is_one_of(buf.info[new_pos - 1], flag(kCatM) | flag(kCatMPst) | flag(kCatH))) {
+              new_pos -= 1;
+            }
+          }
+          if (new_pos > start && is_halant(buf.info[new_pos - 1])) {
+            if (new_pos < end && is_joiner(buf.info[new_pos])) {
+              new_pos += 1;
+            }
+          }
+          let old_pos = i;
+          buf.merge_clusters(new_pos, old_pos + 1);
+          move_info(buf, old_pos, new_pos);
+          if (new_pos <= base && base < old_pos) {
+            base += 1;
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // Apply 'init' to the Left Matra if it's a word start.
+  if (buf.info[start].aux == kPosPreM) {
+    // FLAG_RANGE (FORMAT, NON_SPACING_MARK): general categories 1..12
+    if (start == 0 || !(gc_of(buf.info[start - 1]) >= 1 && gc_of(buf.info[start - 1]) <= 12)) {
+      buf.info[start].mask |= ip.mask_array[kIndicInit];
+    }
+  }
+}
+
+pub fn final_reordering_indic(ip&: IndicPlan, script: u32, var buf&: Buffer) {
+  let n = buf.len();
+  if (n == 0) {
+    return;
+  }
+  var start = 0usize;
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    final_reordering_syllable_indic(ip, script, buf, start, end);
+    start = end;
+  }
+}
+
+// decompose_indic
+pub fn decompose_indic(ab: u32): (u32, u32)? {
+  if (ab == 0x0931 || ab == 0x09DC || ab == 0x09DD || ab == 0x0B94) {
+    return none;
+  }
+  return decompose(ab);
+}
+
+// compose_indic
+pub fn compose_indic(a: u32, b: u32): u32? {
+  if (gc_is_mark(general_category(a))) {
+    return none;
+  }
+  if (a == 0x09AF && b == 0x09BC) {
+    return 0x09DF;
+  }
+  return compose(a, b);
+}
+
+pub fn preprocess_text_indic(var buf&: Buffer, script: u32) {
+  preprocess_vowel_constraints(buf, script);
+}
+
+// --- Khmer -------------------------------------------------------------------------------------
+
+static let kKhmerFeatureTags: [str; 9] = ["pref", "blwf", "abvf", "pstf", "cfar", "pres", "abvs", "blws", "psts"];
+static let kKhmerFeatureFlags: [u32; 9] = [
+  kFManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable, kFManualJoiners | kFPerSyllable,
+  kFManualJoiners | kFPerSyllable, kFGlobalManualJoiners, kFGlobalManualJoiners, kFGlobalManualJoiners, kFGlobalManualJoiners,
+];
+
+pub struct KhmerPlan : Copy {
+  pub var mask_array: [u32; 9] = [0u32; 9]
+}
+
+pub fn collect_features_khmer(var b&: MapBuilder) {
+  b.add_gsub_pause(kPauseKhmerSetupSyllables);
+  b.add_gsub_pause(kPauseKhmerReorder);
+  b.enable_feature(tag("locl"), kFPerSyllable);
+  b.enable_feature(tag("ccmp"), kFPerSyllable);
+  var i = 0usize;
+  while (i < 5) {
+    b.add_feature(tag(kKhmerFeatureTags[i]), kKhmerFeatureFlags[i]);
+    i += 1;
+  }
+  b.add_gsub_pause(kPauseClearSyllables);
+  while (i < 9) {
+    b.add_feature(tag(kKhmerFeatureTags[i]), kKhmerFeatureFlags[i]);
+    i += 1;
+  }
+}
+
+pub fn override_features_khmer(var b&: MapBuilder) {
+  b.enable_feature(tag("clig"));
+  b.disable_feature(tag("liga"));
+}
+
+pub fn plan_khmer(map&: OtMap): KhmerPlan {
+  var p = KhmerPlan {};
+  for (let i in 0..9) {
+    p.mask_array[i] = (kKhmerFeatureFlags[i] & kFGlobal) != 0 ? 0 : map.get_1_mask(tag(kKhmerFeatureTags[i]));
+  }
+  return p;
+}
+
+pub fn setup_masks_khmer(var buf&: Buffer) {
+  for (var g& in buf.info) {
+    g.category = indic_categories(g.codepoint) & 0xFF;
+  }
+}
+
+pub fn setup_syllables_khmer(var buf&: Buffer) {
+  run_machine(khmer_machine(), buf);
+}
+
+fn reorder_consonant_syllable_khmer(kp&: KhmerPlan, var buf&: Buffer, start: usize, end: usize) {
+  let post = kp.mask_array[1] | kp.mask_array[2] | kp.mask_array[3];
+  for (let i in start + 1..end) {
+    buf.info[i].mask |= post;
+  }
+  var num_coengs = 0u32;
+  for (let i in start + 1..end) {
+    if (buf.info[i].category == kCatH && num_coengs <= 2 && i + 1 < end) {
+      num_coengs += 1;
+      if (buf.info[i + 1].category == kCatRa) {
+        for (let j in 0..2) {
+          buf.info[i + j].mask |= kp.mask_array[0];
+        }
+        buf.merge_clusters(start, i + 2);
+        let t0 = buf.info[i];
+        let t1 = buf.info[i + 1];
+        var k = i;
+        while (k > start) {
+          k -= 1;
+          buf.info[k + 2] = buf.info[k];
+        }
+        buf.info[start] = t0;
+        buf.info[start + 1] = t1;
+        if (kp.mask_array[4] != 0) {
+          for (let j in i + 2..end) {
+            buf.info[j].mask |= kp.mask_array[4];
+          }
+        }
+        num_coengs = 2;
+      }
+    } else if (buf.info[i].category == kCatVPre) {
+      buf.merge_clusters(start, i + 1);
+      move_info(buf, i, start);
+    }
+  }
+}
+
+pub fn reorder_khmer(kp&: KhmerPlan, face&: ShapeFace, var buf&: Buffer): bool {
+  let ret = insert_dotted_circles(face, buf, 1, kCatDottedCircle, -1, -1);
+  var start = 0usize;
+  let n = buf.len();
+  while (start < n) {
+    let end = buf.next_syllable(start);
+    let t = buf.info[start].syllable & 0x0F;
+    if (t == 0 || t == 1) {
+      reorder_consonant_syllable_khmer(kp, buf, start, end);
+    }
+    start = end;
+  }
+  return ret;
+}
+
+pub fn decompose_khmer(ab: u32): (u32, u32)? => match (ab) {
+  0x17BE => (0x17C1u32, 0x17BEu32),
+  0x17BF => (0x17C1u32, 0x17BFu32),
+  0x17C0 => (0x17C1u32, 0x17C0u32),
+  0x17C4 => (0x17C1u32, 0x17C4u32),
+  0x17C5 => (0x17C1u32, 0x17C5u32),
+  _ => decompose(ab),
+};
+
+pub fn compose_khmer(a: u32, b: u32): u32? {
+  if (gc_is_mark(general_category(a))) {
+    return none;
+  }
+  return compose(a, b);
+}

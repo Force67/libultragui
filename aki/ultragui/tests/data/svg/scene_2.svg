@@ -1,0 +1,24 @@
+<svg width="160" height="120" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient id="g0" gradientUnits="userSpaceOnUse" spreadMethod="repeat" x1="27.77" y1="119.8" x2="159.228" y2="95.61"><stop offset="0.08" stop-color="rgba(157,128,108,0.61)"/><stop offset="0.84" stop-color="#dc8" stop-opacity="0.8"/></linearGradient>
+<radialGradient id="g1" gradientUnits="userSpaceOnUse" spreadMethod="repeat" cx="39.2" cy="113.0" r="37.0"><stop offset="0.16" stop-color="rgba(236,127,250,0.28)"/><stop offset="0.35" stop-color="rgb(181,232,236)"/><stop offset="0.96" stop-color="rgba(233,249,113,0.94)" stop-opacity="0.84"/><stop offset="0.98" stop-color="rgb(137,245,158)"/></radialGradient>
+</defs>
+<path d="M43.0,117.891 S74.8,1.46 145.0,52.5 a23.813,19.99 -64.11 1 1 8.486,12.3 H40.5 Q16.776,79.0 174.9,91.0 Z M-0.6,77.88 Z M115.44,64.0" fill="#7fb" opacity="0.95" fill-opacity="0.73" stroke-opacity="0.26" transform="matrix(-1.0 -0.0 0.9 -1.0 -20.0 -8.559)"/>
+<polyline points="-12.0,75.91 116.56,32.392 3.42,17.0 140.0,47.137 73.0,-11.0" fill="url(#g1)" stroke="url(#g0)" stroke-width="2.0" opacity="0.75" fill-opacity="0.02" transform="scale(1.5 1.0) skewY(7.307) skewY(7.0)"/>
+<circle cx="19.0" cy="73.98" r="26.0" fill="rgba(39,112,251,0.19)" fill-rule="evenodd"/>
+<path d="M52.4,104.0 H20.56 c-16.1,-3.67 -23.276,-24.2 12.92,-19.8" fill="#f0d4ec" transform="rotate(-5.687) matrix(1.364 1.3 -0.3 -0.03 2.0 3.0)"/>
+<polyline points="61.744,89.577 53.14,91.0 130.2,64.7 61.323,129.0 44.083,82.0" fill="rgba(120,206,183,0.78)" opacity="0.44" fill-opacity="0.6" fill-rule="evenodd"/>
+<polyline points="10.472,57.4 73.7,128.0 51.246,65.0 128.897,121.19 72.187,-8.0 101.79,13.013 33.0,-4.213" fill="url(#g0)" fill-rule="evenodd" transform="rotate(87.9)"/>
+<line x1="44.0" y1="13.436" x2="137.1" y2="38.0" fill="coral" stroke="red" stroke-width="2.692" fill-opacity="0.68" fill-rule="evenodd" transform="translate(-9.68 -7.83) matrix(0.0 0.0 -0.3 1.0 -7.7 18.0)"/>
+<polygon points="150.91,65.0 54.547,57.7 167.88,51.0 155.6,33.343 8.0,3.0 52.962,-10.79 29.46,65.925 106.5,39.8" fill="#2a9f8f23" stroke="#e24" stroke-width="6.9" stroke-opacity="0.24" fill-rule="evenodd" transform="scale(0.9) rotate(18.216 40.03 28.07)"/>
+<ellipse cx="103.712" cy="27.0" rx="20.223" ry="15.21" fill="none" stroke="url(#g0)" stroke-width="2.5" fill-opacity="0.34" stroke-opacity="0.24" transform="rotate(53.0) rotate(-128.0 42.98 13.0)"/>
+<polyline points="8.6,-0.86 72.0,24.42 26.0,9.0 48.514,-4.834 30.373,8.0 11.0,-5.0 141.83,86.2" fill="rgb(46,253,205)" fill-rule="evenodd"/>
+<circle cx="36.7" cy="84.0" r="2.2" fill="url(#g1)" stroke="#376" stroke-width="3.0" transform="matrix(0.1 0.0 0.4 -1.0 -8.104 -14.3) skewX(-14.9) rotate(-144.0 47.28 52.738)"/>
+<line x1="91.029" y1="108.0" x2="73.0" y2="76.37" fill="url(#g1)" transform="skewY(-36.2) rotate(-127.99 3.8 99.7) matrix(0.6 1.0 1.434 0.4 -13.7 8.04)"/>
+<rect x="104.6" y="81.86" width="69.66" height="7.0" fill="none" stroke="#337f0816" stroke-width="5.5" fill-rule="evenodd" transform="skewY(-19.6) skewY(-1.9) rotate(-11.03 30.9 36.947)"/>
+<ellipse cx="94.612" cy="62.9" rx="33.0" ry="8.6" fill="url(#g1)" stroke="rgba(175,225,36,0.42)" stroke-width="6.0" opacity="0.57" fill-opacity="0.16" transform="rotate(52.239) skewX(24.1) scale(1.3)"/>
+<path d="M58.35,45.82 v0.618 V84.6" fill="url(#g1)" opacity="0.46" fill-rule="evenodd" transform="scale(0.0 1.0)"/>
+<line x1="86.5" y1="52.5" x2="5.42" y2="56.79" fill="url(#g0)" stroke="url(#g0)" stroke-width="1.6"/>
+<path d="M116.557,49.7 Q102.0,73.4 113.25,-9.0 A23.1,16.71 -70.0 0,0 90.0,-11.096 V60.02" fill="rgba(49,184,54,0.61)" stroke="rgba(141,244,144,0.51)" stroke-width="7.0" opacity="0.43"/>
+<path d="M170.9,62.362 q-20.3,21.2 -28.6,28.647 Z M172.324,54.877 s-13.8,-9.0 19.0,-4.0 t4.14,-15.172 v1.317" fill="#1ad" transform="skewX(-29.63)"/>
+</svg>
